@@ -231,6 +231,26 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             result = os.linesep.join(lines)
             print(result, flush=True)
 
+    @register_command(name="update", description=f"update {environ.name} packages")
+    class Command(SubCommand):
+
+        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+            parser = super().create_parser(type)
+            parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None,)
+            return parser
+
+        def run(self, args: "argparse.Namespace"):
+            try:
+                package = environ.name
+                if args.dependencies:
+                    dependencies = f"[{','.join(args.dependencies)}]"
+                    package = f"{package}{dependencies}"
+                utils.popen(
+                    utils.get_interpreter(), "-m", "pip", "install", "-U", package,
+                ).check_call()
+            except Exception as e:
+                environ.logger.warning(f"Update {environ.name} packages failed: {e}")
+
     @register_command(name="clean", description="clean temporary files")
     class Command(SubCommand):
 
