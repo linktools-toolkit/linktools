@@ -12,8 +12,8 @@ license = {text = "Apache 2.0"}
 dynamic = ["version", "dependencies", "optional-dependencies", "scripts"]
 
 [project.urls]
-Homepage = "https://github.com/ice-black-tea/linktools"
-Repository = "https://github.com/ice-black-tea/linktools.git"
+Homepage = "https://github.com/linktools-toolkit/linktools"
+Repository = "https://github.com/linktools-toolkit/linktools.git"
 
 [tool.setuptools.packages.find]
 where = ["src"]

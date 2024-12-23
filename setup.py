@@ -62,9 +62,19 @@ class ConsoleScripts(list):
 if __name__ == '__main__':
 
     release = os.environ.get("RELEASE", "false").lower() == "true"
-    version = os.environ.get("VERSION", "0.0.1.dev0")
+    version = os.environ.get("VERSION", None)
+    if not version:
+        try:
+            with open(get_root_path(".version"), "rt", encoding="utf-8") as fd:
+                version = fd.read().strip()
+        except:
+            pass
+    if not version:
+        version = "0.0.1"
     if version.startswith("v"):
         version = version[len("v"):]
+    if not release and not version.endswith(".dev0"):
+        version = f"{version}.dev0"
 
     with open(get_src_path("template", "tools.yml"), "rb") as fd_in, \
             open(get_src_path("assets", "tools.json"), "wt") as fd_out:

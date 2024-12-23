@@ -68,7 +68,7 @@ TOOL_BURPSUITE_KEYGEN:
   <<: *JAR
   version: '2_1_06'
   name: 'burpsuite-keygen'
-  download_url: 'https://github.com/ice-black-tea/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar'
+  download_url: 'https://github.com/linktools-toolkit/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar'
 
 ############################################################################################
 # java
@@ -239,16 +239,16 @@ TOOL_VDEX_EXTRACTOR:
     when:
       - system: darwin
         machine: arm64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-arm64'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-arm64'
       - system: darwin
         machine: x86_64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-amd64'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-amd64'
       - system: linux
         machine: x86_64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/vdexExtractor-{version}/vdexExtractor-linux-amd64'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-linux-amd64'
       - system: windows
         machine: amd64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/vdexExtractor-{version}/vdexExtractor-windows-amd64.exe'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-windows-amd64.exe'
       - else: ~
 
 TOOL_COMPACT_DEX_CONVERTER:
@@ -258,7 +258,7 @@ TOOL_COMPACT_DEX_CONVERTER:
       - system: windows
         then: 'flinux'
       - else: ~
-  download_url: 'https://github.com/ice-black-tea/archives/releases/download/compact_dex_converter-{version}/compact_dex_converter.zip'
+  download_url: 'https://github.com/linktools-toolkit/archives/releases/download/compact_dex_converter-{version}/compact_dex_converter.zip'
   unpack_path: 'compact_dex_converter-{version}'
   target_path:
     when:
@@ -381,16 +381,16 @@ TOOL_HDC:
     when:
       - system: darwin
         machine: arm64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-arm64.zip'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-arm64.zip'
       - system: darwin
         machine: x86_64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-x64.zip'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-x64.zip'
       - system: linux
         machine: x86_64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/harmonyos-toolchains-{version}/toolchains-linux-x64.zip'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-linux-x64.zip'
       - system: windows
         machine: amd64
-        then: 'https://github.com/ice-black-tea/archives/releases/download/harmonyos-toolchains-{version}/toolchains-windows-x64.zip'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-windows-x64.zip'
       - else: ~
   unpack_path: 'harmony-toolchains-{version}'
   target_path:
@@ -409,7 +409,7 @@ TOOL_FLINUX:
   download_url:
     when:
       - system: windows
-        then: 'https://github.com/ice-black-tea/archives/releases/download/flinux-{version}/flinux.zip'
+        then: 'https://github.com/linktools-toolkit/archives/releases/download/flinux-{version}/flinux.zip'
       - else: ~
   unpack_path: 'flinux-{version}'
   target_path:

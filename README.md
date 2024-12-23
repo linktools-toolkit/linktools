@@ -14,10 +14,10 @@ python & pip (3.6及以上): <https://www.python.org/downloads/>
 # pip直接安装linktools，按需添加依赖项，推荐使用all添加所有依赖项
 python3 -m pip install -U "linktools[all]"
 # 也可以用以下命令安装github上的最新版本:
-# python3 -m pip install --ignore-installed "linktools@ git+https://github.com/ice-black-tea/linktools.git@master"
+# python3 -m pip install --ignore-installed "linktools@ git+https://github.com/linktools-toolkit/linktools.git@master"
 ```
 
-额外的依赖项以及相应功能可通过[requirements.yml](https://github.com/ice-black-tea/linktools/blob/master/requirements.yml)查看
+额外的依赖项以及相应功能可通过[requirements.yml](https://github.com/linktools-toolkit/linktools/blob/master/requirements.yml)查看
 
 ### 配置alias（推荐）
 
@@ -114,7 +114,7 @@ $ ct-env clean 7
 <details>
 <summary>类似linux中的grep，正则匹配文件内容 ，额外添加解析zip、elf等格等功能</summary>
 
-![ct-grep](https://raw.githubusercontent.com/ice-black-tea/linktools/master/images/ct-grep.png)
+![ct-grep](https://raw.githubusercontent.com/linktools-toolkit/linktools/master/images/ct-grep.png)
 
 </details>
 
@@ -125,7 +125,7 @@ $ ct-env clean 7
 
 ##### 常用命令
 
-所有声明的工具可通过[配置文件](https://github.com/ice-black-tea/linktools/blob/master/src/linktools/template/tools.yml)查看，此处以apktool举例
+所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/template/tools.yml)查看，此处以apktool举例
 
 ```bash
 # 初始化并执行apktool命令
@@ -243,7 +243,7 @@ $ at-app --non-system
 
 ##### 输出效果
 
-![at-app](https://raw.githubusercontent.com/ice-black-tea/linktools/master/images/at-app.png)
+![at-app](https://raw.githubusercontent.com/linktools-toolkit/linktools/master/images/at-app.png)
 
 </details>
 
@@ -298,7 +298,7 @@ $ at-intent browser https://example.com
 $ at-frida -l ~/test/frida.js -p me.ele --spawn
 
 # 从远程加载frida脚本，注入到me.ele进程中，并将me.ele流量重定向到本地8080端口
-$ at-frida -c https://raw.githubusercontent.com/ice-black-tea/linktools/master/agents/frida/test/android.js -p me.ele --redirect-port 8080
+$ at-frida -c https://raw.githubusercontent.com/linktools-toolkit/linktools/master/agents/frida/test/android.js -p me.ele --redirect-port 8080
 
 # 只启动frida-server，不注入脚本
 $ at-frida --serve --remote-port 27042 --local-port 27042 -p fake_package
@@ -309,7 +309,7 @@ $ at-frida --no-serve --remote-port 27042 -p me.ele
 
 **2) 使用python方式调用**
 
-执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/ice-black-tea/linktools/blob/master/src/linktools/cli/commands/android/frida.py) 
+执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/cli/commands/android/frida.py) 
 
 ```python
 #!/usr/bin/env python3
@@ -352,7 +352,7 @@ if __name__ == "__main__":
 
 ##### 内置接口
 
-e.g. [java相关接口](https://github.com/ice-black-tea/linktools/blob/master/agents/frida/lib/java.ts)
+e.g. [java相关接口](https://github.com/linktools-toolkit/linktools/blob/master/agents/frida/lib/java.ts)
 
 ```javascript
 Java.perform(function () {
