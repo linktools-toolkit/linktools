@@ -40,7 +40,7 @@ import frida
 from .. import environ, utils, DownloadHttpError
 from ..android import AdbDevice
 from ..decorator import cached_classproperty
-from ..ios import SibDevice
+from ..ios import GoIOSDevice
 from ..types import Timeout, Stoppable
 
 _logger = environ.get_logger("frida.server")
@@ -279,9 +279,9 @@ class FridaIOSServer(FridaServer):  # proxy for frida.core.Device
     ios server
     """
 
-    def __init__(self, device: SibDevice = None, local_port: int = 37042, remote_port: int = 27042):
+    def __init__(self, device: GoIOSDevice = None, local_port: int = 37042, remote_port: int = 27042):
         super().__init__(frida.get_device_manager().add_remote_device(f"localhost:{local_port}"))
-        self._device = device or SibDevice()
+        self._device = device or GoIOSDevice()
         self._local_port = local_port
         self._remote_port = remote_port
         self._forward: Optional[Stoppable] = None

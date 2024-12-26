@@ -923,12 +923,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
             exit_code = self.run(args) or 0
 
-        except (KeyboardInterrupt, EOFError, CommandError, *self.known_errors) as e:
+        except (CommandError, *self.known_errors) as e:
             exit_code = 1
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
-                exc_info=True if environ.debug else None,
+                exc_info=True if self.environ.debug else None,
             )
 
         return exit_code
@@ -990,9 +990,16 @@ class CommandMain:
             result = self.command(*args, **kwargs)
         except SystemExit as e:
             result = e.code
+        except (KeyboardInterrupt, EOFError) as e:
+            error_type, error_message = e.__class__.__name__, str(e).strip()
+            self.command.logger.error(
+                f"{error_type}: {error_message}" if error_message else error_type,
+                exc_info=True if self.command.environ.debug else None,
+            )
+            result = 1
         except:
             get_console().print_exception(show_locals=True) \
-                if environ.debug \
+                if self.command.environ.debug \
                 else self.command.logger.error(traceback.format_exc())
             result = 1
 

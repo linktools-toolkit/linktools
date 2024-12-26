@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 import subprocess
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypeVar, Callable
+from typing import Any, Generator, TypeVar, Callable, Union, IO
 
 from . import utils, Tool, environ
 from .decorator import timeoutable
@@ -24,14 +24,11 @@ class Bridge(ABC):
             self,
             tool: Tool,
             options: [str] = None,
-            error_type: Callable[[str], BridgeError] = BridgeError,
-            on_stdout: Callable[[str], None] = _logger.info,
-            on_stderr: Callable[[str], None] = _logger.error):
+            error_type: Callable[[str], BridgeError] = BridgeError
+    ):
         self._tool = tool
         self._options = options or []
         self._error_type = error_type
-        self._on_stdout = on_stdout
-        self._on_stderr = on_stderr
 
     @abstractmethod
     def list_devices(self, alive: bool = None) -> Generator["BaseDevice", None, None]:
@@ -57,14 +54,14 @@ class Bridge(ABC):
     @timeoutable
     def exec(self, *args: Any,
              timeout: TimeoutType = None,
-             stdout: bool = None, stderr: bool = None,
-             log_output: bool = None,
-             ignore_errors: bool = False,
+             stdin: Union[int, IO] = None, stdout: Union[int, IO] = None, stderr: Union[int, IO] = None,
+             log_output: bool = None, ignore_errors: bool = False,
              kill_on_return: bool = True) -> str:
         """
         执行命令
         :param args: 命令参数
         :param timeout: 超时时间
+        :param stdin: 标准输入，默认为PIPE
         :param stdout: 标准输出，默认为PIPE
         :param stderr: 标准错误，默认为PIPE
         :param log_output: 把输出打印到logger中
@@ -72,13 +69,14 @@ class Bridge(ABC):
         :param kill_on_return: 在返回时是否杀掉进程
         :return: 返回输出结果
         """
-
+        if stdin is None:
+            stdin = subprocess.PIPE
         if stdout is None:
             stdout = subprocess.PIPE
         if stderr is None:
             stderr = subprocess.PIPE
 
-        process = self.popen(*args, stdout=stdout, stderr=stderr)
+        process = self.popen(*args, stdin=stdin, stdout=stdout, stderr=stderr)
         try:
             return self._exec(
                 process,
@@ -88,7 +86,7 @@ class Bridge(ABC):
             )
         finally:
             if kill_on_return:
-                process.kill()
+                process.recursive_kill()
 
     def _exec(self, process: utils.Process, timeout: TimeoutType, log_output: bool, ignore_errors: bool) -> str:
         out = err = None
@@ -172,11 +170,11 @@ def list_devices(alive: bool = None) -> Generator["BaseDevice", None, None]:
     :return: 设备对象
     """
     from .android import Adb
-    from .ios import Sib
+    from .ios import GoIOS
     from .harmony import Hdc
     for device in Adb().list_devices(alive=alive):
         yield device
-    for device in Sib().list_devices(alive=alive):
+    for device in GoIOS().list_devices(alive=alive):
         yield device
     for device in Hdc().list_devices(alive=alive):
         yield device

@@ -55,7 +55,7 @@ def bind(port: int, socket_type: socket.SocketKind, socket_proto: int):
             continue
         try:
             # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('', port))
+            sock.bind(('0.0.0.0', port))
             if socket_type == socket.SOCK_STREAM:
                 sock.listen(1)
             port = sock.getsockname()[1]

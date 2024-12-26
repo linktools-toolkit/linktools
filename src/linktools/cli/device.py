@@ -37,7 +37,7 @@ from . import BaseCommand
 from .. import utils
 from ..android import Adb, AdbError, AdbDevice
 from ..device import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
-from ..ios import Sib, SibError, SibDevice
+from ..ios import GoIOS, GoIOSError, GoIOSDevice
 from ..rich import choose
 from ..types import PathType
 
@@ -112,11 +112,11 @@ class AndroidPicker(DevicePicker[Adb, AdbDevice]):
         return Adb(self.options)
 
 
-class IOSPicker(DevicePicker[Sib, SibDevice]):
+class IOSPicker(DevicePicker[GoIOS, GoIOSDevice]):
 
     @property
     def bridge(self):
-        return Sib(self.options)
+        return GoIOS(self.options)
 
 
 class DeviceCommandMixin:
@@ -339,10 +339,10 @@ class IOSCommandMixin:
         )
 
         @cache
-        def pick(sib: Sib):
-            devices = tuple(sib.list_devices(alive=True))
+        def pick(ios: GoIOS):
+            devices = tuple(ios.list_devices(alive=True))
             if len(devices) == 0:
-                raise SibError("no devices/emulators found")
+                raise GoIOSError("no devices/emulators found")
 
             if len(devices) == 1:
                 return devices[0]
@@ -358,8 +358,8 @@ class IOSCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def pick(sib: Sib):
-                    return SibDevice(str(values), sib=sib)
+                def pick(ios: GoIOS):
+                    return GoIOSDevice(str(values), ios=ios)
 
                 device_parser = IOSPicker.copy_on_write(namespace, self.dest)
                 device_parser.func = pick
@@ -368,40 +368,22 @@ class IOSCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def pick(sib: Sib):
+                def pick(ios: GoIOS):
                     device_id = cache.read()
                     if device_id:
-                        return SibDevice(device_id, sib=sib)
-                    raise SibError("no device used last time")
+                        return GoIOSDevice(device_id, ios=ios)
+                    raise GoIOSError("no device used last time")
 
                 device_parser = IOSPicker.copy_on_write(namespace, self.dest)
                 device_parser.func = pick
 
-        class ConnectAction(Action):
-
-            def __call__(self, parser, namespace, values, option_string=None):
-                @cache
-                def pick(sib: Sib):
-                    address = str(values)
-                    host, port = address.split(":", maxsplit=1)
-                    sib.exec("remote", "connect", "--host", host, "--port", port, log_output=True)
-                    for device in sib.list_devices():
-                        if address == device.address:
-                            return device
-
-                device_parser = IOSPicker.copy_on_write(namespace, self.dest)
-                device_parser.func = pick
-
-        option_group = parser.add_argument_group(title="sib options")
+        option_group = parser.add_argument_group(title="ios options")
         option_group.set_defaults(device_picker=IOSPicker(pick))
 
         device_group = option_group.add_mutually_exclusive_group()
         device_group.add_argument(f"{prefix}u", f"{prefix}{prefix}udid", metavar="UDID", dest="device_picker",
                                   action=UdidAction,
                                   help="specify unique device identifier")
-        device_group.add_argument(f"{prefix}c", f"{prefix}{prefix}connect", metavar="IP:PORT", dest="device_picker",
-                                  action=ConnectAction,
-                                  help="use device with TCP/IP")
         device_group.add_argument(f"{prefix}l", f"{prefix}{prefix}last", dest="device_picker", nargs=0, const=True,
                                   action=LastAction,
                                   help="use last device")
@@ -434,7 +416,7 @@ class IOSCommand(BaseCommand, metaclass=abc.ABCMeta):
 
     @property
     def known_errors(self) -> List[Type[BaseException]]:
-        return super().known_errors + [SibError]
+        return super().known_errors + [GoIOSError]
 
     def init_base_arguments(self, parser: ArgumentParser):
         super().init_base_arguments(parser)

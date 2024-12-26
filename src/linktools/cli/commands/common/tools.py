@@ -95,10 +95,10 @@ class Command(BaseCommand):
                 *tool_args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=None,
             )
             try:
-                return process.wait(timeout=.1)
+                return process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 return None
 

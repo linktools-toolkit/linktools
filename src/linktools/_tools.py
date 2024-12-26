@@ -416,7 +416,7 @@ class Tool(metaclass=ToolMeta):
             self.create_stub_file(
                 self.stub_path,
                 self.make_stub_cmdline(self.name),
-                system=self.system
+                system=self.system,
             )
 
         # change tool file permission
@@ -524,7 +524,7 @@ class Tool(metaclass=ToolMeta):
             return out or ""
 
         finally:
-            process.kill()
+            process.recursive_kill()
 
     def __repr__(self):
         return f"Tool<{self.name}>"
@@ -543,8 +543,10 @@ class Tool(metaclass=ToolMeta):
                 fd.write(f"{cmdline} %*\n")
             else:
                 fd.write(f"#!{shutil.which('sh')}\n")
-                fd.write(f"trap 'kill 0' EXIT\n")
                 fd.write(f"{cmdline} \"$@\"\n")
+                # fd.write(f"trap 'kill 0' INT TERM\n")
+                # fd.write(f"{cmdline} \"$@\" &\n")
+                # fd.write(f"wait\n")
         os.chmod(path, 0o755)
         return path
 

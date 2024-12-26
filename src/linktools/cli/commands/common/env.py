@@ -59,10 +59,10 @@ class InitCommand(BaseCommandGroup):
     @subcommand("ios", help="initialize ios environment")
     def on_init_ios(self):
         try:
-            self.logger.info("initialize sib ...")
-            self.environ.tools["sib"].prepare()
+            self.logger.info("initialize go-ios ...")
+            self.environ.tools["ios"].prepare()
         except Exception as e:
-            self.logger.warning(f"initialize sib failed: {e}")
+            self.logger.warning(f"initialize go-ios failed: {e}")
 
 
 class Command(BaseCommandGroup):

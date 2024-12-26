@@ -9,6 +9,8 @@ import subprocess
 import threading
 from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Generator, Tuple
 
+import psutil
+
 from .. import utils
 from .._environ import environ
 from ..decorator import cached_property, timeoutable
@@ -149,21 +151,21 @@ class Process(subprocess.Popen):
     def call(self, timeout: TimeoutType = None) -> int:
         with self:
             try:
-                return self.wait(timeout=timeout.remain)
+                return utils.wait_process(self, timeout.remain)
             except Exception:
-                self.kill()
+                self.recursive_kill()
                 raise
 
     @timeoutable
     def check_call(self, timeout: TimeoutType = None) -> int:
         with self:
             try:
-                retcode = self.wait(timeout=timeout.remain)
+                retcode = utils.wait_process(self, timeout.remain)
                 if retcode:
                     raise subprocess.CalledProcessError(retcode, self.args)
                 return retcode
             except:
-                self.kill()
+                self.recursive_kill()
                 raise
 
     @timeoutable
@@ -185,9 +187,25 @@ class Process(subprocess.Popen):
         else:
 
             try:
-                self.wait(timeout.remain)
+                utils.wait_process(self, timeout)
             except subprocess.TimeoutExpired:
                 pass
+
+    def recursive_kill(self) -> None:
+        try:
+            for p in reversed(psutil.Process(self.pid).children(recursive=True)):
+                try:
+                    p.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+                except Exception as e:
+                    environ.logger.debug(f"Kill children process failed: {e}")
+        except psutil.NoSuchProcess:
+            pass
+        except Exception as e:
+            environ.logger.debug(f"List children process failed: {e}")
+
+        self.terminate()
 
     @cached_property
     def _output(self):
@@ -200,7 +218,8 @@ def popen(
         stdin: Union[int, IO] = None, stdout: Union[int, IO] = None, stderr: Union[int, IO] = None,
         shell: bool = False, cwd: PathType = None,
         env: Dict[str, str] = None, append_env: Dict[str, str] = None, default_env: Dict[str, str] = None,
-        **kwargs) -> Process:
+        **kwargs
+) -> Process:
     args = [str(arg) for arg in args]
 
     if capture_output is True:

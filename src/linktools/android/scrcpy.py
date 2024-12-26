@@ -448,11 +448,11 @@ class ScrcpyServer(Stoppable):
     def stop(self):
         if self._process:
             logger.debug(f"{self._device} stop scrcpy server")
-            utils.ignore_error(self._process.kill)
+            utils.ignore_error(self._process.recursive_kill)
             try:
                 self._process.wait(1)
             except subprocess.TimeoutExpired:
-                utils.ignore_error(self._process.terminate)
+                utils.ignore_error(self._process.kill)
                 logger.warning(f"{self._device} scrcpy server stop timeout")
             self._process = None
 

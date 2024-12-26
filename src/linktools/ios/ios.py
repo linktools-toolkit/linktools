@@ -374,7 +374,7 @@ class Forward(Stoppable):
                 stderr=subprocess.PIPE,
             )
             for i in range(5):
-                timeout = Timeout(i)
+                timeout = Timeout(min(i, 2))
                 for out, err in self._process.fetch(timeout=timeout):
                     for line in (out or "").splitlines() + (err or "").splitlines():
                         data = utils.ignore_error(json.loads, args=(line,), default=None)
@@ -392,7 +392,7 @@ class Forward(Stoppable):
                     return
 
                 _logger.debug(f"Start forward failed, kill {self} process and restart it.")
-                utils.ignore_error(self._process.kill)
+                utils.ignore_error(self._process.recursive_kill)
                 utils.wait_process(self._process, .5)
                 self._process = ios.popen(
                     "forward",
@@ -410,7 +410,7 @@ class Forward(Stoppable):
         process, self._process = self._process, None
         if process is not None:
             _logger.debug(f"Kill {self} process")
-            utils.ignore_error(process.kill)
+            utils.ignore_error(process.recursive_kill)
             utils.wait_process(process, 5)
 
     def __repr__(self):

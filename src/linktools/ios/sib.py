@@ -7,7 +7,6 @@ import time
 from subprocess import TimeoutExpired
 from typing import Any, Generator, List, Callable, Dict, TYPE_CHECKING, TypeVar
 
-from .struct import Process, App
 from .. import utils
 from .._environ import environ
 from ..decorator import cached_property, timeoutable
@@ -271,10 +270,11 @@ class Forward(Stoppable):
         self._stop_on_error(start)
 
     def stop(self):
-        if self._process is not None:
+        process, self._process = self._process, None
+        if process is not None:
             try:
                 _logger.debug(f"Kill sib proxy process")
-                self._process.kill()
-                self._process.wait(5)
+                process.recursive_kill()
+                process.wait(1)
             except TimeoutExpired:
                 _logger.error(f"Proxy process did not finish normally")

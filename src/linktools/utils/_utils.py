@@ -602,18 +602,18 @@ def get_machine() -> str:
     return _MACHINE
 
 
-def is_unix_like() -> bool:
+def is_unix_like(system: str = None) -> bool:
     """
     是否为类Unix系统
     """
-    return get_system() in ("darwin", "linux")
+    return (system or get_system()) in ("darwin", "linux")
 
 
-def is_windows() -> bool:
+def is_windows(system: str = None) -> bool:
     """
     是否为Windows系统
     """
-    return get_system() == "windows"
+    return (system or get_system()) == "windows"
 
 
 if is_unix_like():

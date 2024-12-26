@@ -113,6 +113,8 @@ class Reactor:
     def wait(self, timeout: TimeoutType = None) -> bool:
         worker = self._worker
         if worker:
+            if threading.current_thread().ident == worker.ident:
+                raise RuntimeError("Cannot wait on the reactor from its own thread")
             return utils.wait_thread(worker, timeout)
         return True
 

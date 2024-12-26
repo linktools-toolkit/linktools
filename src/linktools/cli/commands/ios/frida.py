@@ -99,7 +99,7 @@ class Command(IOSCommand):
             def on_session_detached(self, session, reason, crash) -> None:
                 logger.info(f"{session} detached, reason={reason}")
                 if reason in ("connection-terminated", "device-lost"):
-                    self.stop()
+                    self.signal_stop()
                 elif len(self.sessions) == 0:
                     if args.auto_start:
                         app.spawn(bundle_id)
