@@ -253,7 +253,7 @@ class FridaAndroidServer(FridaServer):
         def __init__(self, config: Dict[str, str]):
             self.url = config["url"].format(**config)
             self.name = config["name"].format(**config)
-            self.path = environ.get_data_path("frida", self.name, create_parent=True)
+            self.path = environ.get_data_path("android", "frida", self.name, create_parent=True)
 
         def download(self):
             if os.path.exists(self.path):

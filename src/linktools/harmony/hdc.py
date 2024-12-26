@@ -28,7 +28,7 @@ class Hdc(Bridge):
             error_type=HdcError
         )
 
-    def list_devices(self, alive: bool = None) -> Generator["Device", None, None]:
+    def list_devices(self, alive: bool = None) -> Generator["HdcDevice", None, None]:
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -40,12 +40,12 @@ class Hdc(Bridge):
             if len(splits) == 4:
                 id, mode, status, address = splits[0], splits[1], splits[2], splits[3]
                 if alive is None:
-                    yield Device(id)
+                    yield HdcDevice(id)
                 elif alive == (status in ("Connected",)):
-                    yield Device(id)
+                    yield HdcDevice(id)
 
 
-class Device(BaseDevice):
+class HdcDevice(BaseDevice):
 
     def __init__(self, id: str = None, hdc: Hdc = None):
         """
@@ -109,7 +109,7 @@ class Device(BaseDevice):
         :param type: 设备类型
         :return: 新的设备对象
         """
-        return (type or Device)(self._id, self._hdc)
+        return (type or HdcDevice)(self._id, self._hdc)
 
     @timeoutable
     def exec(self, *args: Any, **kwargs) -> str:

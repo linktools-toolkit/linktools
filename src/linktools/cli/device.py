@@ -128,7 +128,7 @@ class DeviceCommandMixin:
 
         cache = DeviceCache(
             self.environ.get_temp_path(
-                "cache", "device", "mobile",
+                "cli", "cache", "device_id",
                 create_parent=True
             )
         )
@@ -198,7 +198,7 @@ class AndroidCommandMixin:
 
         cache = DeviceCache(
             self.environ.get_temp_path(
-                "cache", "device", "android",
+                "cli", "cache", "android_id",
                 create_parent=True
             )
         )
@@ -333,7 +333,7 @@ class IOSCommandMixin:
 
         cache = DeviceCache(
             self.environ.get_temp_path(
-                "cache", "device", "ios",
+                "cli", "cache", "ios_id",
                 create_parent=True
             )
         )

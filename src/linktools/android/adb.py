@@ -220,7 +220,7 @@ class AdbDevice(BaseDevice):
         _logger.debug(f"Local apk path: {apk_path}")
 
         remote_name = f"installed_{int(time.time())}.apk"
-        remote_path = self.push_file(apk_path, self.get_data_path("apk"), remote_name, **kwargs)
+        remote_path = self.push_file(apk_path, self.get_data_path("android", "apk"), remote_name, **kwargs)
         try:
             if self.uid >= 10000:
                 self.shell("am", "start", "--user", "0",
@@ -456,7 +456,7 @@ class AdbDevice(BaseDevice):
         apk_md5 = self._agent_info["md5"]
 
         apk_path = environ.get_asset_path(apk_name)
-        target_dir = self.get_data_path("agent", "apk", apk_md5)
+        target_dir = self.get_data_path("android", "agent", apk_md5)
         target_path = self.push_file(apk_path, target_dir, apk_name, skip_exist=True)
         if not self.is_file_exist(target_path):
             raise AdbError("%s does not exist" % target_path)

@@ -543,6 +543,7 @@ class Tool(metaclass=ToolMeta):
                 fd.write(f"{cmdline} %*\n")
             else:
                 fd.write(f"#!{shutil.which('sh')}\n")
+                fd.write(f"trap 'kill 0' EXIT\n")
                 fd.write(f"{cmdline} \"$@\"\n")
         os.chmod(path, 0o755)
         return path
@@ -568,8 +569,8 @@ class Tools(object):
         :return: stub脚本路径
         """
         return self.environ.get_data_path(
-            "tools",
-            f"stub_v{self.environ.version}",
+            "scripts",
+            f"tools_v{self.environ.version}",
             utils.get_md5(utils.get_interpreter())
         )
 

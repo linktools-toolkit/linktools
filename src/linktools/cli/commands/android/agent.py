@@ -37,7 +37,7 @@ from linktools.cli import AndroidCommand, CommandError
 class AgentDevice(AdbDevice):
 
     def get_agent_path(self, *name: str) -> str:
-        return self.get_data_path("agent", *name)
+        return self.get_data_path("android", "agent", *name)
 
     def push_agent_plugin(self, src_path: str = None) -> Optional[str]:
         if not src_path:

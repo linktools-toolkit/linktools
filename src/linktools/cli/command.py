@@ -748,7 +748,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         命令名
         """
-        name = self.module
+        name = self.__module__
         index = name.rfind(".")
         if index >= 0:
             name = name[index + 1:]
@@ -954,10 +954,21 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
 
 class CommandMain:
 
-    def __init__(self, command: BaseCommand, *, show_log_time: bool = False, show_log_level: bool = False):
-        self.command = command
+    def __init__(
+            self,
+            command: BaseCommand, *,
+            show_log_time: bool = False,
+            show_log_level: bool = False,
+            exit_on_return: bool = True
+    ):
+        self._command = command
         self.show_log_level = show_log_level
         self.show_log_time = show_log_time
+        self.exit_on_return = exit_on_return
+
+    @property
+    def command(self) -> BaseCommand:
+        return self._command
 
     def init_logging(self):
         """
@@ -985,4 +996,7 @@ class CommandMain:
                 else self.command.logger.error(traceback.format_exc())
             result = 1
 
-        sys.exit(result)
+        if self.exit_on_return:
+            sys.exit(result)
+
+        return result

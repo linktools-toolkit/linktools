@@ -53,7 +53,7 @@ if utils.is_unix_like():
                         data = self._stdout.readline()
                     except OSError as e:
                         if e.errno != errno.EBADF:
-                            environ.logger.debug(f"Handle output error: {e}")
+                            environ.logger.debug(f"Read stdout error: {e}")
                         data = None
                     if not data:
                         fds.remove(self._stdout)
@@ -64,7 +64,7 @@ if utils.is_unix_like():
                         data = self._stderr.readline()
                     except OSError as e:
                         if e.errno != errno.EBADF:
-                            environ.logger.debug(f"Handle output error: {e}")
+                            environ.logger.debug(f"Read stderr error: {e}")
                         data = None
                     if not data:
                         fds.remove(self._stderr)
@@ -181,8 +181,7 @@ class Process(subprocess.Popen):
                     out = data
                 elif code == STDERR:
                     err = data
-                if out is not None or err is not None:
-                    yield out, err
+                yield out, err
         else:
 
             try:

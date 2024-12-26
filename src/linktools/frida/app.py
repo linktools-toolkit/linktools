@@ -663,6 +663,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
     def __enter__(self):
         assert not self.is_running
         self.start()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()

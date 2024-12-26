@@ -29,14 +29,13 @@
 import json
 import subprocess
 import time
-from subprocess import TimeoutExpired
-from typing import TYPE_CHECKING, TypeVar, List, Generator, Any, Callable, Union, Tuple, Dict
+from typing import TYPE_CHECKING, TypeVar, List, Generator, Any, Callable, Dict
 
-from ..types import Stoppable
-from .. import utils
-from .._environ import environ
+from .struct import App, Process
+from .. import utils, environ
 from ..decorator import timeoutable, cached_property
 from ..device import BridgeError, Bridge, BaseDevice
+from ..types import Stoppable, TimeoutType, Timeout
 
 if TYPE_CHECKING:
     from ..ssh import SSHClient
@@ -50,6 +49,14 @@ def _is_log(data: Any) -> bool:
     return isinstance(data, dict) and "level" in data and "msg" in data
 
 
+def _get_msg(log: "Dict[str, str]") -> str:
+    return log.get("msg")
+
+
+def _get_err_msg(log: "Dict[str, str]") -> str:
+    return log.get("error") or log.get("msg")
+
+
 class GoIOSError(BridgeError):
     pass
 
@@ -60,35 +67,8 @@ class GoIOS(Bridge):
         super().__init__(
             tool=environ.get_tool("ios"),
             options=options,
-            error_type=self._on_error,
-            on_stdout=self._on_log,
-            on_stderr=self._on_log,
+            error_type=GoIOSError,
         )
-
-    @classmethod
-    def _on_log(cls, message: str):
-        for line in message.splitlines():
-            data = utils.ignore_error(json.loads, args=(line,), default=None)
-            if _is_log(data):
-                level = data.get("level")
-                if level in ("error", "fatal"):
-                    _logger.error(data.get("msg"))
-                elif level == ("warning",):
-                    _logger.warning(data.get("msg"))
-                elif level in ("trace", "debug"):
-                    _logger.debug(data.get("msg"))
-                else:
-                    _logger.info(data.get("msg"))
-
-    @classmethod
-    def _on_error(cls, message: str):
-        for line in message.splitlines():
-            data = utils.ignore_error(json.loads, args=(line,), default=None)
-            if _is_log(data):
-                level = data.get("level")
-                if level in ("fatal",):
-                    return GoIOSError(data.get("msg"))
-        return GoIOSError(message)
 
     def list_devices(self, alive: bool = None) -> Generator["GoIOSDevice", None, None]:
         """
@@ -105,6 +85,41 @@ class GoIOS(Bridge):
                         yield GoIOSDevice(id, ios=self)
                     elif alive is True:  # online only
                         yield GoIOSDevice(id, ios=self)
+
+    def _exec(self, process: utils.Process, timeout: TimeoutType, log_output: bool, ignore_errors: bool) -> str:
+        result = None
+        for out, err in process.fetch(timeout=timeout):
+            if out is not None:
+                result = out if result is None else result + out
+            for line in (out or "").splitlines() + (err or "").splitlines():
+                data: dict = utils.ignore_error(json.loads, args=(line,), default=None)
+                if log_output:
+                    if _is_log(data):
+                        level = data.get("level")
+                        if level in ("error", "fatal"):
+                            _logger.error(_get_err_msg(data))
+                        elif level in ("warning",):
+                            _logger.warning(_get_msg(data))
+                        elif level in ("trace", "debug"):
+                            _logger.debug(_get_msg(data))
+                        else:
+                            _logger.info(_get_msg(data))
+                    elif data:
+                        _logger.info(data)
+                if not ignore_errors:
+                    if _is_log(data):
+                        level = data.get("level")
+                        if level in ("error", "fatal"):
+                            if not ignore_errors:
+                                raise self._error_type(_get_err_msg(data))
+
+        if isinstance(result, bytes):
+            result = result.decode(errors="ignore")
+            result = result.strip()
+        elif isinstance(result, str):
+            result = result.strip()
+
+        return result or ""
 
 
 class GoIOSDevice(BaseDevice):
@@ -189,17 +204,25 @@ class GoIOSDevice(BaseDevice):
         """
         执行命令
         :param args: 命令行参数
-        :return: sib输出结果
+        :return: ios输出结果
         """
         args = ["--udid", self.id, *args]
         return self._ios.exec(*args, **kwargs)
+
+    @timeoutable
+    def mount(self, **kwargs) -> None:
+        """
+        挂载image
+        """
+        path = environ.get_data_path("ios", "image", create_parent=True)
+        self.exec("image", "auto", f"--basedir={path}", **kwargs)
 
     @timeoutable
     def install(self, path_or_url: str, **kwargs) -> str:
         """
         安装应用
         :param path_or_url: 本地路径或者url
-        :return: sib输出结果
+        :return: ios输出结果
         """
         _logger.info(f"Install ipa url: {path_or_url}")
         ipa_path = environ.get_url_file(path_or_url).save()
@@ -211,7 +234,7 @@ class GoIOSDevice(BaseDevice):
         """
         卸载应用
         :param bundle_id: 包名
-        :return: sib输出结果
+        :return: ios输出结果
         """
         return self.exec("uninstall", bundle_id, **kwargs)
 
@@ -220,9 +243,59 @@ class GoIOSDevice(BaseDevice):
         """
         结束应用
         :param bundle_id: 包名
-        :return: sib输出结果
+        :return: ios输出结果
         """
         return self.exec("kill", bundle_id, **kwargs)
+
+    @timeoutable
+    def get_app(self, bundle_id: str, **kwargs) -> App:
+        """
+        根据包名获取包信息
+        :param bundle_id: 包名
+        :return: 包信息
+        """
+        for line in self.exec("apps", "--all", **kwargs).splitlines():
+            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+                app = App(obj)
+                if bundle_id == app.bundle_id:
+                    return app
+
+        raise GoIOSError(f"App '{bundle_id}' not found")
+
+    @timeoutable
+    def get_apps(self, *bundle_ids: str, system: bool = None, **kwargs) -> "List[App]":
+        """
+        获取包信息
+        :param bundle_ids: 需要匹配的所有包名，为空则匹配所有
+        :param system: true只匹配系统应用，false只匹配非系统应用，为空则全匹配
+        :return: 包信息
+        """
+        options = []
+        if system is None:
+            options.append("--all")
+        elif system is True:
+            options.append("--system")
+
+        result = []
+        for line in self.exec("apps", *options, **kwargs).splitlines():
+            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+                app = App(obj)
+                if not bundle_ids or app.bundle_id in bundle_ids:
+                    result.append(app)
+
+        return result
+
+    @timeoutable
+    def get_processes(self, **kwargs) -> "List[Process]":
+        """
+        获取进程列表
+        :return: 进程列表
+        """
+        result = []
+        for line in self.exec("ps", **kwargs).splitlines():
+            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+                result.append(Process(obj))
+        return result
 
     def forward(self, local_port: int, remote_port: int) -> "Forward":
         """
@@ -300,30 +373,48 @@ class Forward(Stoppable):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            for out, err in self._process.fetch(timeout=10):
-                for line in (out or "").splitlines() + (err or "").splitlines():
-                    data = utils.ignore_error(json.loads, args=(line,), default=None)
-                    if _is_log(data):
-                        level = data.get("level")
-                        if level in ("fatal",):
-                            utils.ignore_error(self._process.kill)
-                            raise GoIOSError(data.get("msg"))
-                        elif "Start listening on port" in data["msg"]:
-                            time.sleep(.01)
-                            _logger.debug(f"Capture ios forward process output: {data['msg']}")
-                            return
+            for i in range(5):
+                timeout = Timeout(i)
+                for out, err in self._process.fetch(timeout=timeout):
+                    for line in (out or "").splitlines() + (err or "").splitlines():
+                        data = utils.ignore_error(json.loads, args=(line,), default=None)
+                        if _is_log(data):
+                            level = data.get("level")
+                            if level in ("fatal", "error"):
+                                raise GoIOSError(_get_err_msg(data))
+                            elif "Start listening on port" in data["msg"]:
+                                _logger.debug(f"Capture ios {self} output: {data['msg']}")
+                                time.sleep(1)
+                                break
+
+                if self._process.poll() is None and not utils.is_port_free(local_port):
+                    _logger.debug(f"{self} port {local_port} is used, continue.")
+                    return
+
+                _logger.debug(f"Start forward failed, kill {self} process and restart it.")
+                utils.ignore_error(self._process.kill)
+                utils.wait_process(self._process, .5)
+                self._process = ios.popen(
+                    "forward",
+                    local_port,
+                    remote_port,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
             raise GoIOSError("Run ios forward failed")
 
         self._stop_on_error(start)
 
     def stop(self):
-        if self._process is not None:
-            try:
-                _logger.debug(f"Kill ios proxy process")
-                self._process.kill()
-                self._process.wait(5)
-            except TimeoutExpired:
-                _logger.error(f"Proxy process did not finish normally")
+        process, self._process = self._process, None
+        if process is not None:
+            _logger.debug(f"Kill {self} process")
+            utils.ignore_error(process.kill)
+            utils.wait_process(process, 5)
+
+    def __repr__(self):
+        return f"Forward<{self.local_port}:{self.remote_port}>"
 
 
 if __name__ == '__main__':
@@ -333,6 +424,9 @@ if __name__ == '__main__':
     rich.init_logging(level=logging.DEBUG, show_level=True)
 
     device = GoIOSDevice()
+    print(device.mount(log_output=True))
+    print(device.get_apps(system=False))
+    print(device.get_processes())
     # print(device.exec("ps", log_output=True))
-    with device.ssh(22, "root", "alpine") as ssh:
-        ssh.open_shell()
+    # with device.ssh(22, "root", "alpine") as ssh:
+    #     ssh.open_shell()

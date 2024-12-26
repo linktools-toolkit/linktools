@@ -37,8 +37,7 @@ import time
 from collections.abc import Callable
 from typing import List, Dict, Any, Optional
 
-from linktools.android import AdbError
-from .adb import AdbDevice
+from .adb import AdbDevice, AdbError
 from .. import environ, utils
 from ..decorator import cached_classproperty
 from ..types import Stoppable
@@ -412,7 +411,7 @@ class ScrcpyServer(Stoppable):
             server_version = server_info["version"] = self._version or server_info["version"]
             server_name = server_info["name"].format(**server_info)
             server_url = server_info["url"].format(**server_info)
-            server_path = environ.get_data_path("android", server_name, create_parent=True)
+            server_path = environ.get_data_path("android", "scrcpy", server_name, create_parent=True)
             if not server_path.exists():
                 url_file = environ.get_url_file(server_url)
                 url_file.save(server_path.parent, server_path.name)

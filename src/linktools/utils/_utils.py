@@ -36,6 +36,7 @@ import random
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import uuid
@@ -855,4 +856,21 @@ def wait_thread(thread: threading.Thread, timeout: TimeoutType) -> bool:
         except:
             pass
         if not thread.is_alive():
+            return True
+
+
+@timeoutable
+def wait_process(process: subprocess.Popen, timeout: TimeoutType) -> bool:
+    interval = 1
+    while True:
+        t = timeout.remain
+        if t is None:
+            t = interval
+        elif t <= 0:
+            return False
+        try:
+            process.wait(min(t, interval))
+        except:
+            pass
+        if process.poll() is not None:
             return True

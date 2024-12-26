@@ -74,7 +74,7 @@ class Command(IOSCommand):
         )
 
         with server:
-            objection_args = ["objection"]
+            objection_args = [utils.get_interpreter(), "-m", "objection.console.cli"]
             if environ.debug:
                 objection_args += ["--debug"]
             objection_args += ["-N", "-p", server.local_port]

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
+import subprocess
 from abc import ABC, abstractmethod
 from typing import Any, Generator, TypeVar, Callable
 
@@ -54,24 +55,75 @@ class Bridge(ABC):
         )
 
     @timeoutable
-    def exec(self, *args: Any, timeout: TimeoutType = None,
-             ignore_errors: bool = False, log_output: bool = False) -> str:
+    def exec(self, *args: Any,
+             timeout: TimeoutType = None,
+             stdout: bool = None, stderr: bool = None,
+             log_output: bool = None,
+             ignore_errors: bool = False,
+             kill_on_return: bool = True) -> str:
         """
         执行命令
         :param args: 命令参数
         :param timeout: 超时时间
-        :param ignore_errors: 忽略错误，报错不会抛异常
+        :param stdout: 标准输出，默认为PIPE
+        :param stderr: 标准错误，默认为PIPE
         :param log_output: 把输出打印到logger中
+        :param ignore_errors: 忽略错误，报错不会抛异常
+        :param kill_on_return: 在返回时是否杀掉进程
         :return: 返回输出结果
         """
-        return self._tool.exec(
-            *(*self._options, *args),
-            timeout=timeout,
-            ignore_errors=ignore_errors,
-            on_stdout=self._on_stdout if log_output else None,
-            on_stderr=self._on_stderr if log_output else None,
-            error_type=self._error_type
-        )
+
+        if stdout is None:
+            stdout = subprocess.PIPE
+        if stderr is None:
+            stderr = subprocess.PIPE
+
+        process = self.popen(*args, stdout=stdout, stderr=stderr)
+        try:
+            return self._exec(
+                process,
+                timeout=timeout,
+                log_output=log_output,
+                ignore_errors=ignore_errors
+            )
+        finally:
+            if kill_on_return:
+                process.kill()
+
+    def _exec(self, process: utils.Process, timeout: TimeoutType, log_output: bool, ignore_errors: bool) -> str:
+        out = err = None
+        for _out, _err in process.fetch(timeout=timeout):
+            if _out is not None:
+                out = _out if out is None else out + _out
+                if log_output:
+                    data: str = _out.decode(errors="ignore") if isinstance(_out, bytes) else _out
+                    data = data.rstrip()
+                    if data:
+                        _logger.info(data)
+            if _err is not None:
+                err = _err if err is None else err + _err
+                if log_output:
+                    data: str = _err.decode(errors="ignore") if isinstance(_err, bytes) else _err
+                    data = data.rstrip()
+                    if data:
+                        _logger.error(data)
+
+        if not ignore_errors and process.poll() not in (0, None):
+            if isinstance(err, bytes):
+                err = err.decode(errors="ignore")
+                err = err.strip()
+            elif isinstance(err, str):
+                err = err.strip()
+            if err:
+                raise self._error_type(err)
+
+        if isinstance(out, bytes):
+            out = out.decode(errors="ignore")
+            out = out.strip()
+        elif isinstance(out, str):
+            out = out.strip()
+
+        return out or ""
 
 
 class BaseDevice(ABC):

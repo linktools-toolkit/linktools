@@ -183,68 +183,6 @@ class SibDevice(BaseDevice):
         """
         return self.exec("app", "kill", "--bundleId", bundle_id, **kwargs)
 
-    @timeoutable
-    def get_app(self, bundle_id: str, detail: bool = None, **kwargs) -> App:
-        """
-        根据包名获取包信息
-        :param bundle_id: 包名
-        :param detail: 获取详细信息
-        :return: 包信息
-        """
-        options = ["--format", "--system"]
-        if detail is True:
-            options.append("--icon")
-
-        out = json.loads(self.exec("app", "list", *options, **kwargs))
-        for obj in utils.get_list_item(out, "appList"):
-            app = App(obj)
-            if bundle_id == app.bundle_id:
-                return app
-
-        raise SibError(f"App '{bundle_id}' not found")
-
-    @timeoutable
-    def get_apps(self, *bundle_ids: str, system: bool = None, detail: bool = False, **kwargs) -> [App]:
-        """
-        获取包信息
-        :param bundle_ids: 需要匹配的所有包名，为空则匹配所有
-        :param system: true只匹配系统应用，false只匹配非系统应用，为空则全匹配
-        :param detail: 获取详细信息
-        :return: 包信息
-        """
-        options = ["--format"]
-        if detail is True:
-            options.append("--icon")
-        if system is not False:
-            options.append("--system")
-
-        exclude = []
-        if system is True:
-            exclude = [o.bundle_id for o in self.get_apps(system=False, detail=False, **kwargs)]
-
-        result = []
-        out = json.loads(self.exec("app", "list", *options, **kwargs))
-        for obj in utils.get_list_item(out, "appList"):
-            app = App(obj)
-            if app.bundle_id in bundle_ids:
-                result.append(app)
-            elif app.bundle_id not in exclude:
-                result.append(app)
-
-        return result
-
-    @timeoutable
-    def get_processes(self, **kwargs):
-        """
-        获取进程列表
-        :return: 进程列表
-        """
-        result = []
-        objs = json.loads(self.exec("ps", "-f", **kwargs))
-        for obj in objs:
-            result.append(Process(obj))
-        return result
-
     def forward(self, local_port: int, remote_port: int) -> "Forward":
         """
         创建端口转发

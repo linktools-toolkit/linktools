@@ -56,14 +56,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     def get_stub_path(environ: "BaseEnviron") -> "pathlib.Path":
         return environ.get_data_path(
-            "env",
-            f"stub_v{environ.version}",
+            "scripts",
+            f"env_v{environ.version}",
             utils.get_md5(utils.get_interpreter())
         )
 
     def get_alias_path(environ: "BaseEnviron") -> "pathlib.Path":
         return environ.get_data_path(
-            "env",
+            "scripts",
             f"alias_v{environ.version}",
             utils.get_md5(utils.get_interpreter())
         )

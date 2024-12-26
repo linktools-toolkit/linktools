@@ -42,7 +42,7 @@ from ._utils import (
     is_unix_like, is_windows,
     import_module, import_module_file,
     get_derived_type, lazy_load, lazy_iter, lazy_raise,
-    wait_event, wait_thread,
+    wait_event, wait_thread, wait_process,
 )
 
 from ._subprocess import (

@@ -73,7 +73,7 @@ class Command(BaseCommandGroup):
     def init_subcommands(self) -> Any:
         return [
             SubCommandWrapper(InitCommand()),
-            [get_commands(self.environ)],
+            get_commands(self.environ),
         ]
 
 

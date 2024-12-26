@@ -33,11 +33,12 @@ from .. import utils
 class App:
 
     def __init__(self, obj: dict):
-        self.bundle_id = utils.get_item(obj, "bundleId", type=str, default="")
-        self.name = utils.get_item(obj, "name", type=str, default="")
-        self.short_version = utils.get_item(obj, "shortVersion", type=str, default="")
-        self.version = utils.get_item(obj, "version", type=str, default="")
-        self.icon_base64 = utils.get_item(obj, "iconBase64", type=str, default="")
+        self.bundle_id = utils.get_item(obj, "CFBundleIdentifier", type=str, default="")
+        self.name = utils.get_item(obj, "CFBundleName", type=str, default="")
+        self.short_version = utils.get_item(obj, "CFBundleVersion", type=str, default="")
+        self.version = utils.get_item(obj, "CFBundleShortVersionString", type=str, default="")
+        self.container = utils.get_item(obj, "Container", type=str, default="")
+        self.entitlements = utils.get_item(obj, "Entitlements", type=dict, default="")
 
     def __repr__(self):
         return f"App<{self.bundle_id}>"
@@ -46,11 +47,11 @@ class App:
 class Process:
 
     def __init__(self, obj: dict):
-        self.pid = utils.get_item(obj, "pid", type=int, default=0)
-        self.name = utils.get_item(obj, "name", type=str, default=0)
-        self.real_app_name = utils.get_item(obj, "realAppName", type=str, default="")
-        self.is_application = utils.get_item(obj, "isApplication", type=bool, default=False)
-        self.start_date = utils.get_item(obj, "startDate", type=str, default="")
+        self.pid = utils.get_item(obj, "Pid", type=int, default=0)
+        self.name = utils.get_item(obj, "Name", type=str, default=0)
+        self.real_app_name = utils.get_item(obj, "RealAppName", type=str, default="")
+        self.is_application = utils.get_item(obj, "IsApplication", type=bool, default=False)
+        self.start_date = utils.get_item(obj, "StartDate", type=str, default="")
 
     def __repr__(self):
         return f"Process<{self.name}>"
