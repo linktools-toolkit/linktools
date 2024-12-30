@@ -151,8 +151,8 @@ class Process(subprocess.Popen):
     def call(self, timeout: TimeoutType = None) -> int:
         with self:
             try:
-                return utils.wait_process(self, timeout.remain)
-            except Exception:
+                return self.wait(timeout.remain)
+            except:
                 self.recursive_kill()
                 raise
 
@@ -160,7 +160,7 @@ class Process(subprocess.Popen):
     def check_call(self, timeout: TimeoutType = None) -> int:
         with self:
             try:
-                retcode = utils.wait_process(self, timeout.remain)
+                retcode = self.wait(timeout.remain)
                 if retcode:
                     raise subprocess.CalledProcessError(retcode, self.args)
                 return retcode
@@ -176,7 +176,6 @@ class Process(subprocess.Popen):
         :return: 返回stdout输出内容和stderr错误内容
         """
         if self.stdout or self.stderr:
-
             for code, data in self._output.get(timeout):
                 out = err = None
                 if code == STDOUT:
@@ -185,11 +184,7 @@ class Process(subprocess.Popen):
                     err = data
                 yield out, err
         else:
-
-            try:
-                utils.wait_process(self, timeout)
-            except subprocess.TimeoutExpired:
-                pass
+            utils.wait_process(self, timeout)
 
     def recursive_kill(self) -> None:
         try:

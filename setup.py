@@ -81,7 +81,7 @@ if __name__ == '__main__':
             if find:
                 items.append(int(find[0]))
         version = ".".join(map(str, items))
-        version = f"{version}.post0.dev0"
+        version = f"{version}.post100.dev0"
 
     with open(get_src_path("template", "tools.yml"), "rb") as fd_in, \
             open(get_src_path("assets", "tools.json"), "wt") as fd_out:

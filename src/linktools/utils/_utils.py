@@ -860,17 +860,15 @@ def wait_thread(thread: threading.Thread, timeout: TimeoutType) -> bool:
 
 
 @timeoutable
-def wait_process(process: subprocess.Popen, timeout: TimeoutType) -> bool:
+def wait_process(process: subprocess.Popen, timeout: TimeoutType) -> "Optional[int]":
     interval = 1
     while True:
         t = timeout.remain
         if t is None:
             t = interval
         elif t <= 0:
-            return False
+            return None
         try:
-            process.wait(min(t, interval))
-        except:
+            return process.wait(min(t, interval))
+        except subprocess.TimeoutExpired:
             pass
-        if process.poll() is not None:
-            return True
