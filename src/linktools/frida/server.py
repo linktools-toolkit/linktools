@@ -33,7 +33,8 @@ import lzma
 import os
 import shutil
 import time
-from typing import List, Dict, Optional
+from collections import ChainMap
+from typing import List, Dict, Optional, Mapping
 
 import frida
 
@@ -46,7 +47,13 @@ from ..types import Timeout, Stoppable
 _logger = environ.get_logger("frida.server")
 
 
-class FridaServer(utils.get_derived_type(frida.core.Device), Stoppable, metaclass=abc.ABCMeta):  # proxy for frida.core.Device
+class ServerNotRunningError(frida.ServerNotRunningError):
+    ...
+
+
+class FridaServer(utils.get_derived_type(frida.core.Device), # proxy for frida.core.Device
+                  Stoppable,
+                  metaclass=abc.ABCMeta):
 
     def __init__(self, device: frida.core.Device):
         super().__init__(device)
@@ -64,7 +71,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device), Stoppable, metaclas
             _logger.debug(f"Frida server is not running: {e}")
             return False
 
-    def start(self) -> bool:
+    def start(self, max_retries=1) -> bool:
         """
         根据frida版本和设备abi类型下载并运行server
         :return: 运行成功为True，否则为False
@@ -75,17 +82,33 @@ class FridaServer(utils.get_derived_type(frida.core.Device), Stoppable, metaclas
                 _logger.info("Frida server is running ...")
                 return True
 
+            last_error = None
+            max_retries = max(max_retries or 1, 1)
             _logger.info("Start frida server ...")
-            self._start()
+            for i in range(max_retries, 0, -1):
+                try:
+                    if last_error is not None:
+                        _logger.warning(
+                            f"Start frida server retry {max_retries - i}, "
+                            f"{last_error.__class__.__name__}: {last_error}")
+                    self._start()
+                    timeout = Timeout(10)
+                    while timeout.check():
+                        if self.is_running:
+                            _logger.info("Frida server is running ...")
+                            return True
+                        time.sleep(min(timeout.remain, 0.5))
+                    _logger.debug("Kill frida server ...")
+                    utils.ignore_error(self._stop)
+                except Exception as e:
+                    _logger.debug("Kill frida server ...")
+                    utils.ignore_error(self._stop)
+                    last_error = e
 
-            timeout = Timeout(10)
-            while timeout.check():
-                if self.is_running:
-                    _logger.info("Frida server is running ...")
-                    return True
-                time.sleep(min(timeout.remain, 0.5))
+            raise ServerNotRunningError("Frida server failed to run ...") from last_error
 
-            raise frida.ServerNotRunningError("Frida server failed to run ...")
+        except ServerNotRunningError:
+            raise
 
         except BaseException as e:
             _logger.debug("Kill frida server ...")
@@ -135,7 +158,7 @@ class FridaAndroidServer(FridaServer):
         self._forward: Optional[Stoppable] = None
 
         self._serve = serve
-        self._server_name = f"fs-ln-{self._remote_port}"
+        self._server_name = f"{environ.name}-fs-{self._remote_port}"
         self._server_dir = self._device.get_data_path("fs-ln")
         self._server_path = self._device.join_path(self._server_dir, self._server_name)
 
@@ -174,15 +197,13 @@ class FridaAndroidServer(FridaServer):
             )
 
     def _stop(self):
-        try:
-            if self._serve:
-                # 就算杀死adb进程，frida server也不一定真的结束了，所以kill一下frida server进程
-                self._device.sudo("killall", self._server_name, ignore_errors=True)
-        finally:
-            if self._forward:
-                # 把转发端口给移除了，不然会一直占用这个端口
-                self._forward.stop()
-                self._forward = None
+        if self._serve:
+            # 就算杀死adb进程，frida server也不一定真的结束了，所以kill一下frida server进程
+            self._device.sudo("killall", "-9", self._server_name, ignore_errors=True)
+        if self._forward:
+            # 把转发端口给移除了，不然会一直占用这个端口
+            self._forward.stop()
+            self._forward = None
 
     @cached_classproperty
     def _server_info(self) -> "List[Dict[str, str]]":
@@ -194,8 +215,7 @@ class FridaAndroidServer(FridaServer):
     def _get_executables(cls, abi: str, version: str):
         result = []
         for config in cls._server_info:
-            config = dict(config)
-            config.update(version=version, abi=abi)
+            config = ChainMap(dict(version=version, abi=abi), config)
             min_version = config.get("min_version", "0.0.0")
             max_version = config.get("max_version", "99999.0.0")
             if utils.parse_version(min_version) <= utils.parse_version(version) <= utils.parse_version(max_version):
@@ -250,7 +270,7 @@ class FridaAndroidServer(FridaServer):
 
     class Executable:
 
-        def __init__(self, config: Dict[str, str]):
+        def __init__(self, config: Mapping[str, str]):
             self.url = config["url"].format(**config)
             self.name = config["name"].format(**config)
             self.path = environ.get_data_path("android", "frida", self.name, create_parent=True)

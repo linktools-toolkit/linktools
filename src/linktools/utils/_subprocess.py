@@ -7,6 +7,7 @@ import queue
 import shlex
 import subprocess
 import threading
+from collections import ChainMap
 from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Generator, Tuple
 
 import psutil
@@ -232,12 +233,13 @@ def popen(
             cwd.mkdir(parents=True, exist_ok=True)
 
     if append_env or default_env:
-        env = dict(env) if env else dict(os.environ)
-        if default_env:
-            for key, value in default_env.items():
-                env.setdefault(key, value)
-        if append_env:
-            env.update(append_env)
+        maps = []
+        if append_env is not None:
+            maps.append(append_env)
+        maps.append(env if env is not None else os.environ)
+        if default_env is not None:
+            maps.append(default_env)
+        env = ChainMap(*maps)
 
     environ.logger.debug(f"Exec cmdline: {list2cmdline(args)}")
 

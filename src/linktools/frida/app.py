@@ -20,7 +20,7 @@ from frida.core import Session, Script
 from .script import FridaUserScript, FridaEvalCode, FridaScriptFile
 from .server import FridaServer
 from .. import utils, environ
-from ..decorator import timeoutable
+from ..decorator import timeoutable, cached_property
 from ..metadata import __release__
 from ..reactor import Reactor
 from ..types import TimeoutType, Stoppable
@@ -298,13 +298,13 @@ class FridaEventCounter:
         self._map = {}
         self._lock = threading.RLock()
 
-    def increase(self, group: "Group"):
+    def increase(self, group: "Group" = None) -> int:
         with self._lock:
-            keys = group.values
+            keys = group.values if group else tuple()
             if keys not in self._map:
                 self._map[keys] = 0
-            self._map[keys] = self._map[keys] + 1
-            return self._map[keys]
+            result = self._map[keys] = self._map[keys] + 1
+            return result
 
     class Group:
 
@@ -589,8 +589,6 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         self._enable_child_gating = enable_child_gating
         self._eternalize = eternalize
 
-        self._event_counter = FridaEventCounter()
-
     @property
     def device(self) -> frida.core.Device:
         return self._device
@@ -667,6 +665,10 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
+
+    @cached_property
+    def counter(self) -> FridaEventCounter:
+        return FridaEventCounter()
 
     def schedule(self, fn: Callable[[], any], delay: float = None):
         self._reactor.schedule(fn, delay)
@@ -877,7 +879,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
     def on_error(self, exc, traceback):
         if isinstance(exc, (KeyboardInterrupt, frida.TransportError, frida.ServerNotRunningError)):
             _logger.error(f"{traceback if environ.debug else exc}")
-            self.stop()
+            self.signal_stop()
         elif isinstance(exc, (frida.core.RPCException,)):
             _logger.error(f"{exc}")
         else:
@@ -889,7 +891,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
 
     def on_device_lost(self):
         _logger.info("Device lost")
-        self.stop()
+        self.signal_stop()
 
     def on_file_change(self, file: FridaScriptFile):
         """
@@ -949,12 +951,12 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         :param event: 事件消息
         :param data: 事件数据
         """
-        pid_count = self._event_counter.increase(
+        pid_count = self.counter.increase(
             FridaEventCounter.Group(accept_empty=False).add(
                 pid=script.session.pid,
             )
         )
-        pid_method_count = self._event_counter.increase(
+        pid_method_count = self.counter.increase(
             FridaEventCounter.Group(accept_empty=False).add(
                 pid=script.session.pid,
                 method=utils.get_item(event, "method_name"),

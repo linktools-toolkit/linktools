@@ -209,7 +209,7 @@ class AdbDevice(BaseDevice):
         return self.shell(*args, **kwargs)
 
     @timeoutable
-    def install(self, path_or_url: str, opts: [str] = (), **kwargs):
+    def install(self, path_or_url: str, opts: str = (), **kwargs):
         """
         安装apk
         :param path_or_url: apk文件路径
@@ -471,7 +471,7 @@ class AdbDevice(BaseDevice):
             data_path: str = None,
             library_path: str = None,
             plugin_path: str = None,
-    ) -> [str]:
+    ) -> "List[str]":
         """
         生成agent参数
         :param args: 参数
@@ -627,7 +627,7 @@ class AdbDevice(BaseDevice):
         return App(objs[0])
 
     @timeoutable
-    def get_apps(self, *package_names: str, system: bool = None, detail: bool = False, **kwargs) -> [App]:
+    def get_apps(self, *package_names: str, system: bool = None, detail: bool = False, **kwargs) -> "List[App]":
         """
         获取包信息
         :param package_names: 需要匹配的所有包名，为空则匹配所有
@@ -652,7 +652,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def get_apps_for_uid(self, *uids: int, detail: bool = False, **kwargs) -> [App]:
+    def get_apps_for_uid(self, *uids: int, detail: bool = False, **kwargs) -> "List[App]":
         """
         获取指定uid包信息
         :param uids: 需要匹配的所有uid
@@ -688,7 +688,7 @@ class AdbDevice(BaseDevice):
         return SystemService(objs[0])
 
     @timeoutable
-    def get_system_services(self, *service_names: str, detail: bool = False, **kwargs) -> [SystemService]:
+    def get_system_services(self, *service_names: str, detail: bool = False, **kwargs) -> "List[SystemService]":
         """
         获取系统服务信息
         :param service_names: 服务名（不填则全量）
@@ -708,7 +708,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_tcp_sockets(self, **kwargs) -> [InetSocket]:
+    def list_tcp_sockets(self, **kwargs) -> "List[InetSocket]":
         """
         同netstat命令，获取设备tcp连接情况，需要读取/proc/net/tcp文件，高版本设备至少需要shell权限
         :return: tcp连接列表
@@ -716,7 +716,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-tcp-sock"], **kwargs)
 
     @timeoutable
-    def list_udp_sockets(self, **kwargs) -> [InetSocket]:
+    def list_udp_sockets(self, **kwargs) -> "List[InetSocket]":
         """
         同netstat命令，获取设备udp连接情况，需要读取/proc/net/udp文件，高版本设备至少需要shell权限
         :return: udp连接列表
@@ -724,7 +724,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-udp-sock"], **kwargs)
 
     @timeoutable
-    def list_raw_sockets(self, **kwargs) -> [InetSocket]:
+    def list_raw_sockets(self, **kwargs) -> "List[InetSocket]":
         """
         同netstat命令，获取设备raw连接情况，需要读取/proc/net/raw文件，高版本设备至少需要shell权限
         :return: raw连接列表
@@ -732,7 +732,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-raw-sock"], **kwargs)
 
     @timeoutable
-    def list_unix_sockets(self, **kwargs) -> [UnixSocket]:
+    def list_unix_sockets(self, **kwargs) -> "List[UnixSocket]":
         """
         同netstat命令，获取设备unix连接情况，需要读取/proc/net/unix文件，高版本设备至少需要shell权限
         :return: unix连接列表
@@ -748,7 +748,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_processes(self, **kwargs) -> [Process]:
+    def list_processes(self, **kwargs) -> "List[Process]":
         """
         列出所有进程
         """
@@ -760,7 +760,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_files(self, path: str, **kwargs) -> [File]:
+    def list_files(self, path: str, **kwargs) -> "List[File]":
         """
         列出指定目录下的所有文件
         """
@@ -795,7 +795,7 @@ class AdbDevice(BaseDevice):
             return f"/data/local/tmp/{environ.name}"
         return data_path
 
-    def get_data_path(self, *names: [str]) -> str:
+    def get_data_path(self, *names: str) -> str:
         """
         /data/local/tmp 路径
         :param names: 文件名

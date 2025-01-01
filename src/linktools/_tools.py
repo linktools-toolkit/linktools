@@ -29,9 +29,9 @@
 
 import os
 import pathlib
-import pickle
 import shutil
 import warnings
+from collections import ChainMap
 from typing import TYPE_CHECKING, Dict, Iterator, Any, Tuple, List, Generator, Callable
 
 from . import utils
@@ -47,7 +47,7 @@ VALIDATE_KEYS = set()
 INTERNAL_KEYS = set()
 
 
-def _parse_value(config: Dict[str, Any], key: str, default=None):
+def _parse_value(config: ChainMap[str, Any], key: str, default=None):
     value = utils.get_item(config, key, default=default)
     if not isinstance(value, dict):
         # not found "when", use config value
@@ -192,26 +192,23 @@ class Tool(metaclass=ToolMeta):
         self._tools = tools
         self._config = config
 
-        self._raw_config: Dict = pickle.loads(pickle.dumps(self.__default__))
-        self._raw_config.update(config)
-
-        # set default value
-        if self._raw_config.get("name") == __missing__:
-            self._raw_config["name"] = name
-        if self._raw_config.get("system") == __missing__:
-            self._raw_config["system"] = self._tools.environ.system
-        if self._raw_config.get("machine") == __missing__:
-            self._raw_config["machine"] = self._tools.environ.machine
+        raw_config = ChainMap(config, self.__default__)
+        new_config = dict(
+            name=name,
+            system=self._tools.environ.system,
+            machine=self._tools.environ.machine
+        )
 
         # set value from environment
-        prefix = self.name.replace("-", "_")
-        for key, value in self._raw_config.items():
+        prefix = name.replace("-", "_")
+        for key, value in raw_config.items():
             if key not in INTERNAL_KEYS:
                 new_value = self._tools.config.get(f"{prefix}_{key}".upper(), default=None)
                 if new_value is not None:
-                    self._raw_config[key] = new_value
+                    new_config[key] = new_value
 
-        self._raw_config.update(kwargs)
+        new_config.update(kwargs)
+        self._raw_config = raw_config.new_child(new_config)
 
     @cached_property
     def config(self) -> dict:
@@ -642,7 +639,7 @@ class Tools(object):
             if name is None:
                 if key.startswith("TOOL_"):
                     key = key[len("TOOL_"):]
-                name = value["name"] = key.lower()
+                name = key.lower()
             result[name] = Tool(self, name, value)
 
         return result

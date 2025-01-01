@@ -31,7 +31,7 @@ import contextlib
 import os
 import shelve
 import shutil
-from typing import TYPE_CHECKING, Tuple, Union, Iterable, TypeVar
+from typing import TYPE_CHECKING, Tuple, Union, Iterable, TypeVar, Optional
 
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
@@ -67,33 +67,38 @@ class UrlFile(metaclass=abc.ABCMeta):
         return False
 
     @timeoutable
-    def save(self, dir: PathType = None, name: str = None,
-             timeout: TimeoutType = None, retry: int = 2,
+    def save(self, dest_dir: PathType = None, dest_name: str = None,
+             timeout: TimeoutType = None, max_retries: int = 3,
              validators: "Union[Validator, Iterable[Validator]]" = None,
              **kwargs) -> str:
         """
         从指定url下载文件
-        :param dir: 文件路径，如果为空，则会返回临时文件路径
-        :param name: 文件名，如果为空，则默认为下载的文件名
+        :param dest_dir: 文件夹路径，如果为空，则会返回临时文件路径
+        :param dest_name: 文件名，如果为空，则默认为下载的文件名
         :param timeout: 超时时间
-        :param retry: 重试次数
+        :param max_retries: 重试次数
         :param validators: 校验文件完整性
         :return: 文件路径
         """
         try:
             self._acquire(timeout=timeout.remain)
 
-            temp_path, temp_name = self._download(retry=retry, timeout=timeout, validators=validators, **kwargs)
-            if not dir:
+            temp_path, temp_name = self._download(
+                max_retries=max_retries,
+                timeout=timeout,
+                validators=validators,
+                **kwargs
+            )
+            if not dest_dir:
                 return temp_path
 
             # 先创建文件夹
-            if not os.path.exists(dir):
-                self._environ.logger.debug(f"{dir} does not exist, create")
-                os.makedirs(dir, exist_ok=True)
+            if not os.path.exists(dest_dir):
+                self._environ.logger.debug(f"{dest_dir} does not exist, create")
+                os.makedirs(dest_dir, exist_ok=True)
 
             # 然后把文件保存到指定路径下
-            dest_path = os.path.join(dir, name or temp_name)
+            dest_path = os.path.join(dest_dir, dest_name or temp_name)
             self._environ.logger.debug(f"Copy {temp_path} to {dest_path}")
             shutil.copy(temp_path, dest_path)
 
@@ -121,7 +126,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @abc.abstractmethod
-    def _download(self, retry: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
+    def _download(self, max_retries: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
         pass
 
     @abc.abstractmethod
@@ -214,7 +219,7 @@ class HttpFile(UrlFile):
             self._environ.get_temp_path("download", "lock", self._ident, create_parent=True)
         )
 
-    def _download(self, retry: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
+    def _download(self, max_retries: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
         if not os.path.exists(self._root_path):
             os.makedirs(self._root_path, exist_ok=True)
 
@@ -237,12 +242,12 @@ class HttpFile(UrlFile):
 
                 # 开始下载
                 last_error = None
-                max_times = 1 + max(retry or 0, 0)
-                for i in range(max_times, 0, -1):
+                max_retries = max(max_retries or 1, 1)
+                for i in range(max_retries, 0, -1):
                     try:
                         if last_error is not None:
                             self._environ.logger.warning(
-                                f"Download retry {max_times - i}, "
+                                f"Download retry {max_retries - i}, "
                                 f"{last_error.__class__.__name__}: {last_error}")
                         # 正式下载文件
                         context.download(timeout)
@@ -303,12 +308,12 @@ class HttpContextVar(property):
 
 
 class HttpContext:
-    url: str = HttpContextVar("Url")
-    user_agent: str = HttpContextVar("UserAgent")
-    headers: dict = HttpContextVar("Headers")
-    file_path: str = HttpContextVar("FilePath")
-    file_size: int = HttpContextVar("FileSize")
-    file_name: str = HttpContextVar("FileName")
+    url: Optional[str] = HttpContextVar("Url")
+    user_agent: Optional[str] = HttpContextVar("UserAgent")
+    headers: Optional[dict] = HttpContextVar("Headers")
+    file_path: Optional[str] = HttpContextVar("FilePath")
+    file_size: Optional[int] = HttpContextVar("FileSize")
+    file_name: Optional[str] = HttpContextVar("FileName")
     completed: bool = HttpContextVar("IsCompleted", False)
 
     def __init__(self, environ: "BaseEnviron", path: str):

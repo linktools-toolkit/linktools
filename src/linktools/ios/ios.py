@@ -49,11 +49,11 @@ def _is_log(data: Any) -> bool:
     return isinstance(data, dict) and "level" in data and "msg" in data
 
 
-def _get_msg(log: "Dict[str, str]") -> str:
+def _get_log_msg(log: "Dict[str, str]") -> str:
     return log.get("msg")
 
 
-def _get_err_msg(log: "Dict[str, str]") -> str:
+def _get_log_err_msg(log: "Dict[str, str]") -> str:
     return log.get("error") or log.get("msg")
 
 
@@ -97,13 +97,13 @@ class GoIOS(Bridge):
                     if _is_log(data):
                         level = data.get("level")
                         if level in ("error", "fatal"):
-                            _logger.error(_get_err_msg(data))
+                            _logger.error(_get_log_err_msg(data))
                         elif level in ("warning",):
-                            _logger.warning(_get_msg(data))
+                            _logger.warning(_get_log_msg(data))
                         elif level in ("trace", "debug"):
-                            _logger.debug(_get_msg(data))
+                            _logger.debug(_get_log_msg(data))
                         else:
-                            _logger.info(_get_msg(data))
+                            _logger.info(_get_log_msg(data))
                     elif data:
                         _logger.info(data)
                 if not ignore_errors:
@@ -111,7 +111,7 @@ class GoIOS(Bridge):
                         level = data.get("level")
                         if level in ("error", "fatal"):
                             if not ignore_errors:
-                                raise self._error_type(_get_err_msg(data))
+                                raise self._error_type(_get_log_err_msg(data))
 
         if isinstance(result, bytes):
             result = result.decode(errors="ignore")
@@ -297,14 +297,14 @@ class GoIOSDevice(BaseDevice):
                 result.append(Process(obj))
         return result
 
-    def forward(self, local_port: int, remote_port: int) -> "Forward":
+    def forward(self, local_port: int, remote_port: int) -> "GoIOSForward":
         """
         创建端口转发
         :param local_port: 本地端口
         :param remote_port: 远程端口
         :return: 端口转发对象
         """
-        return Forward(self, local_port, remote_port)
+        return GoIOSForward(self, local_port, remote_port)
 
     def ssh(self, port: int = 22, username: str = "root", password: str = None) -> "SSHClient":
         """
@@ -354,7 +354,7 @@ class GoIOSDevice(BaseDevice):
         return f"IOSDevice<{self.id}>"
 
 
-class Forward(Stoppable):
+class GoIOSForward(Stoppable):
     local_port = property(lambda self: self._local_port)
     remote_port = property(lambda self: self._remote_port)
 
@@ -381,7 +381,7 @@ class Forward(Stoppable):
                         if _is_log(data):
                             level = data.get("level")
                             if level in ("fatal", "error"):
-                                raise GoIOSError(_get_err_msg(data))
+                                raise GoIOSError(_get_log_err_msg(data))
                             elif "Start listening on port" in data["msg"]:
                                 _logger.debug(f"Capture ios {self} output: {data['msg']}")
                                 time.sleep(1)
