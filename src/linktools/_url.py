@@ -212,7 +212,7 @@ class HttpFile(UrlFile):
         self._local_path = os.path.join(self._root_path, "file")
         self._context_path = os.path.join(self._root_path, "context")
 
-    @cached_property
+    @cached_property(lock=True)
     def _lock(self):
         from filelock import FileLock
         return FileLock(

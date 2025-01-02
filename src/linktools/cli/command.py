@@ -831,7 +831,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         self.init_arguments(parser)
         return parser
 
-    @cached_property
+    @cached_property(lock=True)
     def _argument_parser(self) -> ArgumentParser:
         parser = self.create_parser()
         self.init_global_arguments(parser)

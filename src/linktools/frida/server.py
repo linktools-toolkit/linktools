@@ -51,7 +51,7 @@ class ServerNotRunningError(frida.ServerNotRunningError):
     ...
 
 
-class FridaServer(utils.get_derived_type(frida.core.Device), # proxy for frida.core.Device
+class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.core.Device
                   Stoppable,
                   metaclass=abc.ABCMeta):
 
@@ -71,7 +71,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device), # proxy for frida.c
             _logger.debug(f"Frida server is not running: {e}")
             return False
 
-    def start(self, max_retries=1) -> bool:
+    def start(self, max_retries: int = 1) -> bool:
         """
         根据frida版本和设备abi类型下载并运行server
         :return: 运行成功为True，否则为False

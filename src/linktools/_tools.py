@@ -210,7 +210,7 @@ class Tool(metaclass=ToolMeta):
         new_config.update(kwargs)
         self._raw_config = raw_config.new_child(new_config)
 
-    @cached_property
+    @cached_property(lock=True)
     def config(self) -> dict:
         """
         获取工具配置
@@ -607,10 +607,6 @@ class Tools(object):
         tool = self.all.get(item, None)
         if tool is None:
             raise ToolNotFound(f"Not found tool {item}")
-        if not tool.supported:
-            raise ToolNotSupport(
-                f"{tool} does not support on "
-                f"{self.environ.system} ({self.environ.machine})")
         return tool
 
     def __getattr__(self, item: str) -> Tool:

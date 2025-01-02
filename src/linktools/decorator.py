@@ -71,31 +71,13 @@ def try_except(errors: "Tuple[Type[BaseException]]" = (Exception,), default: "An
     return decorator
 
 
-def synchronized(lock=None):
-    if lock is None:
-        lock = threading.Lock()
+class _CachedProperty:
 
-    def decorator(fn: "Callable[P, T]") -> "Callable[P, T]":
-        @functools.wraps(fn)
-        def wrapper(*args: "P.args", **kwargs: "P.kwargs") -> "T":
-            lock.acquire()
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                lock.release()
-
-        return wrapper
-
-    return decorator
-
-
-class cached_property:
-
-    def __init__(self, func):
+    def __init__(self, func: "Callable[P, T]", lock):
         self.func = func
         self.attrname = None
         self.__doc__ = func.__doc__
-        self.lock = threading.RLock()
+        self.lock = lock
 
     def __set_name__(self, owner, name):
         if self.attrname is None:
@@ -112,6 +94,7 @@ class cached_property:
         if self.attrname is None:
             raise TypeError(
                 "Cannot use cached_property instance without calling __set_name__ on it.")
+
         try:
             cache = instance.__dict__
         except AttributeError:  # not all objects have __dict__ (e.g. class defines slots)
@@ -120,23 +103,45 @@ class cached_property:
                 f"instance to cache {self.attrname!r} property."
             )
             raise TypeError(msg) from None
+
         val = cache.get(self.attrname, __missing__)
         if val == __missing__:
-            with self.lock:
-                # check if another thread filled cache while we awaited lock
-                val = cache.get(self.attrname, __missing__)
-                if val == __missing__:
-                    val = self.func(instance)
-                    try:
-                        cache[self.attrname] = val
-                    except TypeError:
-                        msg = (
-                            f"The '__dict__' attribute on {type(instance).__name__!r} instance "
-                            f"does not support item assignment for caching {self.attrname!r} property."
-                        )
-                        raise TypeError(msg) from None
+            if self.lock is not None:
+                with self.lock:
+                    # check if another thread filled cache while we awaited lock
+                    val = cache.get(self.attrname, __missing__)
+                    if val == __missing__:
+                        val = self.func(instance)
+                        try:
+                            cache[self.attrname] = val
+                        except TypeError:
+                            msg = (
+                                f"The '__dict__' attribute on {type(instance).__name__!r} instance "
+                                f"does not support item assignment for caching {self.attrname!r} property."
+                            )
+                            raise TypeError(msg) from None
+            else:
+                val = self.func(instance)
+                try:
+                    cache[self.attrname] = val
+                except TypeError:
+                    msg = (
+                        f"The '__dict__' attribute on {type(instance).__name__!r} instance "
+                        f"does not support item assignment for caching {self.attrname!r} property."
+                    )
+                    raise TypeError(msg) from None
 
         return val
+
+
+def cached_property(fn: "Callable[P, T]" = None, *, lock: bool = False):
+    if fn is not None:
+        return _CachedProperty(fn, threading.RLock() if lock else None)
+
+    def decorator(fn: "Callable[P, T]"):
+        return _CachedProperty(fn, threading.RLock() if lock else None)
+
+    return decorator
 
 
 class classproperty:
@@ -152,22 +157,35 @@ class classproperty:
         return self.func(owner)
 
 
-class cached_classproperty:
+class _CachedClassproperty:
 
-    def __init__(self, func):
+    def __init__(self, func: "Callable[P, T]", lock):
         self.func = func
         self.__doc__ = func.__doc__
-        self.lock = threading.RLock()
+        self.lock = lock
         self.val = __missing__
 
     def __get__(self, instance, owner=None):
         if self.val == __missing__:
-            with self.lock:
-                # check if another thread filled cache while we awaited lock
-                if self.val == __missing__:
-                    self.val = self.func(owner)
+            if self.lock is not None:
+                with self.lock:
+                    # check if another thread filled cache while we awaited lock
+                    if self.val == __missing__:
+                        self.val = self.func(owner)
+            else:
+                self.val = self.func(owner)
 
         return self.val
+
+
+def cached_classproperty(fn: "Callable[P, T]" = None, *, lock: bool = False):
+    if fn is not None:
+        return _CachedClassproperty(fn, threading.RLock() if lock else None)
+
+    def decorator(fn: "Callable[P, T]"):
+        return _CachedClassproperty(fn, threading.RLock() if lock else None)
+
+    return decorator
 
 
 def _timeoutable(fn: "Callable[P, T]") -> "Callable[P, T]":

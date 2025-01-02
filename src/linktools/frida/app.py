@@ -666,7 +666,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
-    @cached_property
+    @cached_property(lock=True)
     def counter(self) -> FridaEventCounter:
         return FridaEventCounter()
 

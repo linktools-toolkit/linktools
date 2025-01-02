@@ -203,7 +203,7 @@ class Process(subprocess.Popen):
 
         self.terminate()
 
-    @cached_property
+    @cached_property(lock=True)
     def _output(self):
         return Output(self.stdout, self.stderr)
 

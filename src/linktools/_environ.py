@@ -193,7 +193,7 @@ class BaseEnviron(abc.ABC):
                         self.logger.info(f"Remove empty temp directory: {path}")
                         shutil.rmtree(path, ignore_errors=True)
 
-    @cached_classproperty
+    @cached_classproperty(lock=True)
     def _log_manager(self) -> "logging.Manager":
 
         empty_args = tuple()
@@ -256,7 +256,7 @@ class BaseEnviron(abc.ABC):
             env_prefix=f"{self.name.upper()}_"
         )
 
-    @cached_property
+    @cached_property(lock=True)
     def config(self) -> "Config":
         """
         环境相关配置
@@ -318,7 +318,7 @@ class BaseEnviron(abc.ABC):
             os.environ["PATH"] = os.pathsep.join(paths)
         return tools
 
-    @cached_property
+    @cached_property(lock=True)
     def tools(self) -> "Tools":
         """
         工具集
