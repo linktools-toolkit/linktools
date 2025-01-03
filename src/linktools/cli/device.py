@@ -38,7 +38,6 @@ from .. import utils
 from ..android import Adb, AdbError, AdbDevice
 from ..device import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
 from ..ios import GoIOS, GoIOSError, GoIOSDevice
-from ..rich import choose
 from ..types import PathType
 
 
@@ -142,6 +141,8 @@ class DeviceCommandMixin:
             if len(devices) == 1:
                 return devices[0]
 
+            from ..rich import choose
+
             return choose(
                 "Choose device",
                 title="More than one device/emulator",
@@ -211,6 +212,8 @@ class AndroidCommandMixin:
 
             if len(devices) == 1:
                 return devices[0]
+
+            from ..rich import choose
 
             return choose(
                 "Choose device",
@@ -346,6 +349,8 @@ class IOSCommandMixin:
 
             if len(devices) == 1:
                 return devices[0]
+
+            from ..rich import choose
 
             return choose(
                 "Choose device",

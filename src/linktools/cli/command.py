@@ -40,19 +40,16 @@ from pkgutil import walk_packages
 from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING, Optional, Callable, List, Type, Tuple, Generator, Any, Iterable, Union, Set, Dict
 
-from rich import get_console
-from rich.tree import Tree
-
 from .argparse import BooleanOptionalAction, auto_complete
 from .. import utils
 from .._environ import environ
 from ..decorator import cached_property
 from ..metadata import __missing__
-from ..rich import LogHandler, init_logging
 from ..types import Error
 
 if TYPE_CHECKING:
     from typing import TypeVar, Union, Literal
+    from rich.tree import Tree
     from .._environ import BaseEnviron
 
     T = TypeVar("T")
@@ -673,6 +670,10 @@ class SubCommandMixin:
                 description = root.description
         elif self.description:
             description = self.description
+
+        from rich import get_console
+        from rich.tree import Tree
+
         tree = self._make_subcommand_tree(
             Tree(f"📎 {description}"),
             getattr(args, name),
@@ -687,13 +688,13 @@ class SubCommandMixin:
 
     def _make_subcommand_tree(
             self: "BaseCommand",
-            tree: Tree,
+            tree: "Tree",
             infos: List[_SubCommandInfo],
             root_id: str,
             max_level: Optional[int],
             sort: bool = False
-    ) -> Tree:
-        nodes: Dict[str, Tuple[Tree, int]] = {}
+    ) -> "Tree":
+        nodes: "Dict[str, Tuple[Tree, int]]" = {}
         for info in infos:
             if info.node.parent_id == root_id:
                 parent_node, parent_node_level = tree, 0
@@ -847,6 +848,8 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         初始化公共参数，会在命令本身和所有子命令中调用
         """
+        from ..rich import LogHandler
+
         environ = self.environ
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
 
@@ -974,6 +977,8 @@ class CommandMain:
         """
         初始化log
         """
+        from ..rich import init_logging
+
         init_logging(
             level=logging.INFO,
             show_time=self.show_log_time,
@@ -998,6 +1003,7 @@ class CommandMain:
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except:
+            from rich import get_console
             get_console().print_exception(show_locals=True) \
                 if self.command.environ.debug \
                 else self.command.logger.error(traceback.format_exc())

@@ -10,8 +10,6 @@ import threading
 from collections import ChainMap
 from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Generator, Tuple
 
-import psutil
-
 from .. import utils
 from .._environ import environ
 from ..decorator import cached_property, timeoutable
@@ -188,6 +186,7 @@ class Process(subprocess.Popen):
             utils.wait_process(self, timeout)
 
     def recursive_kill(self) -> None:
+        import psutil
         try:
             for p in reversed(psutil.Process(self.pid).children(recursive=True)):
                 try:

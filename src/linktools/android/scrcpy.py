@@ -34,8 +34,7 @@ import struct
 import subprocess
 import threading
 import time
-from collections.abc import Callable
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 from .adb import AdbDevice, AdbError
 from .. import environ, utils

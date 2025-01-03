@@ -34,7 +34,6 @@ import shutil
 from typing import TYPE_CHECKING, Tuple, Union, Iterable, TypeVar, Optional
 
 from .decorator import cached_property, timeoutable
-from .rich import create_progress
 from .types import TimeoutType, Error, PathType, Timeout
 from .utils import get_md5, get_file_hash, ignore_error, parse_header, guess_file_name, user_agent
 
@@ -352,6 +351,7 @@ class HttpContext:
         except ModuleNotFoundError:
             fn = self._download_with_urllib
 
+        from .rich import create_progress  # lazy import
         with create_progress() as progress:
             task_id = progress.add_task(self.file_name, total=None)
             progress.advance(task_id, initial)

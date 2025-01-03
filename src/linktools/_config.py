@@ -41,7 +41,6 @@ from typing import \
 
 from . import utils
 from .metadata import __missing__
-from .rich import prompt, confirm, choose
 from .types import PathType, Error, get_args
 
 if TYPE_CHECKING:
@@ -590,7 +589,8 @@ class Config:
                 default = config.cast(default, self.type)
 
             if self.choices:
-                return choose(
+                from . import rich
+                return rich.choose(
                     self.prompt or f"Please choose {key}",
                     choices=self.choices,
                     default=default,
@@ -598,7 +598,8 @@ class Config:
                     show_choices=True
                 )
 
-            return prompt(
+            from . import rich
+            return rich.prompt(
                 self.prompt or f"Please input {key}",
                 type=self.type if not isinstance(self.type, str) else str,
                 password=self.password,
@@ -637,7 +638,8 @@ class Config:
             if default != __missing__:
                 default = config.cast(default, bool)
 
-            return confirm(
+            from . import rich
+            return rich.confirm(
                 self.prompt or f"Please confirm {key}",
                 default=default,
                 show_default=True,
