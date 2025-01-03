@@ -284,13 +284,17 @@ if __name__ == '__main__':
         env_parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
         env_parser.set_defaults(func=command.run)
 
+    def on_tool_command(args):
+        try:
+            tool = environ.get_tool(args.name, cmdline=None)
+            return tool.popen(*args.args).call()
+        except KeyboardInterrupt:
+            return 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
+
     tool_parser = command_parser.add_parser("tool")
     tool_parser.add_argument("name", help="tool Name").required = True
     tool_parser.add_argument("args", nargs=argparse.REMAINDER, help="tool Args")
-    tool_parser.set_defaults(func=lambda args: \
-        environ.get_tool(args.name, cmdline=None) \
-                             .popen(*args.args) \
-                             .call())
+    tool_parser.set_defaults(func=on_tool_command)
 
     args = parser.parse_args()
     logging.basicConfig(

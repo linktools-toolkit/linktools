@@ -990,13 +990,13 @@ class CommandMain:
             result = self.command(*args, **kwargs)
         except SystemExit as e:
             result = e.code
-        except (KeyboardInterrupt, EOFError) as e:
+        except KeyboardInterrupt as e:
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.command.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
                 exc_info=True if self.command.environ.debug else None,
             )
-            result = 1
+            result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except:
             get_console().print_exception(show_locals=True) \
                 if self.command.environ.debug \
