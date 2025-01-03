@@ -29,7 +29,9 @@
 
 import os
 import pathlib
+import platform
 import shutil
+import sys
 import warnings
 from collections import ChainMap
 from typing import TYPE_CHECKING, Dict, Iterator, Any, Tuple, List, Generator, Callable
@@ -569,8 +571,8 @@ class Tools(object):
         """
         return self.environ.get_data_path(
             "scripts",
+            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
             f"tools_v{self.environ.version}",
-            utils.get_md5(utils.get_interpreter())
         )
 
     def keys(self) -> Generator[str, None, None]:

@@ -26,6 +26,8 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import platform
+import sys
 from argparse import ArgumentParser
 from typing import TYPE_CHECKING
 
@@ -57,15 +59,15 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     def get_stub_path(environ: "BaseEnviron") -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
+            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
             f"env_v{environ.version}",
-            utils.get_md5(utils.get_interpreter())
         )
 
     def get_alias_path(environ: "BaseEnviron") -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
+            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
             f"alias_v{environ.version}",
-            utils.get_md5(utils.get_interpreter())
         )
 
     def get_default_shell(environ: "BaseEnviron") -> "Optional[str]":
