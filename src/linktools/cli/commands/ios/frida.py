@@ -30,10 +30,11 @@ import re
 from argparse import ArgumentParser, Namespace
 from typing import Optional, Type, List
 
-from linktools import utils, DownloadError
+from linktools import utils
 from linktools.cli import CommandError, IOSCommand, CommandMain
 from linktools.cli.argparse import KeyValueAction, range_type, BooleanOptionalAction
 from linktools.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaIOSServer
+from linktools.types import DownloadError
 
 
 class Command(IOSCommand):

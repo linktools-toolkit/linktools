@@ -34,8 +34,7 @@ import struct
 import subprocess
 import threading
 import time
-from collections.abc import Callable
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 from .adb import AdbDevice, AdbError
 from .. import environ, utils
@@ -1021,10 +1020,10 @@ if __name__ == '__main__':
     import av
     import cv2
 
-    from .. import rich
+    from ..rich import init_logging
     from ..types import CacheQueue
 
-    rich.init_logging(level=logging.DEBUG, show_level=True)
+    init_logging(level=logging.DEBUG, show_level=True)
 
     video_codec = av.codec.CodecContext.create("h264", "r")
     video_frames = CacheQueue[av.VideoFrame](100)

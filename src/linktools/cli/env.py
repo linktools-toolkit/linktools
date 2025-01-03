@@ -26,8 +26,6 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-import platform
-import sys
 from argparse import ArgumentParser
 from typing import TYPE_CHECKING
 
@@ -56,17 +54,17 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
         return wrapper
 
-    def get_stub_path(environ: "BaseEnviron") -> "pathlib.Path":
+    def get_stub_path() -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
-            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
+            utils.get_interpreter_ident(),
             f"env_v{environ.version}",
         )
 
-    def get_alias_path(environ: "BaseEnviron") -> "pathlib.Path":
+    def get_alias_path() -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
-            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
+            utils.get_interpreter_ident(),
             f"alias_v{environ.version}",
         )
 
@@ -87,7 +85,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 raise NotImplementedError(f"Not found shell path")
 
             paths = os.environ.get("PATH", "").split(os.pathsep)
-            stub_path = str(get_stub_path(environ))
+            stub_path = str(get_stub_path())
             if stub_path not in paths:
                 paths.append(stub_path)
             stub_path = str(environ.tools.stub_path)
@@ -111,7 +109,8 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return parser
 
         def run(self, args: "argparse.Namespace"):
-            alias_path = get_alias_path(environ)
+            shell = args.shell or get_default_shell(environ)
+            alias_path = get_alias_path() / f"alias.{shell}"
             alias_path.parent.mkdir(parents=True, exist_ok=True)
             if not args.reload and os.path.exists(alias_path):
                 environ.logger.info(f"Found alias script: {alias_path}")
@@ -120,11 +119,11 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             from .. import metadata
             from ..cli import commands
-            from ..cli.argparse import auto_complete
+            from ..cli.argparse import ParserCompleter
             from ..cli.command import iter_module_commands, iter_entry_point_commands
             from .._tools import Tool
 
-            stub_path = get_stub_path(environ)
+            stub_path = get_stub_path()
             stub_path.mkdir(parents=True, exist_ok=True)
             utils.clear_directory(stub_path)
 
@@ -152,15 +151,11 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     )
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
 
-            shell = args.shell or get_default_shell(environ)
-
             lines = []
-            if auto_complete:
-                try:
-                    environ.logger.info("Generate completion script ...")
-                    lines.append(auto_complete.shellcode(executables, shell=shell))
-                except:
-                    pass
+            completion = ParserCompleter.shellcode(executables, shell=shell)
+            if completion:
+                environ.logger.info("Generate completion script ...")
+                lines.append(completion)
 
             tools_path = environ.tools.stub_path
             if shell in ("bash", "zsh"):

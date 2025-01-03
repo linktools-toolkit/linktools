@@ -15,20 +15,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import random
-import socket
+import typing
 
-from ..types import Error
+from ..types import NoFreePortFoundError
+
+if typing.TYPE_CHECKING:
+    import socket
 
 
 # from: https://github.com/google/python_portpicker
 
-
-class NoFreePortFoundError(Error):
-    """Exception indicating that no free port could be found."""
-
-
-def bind(port: int, socket_type: socket.SocketKind, socket_proto: int):
+def bind(port: int, socket_type: "socket.SocketKind", socket_proto: int):
     """Try to bind to a socket of the specified type, protocol, and port.
 
     This is primarily a helper function for PickUnusedPort, used to see
@@ -46,6 +43,8 @@ def bind(port: int, socket_type: socket.SocketKind, socket_proto: int):
     Returns:
       The port number on success or None on failure.
     """
+    import socket
+
     got_socket = False
     for family in (socket.AF_INET6, socket.AF_INET):
         try:
@@ -74,11 +73,15 @@ def is_port_free(port: int):
     Returns:
       boolean, whether it is free to use for both TCP and UDP
     """
+    import socket
+
     return bind(port, socket.SOCK_STREAM, socket.IPPROTO_TCP) is not None and \
-           bind(port, socket.SOCK_DGRAM, socket.IPPROTO_UDP) is not None
+        bind(port, socket.SOCK_DGRAM, socket.IPPROTO_UDP) is not None
 
 
 def get_free_port():
+    import socket
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(('127.0.0.1', 0))
@@ -87,6 +90,8 @@ def get_free_port():
         finally:
             s.close()
     except OSError:
+        import random
+
         for _ in range(20):
             port = random.randint(30000, 40000)
             if not is_port_free(port):

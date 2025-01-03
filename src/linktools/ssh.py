@@ -17,7 +17,7 @@ from scp import SCPClient
 
 from . import utils
 from ._environ import environ
-from .rich import create_progress, prompt
+from .rich import prompt, create_progress
 from .types import Stoppable
 from .utils import list2cmdline, ignore_error, is_unix_like
 

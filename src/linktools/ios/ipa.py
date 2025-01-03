@@ -7,7 +7,6 @@
 # Product   : PyCharm
 # Project   : link
 
-import plistlib
 import re
 import zipfile
 from typing import Optional, Dict, Any, List
@@ -30,6 +29,7 @@ class IPA(object):
         self._analysis()
 
     def _analysis(self):
+        import plistlib
         plist_path = self.find_file(_INFO_PLIST)
         if plist_path is None:
             raise IPAError("Missing Info.plist")

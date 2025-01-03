@@ -40,19 +40,17 @@ from pkgutil import walk_packages
 from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING, Optional, Callable, List, Type, Tuple, Generator, Any, Iterable, Union, Set, Dict
 
-from rich import get_console
-from rich.tree import Tree
-
-from .argparse import BooleanOptionalAction, auto_complete
+from .argparse import BooleanOptionalAction, ParserCompleter
 from .. import utils
 from .._environ import environ
 from ..decorator import cached_property
 from ..metadata import __missing__
-from ..rich import LogHandler, init_logging
+from ..rich import get_log_handler, init_logging
 from ..types import Error
 
 if TYPE_CHECKING:
     from typing import TypeVar, Union, Literal
+    from rich.tree import Tree
     from .._environ import BaseEnviron
 
     T = TypeVar("T")
@@ -673,6 +671,10 @@ class SubCommandMixin:
                 description = root.description
         elif self.description:
             description = self.description
+
+        from rich import get_console
+        from rich.tree import Tree
+
         tree = self._make_subcommand_tree(
             Tree(f"📎 {description}"),
             getattr(args, name),
@@ -687,13 +689,13 @@ class SubCommandMixin:
 
     def _make_subcommand_tree(
             self: "BaseCommand",
-            tree: Tree,
+            tree: "Tree",
             infos: List[_SubCommandInfo],
             root_id: str,
             max_level: Optional[int],
             sort: bool = False
-    ) -> Tree:
-        nodes: Dict[str, Tuple[Tree, int]] = {}
+    ) -> "Tree":
+        nodes: "Dict[str, Tuple[Tree, int]]" = {}
         for info in infos:
             if info.node.parent_id == root_id:
                 parent_node, parent_node_level = tree, 0
@@ -847,6 +849,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         初始化公共参数，会在命令本身和所有子命令中调用
         """
+
         environ = self.environ
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
 
@@ -871,7 +874,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    handler = LogHandler.get_instance()
+                    handler = get_log_handler()
                     if handler:
                         handler.show_time = value
 
@@ -880,7 +883,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    handler = LogHandler.get_instance()
+                    handler = get_log_handler()
                     if handler:
                         handler.show_level = value
 
@@ -892,11 +895,10 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         group.add_argument(f"{prefix}{prefix}debug", action=DebugAction, nargs=0, const=True, dest=SUPPRESS,
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
 
-        if LogHandler.get_instance():
-            group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
-                               help="show log time")
-            group.add_argument(f"{prefix}{prefix}level", action=LogLevelAction, dest=SUPPRESS,
-                               help="show log level")
+        group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
+                           help="show log time")
+        group.add_argument(f"{prefix}{prefix}level", action=LogLevelAction, dest=SUPPRESS,
+                           help="show log level")
 
         if self.environ.version != NotImplemented:
             parser.add_argument(
@@ -916,10 +918,9 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         try:
             if not isinstance(args, Namespace):
-                parser = self._argument_parser
-                if auto_complete:
-                    auto_complete.autocomplete(parser)
-                args = parser.parse_args(args)
+                args = ParserCompleter \
+                    .autocomplete(self._argument_parser) \
+                    .parse_args(args)
 
             exit_code = self.run(args) or 0
 
@@ -984,7 +985,9 @@ class CommandMain:
         """
         main命令入口
         """
-        self.init_logging()
+
+        if not ParserCompleter.is_invocation():
+            self.init_logging()
 
         try:
             result = self.command(*args, **kwargs)
@@ -998,6 +1001,7 @@ class CommandMain:
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except:
+            from rich import get_console
             get_console().print_exception(show_locals=True) \
                 if self.command.environ.debug \
                 else self.command.logger.error(traceback.format_exc())

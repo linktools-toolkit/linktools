@@ -27,44 +27,44 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import functools
-import getpass
 import gzip
-import hashlib
 import os
-import platform
-import random
-import re
-import shutil
-import socket
-import subprocess
 import sys
-import threading
-import uuid
-from collections.abc import Iterable, Sized
-from importlib.machinery import ModuleSpec
-from importlib.util import find_spec, LazyLoader, module_from_spec, spec_from_file_location
 from pathlib import Path
-from typing import TYPE_CHECKING, Union, Callable, Optional, Type, Any, List, TypeVar, Tuple, Set, Dict, overload
-from urllib import parse
-from urllib.request import urlopen
+from typing import TYPE_CHECKING, overload, Tuple, List, Set
 
-from .._environ import environ
-from ..decorator import singleton, timeoutable
+from ..decorator import timeoutable
 from ..metadata import __missing__
-from ..references.fake_useragent import UserAgent
 from ..types import PathType, QueryType, Proxy, IterProxy, Error, TimeoutType
 
 if TYPE_CHECKING:
-    from typing import ParamSpec, Literal
+    import subprocess
+    import threading
+
+    from typing import ParamSpec, Literal, Union, Callable, Optional, Type, Any, TypeVar, Dict, Iterable
+    from importlib.machinery import ModuleSpec
 
     T = TypeVar("T")
     P = ParamSpec("P")
 
 DEFAULT_ENCODING = "utf-8"
 
-_SYSTEM = None
-_MACHINE = None
-_INTERPRETER = None
+_user_agent = None
+_system = _machine = None
+_interpreter = _interpreter_ident = None
+_is_windows_like = _is_unix_like = False
+
+try:
+    import msvcrt
+except ModuleNotFoundError:
+    try:
+        import pwd
+    except ModuleNotFoundError:
+        ...
+    else:
+        _is_unix_like = True
+else:
+    _is_windows_like = True
 
 
 def ignore_error(
@@ -86,7 +86,7 @@ def ignore_error(
 
 
 # noinspection PyShadowingBuiltins
-def cast(type: "Type[T]", obj: Any, default: Any = __missing__) -> "Optional[T]":
+def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional[T]":
     """
     类型转换
     :param type: 目标类型
@@ -102,7 +102,7 @@ def cast(type: "Type[T]", obj: Any, default: Any = __missing__) -> "Optional[T]"
         return default
 
 
-def cast_int(obj: Any, default: Any = __missing__) -> int:
+def cast_int(obj: "Any", default: "Any" = __missing__) -> int:
     """
     转为int
     :param obj: 需要转换的值
@@ -112,7 +112,7 @@ def cast_int(obj: Any, default: Any = __missing__) -> int:
     return cast(int, obj, default)
 
 
-def cast_bool(obj: Any, default: Any = __missing__) -> bool:
+def cast_bool(obj: "Any", default: "Any" = __missing__) -> bool:
     """
     转为bool
     :param obj: 需要转换的值
@@ -122,7 +122,7 @@ def cast_bool(obj: Any, default: Any = __missing__) -> bool:
     return cast(bool, obj, default)
 
 
-def coalesce(*args: Any) -> Any:
+def coalesce(*args: "Any") -> "Any":
     """
     从参数列表中返回第一个不为None的值
     """
@@ -132,7 +132,7 @@ def coalesce(*args: Any) -> Any:
     return None
 
 
-def is_contain(obj: Any, key: Any) -> bool:
+def is_contain(obj: "Any", key: "Any") -> bool:
     """
     是否包含内容
     :param obj: 对象
@@ -141,12 +141,12 @@ def is_contain(obj: Any, key: Any) -> bool:
     """
     if obj is None:
         return False
-    if isinstance(obj, Iterable):
+    if hasattr(obj, "__contains__"):
         return key in obj
     return False
 
 
-def is_empty(obj: Any) -> bool:
+def is_empty(obj: "Any") -> bool:
     """
     对象是否为空
     :param obj: 对象
@@ -154,13 +154,13 @@ def is_empty(obj: Any) -> bool:
     """
     if obj is None:
         return True
-    if isinstance(obj, Sized):
+    if hasattr(obj, "__len__"):
         return len(obj) == 0
     return False
 
 
 # 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def get_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
+def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
     """
     获取子项
     :param obj: 对象
@@ -197,7 +197,7 @@ def get_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "T" = None) 
 
 
 # 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def pop_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
+def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
     """
     获取并删除子项
     :param obj: 对象
@@ -247,7 +247,7 @@ def pop_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "T" = None) 
 
 
 # 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def get_list_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":
+def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":
     """
     获取子项（列表）
     :param obj: 对象
@@ -271,7 +271,8 @@ def get_list_item(obj: Any, *keys: Any, type: "Type[T]" = None, default: "List[T
     return result
 
 
-def get_hash(data: Union[str, bytes], algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+def get_hash(data: "Union[str, bytes]", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+    import hashlib
     if isinstance(data, str):
         data = bytes(data, "utf8")
     m = getattr(hashlib, algorithm)()
@@ -280,6 +281,7 @@ def get_hash(data: Union[str, bytes], algorithm: "Literal['md5', 'sha1', 'sha256
 
 
 def get_file_hash(path: "PathType", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+    import hashlib
     m = getattr(hashlib, algorithm)()
     with open(path, "rb") as fd:
         while True:
@@ -290,7 +292,7 @@ def get_file_hash(path: "PathType", algorithm: "Literal['md5', 'sha1', 'sha256']
     return m.hexdigest()
 
 
-def get_md5(data: Union[str, bytes]) -> str:
+def get_md5(data: "Union[str, bytes]") -> str:
     return get_hash(data, algorithm="md5")
 
 
@@ -299,10 +301,12 @@ def get_file_md5(path: "PathType"):
 
 
 def make_uuid() -> str:
+    import random
+    import uuid
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{uuid.uuid1()}{random.random()}")).replace("-", "")
 
 
-def gzip_compress(data: Union[str, bytes]) -> bytes:
+def gzip_compress(data: "Union[str, bytes]") -> bytes:
     if isinstance(data, str):
         data = bytes(data, "utf8")
     return gzip.compress(data)
@@ -343,10 +347,10 @@ def read_file(path: "PathType", text: "Literal[True]", encoding=DEFAULT_ENCODING
 
 
 @overload
-def read_file(path: "PathType", text: bool, encoding=DEFAULT_ENCODING) -> Union[str, bytes]: ...
+def read_file(path: "PathType", text: bool, encoding=DEFAULT_ENCODING) -> "Union[str, bytes]": ...
 
 
-def read_file(path: "PathType", text: bool = False, encoding=DEFAULT_ENCODING) -> Union[str, bytes]:
+def read_file(path: "PathType", text: bool = False, encoding=DEFAULT_ENCODING) -> "Union[str, bytes]":
     """
     读取文件数据
     """
@@ -377,6 +381,7 @@ def remove_file(path: "PathType") -> None:
     if not os.path.exists(path):
         return
     if os.path.isdir(path):
+        import shutil
         shutil.rmtree(path, ignore_errors=True)
     else:
         ignore_error(os.remove, args=(path,))
@@ -391,17 +396,19 @@ def clear_directory(path: "PathType") -> None:
     for name in os.listdir(path):
         target_path = os.path.join(path, name)
         if os.path.isdir(target_path):
+            import shutil
             shutil.rmtree(target_path, ignore_errors=True)
         else:
             ignore_error(os.remove, args=(target_path,))
 
 
-def get_lan_ip() -> Optional[str]:
+def get_lan_ip() -> "Optional[str]":
     """
     获取本地IP地址
     """
     s = None
     try:
+        import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
@@ -412,10 +419,11 @@ def get_lan_ip() -> Optional[str]:
             ignore_error(s.close)
 
 
-def get_wan_ip() -> Optional[str]:
+def get_wan_ip() -> "Optional[str]":
     """
     获取外网IP地址
     """
+    from urllib.request import urlopen
     try:
         with urlopen("http://ifconfig.me/ip") as response:
             return response.read().decode().strip()
@@ -423,7 +431,7 @@ def get_wan_ip() -> Optional[str]:
         return None
 
 
-def parse_version(version: str) -> Tuple[int, ...]:
+def parse_version(version: str) -> "Tuple[int, ...]":
     """
     将字符串版本号解析成元组
     """
@@ -432,6 +440,7 @@ def parse_version(version: str) -> Tuple[int, ...]:
         if x.isdigit():
             result.append(cast_int(x))
         else:
+            import re
             match = re.match(r"^\d+", x)
             if not match:
                 break
@@ -465,38 +474,45 @@ def get_char_width(char):
     return 1
 
 
-@singleton
-class _UserAgent(UserAgent):
-
-    def __init__(self):
-        super().__init__(
-            path=environ.get_asset_path(f"browsers.json"),
-            fallback=environ.get_config("DEFAULT_USER_AGENT", type=str),
-        )
-
-
 def user_agent(style=None) -> str:
     """
     随机获取一个User-Agent
     """
-    ua = _UserAgent()
+    global _user_agent
+
+    if _user_agent is None:
+        from .._environ import environ
+        from ..references.fake_useragent import UserAgent
+
+        class _UserAgent(UserAgent):
+
+            def __init__(self):
+                super().__init__(
+                    path=environ.get_asset_path(f"browsers.json"),
+                    fallback=environ.get_config("DEFAULT_USER_AGENT", type=str),
+                )
+
+        _user_agent = _UserAgent()
 
     try:
         if style:
-            return ua[style]
+            return _user_agent[style]
 
-        return ua.random
+        return _user_agent.random
 
     except Exception as e:
+        from .._environ import environ
         environ.logger.debug(f"fetch user agent error: {e}")
 
-    return ua.fallback
+    return _user_agent.fallback
 
 
 def make_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
     """
     拼接URL
     """
+    from urllib import parse
+
     result = url
 
     for path in paths:
@@ -519,6 +535,7 @@ def guess_file_name(url: str) -> str:
     """
     根据url推测文件名
     """
+    from urllib import parse
     if not url:
         return ""
     try:
@@ -561,7 +578,7 @@ def parse_header(line):
     return key, pdict
 
 
-def parser_cookie(cookie: str) -> Dict[str, str]:
+def parser_cookie(cookie: str) -> "Dict[str, str]":
     """
     解析cookie成字典
     """
@@ -576,97 +593,66 @@ def get_interpreter():
     """
     获取当前python解释器的绝对路径
     """
-    global _INTERPRETER
-    if _INTERPRETER is None:
-        _INTERPRETER = sys.executable
-    return _INTERPRETER
+    global _interpreter
+    if _interpreter is None:
+        _interpreter = sys.executable
+    return _interpreter
+
+
+def get_interpreter_ident() -> str:
+    """
+    获取当前python解释器id
+    """
+    global _interpreter_ident
+    if _interpreter_ident is None:
+        import platform
+        _interpreter_ident = f"{get_md5(sys.exec_prefix)}_{platform.python_version()}"
+    return _interpreter_ident
 
 
 def get_system() -> str:
     """
     获取系统类型
     """
-    global _SYSTEM
-    if _SYSTEM is None:
-        _SYSTEM = platform.system().lower()
-    return _SYSTEM
+    global _system
+    if _system is None:
+        import platform
+        _system = platform.system().lower()
+    return _system
 
 
 def get_machine() -> str:
     """
     获取机器类型
     """
-    global _MACHINE
-    if _MACHINE is None:
-        _MACHINE = platform.machine().lower()
-    return _MACHINE
+    global _machine
+    if _machine is None:
+        import platform
+        _machine = platform.machine().lower()
+    return _machine
 
 
 def is_unix_like(system: str = None) -> bool:
     """
     是否为类Unix系统
     """
-    return (system or get_system()) in ("darwin", "linux")
+    return system in ("darwin", "linux") if system else _is_unix_like
 
 
 def is_windows(system: str = None) -> bool:
     """
     是否为Windows系统
     """
-    return (system or get_system()) == "windows"
+    return system == "windows" if system else _is_windows_like
 
 
-if is_unix_like():
-
-    import pwd
-
-
-    def get_user(uid: int = None):
-        """
-        获取用户名，如果没有指定uid则返回当前用户名
-        """
-        return pwd.getpwuid(int(uid)) \
-            if uid is not None \
-            else getpass.getuser()
-
-
-    def get_uid(user: str = None):
-        """
-        获取用户ID，如果没有指定用户则返回当前用户ID
-        """
-        return pwd.getpwnam(str(user)).pw_uid \
-            if user is not None \
-            else os.getuid()
-
-
-    def get_gid(user: str = None):
-        """
-        获取用户组ID，如果没有指定用户则返回当前用户组ID
-        """
-        return pwd.getpwnam(str(user)).pw_gid \
-            if user is not None \
-            else os.getgid()
-
-
-    def get_shell_path():
-        """
-        获取当前用户shell路径
-        """
-        if "SHELL" in os.environ:
-            shell_path = os.environ["SHELL"]
-            if shell_path and os.path.exists(shell_path):
-                return shell_path
-        try:
-            return pwd.getpwnam(get_user()).pw_shell
-        except:
-            return shutil.which("zsh") or shutil.which("bash") or shutil.which("sh")
-
-elif is_windows():
+if is_windows():
 
     def get_user(uid: int = None):
         """
         获取当前用户，windows固定为当前用户名
         """
+        import getpass
         return getpass.getuser()
 
 
@@ -688,6 +674,7 @@ elif is_windows():
         """
         获取当前用户shell路径
         """
+        import shutil
         shell_path = shutil.which("powershell") or shutil.which("cmd")
         if shell_path:
             return shell_path
@@ -696,6 +683,54 @@ elif is_windows():
             if shell_path and os.path.exists(shell_path):
                 return shell_path
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
+
+elif is_unix_like():
+
+    def get_user(uid: int = None) -> str:
+        """
+        获取用户名，如果没有指定uid则返回当前用户名
+        """
+        if uid is not None:
+            import pwd
+            return pwd.getpwuid(int(uid)).pw_name
+        import getpass
+        return getpass.getuser()
+
+
+    def get_uid(user: str = None):
+        """
+        获取用户ID，如果没有指定用户则返回当前用户ID
+        """
+        if user is not None:
+            import pwd
+            return pwd.getpwnam(str(user)).pw_uid
+        return os.getuid()
+
+
+    def get_gid(user: str = None):
+        """
+        获取用户组ID，如果没有指定用户则返回当前用户组ID
+        """
+        if user is not None:
+            import pwd
+            return pwd.getpwnam(str(user)).pw_gid
+        return os.getgid()
+
+
+    def get_shell_path():
+        """
+        获取当前用户shell路径
+        """
+        if "SHELL" in os.environ:
+            shell_path = os.environ["SHELL"]
+            if shell_path and os.path.exists(shell_path):
+                return shell_path
+        try:
+            import pwd
+            return pwd.getpwnam(get_user()).pw_shell
+        except:
+            import shutil
+            return shutil.which("zsh") or shutil.which("bash") or shutil.which("sh")
 
 else:
 
@@ -727,13 +762,14 @@ else:
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
-def import_module(name: str, spec: ModuleSpec = None) -> "T":
+def import_module(name: str, spec: "ModuleSpec" = None) -> "T":
     """
     延迟导入模块
     :param name: 模块名
     :param spec: 模块spec
     :return: module
     """
+    from importlib.util import find_spec, LazyLoader, module_from_spec
     if name in sys.modules:
         return sys.modules[name]
     spec = spec or find_spec(name)
@@ -754,6 +790,7 @@ def import_module_file(name: str, path: str) -> "T":
     :param path: 模块路径
     :return: module
     """
+    from importlib.util import LazyLoader, module_from_spec, spec_from_file_location
     if name in sys.modules:
         return sys.modules[name]
     if os.path.isdir(path):
@@ -830,7 +867,7 @@ def lazy_raise(e: BaseException) -> "T":
 
 
 @timeoutable
-def wait_event(event: threading.Event, timeout: TimeoutType) -> bool:
+def wait_event(event: "threading.Event", timeout: TimeoutType) -> bool:
     interval = 1
     while True:
         t = timeout.remain
@@ -843,7 +880,7 @@ def wait_event(event: threading.Event, timeout: TimeoutType) -> bool:
 
 
 @timeoutable
-def wait_thread(thread: threading.Thread, timeout: TimeoutType) -> bool:
+def wait_thread(thread: "threading.Thread", timeout: TimeoutType) -> bool:
     interval = 1
     while True:
         t = timeout.remain
@@ -860,7 +897,8 @@ def wait_thread(thread: threading.Thread, timeout: TimeoutType) -> bool:
 
 
 @timeoutable
-def wait_process(process: subprocess.Popen, timeout: TimeoutType) -> "Optional[int]":
+def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional[int]":
+    import subprocess
     interval = 1
     while True:
         t = timeout.remain

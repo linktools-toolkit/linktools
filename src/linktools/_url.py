@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Tuple, Union, Iterable, TypeVar, Optional
 
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
-from .types import TimeoutType, Error, PathType, Timeout
+from .types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError
 from .utils import get_md5, get_file_hash, ignore_error, parse_header, guess_file_name, user_agent
 
 if TYPE_CHECKING:
@@ -43,17 +43,6 @@ if TYPE_CHECKING:
     from ._environ import BaseEnviron
 
     ValidatorsType = TypeVar("ValidatorsType", bound="Union[UrlFile.Validator, Iterable[UrlFile.Validator]]")
-
-
-class DownloadError(Error):
-    pass
-
-
-class DownloadHttpError(DownloadError):
-
-    def __init__(self, code, e):
-        super().__init__(e)
-        self.code = code
 
 
 class UrlFile(metaclass=abc.ABCMeta):

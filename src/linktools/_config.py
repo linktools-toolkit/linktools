@@ -41,8 +41,8 @@ from typing import \
 
 from . import utils
 from .metadata import __missing__
-from .rich import prompt, confirm, choose
-from .types import PathType, Error, get_args
+from .rich import choose, prompt, confirm
+from .types import PathType, get_args, ConfigError
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -107,10 +107,6 @@ CONFIG_TYPES: "Dict[ConfigType, Callable[[Any], T]]" = dict({
     "path": cast_path,
     "json": cast_json,
 })
-
-
-class ConfigError(Error):
-    pass
 
 
 class ConfigProperty(metaclass=abc.ABCMeta):

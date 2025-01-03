@@ -419,9 +419,9 @@ class GoIOSForward(Stoppable):
 
 if __name__ == '__main__':
     import logging
-    from .. import rich
+    from ..rich import init_logging
 
-    rich.init_logging(level=logging.DEBUG, show_level=True)
+    init_logging(level=logging.DEBUG, show_level=True)
 
     device = GoIOSDevice()
     print(device.mount(log_output=True))

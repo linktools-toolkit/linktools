@@ -170,6 +170,7 @@ class FridaShareScript(FridaUserScript):
                      f"Current md5: {source_md5}{os.linesep}" \
                      f"Source: {os.linesep}{source_summary}{os.linesep}" \
                      f"Are you sure you'd like to trust it?"
+
             if confirm(prompt):
                 utils.write_file(cached_md5_path, source_md5)
                 _logger.info(f"Load trusted {self}")

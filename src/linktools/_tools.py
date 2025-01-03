@@ -29,9 +29,7 @@
 
 import os
 import pathlib
-import platform
 import shutil
-import sys
 import warnings
 from collections import ChainMap
 from typing import TYPE_CHECKING, Dict, Iterator, Any, Tuple, List, Generator, Callable
@@ -39,7 +37,7 @@ from typing import TYPE_CHECKING, Dict, Iterator, Any, Tuple, List, Generator, C
 from . import utils
 from .decorator import cached_property, timeoutable
 from .metadata import __missing__
-from .types import TimeoutType, Error, PathType
+from .types import TimeoutType, PathType, ToolNotFound, ToolNotSupport, ToolExecError
 
 if TYPE_CHECKING:
     from ._environ import BaseEnviron
@@ -155,22 +153,6 @@ class ToolMeta(type):
         return property(lambda self: self._raw_config.get(name)) \
             if prop.raw \
             else property(lambda self: self.config.get(name))
-
-
-class ToolError(Error):
-    pass
-
-
-class ToolNotFound(ToolError):
-    pass
-
-
-class ToolNotSupport(ToolError):
-    pass
-
-
-class ToolExecError(ToolError):
-    pass
 
 
 class Tool(metaclass=ToolMeta):
@@ -571,7 +553,7 @@ class Tools(object):
         """
         return self.environ.get_data_path(
             "scripts",
-            f"{utils.get_md5(sys.exec_prefix)}_{platform.python_version()}",
+            utils.get_interpreter_ident(),
             f"tools_v{self.environ.version}",
         )
 

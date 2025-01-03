@@ -53,6 +53,41 @@ class Error(Exception):
     pass
 
 
+class DownloadError(Error):
+    pass
+
+
+class DownloadHttpError(DownloadError):
+
+    def __init__(self, code, e):
+        super().__init__(e)
+        self.code = code
+
+
+class ConfigError(Error):
+    pass
+
+
+class ToolError(Error):
+    pass
+
+
+class ToolNotFound(ToolError):
+    pass
+
+
+class ToolNotSupport(ToolError):
+    pass
+
+
+class ToolExecError(ToolError):
+    pass
+
+
+class NoFreePortFoundError(Error):
+    """Exception indicating that no free port could be found."""
+
+
 def get_origin(tp):
     if hasattr(_t, "get_origin"):
         return _t.get_origin(tp)

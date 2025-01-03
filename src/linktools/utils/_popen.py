@@ -4,16 +4,12 @@
 import errno
 import os
 import queue
-import shlex
 import subprocess
 import threading
 from collections import ChainMap
 from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Generator, Tuple
 
-import psutil
-
-from .. import utils
-from .._environ import environ
+from . import _utils as utils
 from ..decorator import cached_property, timeoutable
 from ..types import TimeoutType, PathType, Timeout
 
@@ -26,6 +22,7 @@ def list2cmdline(args: Iterable[str]) -> str:
 
 
 def cmdline2list(cmdline: str) -> List[str]:
+    import shlex
     return shlex.split(cmdline)
 
 
@@ -56,6 +53,7 @@ if utils.is_unix_like():
                         data = self._stdout.readline()
                     except OSError as e:
                         if e.errno != errno.EBADF:
+                            from .._environ import environ
                             environ.logger.debug(f"Read stdout error: {e}")
                         data = None
                     if not data:
@@ -67,6 +65,7 @@ if utils.is_unix_like():
                         data = self._stderr.readline()
                     except OSError as e:
                         if e.errno != errno.EBADF:
+                            from .._environ import environ
                             environ.logger.debug(f"Read stderr error: {e}")
                         data = None
                     if not data:
@@ -118,6 +117,7 @@ else:
                     self._queue.put((code, data))
             except OSError as e:
                 if e.errno != errno.EBADF:
+                    from .._environ import environ
                     environ.logger.debug(f"Handle output error: {e}")
             finally:
                 event.set()
@@ -188,6 +188,7 @@ class Process(subprocess.Popen):
             utils.wait_process(self, timeout)
 
     def recursive_kill(self) -> None:
+        import psutil
         try:
             for p in reversed(psutil.Process(self.pid).children(recursive=True)):
                 try:
@@ -195,10 +196,12 @@ class Process(subprocess.Popen):
                 except psutil.NoSuchProcess:
                     pass
                 except Exception as e:
+                    from .._environ import environ
                     environ.logger.debug(f"Kill children process failed: {e}")
         except psutil.NoSuchProcess:
             pass
         except Exception as e:
+            from .._environ import environ
             environ.logger.debug(f"List children process failed: {e}")
 
         self.terminate()
@@ -216,6 +219,8 @@ def popen(
         env: Dict[str, str] = None, append_env: Dict[str, str] = None, default_env: Dict[str, str] = None,
         **kwargs
 ) -> Process:
+    from .._environ import environ
+
     args = [str(arg) for arg in args]
 
     if capture_output is True:
