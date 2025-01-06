@@ -329,8 +329,11 @@ TOOL_IOS:
   unpack_path: 'ios-{version}'
   target_path:
     when:
-      - system: [darwin, linux]
+      - system: darwin
         then: 'ios'
+      - system: linux
+        machine: x86_64
+        then: 'ios-amd64'
       - system: windows
         then: 'ios.exe'
       - else: ~

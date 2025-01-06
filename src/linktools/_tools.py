@@ -47,7 +47,7 @@ VALIDATE_KEYS = set()
 INTERNAL_KEYS = set()
 
 
-def _parse_value(config: ChainMap[str, Any], key: str, default=None):
+def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
     value = utils.get_item(config, key, default=default)
     if not isinstance(value, dict):
         # not found "when", use config value
