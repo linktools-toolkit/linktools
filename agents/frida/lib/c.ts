@@ -3,6 +3,9 @@
  */
 
 import * as Log from "./log"
+import * as java from "./java";
+import * as objc from "./objc";
+
 
 type HookOpts = {
     method?: boolean;
@@ -12,6 +15,8 @@ type HookOpts = {
     backtracer?: "accurate" | "fuzzy";
     args?: boolean;
     result?: boolean;
+    error?: boolean;
+    page?: boolean;
     extras?: {
         [name: string]: any
     };
@@ -169,6 +174,8 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
     hookOpts.backtracer = options.backtracer || "accurate";
     hookOpts.args = parseBoolean(options.args, false);
     hookOpts.result = parseBoolean(options.result, hookOpts.args);
+    hookOpts.error = parseBoolean(options.error, hookOpts.args);
+    hookOpts.page = parseBoolean(options.page, false);
     hookOpts.extras = {};
     if (options.extras != null) {
         for (let i in options.extras) {
@@ -193,8 +200,11 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
         if (hookOpts.result !== false) {
             event["result"] = null;
         }
-        if (hookOpts.args !== false || hookOpts.result !== false) {
+        if (hookOpts.error !== false) {
             event["error"] = null;
+        }
+        if (hookOpts.page !== false) {
+            event["page"] = $getCurrentPage();
         }
         try {
             const result = this(args);
@@ -203,7 +213,7 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
             }
             return result;
         } catch (e) {
-            if (hookOpts.args !== false || hookOpts.result !== false) {
+            if (hookOpts.error !== false) {
                 event["error"] = pretty2Json(e);
             }
             throw e;
@@ -233,6 +243,9 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
         }
         if (hookOpts.result !== false) {
             event["result"] = pretty2Json(ret);
+        }
+        if (hookOpts.page !== false) {
+            event["page"] = $getCurrentPage();
         }
         if (hookOpts.stack !== false) {
             const stack = event["stack"] = [];
@@ -268,4 +281,22 @@ export function getDescFromAddress(pointer: NativePointer, symbol: boolean) {
         return `${pointer} ${module.name}!${pointer.sub(module.base)}`;
     }
     return `${pointer}`;
+}
+
+function $getCurrentPage(): string | null {
+    let reseult = null;
+    try {
+        if (Java.available) {
+            Java.perform(function () {
+                const activity = java.o.currentActivity;
+                reseult = activity ? activity.$className : null;
+            });
+        } else if (ObjC.available) {
+            const viewController = objc.o.currentViewController;
+            reseult = viewController ? viewController.$className : null;
+        }
+    } catch (e) {
+        reseult = null;
+    }
+    return reseult;
 }

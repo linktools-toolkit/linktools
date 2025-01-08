@@ -14,11 +14,41 @@ type HookOpts = {
     backtracer?: "accurate" | "fuzzy";
     args?: boolean;
     result?: boolean;
+    error?: boolean;
+    page?: boolean;
     extras?: {
         [name: string]: any
     };
 }
 type HookImpl = (obj: any, args: any[]) => any;
+
+class Objects {
+
+    get currentViewController(): ObjC.Object | null {
+        try {
+            let currentViewController = ObjC.classes["UIApplication"].sharedApplication().keyWindow().rootViewController();
+            while (currentViewController) {
+                const presentedViewController = currentViewController.presentedViewController();
+                if (presentedViewController) {
+                    currentViewController = presentedViewController;
+                } else {
+                    if (currentViewController.isKindOfClass_(ObjC.classes["UINavigationController"])) {
+                        currentViewController = currentViewController.visibleViewController();
+                    } else if (currentViewController.isKindOfClass_(ObjC.classes["UITabBarController"])) {
+                        currentViewController = currentViewController.selectedViewController();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            return currentViewController;
+        } catch (e) {
+            return null;
+        }
+    }
+}
+
+export const o = new Objects();
 
 /**
  * 获取hook实现，调用原方法并发送调用事件
@@ -94,6 +124,8 @@ export function getEventImpl(options: HookOpts): HookImpl {
     hookOpts.backtracer = options.backtracer || "accurate";
     hookOpts.args = parseBoolean(options.args, false);
     hookOpts.result = parseBoolean(options.result, hookOpts.args);
+    hookOpts.error = parseBoolean(options.error, hookOpts.args);
+    hookOpts.page = parseBoolean(options.page, false);
     hookOpts.extras = {};
     if (options.extras != null) {
         for (let i in options.extras) {
@@ -128,8 +160,12 @@ export function getEventImpl(options: HookOpts): HookImpl {
         if (hookOpts.result !== false) {
             event["result"] = null;
         }
-        if (hookOpts.args !== false || hookOpts.result !== false) {
+        if (hookOpts.error !== false) {
             event["error"] = null;
+        }
+        if (hookOpts.page !== false) {
+            const viewController = o.currentViewController;
+            event["page"] = viewController ? viewController.$className : null;
         }
         try {
             const result = this(obj, args);
@@ -138,7 +174,7 @@ export function getEventImpl(options: HookOpts): HookImpl {
             }
             return result;
         } catch (e) {
-            if (hookOpts.args !== false || hookOpts.result !== false) {
+            if (hookOpts.error !== false) {
                 event["error"] = pretty2Json(e);
             }
             throw e;
@@ -209,7 +245,6 @@ export function bypassSslPinning() {
         return Memory.allocUtf8String("fakePSKidentity");
     });
 }
-
 
 /**
  * 为method添加properties

@@ -30,6 +30,8 @@ type HookOpts = {
     stack?: boolean;
     args?: boolean;
     result?: boolean;
+    error?: boolean;
+    page?: boolean;
     extras?: {
         [name: string]: any
     };
@@ -88,6 +90,24 @@ class Objects {
     get applicationContext(): Java.Wrapper {
         const activityThreadClass = Java.use("android.app.ActivityThread");
         return activityThreadClass.currentApplication().getApplicationContext();
+    }
+
+    get currentActivity(): Java.Wrapper | null {
+        try {
+            const activityThreadClass = Java.use("android.app.ActivityThread");
+            const activityClientRecordClass = Java.use("android.app.ActivityThread$ActivityClientRecord");
+            const activityClientRecords = activityThreadClass.currentActivityThread().mActivities.value.values();
+            const it = activityClientRecords.iterator();
+            while (it.hasNext()) {
+                const activityClientRecord = Java.cast(it.next(), activityClientRecordClass);
+                if (!activityClientRecord.paused.value) {
+                    return activityClientRecord.activity.value;
+                }
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
     }
 }
 
@@ -358,6 +378,8 @@ export function getEventImpl<T extends Java.Members<T> = {}>(options: HookOpts):
     hookOpts.stack = parseBoolean(options.stack, false);
     hookOpts.args = parseBoolean(options.args, false);
     hookOpts.result = parseBoolean(options.result, hookOpts.args);
+    hookOpts.error = parseBoolean(options.error, hookOpts.args);
+    hookOpts.page = parseBoolean(options.page, false);
     hookOpts.extras = {};
     if (options.extras != null) {
         for (let i in options.extras) {
@@ -385,8 +407,12 @@ export function getEventImpl<T extends Java.Members<T> = {}>(options: HookOpts):
         if (hookOpts.result !== false) {
             event["result"] = null;
         }
-        if (hookOpts.args !== false || hookOpts.result !== false) {
+        if (hookOpts.error !== false) {
             event["error"] = null;
+        }
+        if (hookOpts.page !== false) {
+            const activity = o.currentActivity;
+            event["page"] = activity ? activity.$className : null;
         }
         try {
             const result = this(obj, args);
@@ -395,7 +421,7 @@ export function getEventImpl<T extends Java.Members<T> = {}>(options: HookOpts):
             }
             return result;
         } catch (e) {
-            if (hookOpts.args !== false || hookOpts.result !== false) {
+            if (hookOpts.error !== false) {
                 event["error"] = pretty2Json(e);
             }
             throw e;
