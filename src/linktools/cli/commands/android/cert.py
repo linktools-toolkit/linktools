@@ -37,7 +37,7 @@ import OpenSSL
 from rich import get_console
 from rich.table import Table
 
-from linktools import utils
+from linktools import utils, Config
 from linktools.cli import subcommand, subcommand_argument, AndroidCommand
 
 
@@ -57,12 +57,11 @@ class Command(AndroidCommand):
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
-        return subcommand.run(args)
+        return subcommand.run(self, args)
 
     @subcommand("info", help="display certificate information")
     @subcommand_argument("path", help="cert path")
-    def on_info(self, path: str):
-
+    def on_info(self, path: str, test: int):
         def format_date(date: str):
             date = datetime.strptime(date, '%Y%m%d%H%M%SZ')
             return date.strftime('%Y-%m-%d %H:%M:%S')

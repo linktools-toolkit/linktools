@@ -45,7 +45,7 @@ from .rich import choose, prompt, confirm
 from .types import PathType, get_args, ConfigError
 
 if TYPE_CHECKING:
-    from typing import Literal
+    from typing import Literal, Self
     from ._environ import BaseEnviron
 
     T = TypeVar("T")
@@ -124,20 +124,30 @@ class ConfigProperty(metaclass=abc.ABCMeta):
         return self._default
 
     @abc.abstractmethod
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any) -> Any:
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
         pass
+
+    def __or__(self, other: Any) -> "Self":
+        prop = self
+        while prop._default != __missing__:
+            default = prop._default
+            if not isinstance(default, ConfigProperty):
+                raise ValueError("config default value has been set, cannot use \"|\" operator")
+            prop = default
+        prop._default = other
+        return self
 
 
 class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any) -> Any:
-        result = self.load(config, key, type=type, default=default)
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
+        result = self.load(config, key, type=type, default=default, **kwargs)
         if isinstance(result, ConfigProperty):
-            result = result.get(config, key, type=type, default=default)
+            result = result.get(config, key, type=type, default=default, **kwargs)
         return result
 
     @abc.abstractmethod
-    def load(self, config: "Config", key: str, *, type: "ConfigType", default: Any) -> Any:
+    def load(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
         pass
 
 
@@ -148,7 +158,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
         self._data = __missing__
         self._cached = cached
 
-    def get(self, config: "Config", key: str, type: "ConfigType", default: Any) -> Any:
+    def get(self, config: "Config", key: str, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
 
         if self._data != __missing__:
             return self._data
@@ -162,9 +172,9 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
                 cache = parser.get(key, __missing__)
 
             # load config value
-            result = self.load(config, key, type=type, cache=cache)
+            result = self.load(config, key, type=type, cache=cache, **kwargs)
             if isinstance(result, ConfigProperty):
-                result = result.get(config, key, type=type, default=default)
+                result = result.get(config, key, type=type, default=default, **kwargs)
             elif type is not None:
                 result = config.cast(result, type)
 
@@ -173,9 +183,9 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
             parser.dump()
 
         else:
-            result = self.load(config, key, type=type, cache=__missing__)
+            result = self.load(config, key, type=type, cache=__missing__, **kwargs)
             if isinstance(result, ConfigProperty):
-                result = result.get(config, key, type=type, default=default)
+                result = result.get(config, key, type=type, default=default, **kwargs)
             elif type is not None:
                 result = config.cast(result, type)
 
@@ -183,7 +193,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
         return result
 
     @abc.abstractmethod
-    def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any) -> Any:
+    def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
         pass
 
 
@@ -197,6 +207,7 @@ class ConfigDict(dict):
         d.alias = Config.Alias
         d.error = Config.Error
         d.confirm = Config.Confirm
+        d.redirect = Config.Redirect
         try:
             data = utils.read_file(filename, text=False)
             exec(compile(data, filename, "exec"), d.__dict__)
@@ -549,6 +560,24 @@ class Config:
     def __setitem__(self, key: str, value: Any):
         self.set(key, value)
 
+    class Redirect(LazyConfigProperty):
+
+        def __init__(
+                self,
+                key: str,
+                type: "ConfigType" = str,
+                default: Any = __missing__,
+        ):
+            super().__init__(type=type, default=default)
+            self.key = key
+
+        def load(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+            return config.get(
+                self.key,
+                type=type or self.type,
+                default=default if default != __missing__ else self.default
+            )
+
     class Prompt(CacheConfigProperty):
 
         def __init__(
@@ -570,7 +599,9 @@ class Config:
             self.always_ask = always_ask
             self.allow_empty = allow_empty
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any):
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any,
+                 choices: "Union[List[str], Dict[str, str]]" = None,
+                 **kwargs):
 
             default = cache
             if default != __missing__ and not self.always_ask:
@@ -585,17 +616,18 @@ class Config:
             if default != __missing__:
                 default = config.cast(default, self.type)
 
-            if self.choices:
+            choices = choices or self.choices
+            if choices:
                 return choose(
                     self.prompt or f"Please choose {key}",
-                    choices=self.choices,
+                    choices=choices,
                     default=default,
                     show_default=True,
                     show_choices=True
                 )
 
             return prompt(
-                self.prompt or f"Please input {key}",
+                self.prompt or f"Please enter {key}",
                 type=self.type if not isinstance(self.type, str) else str,
                 password=self.password,
                 default=default,
@@ -618,7 +650,7 @@ class Config:
             self.prompt = prompt
             self.always_ask = always_ask
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any):
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
 
             default = cache
             if default != __missing__ and not self.always_ask:
@@ -651,7 +683,7 @@ class Config:
             super().__init__(type=type, default=default, cached=cached)
             self.keys = keys
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any):
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
             if cache != __missing__:
                 return cache
 
@@ -679,7 +711,7 @@ class Config:
             super().__init__()
             self.func = func
 
-        def load(self, config: "Config", key: str, type: "ConfigType", default: Any) -> Any:
+        def load(self, config: "Config", key: str, **kwargs) -> Any:
             return self.func(config)
 
     class Error(LazyConfigProperty):
@@ -688,7 +720,7 @@ class Config:
             super().__init__()
             self.message = message
 
-        def load(self, config: "Config", key: str, type: "ConfigType", default: Any) -> Any:
+        def load(self, config: "Config", key: str, **kwargs) -> Any:
             message = self.message or \
                       f"Cannot find config \"{key}\". {os.linesep}" \
                       f"You can use any of the following methods to fix it: {os.linesep}" \

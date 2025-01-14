@@ -59,7 +59,7 @@ class _LogHandlerMixin(metaclass=ABCMeta):
 
     @property
     @abstractmethod
-    def show_time(self):
+    def show_time(self) -> bool:
         ...
 
     @show_time.setter
@@ -76,134 +76,185 @@ class _LogHandlerMixin(metaclass=ABCMeta):
         ...
 
 
-def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
-    from rich import get_console
+def _get_rich_log_handler_class():
+    from rich.logging import RichHandler
+    from rich.text import Text
 
-    if get_console().is_terminal:
+    class LogHandler(RichHandler, _LogHandlerMixin):
 
-        from rich.logging import RichHandler
-        from rich.text import Text
+        def __init__(self, show_level: bool, show_time: bool):
+            super().__init__(
+                show_path=False,
+                show_level=show_level,
+                show_time=show_time,
+                omit_repeated_times=False,
+                log_time_format=self.make_time_text
+                # markup=True,
+                # highlighter=NullHighlighter()
+            )
 
-        class LogHandler(RichHandler, _LogHandlerMixin):
+            self._styles = {
+                logging.DEBUG: {
+                    "level": "black on blue",
+                    "message": "deep_sky_blue1",
+                },
+                logging.INFO: {
+                    "level": "black on green",
+                    "message": None,
+                },
+                logging.WARNING: {
+                    "level": "black on yellow",
+                    "message": "magenta1",
+                },
+                logging.ERROR: {
+                    "level": "black on red1",
+                    "message": "red1",
+                },
+                logging.CRITICAL: {
+                    "level": "black on red1",
+                    "message": "red1",
+                },
+            }
 
-            def __init__(self, show_level: bool, show_time: bool):
-                super().__init__(
-                    show_path=False,
-                    show_level=show_level,
-                    show_time=show_time,
-                    omit_repeated_times=False,
-                    log_time_format=self.make_time_text
-                    # markup=True,
-                    # highlighter=NullHighlighter()
-                )
+        @property
+        def show_level(self):
+            return self._log_render.show_level
 
-                self._styles = {
-                    logging.DEBUG: {
-                        "level": "black on blue",
-                        "message": "deep_sky_blue1",
-                    },
-                    logging.INFO: {
-                        "level": "black on green",
-                        "message": None,
-                    },
-                    logging.WARNING: {
-                        "level": "black on yellow",
-                        "message": "magenta1",
-                    },
-                    logging.ERROR: {
-                        "level": "black on red1",
-                        "message": "red1",
-                    },
-                    logging.CRITICAL: {
-                        "level": "black on red1",
-                        "message": "red1",
-                    },
-                }
+        @show_level.setter
+        def show_level(self, value: bool):
+            self._log_render.show_level = value
 
-            @property
-            def show_level(self):
-                return self._log_render.show_level
+        @property
+        def show_time(self):
+            return self._log_render.show_time
 
-            @show_level.setter
-            def show_level(self, value: bool):
-                self._log_render.show_level = value
+        @show_time.setter
+        def show_time(self, value: bool):
+            self._log_render.show_time = value
 
-            @property
-            def show_time(self):
-                return self._log_render.show_time
-
-            @show_time.setter
-            def show_time(self, value: bool):
-                self._log_render.show_time = value
-
-            def make_time_text(self, time: "float | datetime | None" = None, format: str = None,
-                               style: str = None) -> "Text":
-                if not time:
-                    time = datetime.now()
-                elif isinstance(time, (int, float)):
-                    time = datetime.fromtimestamp(time)
-                if not style:
-                    style = "log.time"
+        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
+            if not time:
+                time = datetime.now()
+            elif isinstance(time, (int, float)):
+                time = datetime.fromtimestamp(time)
+            if not style:
+                style = "log.time"
+            if not format:
+                if self.formatter:
+                    format = self.formatter.datefmt
                 if not format:
-                    if self.formatter:
-                        format = self.formatter.datefmt
-                    if not format:
-                        format = "[%x %X]"
-                return Text(time.strftime(format), style=style)
+                    format = "[%x %X]"
+            return Text(time.strftime(format), style=style)
 
-            def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
-                if not level_name:
-                    level_name = logging.getLevelName(level_no)
+        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
+            if not level_name:
+                level_name = logging.getLevelName(level_no)
+            if not style:
+                style = self.get_level_style(level_no)
                 if not style:
-                    style = self.get_level_style(level_no)
-                    if not style:
-                        style = "log.level"
-                return Text(f" {level_name[:1].upper()} ", style=style)
+                    style = "log.level"
+            return Text(f" {level_name[:1].upper()} ", style=style)
 
-            def get_time_style(self, level_no):
-                style = self._styles.get(level_no)
-                if style:
-                    return style.get("time")
-                return None
+        def get_time_style(self, level_no):
+            style = self._styles.get(level_no)
+            if style:
+                return style.get("time")
+            return None
 
-            def get_level_style(self, level_no):
-                style = self._styles.get(level_no)
-                if style:
-                    return style.get("level")
-                return None
+        def get_level_style(self, level_no):
+            style = self._styles.get(level_no)
+            if style:
+                return style.get("level")
+            return None
 
-            def get_message_style(self, level_no):
-                style = self._styles.get(level_no)
-                if style:
-                    return style.get("message")
-                return None
+        def get_message_style(self, level_no):
+            style = self._styles.get(level_no)
+            if style:
+                return style.get("message")
+            return None
 
-            def get_level_text(self, record: logging.LogRecord) -> "Text":
-                level_name = record.levelname
-                level_no = record.levelno
-                return self.make_level_text(level_no, level_name)
+        def get_level_text(self, record: logging.LogRecord) -> "Text":
+            level_name = record.levelname
+            level_no = record.levelno
+            return self.make_level_text(level_no, level_name)
 
-            def render_message(self, record: logging.LogRecord, message: str) -> "ConsoleRenderable":
-                indent = getattr(record, "indent", 0)
-                if indent > 0:
-                    message = " " * indent + message
-                    message = message.replace(os.linesep, os.linesep + " " * indent)
+        def render_message(self, record: logging.LogRecord, message: str) -> "ConsoleRenderable":
+            indent = getattr(record, "indent", 0)
+            if indent > 0:
+                message = " " * indent + message
+                message = message.replace(os.linesep, os.linesep + " " * indent)
 
-                use_markup = getattr(record, "markup", self.markup)
-                style = getattr(record, "style", self.get_message_style(record.levelno))
-                message_text = Text.from_markup(message, style=style) if use_markup else Text(message, style=style)
+            use_markup = getattr(record, "markup", self.markup)
+            style = getattr(record, "style", self.get_message_style(record.levelno))
+            message_text = Text.from_markup(message, style=style) if use_markup else Text(message, style=style)
 
-                highlighter = getattr(record, "highlighter", False)
-                if highlighter and self.highlighter:
-                    message_text = self.highlighter(message_text)
+            highlighter = getattr(record, "highlighter", False)
+            if highlighter and self.highlighter:
+                message_text = self.highlighter(message_text)
 
-                return message_text
+            return message_text
 
+    return LogHandler
+
+
+def _get_fake_log_handler_class():
+    class LogHandler(logging.Handler, _LogHandlerMixin):
+
+        def __init__(self, show_level: bool, show_time: bool):
+            super().__init__()
+            self._show_level = show_level
+            self._show_time = show_time
+
+        @property
+        def show_level(self):
+            return self._show_level
+
+        @show_level.setter
+        def show_level(self, value: bool):
+            self._show_level = value
+
+        @property
+        def show_time(self):
+            return self._show_time
+
+        @show_time.setter
+        def show_time(self, value: bool):
+            self._show_time = value
+
+        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
+            from rich.text import Text
+            return Text("")
+
+        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
+            from rich.text import Text
+            return Text("")
+
+    return LogHandler
+
+
+def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
+    from .cli.argparse import ParserCompleter
+
+    if ParserCompleter.is_invocation():
+        log_handler_class = _get_fake_log_handler_class()
         logging.basicConfig(
             level=level,
             format="%(message)s",
             datefmt="[%X]",
-            handlers=[LogHandler(show_level=show_level, show_time=show_time)],
+            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
+            force=force,
+        )
+        return
+
+    from rich import get_console
+
+    if get_console().is_terminal:
+        log_handler_class = _get_rich_log_handler_class()
+        logging.basicConfig(
+            level=level,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
             force=force,
         )
 

@@ -32,7 +32,7 @@ from . import argparse
 from .command import \
     BaseCommand, BaseCommandGroup, CommandError, \
     SubCommand, SubCommandGroup, SubCommandWrapper, \
-    subcommand, subcommand_argument, SubCommandError, \
+    subcommand, subcommand_argument, SubCommandError, NotFoundSubCommand, \
     iter_module_commands, iter_entry_point_commands, \
     CommandMain
 

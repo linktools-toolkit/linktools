@@ -31,7 +31,7 @@ import contextlib
 import os
 import shelve
 import shutil
-from typing import TYPE_CHECKING, Tuple, Union, Iterable, TypeVar, Optional
+from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
 
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
@@ -41,8 +41,6 @@ from .utils import get_md5, get_file_hash, ignore_error, parse_header, guess_fil
 if TYPE_CHECKING:
     from typing import Literal
     from ._environ import BaseEnviron
-
-    ValidatorsType = TypeVar("ValidatorsType", bound="Union[UrlFile.Validator, Iterable[UrlFile.Validator]]")
 
 
 class UrlFile(metaclass=abc.ABCMeta):
@@ -58,7 +56,7 @@ class UrlFile(metaclass=abc.ABCMeta):
     @timeoutable
     def save(self, dest_dir: PathType = None, dest_name: str = None,
              timeout: TimeoutType = None, max_retries: int = 3,
-             validators: "Union[Validator, Iterable[Validator]]" = None,
+             validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]" = None,
              **kwargs) -> str:
         """
         从指定url下载文件
@@ -115,7 +113,9 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @abc.abstractmethod
-    def _download(self, max_retries: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
+    def _download(self, max_retries: int, timeout: Timeout,
+                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
+                  **kwargs) -> Tuple[str, str]:
         pass
 
     @abc.abstractmethod
@@ -176,7 +176,9 @@ class LocalFile(UrlFile):
     def is_local(self):
         return True
 
-    def _download(self, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
+    def _download(self,
+                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
+                  **kwargs) -> Tuple[str, str]:
         src_path = self._url
         if not os.path.exists(src_path):
             raise DownloadError(f"{src_path} does not exist")
@@ -208,7 +210,9 @@ class HttpFile(UrlFile):
             self._environ.get_temp_path("download", "lock", self._ident, create_parent=True)
         )
 
-    def _download(self, max_retries: int, timeout: Timeout, validators: "ValidatorsType", **kwargs) -> Tuple[str, str]:
+    def _download(self, max_retries: int, timeout: Timeout,
+                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
+                  **kwargs) -> Tuple[str, str]:
         if not os.path.exists(self._root_path):
             os.makedirs(self._root_path, exist_ok=True)
 

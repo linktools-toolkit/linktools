@@ -26,6 +26,7 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import functools
 from argparse import ArgumentParser
 from typing import TYPE_CHECKING
 
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from typing import Optional, Callable, List, Iterable
 
     from .. import BaseEnviron
-    from .command import SubCommand
+    from .command import BaseCommand, SubCommand
 
 
 def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
@@ -79,7 +80,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("-c", "--command", help="shell command", default=None)
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             shell = environ.tools["shell"]
             if not shell.exists:
                 raise NotImplementedError(f"Not found shell path")
@@ -108,7 +109,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("--reload", action="store_true", help="reload alias script", default=False)
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             shell = args.shell or get_default_shell(environ)
             alias_path = get_alias_path() / f"alias.{shell}"
             alias_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +181,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 choices=["bash", "zsh", "tcsh", "fish", "powershell"])
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             environ.logger.warning("Not support generate completion script, already integrated into alias subcommand")
 
     @register_command(name="java", description="generate java environment script")
@@ -194,7 +195,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 help="java version, such as 11.0.23 / 17.0.11 / 22.0.1")
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             java = environ.tools["java"]
             if args.version:
                 java = java.copy(version=args.version)
@@ -236,7 +237,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None,)
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             try:
                 package = environ.name
                 if args.dependencies:
@@ -257,7 +258,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 help="expire days")
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
             environ.clean_temp_files(expire_days=args.days)
 
     return commands
@@ -277,7 +278,7 @@ if __name__ == '__main__':
     for command in get_commands(environ):
         env_parser = command.create_parser(command_parser.add_parser)
         env_parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
-        env_parser.set_defaults(func=command.run)
+        env_parser.set_defaults(func=functools.partial(command.run, None))
 
     def on_tool_command(args):
         try:

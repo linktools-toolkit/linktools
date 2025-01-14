@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Optional, Callable, List, Type, Tuple, Generat
 
 from .argparse import BooleanOptionalAction, ParserCompleter
 from .. import utils
+from .._config import ConfigProperty
 from .._environ import environ
 from ..decorator import cached_property
 from ..metadata import __missing__
@@ -62,6 +63,10 @@ class CommandError(Error):
 
 
 class SubCommandError(CommandError):
+    pass
+
+
+class NotFoundSubCommand(SubCommandError):
     pass
 
 
@@ -349,7 +354,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         return type(self.name, help=self.description)
 
     @abc.abstractmethod
-    def run(self, args: Namespace):
+    def run(self, parent: "BaseCommand", args: Namespace):
         """
         业务逻辑入口
         """
@@ -370,7 +375,7 @@ class SubCommandGroup(SubCommand):
         parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
         return parser
 
-    def run(self, args: Namespace):
+    def run(self, parent: "BaseCommand", args: Namespace):
         attr_name = f"__subcommand_help_{id(self):x}__"
         assert hasattr(args, attr_name)
         func = getattr(args, attr_name)
@@ -455,7 +460,7 @@ class _SubCommandMethod(SubCommand):
 
         return parser
 
-    def run(self, args: Namespace):
+    def run(self, parent: "BaseCommand", args: Namespace):
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
@@ -468,7 +473,14 @@ class _SubCommandMethod(SubCommand):
 
         method_kwargs = dict()
         for action in actions:
-            method_kwargs[action.dest] = getattr(args, action.dest)
+            method_kwargs[action.dest] = value = getattr(args, action.dest)
+            if isinstance(value, ConfigProperty):
+                method_kwargs[action.dest] = value.get(
+                    parent.environ.config,
+                    f"{action.dest} for {self.name}",
+                    type=action.type,
+                    choices=action.choices
+                )
 
         return method(*method_args, **method_kwargs)
 
@@ -489,7 +501,7 @@ class SubCommandWrapper(SubCommand):
     def create_parser(self, type: Callable[..., ArgumentParser]) -> ArgumentParser:
         return self.command.create_parser(self.name, help=self.description, type=type)
 
-    def run(self, args: Namespace):
+    def run(self, parent: "BaseCommand", args: Namespace):
         return self.command(args)
 
 
@@ -646,9 +658,8 @@ class SubCommandMixin:
         """
         subcommand = self.parse_subcommand(args)
         if subcommand:
-            return subcommand.run(args)
-
-        raise SubCommandError("Not found subcommand")
+            return subcommand.run(self, args)
+        raise NotFoundSubCommand("Not found subcommand")
 
     def print_subcommands(
             self: "BaseCommand",
@@ -895,10 +906,11 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         group.add_argument(f"{prefix}{prefix}debug", action=DebugAction, nargs=0, const=True, dest=SUPPRESS,
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
 
-        group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
-                           help="show log time")
-        group.add_argument(f"{prefix}{prefix}level", action=LogLevelAction, dest=SUPPRESS,
-                           help="show log level")
+        if get_log_handler():
+            group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
+                               help="show log time")
+            group.add_argument(f"{prefix}{prefix}level", action=LogLevelAction, dest=SUPPRESS,
+                               help="show log level")
 
         if self.environ.version != NotImplemented:
             parser.add_argument(
@@ -950,7 +962,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
         subcommand = self.parse_subcommand(args)
         if not subcommand or subcommand.is_group:
             return self.print_subcommands(args, subcommand, max_level=2)
-        return subcommand.run(args)
+        return subcommand.run(self, args)
 
 
 class CommandMain:
@@ -985,9 +997,7 @@ class CommandMain:
         """
         main命令入口
         """
-
-        if not ParserCompleter.is_invocation():
-            self.init_logging()
+        self.init_logging()
 
         try:
             result = self.command(*args, **kwargs)
