@@ -28,6 +28,7 @@
 """
 
 import abc
+import functools
 import inspect
 import logging
 import os
@@ -40,7 +41,7 @@ from pkgutil import walk_packages
 from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING, Optional, Callable, List, Type, Tuple, Generator, Any, Iterable, Union, Set, Dict
 
-from .argparse import BooleanOptionalAction, ParserCompleter
+from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
 from .. import utils
 from .._config import ConfigProperty
 from .._environ import environ
@@ -68,6 +69,26 @@ class SubCommandError(CommandError):
 
 class NotFoundSubCommand(SubCommandError):
     pass
+
+
+class CommandParser(ArgumentParser):
+
+    def __init__(self, *args, command: "BaseCommand" = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._command = command
+
+    @property
+    def command(self) -> "BaseCommand":
+        return self._command
+
+    def parse_known_args(self, args = None, namespace = None):
+        namespace, args = super().parse_known_args(args, namespace)
+        for action in self._actions:
+            if isinstance(action, ConfigAction):
+                value = getattr(namespace, action.dest, None)
+                if isinstance(value, ConfigLoader):
+                    value(parser=self, action=action, namespace=namespace)
+        return namespace, args
 
 
 class _CommandInfo:
@@ -152,7 +173,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
 
 
 def _filter_kwargs(kwargs):
-    return {k: v for k, v in kwargs.items() if v != __missing__}
+    return {k: v for k, v in kwargs.items() if v is not __missing__}
 
 
 _subcommand_index: int = 0
@@ -224,7 +245,7 @@ def subcommand(
         subcommand_info.pass_args = pass_args
         subcommand_info.set_args(
             name,
-            help=help if help != __missing__ else "",
+            help=help if help is not __missing__ else "",
             aliases=aliases,
             prog=prog,
             usage=usage,
@@ -347,14 +368,14 @@ class SubCommand(metaclass=abc.ABCMeta):
         """
         return False
 
-    def create_parser(self, type: Callable[..., ArgumentParser]) -> ArgumentParser:
+    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
         """
-        创建ArgumentParser对象
+        创建CommandParser对象
         """
         return type(self.name, help=self.description)
 
     @abc.abstractmethod
-    def run(self, parent: "BaseCommand", args: Namespace):
+    def run(self, args: Namespace):
         """
         业务逻辑入口
         """
@@ -370,12 +391,12 @@ class SubCommandGroup(SubCommand):
     def is_group(self):
         return True
 
-    def create_parser(self, type: Callable[..., ArgumentParser]) -> ArgumentParser:
+    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
         parser = type(self.name, help=self.description)
         parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
         return parser
 
-    def run(self, parent: "BaseCommand", args: Namespace):
+    def run(self, args: Namespace):
         attr_name = f"__subcommand_help_{id(self):x}__"
         assert hasattr(args, attr_name)
         func = getattr(args, attr_name)
@@ -394,7 +415,7 @@ class _SubCommandMethod(SubCommand):
         self.info = info
         self.target = target
 
-    def create_parser(self, type: Callable[..., ArgumentParser]) -> ArgumentParser:
+    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
 
         actions = []
         method = getattr(self.target, self.info.func.__name__)
@@ -437,12 +458,23 @@ class _SubCommandMethod(SubCommand):
 
             # 根据方法参数的注解，设置一些默认值
             parameter = signature.parameters[dest]
+            if "config" in argument_kwargs:
+                config = argument_kwargs.get("config")
+                if isinstance(config, ConfigProperty):
+                    if "action" not in argument_kwargs:
+                        argument_kwargs.setdefault("action", ConfigAction)
+                        if parameter.annotation != signature.empty:
+                            if parameter.annotation in (int, float, str, bool):
+                                argument_kwargs.setdefault("type", parameter.annotation)
+                    argument_kwargs.setdefault("required", False)
+
             if "default" not in argument_kwargs:
                 if parameter.default != signature.empty:
                     argument_kwargs.setdefault("default", parameter.default)
                     argument_kwargs.setdefault("required", False)
                 else:
                     argument_kwargs.setdefault("required", True)
+
             if "action" not in argument_kwargs:
                 if parameter.annotation != signature.empty:
                     if parameter.annotation in (int, float, str):
@@ -460,7 +492,7 @@ class _SubCommandMethod(SubCommand):
 
         return parser
 
-    def run(self, parent: "BaseCommand", args: Namespace):
+    def run(self, args: Namespace):
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
@@ -473,14 +505,7 @@ class _SubCommandMethod(SubCommand):
 
         method_kwargs = dict()
         for action in actions:
-            method_kwargs[action.dest] = value = getattr(args, action.dest)
-            if isinstance(value, ConfigProperty):
-                method_kwargs[action.dest] = value.get(
-                    parent.environ.config,
-                    f"{action.dest} for {self.name}",
-                    type=action.type,
-                    choices=action.choices
-                )
+            method_kwargs[action.dest] = getattr(args, action.dest)
 
         return method(*method_args, **method_kwargs)
 
@@ -498,10 +523,10 @@ class SubCommandWrapper(SubCommand):
         )
         self.command = command
 
-    def create_parser(self, type: Callable[..., ArgumentParser]) -> ArgumentParser:
+    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
         return self.command.create_parser(self.name, help=self.description, type=type)
 
-    def run(self, parent: "BaseCommand", args: Namespace):
+    def run(self, args: Namespace):
         return self.command(args)
 
 
@@ -577,7 +602,7 @@ class SubCommandMixin:
 
     def add_subcommands(
             self: "BaseCommand",
-            parser: ArgumentParser = None,
+            parser: "CommandParser" = None,
             target: Any = None,
             required: bool = False,
             sort: bool = False,
@@ -603,7 +628,7 @@ class SubCommandMixin:
                 if not parent_parser:
                     raise SubCommandError(f"{subcommand} has no parent subparser")
 
-            parser = subcommand.create_parser(type=parent_parser.add_parser)
+            parser = subcommand.create_parser(type=functools.partial(parent_parser.add_parser, command=self))
             parser.set_defaults(**{f"__subcommand_{id(self):x}__": subcommand})
             self.init_global_arguments(parser)
 
@@ -658,7 +683,7 @@ class SubCommandMixin:
         """
         subcommand = self.parse_subcommand(args)
         if subcommand:
-            return subcommand.run(self, args)
+            return subcommand.run(args)
         raise NotFoundSubCommand("Not found subcommand")
 
     def print_subcommands(
@@ -803,7 +828,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return []
 
     @abc.abstractmethod
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         """
         初始化参数，在调用create_parser时执行
         """
@@ -819,11 +844,11 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
     def create_parser(
             self,
             *args: Any,
-            type: Callable[..., ArgumentParser] = ArgumentParser,
+            type: Callable[..., CommandParser] = CommandParser,
             formatter_class: Type[HelpFormatter] = RawDescriptionHelpFormatter,
             conflict_handler="resolve",
             **kwargs: Any
-    ) -> ArgumentParser:
+    ) -> CommandParser:
         """
         创建命令行解析器
         """
@@ -835,6 +860,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                 description += self.environ.description
         parser = type(
             *args,
+            command=self,
             description=description,
             formatter_class=formatter_class,
             conflict_handler=conflict_handler,
@@ -845,18 +871,18 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return parser
 
     @cached_property(lock=True)
-    def _argument_parser(self) -> ArgumentParser:
+    def _argument_parser(self) -> CommandParser:
         parser = self.create_parser()
         self.init_global_arguments(parser)
         return parser
 
-    def init_base_arguments(self, parser: ArgumentParser) -> None:
+    def init_base_arguments(self, parser: CommandParser) -> None:
         """
         初始化基础参数，在调用create_parser时执行
         """
         pass
 
-    def init_global_arguments(self, parser: ArgumentParser) -> None:
+    def init_global_arguments(self, parser: CommandParser) -> None:
         """
         初始化公共参数，会在命令本身和所有子命令中调用
         """
@@ -930,9 +956,8 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         try:
             if not isinstance(args, Namespace):
-                args = ParserCompleter \
-                    .autocomplete(self._argument_parser) \
-                    .parse_args(args)
+                parser = ArgParseComplete.autocomplete(self._argument_parser)
+                args = parser.parse_args(args)
 
             exit_code = self.run(args) or 0
 
@@ -952,7 +977,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
     def init_subcommands(self) -> Any:
         return self
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(
             parser=parser,
             target=self.init_subcommands(),
@@ -962,7 +987,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
         subcommand = self.parse_subcommand(args)
         if not subcommand or subcommand.is_group:
             return self.print_subcommands(args, subcommand, max_level=2)
-        return subcommand.run(self, args)
+        return subcommand.run(args)
 
 
 class CommandMain:

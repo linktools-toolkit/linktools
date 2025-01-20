@@ -233,9 +233,9 @@ def _get_fake_log_handler_class():
 
 
 def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
-    from .cli.argparse import ParserCompleter
+    from .cli.argparse import ArgParseComplete
 
-    if ParserCompleter.is_invocation():
+    if ArgParseComplete.is_invocation():
         log_handler_class = _get_fake_log_handler_class()
         logging.basicConfig(
             level=level,
@@ -432,7 +432,7 @@ def prompt(
         prompt,
         password=password,
         choices=choices,
-        default=default if default != __missing__ else ...,
+        default=default if default is not __missing__ else ...,
         show_default=show_default,
         show_choices=show_choices
     )
@@ -457,7 +457,7 @@ def choose(
 
     tip_id = 0
     default_id = None
-    if default != __missing__ and default in keys:
+    if default is not __missing__ and default in keys:
         tip_id = default_id = keys.index(default)
 
     begin_id = 1
@@ -492,6 +492,6 @@ def confirm(
 ) -> bool:
     return _create_prompt_class(bool, allow_empty=False).ask(
         prompt,
-        default=default if default != __missing__ else ...,
+        default=default if default is not __missing__ else ...,
         show_default=show_default,
     )

@@ -447,11 +447,11 @@ class ScrcpyServer(Stoppable):
     def stop(self):
         if self._process:
             logger.debug(f"{self._device} stop scrcpy server")
-            utils.ignore_error(self._process.recursive_kill)
+            utils.ignore_errors(self._process.recursive_kill)
             try:
                 self._process.wait(1)
             except subprocess.TimeoutExpired:
-                utils.ignore_error(self._process.kill)
+                utils.ignore_errors(self._process.kill)
                 logger.warning(f"{self._device} scrcpy server stop timeout")
             self._process = None
 
@@ -688,7 +688,7 @@ class ScrcpySession(Stoppable):
                         rlist.remove(sock)
                     if sock in xlist:
                         xlist.remove(sock)
-                    utils.ignore_error(sock.close)
+                    utils.ignore_errors(sock.close)
 
     def _send_control_packet(self, packet: bytes):
         sock = self._control_socket
@@ -1006,13 +1006,13 @@ class ScrcpySession(Stoppable):
     def stop(self):
         sock = self._video_socket
         if sock:
-            utils.ignore_error(sock.close)
+            utils.ignore_errors(sock.close)
         sock = self._audio_socket
         if sock:
-            utils.ignore_error(sock.close)
+            utils.ignore_errors(sock.close)
         sock = self._control_socket
         if sock:
-            utils.ignore_error(sock.close)
+            utils.ignore_errors(sock.close)
 
 
 if __name__ == '__main__':

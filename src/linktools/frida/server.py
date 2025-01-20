@@ -99,10 +99,10 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
                             return True
                         time.sleep(min(timeout.remain, 0.5))
                     _logger.debug("Kill frida server ...")
-                    utils.ignore_error(self._stop)
+                    utils.ignore_errors(self._stop)
                 except Exception as e:
                     _logger.debug("Kill frida server ...")
-                    utils.ignore_error(self._stop)
+                    utils.ignore_errors(self._stop)
                     last_error = e
 
             raise ServerNotRunningError("Frida server failed to run ...") from last_error
@@ -112,7 +112,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
 
         except BaseException as e:
             _logger.debug("Kill frida server ...")
-            utils.ignore_error(self._stop)
+            utils.ignore_errors(self._stop)
             raise e
 
     def stop(self) -> bool:
@@ -325,5 +325,5 @@ class FridaIOSServer(FridaServer):  # proxy for frida.core.Device
 
     def _stop(self):
         if self._forward:
-            utils.ignore_error(self._forward.stop)
+            utils.ignore_errors(self._forward.stop)
             self._forward = None

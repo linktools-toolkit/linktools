@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
 from .types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError
-from .utils import get_md5, get_file_hash, ignore_error, parse_header, guess_file_name, user_agent
+from .utils import get_md5, get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -285,7 +285,7 @@ class HttpFile(UrlFile):
         self._lock.acquire(timeout=timeout.remain, poll_interval=1)
 
     def _release(self):
-        ignore_error(self._lock.release)
+        ignore_errors(self._lock.release)
 
 
 class HttpContextVar(property):

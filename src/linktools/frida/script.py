@@ -51,7 +51,7 @@ class FridaUserScript(metaclass=abc.ABCMeta):
 
     def load(self) -> Optional[str]:
         with self._lock:
-            if self._source == __missing__:
+            if self._source is __missing__:
                 self._source = self._load()
             return self._source
 

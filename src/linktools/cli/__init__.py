@@ -34,7 +34,7 @@ from .command import \
     SubCommand, SubCommandGroup, SubCommandWrapper, \
     subcommand, subcommand_argument, SubCommandError, NotFoundSubCommand, \
     iter_module_commands, iter_entry_point_commands, \
-    CommandMain
+    CommandMain, CommandParser
 
 from .device import \
     DeviceCommandMixin, AndroidCommandMixin, IOSCommandMixin, \

@@ -26,8 +26,6 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-import functools
-from argparse import ArgumentParser
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -36,7 +34,7 @@ if TYPE_CHECKING:
     from typing import Optional, Callable, List, Iterable
 
     from .. import BaseEnviron
-    from .command import BaseCommand, SubCommand
+    from .command import SubCommand, CommandParser
 
 
 def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
@@ -75,12 +73,12 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     @register_command(name="shell", description="run shell command")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-c", "--command", help="shell command", default=None)
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             shell = environ.tools["shell"]
             if not shell.exists:
                 raise NotImplementedError(f"Not found shell path")
@@ -102,14 +100,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     @register_command(name="alias", description="generate shell alias script")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-s", "--shell", help="output code for the specified shell",
                                 choices=["bash", "zsh", "tcsh", "fish", "powershell"], default=None)
             parser.add_argument("--reload", action="store_true", help="reload alias script", default=False)
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             shell = args.shell or get_default_shell(environ)
             alias_path = get_alias_path() / f"alias.{shell}"
             alias_path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +118,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             from .. import metadata
             from ..cli import commands
-            from ..cli.argparse import ParserCompleter
+            from ..cli.argparse import ArgParseComplete
             from ..cli.command import iter_module_commands, iter_entry_point_commands
             from .._tools import Tool
 
@@ -153,7 +151,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
 
             lines = []
-            completion = ParserCompleter.shellcode(executables, shell=shell)
+            completion = ArgParseComplete.shellcode(executables, shell=shell)
             if completion:
                 environ.logger.info("Generate completion script ...")
                 lines.append(completion)
@@ -175,19 +173,19 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     @register_command(name="completion", description="generate shell auto complete script (deprecated)")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-s", "--shell", help="output code for the specified shell",
                                 choices=["bash", "zsh", "tcsh", "fish", "powershell"])
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             environ.logger.warning("Not support generate completion script, already integrated into alias subcommand")
 
     @register_command(name="java", description="generate java environment script")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-s", "--shell", help="output code for the specified shell",
                                 choices=["bash", "zsh", "tcsh", "fish", "powershell"])
@@ -195,7 +193,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 help="java version, such as 11.0.23 / 17.0.11 / 22.0.1")
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             java = environ.tools["java"]
             if args.version:
                 java = java.copy(version=args.version)
@@ -232,12 +230,12 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     @register_command(name="update", description=f"update {environ.name} packages")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
-            parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None,)
+            parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             try:
                 package = environ.name
                 if args.dependencies:
@@ -252,51 +250,67 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     @register_command(name="clean", description="clean temporary files")
     class Command(SubCommand):
 
-        def create_parser(self, type: "Callable[..., ArgumentParser]") -> "argparse.ArgumentParser":
+        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("days", metavar="DAYS", nargs="?", type=int, default=7,
                                 help="expire days")
             return parser
 
-        def run(self, parent: "BaseCommand", args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace"):
             environ.clean_temp_files(expire_days=args.days)
 
     return commands
 
 
 if __name__ == '__main__':
-    import argparse
+    import functools
     import logging
-    from .. import environ
+    from .command import BaseCommand, CommandParser, CommandMain
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
-    command_parser = parser.add_subparsers(metavar="COMMAND", help="Command Help")
-    command_parser.required = True
+    class Command(BaseCommand):
 
-    for command in get_commands(environ):
-        env_parser = command.create_parser(command_parser.add_parser)
-        env_parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
-        env_parser.set_defaults(func=functools.partial(command.run, None))
+        class Main(CommandMain):
 
-    def on_tool_command(args):
-        try:
-            tool = environ.get_tool(args.name, cmdline=None)
-            return tool.popen(*args.args).call()
-        except KeyboardInterrupt:
-            return 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
+            def init_logging(self):
+                logging.basicConfig(level=logging.CRITICAL)
 
-    tool_parser = command_parser.add_parser("tool")
-    tool_parser.add_argument("name", help="tool Name").required = True
-    tool_parser.add_argument("args", nargs=argparse.REMAINDER, help="tool Args")
-    tool_parser.set_defaults(func=on_tool_command)
+        @property
+        def main(self) -> "CommandMain":
+            return self.Main(self)
 
-    args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.CRITICAL
-        if not args.verbose
-        else logging.DEBUG
-    )
+        def init_base_arguments(self, parser: "argparse.ArgumentParser"):
+            pass
 
-    exit(args.func(args))
+        def init_global_arguments(self, parser: "argparse.ArgumentParser") -> None:
+            pass
+
+        def init_arguments(self, parser: "argparse.ArgumentParser") -> None:
+            parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
+
+            command_parser = parser.add_subparsers(metavar="COMMAND", help="Command Help")
+            command_parser.required = True
+
+            for command in get_commands(self.environ):
+                env_parser = command.create_parser(functools.partial(command_parser.add_parser, command=self))
+                env_parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
+                env_parser.set_defaults(func=command.run)
+
+            tool_parser = command_parser.add_parser("tool")
+            tool_parser.add_argument("name", help="tool Name").required = True
+            tool_parser.add_argument("args", nargs="...", help="tool Args")
+            tool_parser.set_defaults(func=self.on_tool)
+
+        def run(self, args: "argparse.Namespace") -> "Optional[int]":
+            if args.verbose:
+                self.logger.level = logging.DEBUG
+            return args.func(args)
+
+        def on_tool(self, args: "argparse.Namespace"):
+            return self.environ.get_tool(args.name, cmdline=None) \
+                .popen(*args.args) \
+                .call()
+
+
+    command = Command()
+    command.main()

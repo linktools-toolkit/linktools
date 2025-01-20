@@ -33,6 +33,7 @@ import errno
 import json
 import os
 import threading
+from collections import ChainMap
 from pathlib import Path
 from types import ModuleType
 from typing import \
@@ -114,6 +115,11 @@ class ConfigProperty(metaclass=abc.ABCMeta):
     def __init__(self, *, type: "ConfigType" = None, default: Any = __missing__):
         self._type = type
         self._default = default
+        self._tail = None
+        if default is __missing__:
+            self._tail = self
+        elif isinstance(default, ConfigProperty):
+            self._tail = default._tail
 
     @property
     def type(self) -> "ConfigType":
@@ -124,23 +130,50 @@ class ConfigProperty(metaclass=abc.ABCMeta):
         return self._default
 
     @abc.abstractmethod
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
         pass
 
-    def __or__(self, other: Any) -> "Self":
-        prop = self
-        while prop._default != __missing__:
-            default = prop._default
-            if not isinstance(default, ConfigProperty):
+    def set_default(self, value: Any, ignore_errors: bool = False) -> "Self":
+        if self._tail is None:
+            if not ignore_errors:
                 raise ValueError("config default value has been set, cannot use \"|\" operator")
-            prop = default
-        prop._default = other
+            return self
+
+        # update tail if necessary
+        if self._tail._default is not __missing__:
+            tail, default = self._tail, self._tail._default
+            while default is not __missing__:
+                if not isinstance(default, ConfigProperty):
+                    tail = None
+                    break
+                tail, default = default, tail._default
+            node = self
+            while isinstance(node, ConfigProperty):
+                node._tail = tail
+                node = node._default
+            if tail is None:
+                if not ignore_errors:
+                    raise ValueError("config default value has been set, cannot use \"|\" operator")
+                return self
+
+        if self._tail is self:
+            self._default = value
+            self._tail = value \
+                if isinstance(value, ConfigProperty) and value._default is __missing__ \
+                else None
+        else:
+            self._tail.set_default(value)
+            self._tail = self._tail._tail
+
         return self
+
+    def __or__(self, other: Any) -> "Self":
+        return self.set_default(other, ignore_errors=False)
 
 
 class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
         result = self.load(config, key, type=type, default=default, **kwargs)
         if isinstance(result, ConfigProperty):
             result = result.get(config, key, type=type, default=default, **kwargs)
@@ -153,14 +186,13 @@ class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
 class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
-    def __init__(self, *, type: "ConfigType" = None, default: Any = __missing__, cached: bool = False):
+    def __init__(self, *, type: "ConfigType" = None, default: Any, cached: bool = __missing__):
         super().__init__(type=type, default=default)
         self._data = __missing__
         self._cached = cached
 
-    def get(self, config: "Config", key: str, type: "ConfigType", default: Any = __missing__, **kwargs) -> Any:
-
-        if self._data != __missing__:
+    def get(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+        if self._data is not __missing__:
             return self._data
 
         type = type or self._type
@@ -168,7 +200,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
             # load cache from config file
             parser = ConfigCacheParser(config.cache.path, config.cache.namespace)
             cache = default
-            if cache == __missing__:
+            if cache is __missing__:
                 cache = parser.get(key, __missing__)
 
             # load config value
@@ -183,7 +215,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
             parser.dump()
 
         else:
-            result = self.load(config, key, type=type, cache=__missing__, **kwargs)
+            result = self.load(config, key, type=type, cache=default, **kwargs)
             if isinstance(result, ConfigProperty):
                 result = result.get(config, key, type=type, default=default, **kwargs)
             elif type is not None:
@@ -196,6 +228,10 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
     def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
         pass
 
+    def save(self, config: "Config", key: str, value: Any) -> None:
+        if self._cached:
+            config.cache.save(**{key: value})
+
 
 class ConfigDict(dict):
 
@@ -207,7 +243,7 @@ class ConfigDict(dict):
         d.alias = Config.Alias
         d.error = Config.Error
         d.confirm = Config.Confirm
-        d.redirect = Config.Redirect
+        d.prop = Config.Property
         try:
             data = utils.read_file(filename, text=False)
             exec(compile(data, filename, "exec"), d.__dict__)
@@ -294,7 +330,7 @@ class ConfigCache(dict):
     def __init__(self, environ: "BaseEnviron", namespace: str = __missing__):
         super().__init__()
         self._environ = environ
-        self._namespace = namespace if namespace != __missing__ else "MAIN"
+        self._namespace = namespace if namespace is not __missing__ else "MAIN"
         self._path = self._environ.get_data_path(f"{self._environ.name}.cfg", create_parent=True)
         self.load()
 
@@ -366,30 +402,18 @@ class Config:
         :param env_prefix: 环境变量前缀
         """
         self._environ = environ
+        self._env_prefix = env_prefix.upper() if env_prefix is not __missing__ else ""
         self._data = data
-        self._cache = ConfigCache(environ, namespace if namespace != __missing__ else "MAIN")
-        self._prefix = env_prefix.upper() if env_prefix != __missing__ else ""
-        self._reload = None
-
-    @property
-    def reload(self) -> bool:
-        """
-        是否重新加载配置
-        """
-        if self._reload is None:
-            value = False
-            key = f"{self._prefix}RELOAD_CONFIG"
-            if key in os.environ:
-                value = self.cast(os.environ[key], type=bool)
-            self._reload = value
-        return self._reload
-
-    @reload.setter
-    def reload(self, value: bool):
-        """
-        是否重新加载配置
-        """
-        self._reload = value
+        self._cache = ConfigCache(environ, namespace if namespace is not __missing__ else "MAIN")
+        self._map = ChainMap(
+            {
+                key[len(self._env_prefix):]: value
+                for key, value in os.environ.items()
+                if key.startswith(self._env_prefix)
+            },
+            self._cache,
+            self._data,
+        )
 
     @property
     def cache(self):
@@ -397,6 +421,18 @@ class Config:
         缓存对象
         """
         return self._cache
+
+    def reload(self) -> None:
+        """
+        重新加载配置，包括：清空缓存、刷新环境变量
+        """
+        self._map.maps[0].clear()
+        self._map.maps[0].update({
+            key[len(self._env_prefix):]: value
+            for key, value in os.environ.items()
+            if key.startswith(self._env_prefix)
+        })
+        self._cache.clear()
 
     def cast(self, obj: Any, type: "ConfigType", default: Any = __missing__) -> "T":
         """
@@ -407,7 +443,7 @@ class Config:
             try:
                 return cast(obj)
             except Exception:
-                if default != __missing__:
+                if default is not __missing__:
                     return default
                 raise
         return obj
@@ -416,53 +452,36 @@ class Config:
         """
         获取指定配置，优先会从环境变量中获取
         """
-        last_error = __missing__
-
-        data_value = self._data.get(key, __missing__)
-        if isinstance(data_value, ConfigProperty):
-            if type in (None, __missing__):
-                type = data_value.type
-            if default == __missing__:
-                default = data_value.default
+        if type in (None, __missing__):
+            value = self._data.get(key, __missing__)
+            if isinstance(value, ConfigProperty):
+                type = value.type
 
         try:
-            env_key = f"{self._prefix}{key}"
-            env_value = os.environ.get(env_key, __missing__)
-            if env_value != __missing__:
-                return self.cast(env_value, type=type)
-
-            cache_value = self._cache.get(key, __missing__)
-            if cache_value != __missing__:
-                if self.reload:
-                    prop = data_value
-                    if isinstance(prop, CacheConfigProperty):
-                        with self._cache.__lock__:
-                            result = self._cache[key] = prop.get(self, key, type=type, default=cache_value)
-                            return result
-                    prop = default
-                    if isinstance(prop, CacheConfigProperty):
-                        with self._cache.__lock__:
-                            result = self._cache[key] = prop.get(self, key, type=type, default=cache_value)
-                            return result
-                return self.cast(cache_value, type=type)
-
-            if data_value != __missing__:
-                if isinstance(data_value, ConfigProperty):
+            value = self._map.get(key, __missing__)
+            if value is not __missing__:
+                if isinstance(value, ConfigProperty):
                     with self._cache.__lock__:
-                        result = self._cache[key] = data_value.get(self, key, type=type, default=__missing__)
+                        result = self._cache[key] = value.get(self, key, type=type, default=__missing__)
                         return result
-                return self.cast(data_value, type=type)
-
+                return self.cast(value, type=type)
+            raise ConfigError(f"Not found environment variable \"{self._env_prefix}{key}\" or config \"{key}\"")
+        except ConfigError:
+            if default is __missing__:
+                raise
         except Exception as e:
-            last_error = e
-
-        if default == __missing__:
-            if last_error != __missing__:
-                raise last_error
-            raise ConfigError(f"Not found environment variable \"{self._prefix}{key}\" or config \"{key}\"")
+            if default is __missing__:
+                raise ConfigError(f"Failed to get config \"{key}\"") from e
 
         if isinstance(default, ConfigProperty):
-            return default.get(self, key, type=type, default=__missing__)
+            try:
+                with self._cache.__lock__:
+                    result = self._cache[key] = default.get(self, key, type=type, default=__missing__)
+                    return result
+            except ConfigError:
+                raise
+            except Exception as e:
+                raise ConfigError(f"Failed to get default config \"{key}\"") from e
 
         return default
 
@@ -470,12 +489,7 @@ class Config:
         """
         遍历配置名，默认不遍历内置配置
         """
-        keys = set(self._data.keys())
-        keys.update(self._cache.keys())
-        for key in os.environ.keys():
-            if key.startswith(self._prefix):
-                keys.add(key[len(self._prefix):])
-        for key in sorted(keys):
+        for key in sorted(self._map.keys()):
             yield key
 
     def items(self) -> Generator[Tuple[str, Any], None, None]:
@@ -550,9 +564,7 @@ class Config:
         return True
 
     def __contains__(self, key) -> bool:
-        return f"{self._prefix}{key}" in os.environ or \
-            key in self._data or \
-            key in self._cache
+        return key in self._map
 
     def __getitem__(self, key: str) -> Any:
         return self.get(key)
@@ -560,23 +572,40 @@ class Config:
     def __setitem__(self, key: str, value: Any):
         self.set(key, value)
 
-    class Redirect(LazyConfigProperty):
+    class Property(CacheConfigProperty):
 
         def __init__(
                 self,
-                key: str,
+                key: str = __missing__,
                 type: "ConfigType" = str,
                 default: Any = __missing__,
+                cached: bool = __missing__,
         ):
-            super().__init__(type=type, default=default)
+            super().__init__(type=type, default=default, cached=cached)
             self.key = key
 
-        def load(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+        def get(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+            return super().get(config, self.key or key, type, default, **kwargs)
+
+        def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
+            if isinstance(self.default, ConfigProperty):
+                return self.default.get(
+                    config,
+                    self.key or key,
+                    type=type or self.type,
+                    default=cache
+                )
             return config.get(
-                self.key,
+                self.key or key,
                 type=type or self.type,
-                default=default if default != __missing__ else self.default
+                default=cache if cache is not __missing__ else self.default
             )
+
+        def save(self, config: "Config", key: str, value: Any) -> None:
+            if self._cached is __missing__:
+                if isinstance(self.default, CacheConfigProperty):
+                    return self.default.save(config, self.key or key, value)
+            return super().save(config, self.key or key, value)
 
     class Prompt(CacheConfigProperty):
 
@@ -587,7 +616,7 @@ class Config:
                 choices: "Union[List[str], Dict[str, str]]" = None,
                 type: "Union[Type[Union[str, int, float]], LiteralType]" = str,
                 default: Any = __missing__,
-                cached: bool = False,
+                cached: bool = __missing__,
                 always_ask: bool = False,
                 allow_empty: bool = False,
         ):
@@ -604,16 +633,16 @@ class Config:
                  **kwargs):
 
             default = cache
-            if default != __missing__ and not self.always_ask:
+            if default is not __missing__ and not self.always_ask:
                 if not config.reload:
                     return default
 
-            if default == __missing__:
+            if default is __missing__:
                 default = self.default
                 if isinstance(default, ConfigProperty):
                     default = default.get(config, key, type=type or self.type, default=cache)
 
-            if default != __missing__:
+            if default is not __missing__:
                 default = config.cast(default, self.type)
 
             choices = choices or self.choices
@@ -642,7 +671,7 @@ class Config:
                 self,
                 prompt: str = None,
                 default: Any = __missing__,
-                cached: bool = False,
+                cached: bool = __missing__,
                 always_ask: bool = False,
         ):
             super().__init__(type=bool, default=default, cached=cached)
@@ -653,16 +682,16 @@ class Config:
         def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
 
             default = cache
-            if default != __missing__ and not self.always_ask:
+            if default is not __missing__ and not self.always_ask:
                 if not config.reload:
                     return default
 
-            if default == __missing__:
+            if default is __missing__:
                 default = self.default
                 if isinstance(default, ConfigProperty):
                     default = default.get(config, key, type=type or self.type, default=cache)
 
-            if default != __missing__:
+            if default is not __missing__:
                 default = config.cast(default, bool)
 
             return confirm(
@@ -678,16 +707,16 @@ class Config:
                 *keys: str,
                 type: "ConfigType" = str,
                 default: Any = __missing__,
-                cached: bool = False
+                cached: bool = __missing__
         ):
             super().__init__(type=type, default=default, cached=cached)
             self.keys = keys
 
         def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
-            if cache != __missing__:
+            if cache is not __missing__:
                 return cache
 
-            if self.default == __missing__:
+            if self.default is __missing__:
                 last_error = None
                 for key in self.keys:
                     try:
@@ -724,8 +753,8 @@ class Config:
             message = self.message or \
                       f"Cannot find config \"{key}\". {os.linesep}" \
                       f"You can use any of the following methods to fix it: {os.linesep}" \
-                      f"1. set \"{config._prefix}{key}\" as an environment variable, {os.linesep}" \
-                      f"2. call config.cache.save() method to save the value to file. {os.linesep}"
+                      f"1. set \"{config._env_prefix}{key}\" as an environment variable, {os.linesep}" \
+                      f"2. call config.cache.save({key}=xxx) method to save the value to file. {os.linesep}"
             raise ConfigError(message)
 
 
@@ -740,6 +769,6 @@ class ConfigWrapper(Config):
         super().__init__(
             config._environ,
             config._data,
-            namespace=namespace if namespace != __missing__ else config.cache.namespace,
-            env_prefix=env_prefix if env_prefix != __missing__ else config._prefix
+            namespace=namespace if namespace is not __missing__ else config.cache.namespace,
+            env_prefix=env_prefix if env_prefix is not __missing__ else config._env_prefix
         )

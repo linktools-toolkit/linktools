@@ -19,7 +19,7 @@ from . import utils
 from ._environ import environ
 from .rich import prompt, create_progress
 from .types import Stoppable
-from .utils import list2cmdline, ignore_error, is_unix_like
+from .utils import list2cmdline, ignore_errors, is_unix_like
 
 try:
     import SocketServer
@@ -110,7 +110,7 @@ class SSHClient(paramiko.SSHClient):
             try:
                 self._open_shell(chan)
             finally:
-                ignore_error(chan.close)
+                ignore_errors(chan.close)
 
     if utils.is_windows():
 
@@ -316,9 +316,9 @@ class SSHForward(Stoppable):
                     except Exception as e:
                         _logger.debug(f"Forwarding request to {forward_host}:{forward_port} failed: {e}")
                     finally:
-                        peername = utils.ignore_error(self.request.getpeername)
-                        utils.ignore_error(channel.close)
-                        utils.ignore_error(self.request.close)
+                        peername = utils.ignore_errors(self.request.getpeername)
+                        utils.ignore_errors(channel.close)
+                        utils.ignore_errors(self.request.close)
                         _logger.debug(f"Tunnel closed from {peername}")
 
                         with lock:
@@ -346,7 +346,7 @@ class SSHForward(Stoppable):
 
         with self._lock:
             for channel in self._channels:
-                utils.ignore_error(channel.close)
+                utils.ignore_errors(channel.close)
             self._channels = []
 
 
@@ -375,8 +375,8 @@ class SSHReverse(Stoppable):
                 try:
                     sock.connect((forward_host, forward_port))
                 except Exception as e:
-                    utils.ignore_error(channel.close)
-                    utils.ignore_error(sock.close)
+                    utils.ignore_errors(channel.close)
+                    utils.ignore_errors(sock.close)
                     _logger.error(f"Forwarding request to {forward_host}:{forward_port} failed: {e}")
                     return
 
@@ -405,8 +405,8 @@ class SSHReverse(Stoppable):
                 except Exception as e:
                     _logger.debug(f"Forwarding request to {forward_host}:{forward_port} failed: {e}")
                 finally:
-                    utils.ignore_error(channel.close)
-                    utils.ignore_error(sock.close)
+                    utils.ignore_errors(channel.close)
+                    utils.ignore_errors(sock.close)
                     _logger.debug(f"Tunnel closed from {channel.origin_addr}")
 
                     with lock:
@@ -454,5 +454,5 @@ class SSHReverse(Stoppable):
 
         with self._lock:
             for channel in self._channels:
-                utils.ignore_error(channel.close)
+                utils.ignore_errors(channel.close)
             self._channels = []

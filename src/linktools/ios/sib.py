@@ -41,7 +41,7 @@ class Sib(Bridge):
         :return: 设备号数组
         """
         result = self.exec("devices", "--detail")
-        result = utils.ignore_error(json.loads, args=(result,)) or []
+        result = utils.ignore_errors(json.loads, args=(result,)) or []
         for info in utils.get_list_item(result, "deviceList", default=[]):
             id = utils.get_item(info, "serialNumber")
             status = utils.get_item(info, "status")
@@ -228,7 +228,7 @@ class SibDevice(BaseDevice):
             )
         except:
             if client is not None:
-                utils.ignore_error(client.close)
+                utils.ignore_errors(client.close)
             elif forward is not None:
                 forward.stop()
             raise

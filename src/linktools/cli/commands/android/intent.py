@@ -45,7 +45,7 @@ class Command(AndroidCommand):
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
-        return subcommand.run(self, args)
+        return subcommand.run(args)
 
     @subcommand("setting", help="start setting activity", pass_args=True)
     def on_setting(self, args: Namespace):

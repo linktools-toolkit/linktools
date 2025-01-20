@@ -159,7 +159,7 @@ class BaseDevice(ABC):
         获取可读的设备号信息
         :return: 设备号信息
         """
-        name = utils.ignore_error(lambda: f"({self.name})", default="")
+        name = utils.ignore_errors(lambda: f"({self.name})", default="")
         return f"{self.id} {name}" if name else ""
 
 

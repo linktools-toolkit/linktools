@@ -67,7 +67,7 @@ else:
     _is_windows_like = True
 
 
-def ignore_error(
+def ignore_errors(
         fn: "Callable[P, T]", *,
         args: "P.args" = None, kwargs: "P.kwargs" = None,
         default: "T" = None
@@ -94,7 +94,7 @@ def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional
     :param default: 默认值
     :return: 转换后的值
     """
-    if default == __missing__:
+    if default is __missing__:
         return type(obj)
     try:
         return type(obj)
@@ -384,7 +384,7 @@ def remove_file(path: "PathType") -> None:
         import shutil
         shutil.rmtree(path, ignore_errors=True)
     else:
-        ignore_error(os.remove, args=(path,))
+        ignore_errors(os.remove, args=(path,))
 
 
 def clear_directory(path: "PathType") -> None:
@@ -399,7 +399,7 @@ def clear_directory(path: "PathType") -> None:
             import shutil
             shutil.rmtree(target_path, ignore_errors=True)
         else:
-            ignore_error(os.remove, args=(target_path,))
+            ignore_errors(os.remove, args=(target_path,))
 
 
 def get_lan_ip() -> "Optional[str]":
@@ -416,7 +416,7 @@ def get_lan_ip() -> "Optional[str]":
         return None
     finally:
         if s is not None:
-            ignore_error(s.close)
+            ignore_errors(s.close)
 
 
 def get_wan_ip() -> "Optional[str]":
@@ -910,3 +910,12 @@ def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional
             return process.wait(min(t, interval))
         except subprocess.TimeoutExpired:
             pass
+
+
+def let(value: "Any", fn: "Callable[[Any], T]") -> "T":
+    return fn(value)
+
+
+def also(value: "T", fn: "Callable[[T], Any]") -> "T":
+    fn(value)
+    return value

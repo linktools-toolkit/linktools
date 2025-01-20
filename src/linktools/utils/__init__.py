@@ -28,7 +28,7 @@
 """
 
 from ._utils import (
-    ignore_error,
+    ignore_errors,
     cast, cast_int as int, cast_bool as bool,
     coalesce, is_contain, is_empty,
     get_item, pop_item, get_list_item,
@@ -44,6 +44,7 @@ from ._utils import (
     import_module, import_module_file,
     get_derived_type, lazy_load, lazy_iter, lazy_raise,
     wait_event, wait_thread, wait_process,
+    let, also,
 )
 
 from ._popen import (

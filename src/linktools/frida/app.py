@@ -386,14 +386,14 @@ class FridaManager:
         device.on("lost", cb_lost)
 
         def cancel():
-            utils.ignore_error(device.off, args=("spawn-added", cb_spawn_added))
-            utils.ignore_error(device.off, args=("spawn-removed", cb_spawn_removed))
-            utils.ignore_error(device.off, args=("child-added", cb_child_added))
-            utils.ignore_error(device.off, args=("child-removed", cb_child_removed))
-            utils.ignore_error(device.off, args=("output", cb_output))
-            # utils.ignore_error(device.off, args=("process-crashed", cb_process_crashed))
-            # utils.ignore_error(device.off, args=("uninjected", cb_uninjected))
-            utils.ignore_error(device.off, args=("lost", cb_lost))
+            utils.ignore_errors(device.off, args=("spawn-added", cb_spawn_added))
+            utils.ignore_errors(device.off, args=("spawn-removed", cb_spawn_removed))
+            utils.ignore_errors(device.off, args=("child-added", cb_child_added))
+            utils.ignore_errors(device.off, args=("child-removed", cb_child_removed))
+            utils.ignore_errors(device.off, args=("output", cb_output))
+            # utils.ignore_errors(device.off, args=("process-crashed", cb_process_crashed))
+            # utils.ignore_errors(device.off, args=("uninjected", cb_uninjected))
+            utils.ignore_errors(device.off, args=("lost", cb_lost))
 
         self._register_cancel_handler(device, cancel)
 
@@ -412,7 +412,7 @@ class FridaManager:
         session.on("detached", on_detached)
 
         def cancel():
-            utils.ignore_error(session.off, args=("detached", on_detached))
+            utils.ignore_errors(session.off, args=("detached", on_detached))
 
         self._register_cancel_handler(session, cancel)
 
@@ -433,8 +433,8 @@ class FridaManager:
         script.on("destroyed", on_destroyed)
 
         def cancel():
-            utils.ignore_error(script.off, args=("message", on_message))
-            utils.ignore_error(script.off, args=("destroyed", on_destroyed))
+            utils.ignore_errors(script.off, args=("message", on_message))
+            utils.ignore_errors(script.off, args=("destroyed", on_destroyed))
 
         self._register_cancel_handler(script, cancel)
 
@@ -693,7 +693,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
                 break
         else:
             if resume:
-                self._reactor.schedule(lambda: utils.ignore_error(self.device.resume, args=(pid,)))
+                self._reactor.schedule(lambda: utils.ignore_errors(self.device.resume, args=(pid,)))
         return pid
 
     def inject_all(self, resume: bool = True) -> [int]:
@@ -794,7 +794,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             )
         finally:
             if resume:
-                utils.ignore_error(self.device.resume, args=(process_id,))
+                utils.ignore_errors(self.device.resume, args=(process_id,))
 
         self._reactor.schedule(lambda: self.on_script_loaded(script))
 
@@ -836,7 +836,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
     def _detach_session(self, session: FridaSession):
         if session is not None:
             _logger.debug(f"{session} detach")
-            utils.ignore_error(session.detach)
+            utils.ignore_errors(session.detach)
 
     def _unload_script(self, session: FridaSession):
         if not session:
@@ -846,7 +846,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             if not script:
                 break
             _logger.debug(f"{script} unload")
-            utils.ignore_error(script.unload)
+            utils.ignore_errors(script.unload)
 
     def _eternalize_script(self, session: FridaSession):
         if not session:
@@ -856,7 +856,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             if not script:
                 break
             _logger.debug(f"{script} eternalize")
-            utils.ignore_error(script.eternalize)
+            utils.ignore_errors(script.eternalize)
 
     def _on_stop(self):
         process_script = self._unload_script

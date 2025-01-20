@@ -37,7 +37,7 @@ import OpenSSL
 from rich import get_console
 from rich.table import Table
 
-from linktools import utils, Config
+from linktools import utils
 from linktools.cli import subcommand, subcommand_argument, AndroidCommand
 
 
@@ -57,7 +57,7 @@ class Command(AndroidCommand):
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
-        return subcommand.run(self, args)
+        return subcommand.run(args)
 
     @subcommand("info", help="display certificate information")
     @subcommand_argument("path", help="cert path")

@@ -32,6 +32,7 @@ class __MissingType:
     __eq__ = lambda l, r: \
         l is r or type(l) is type(r)
     __repr__ = lambda _: "__missing__"
+    __bool__ = lambda _: False
 
 
 __name__ = "linktools"

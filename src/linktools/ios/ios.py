@@ -78,7 +78,7 @@ class GoIOS(Bridge):
         """
         result = self.exec("list")
         for line in result.splitlines():
-            data = utils.ignore_error(json.loads, args=(line,), default=None)
+            data = utils.ignore_errors(json.loads, args=(line,), default=None)
             if isinstance(data, dict) and "deviceList" in data:
                 for id in data["deviceList"]:
                     if alive is None:
@@ -92,7 +92,7 @@ class GoIOS(Bridge):
             if out is not None:
                 result = out if result is None else result + out
             for line in (out or "").splitlines() + (err or "").splitlines():
-                data: dict = utils.ignore_error(json.loads, args=(line,), default=None)
+                data: dict = utils.ignore_errors(json.loads, args=(line,), default=None)
                 if log_output:
                     if _is_log(data):
                         level = data.get("level")
@@ -179,7 +179,7 @@ class GoIOSDevice(BaseDevice):
         :return: 设备类型
         """
         for line in self.exec("info").splitlines():
-            return utils.ignore_error(json.loads, args=(line,), default={})
+            return utils.ignore_errors(json.loads, args=(line,), default={})
         raise GoIOSError("get device info failed")
 
     def copy(self, type: "Callable[[str, GoIOS], DEVICE_TYPE]" = None) -> "DEVICE_TYPE":
@@ -255,7 +255,7 @@ class GoIOSDevice(BaseDevice):
         :return: 包信息
         """
         for line in self.exec("apps", "--all", **kwargs).splitlines():
-            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+            for obj in utils.ignore_errors(json.loads, args=(line,), default=[]):
                 app = App(obj)
                 if bundle_id == app.bundle_id:
                     return app
@@ -278,7 +278,7 @@ class GoIOSDevice(BaseDevice):
 
         result = []
         for line in self.exec("apps", *options, **kwargs).splitlines():
-            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+            for obj in utils.ignore_errors(json.loads, args=(line,), default=[]):
                 app = App(obj)
                 if not bundle_ids or app.bundle_id in bundle_ids:
                     result.append(app)
@@ -293,7 +293,7 @@ class GoIOSDevice(BaseDevice):
         """
         result = []
         for line in self.exec("ps", **kwargs).splitlines():
-            for obj in utils.ignore_error(json.loads, args=(line,), default=[]):
+            for obj in utils.ignore_errors(json.loads, args=(line,), default=[]):
                 result.append(Process(obj))
         return result
 
@@ -343,7 +343,7 @@ class GoIOSDevice(BaseDevice):
             )
         except:
             if client is not None:
-                utils.ignore_error(client.close)
+                utils.ignore_errors(client.close)
             elif forward is not None:
                 forward.stop()
             raise
@@ -377,7 +377,7 @@ class GoIOSForward(Stoppable):
                 timeout = Timeout(min(i, 2))
                 for out, err in self._process.fetch(timeout=timeout):
                     for line in (out or "").splitlines() + (err or "").splitlines():
-                        data = utils.ignore_error(json.loads, args=(line,), default=None)
+                        data = utils.ignore_errors(json.loads, args=(line,), default=None)
                         if _is_log(data):
                             level = data.get("level")
                             if level in ("fatal", "error"):
@@ -392,7 +392,7 @@ class GoIOSForward(Stoppable):
                     return
 
                 _logger.debug(f"Start forward failed, kill {self} process and restart it.")
-                utils.ignore_error(self._process.recursive_kill)
+                utils.ignore_errors(self._process.recursive_kill)
                 utils.wait_process(self._process, .5)
                 self._process = ios.popen(
                     "forward",
@@ -410,7 +410,7 @@ class GoIOSForward(Stoppable):
         process, self._process = self._process, None
         if process is not None:
             _logger.debug(f"Kill {self} process")
-            utils.ignore_error(process.recursive_kill)
+            utils.ignore_errors(process.recursive_kill)
             utils.wait_process(process, 5)
 
     def __repr__(self):
