@@ -2,6 +2,7 @@
 # -*- coding:utf-8 -*-
 
 import errno
+import io
 import os
 import queue
 import subprocess
@@ -38,40 +39,73 @@ if utils.is_unix_like():
             import select
 
             fds = []
+            stdout, stderr = None, None
             if self._stdout:
-                fds.append(self._stdout)
+                stdout = self.IOWrapper(self._stdout, STDOUT)
+                fds.append(stdout.fd)
             if self._stderr:
-                fds.append(self._stderr)
+                stderr = self.IOWrapper(self._stderr, STDERR)
+                fds.append(stderr.fd)
 
             while len(fds) > 0:
                 remain = utils.coalesce(timeout.remain, 1)
                 if remain <= 0:  # 超时
                     break
                 rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
-                if self._stdout and self._stdout in rlist:
-                    try:
-                        data = self._stdout.readline()
-                    except OSError as e:
-                        if e.errno != errno.EBADF:
-                            from .._environ import environ
-                            environ.logger.debug(f"Read stdout error: {e}")
-                        data = None
-                    if not data:
-                        fds.remove(self._stdout)
-                    else:
-                        yield STDOUT, data
-                if self._stderr and self._stderr in rlist:
-                    try:
-                        data = self._stderr.readline()
-                    except OSError as e:
-                        if e.errno != errno.EBADF:
-                            from .._environ import environ
-                            environ.logger.debug(f"Read stderr error: {e}")
-                        data = None
-                    if not data:
-                        fds.remove(self._stderr)
-                    else:
-                        yield STDERR, data
+                if stdout.fd is not None and stdout.fd in rlist:
+                    yield from stdout.read_lines()
+                    if stdout.closed:
+                        fds.remove(stdout.fd)
+                if stderr.fd is not None and stderr.fd in rlist:
+                    yield from stderr.read_lines()
+                    if stderr.closed:
+                        fds.remove(stderr.fd)
+
+            yield from stdout.read_remain_line()
+            yield from stderr.read_remain_line()
+
+        class IOWrapper:
+
+            def __init__(self, io: IO[AnyStr], code: int):
+                self.io = io
+                self.fd = io.fileno()
+                self.code = code
+                self.closed = False
+                self.buffer = bytearray()
+
+            def read_lines(self):
+                data = None
+                try:
+                    if not self.closed:
+                        data = os.read(self.fd, 32768)
+                        if data:
+                            self.buffer.extend(data)
+                except OSError as e:
+                    if e.errno != errno.EBADF:
+                        from .._environ import environ
+                        environ.logger.debug(f"Read io error: {e}")
+                if data:
+                    while True:
+                        index = self.buffer.find(b"\n")
+                        if index < 0:
+                            break
+                        self.buffer, line = self.buffer[index + 1:], self.buffer[:index + 1]
+                        line = line.decode(self.io.encoding, self.io.errors) \
+                            if isinstance(self.io, io.TextIOWrapper) \
+                            else bytes(line)
+                        yield self.code, line
+                else:
+                    yield from self.read_remain_line()
+                    self.closed = True
+
+            def read_remain_line(self):
+                if self.buffer:
+                    self.buffer, line = bytearray(), self.buffer
+                    line = line.decode(self.io.encoding, self.io.errors) \
+                        if isinstance(self.io, io.TextIOWrapper) \
+                        else bytes(line)
+                    yield self.code, line
+
 
 else:
 

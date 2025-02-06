@@ -370,12 +370,14 @@ class GoIOSForward(Stoppable):
                 remote_port,
                 text=True,
                 bufsize=1,
+                universal_newlines=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            for i in range(5):
-                timeout = Timeout(min(i, 2))
+            for i in range(1, 6):
+                timeout = Timeout(i)
                 for out, err in self._process.fetch(timeout=timeout):
+                    running = False
                     for line in (out or "").splitlines() + (err or "").splitlines():
                         data = utils.ignore_errors(json.loads, args=(line,), default=None)
                         if _is_log(data):
@@ -384,12 +386,16 @@ class GoIOSForward(Stoppable):
                                 raise GoIOSError(_get_log_err_msg(data))
                             elif "Start listening on port" in data["msg"]:
                                 _logger.debug(f"Capture ios {self} output: {data['msg']}")
-                                time.sleep(1)
+                                running = True
                                 break
+                    if running:
+                        break
 
-                if self._process.poll() is None and not utils.is_port_free(local_port):
-                    _logger.debug(f"{self} port {local_port} is used, continue.")
-                    return
+                if self._process.poll() is None:
+                    time.sleep(min(max(timeout.remain, 1), 1))
+                    if self._process.poll() is None and not utils.is_port_free(local_port):
+                        _logger.debug(f"{self} process is running, continue")
+                        return
 
                 _logger.debug(f"Start forward failed, kill {self} process and restart it.")
                 utils.ignore_errors(self._process.recursive_kill)
@@ -414,7 +420,7 @@ class GoIOSForward(Stoppable):
             utils.wait_process(process, 5)
 
     def __repr__(self):
-        return f"Forward<{self.local_port}:{self.remote_port}>"
+        return f"GoIOSForward<{self.local_port}:{self.remote_port}>"
 
 
 if __name__ == '__main__':

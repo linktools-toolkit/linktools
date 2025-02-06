@@ -279,7 +279,7 @@ TOOL_SIB:
 # Go-iOS: https://github.com/danielpaulus/go-ios
 ############################################################################################
 TOOL_IOS:
-  version: '1.0.166'
+  version: '1.0.174'
   download_url:
     when:
       - system: darwin
