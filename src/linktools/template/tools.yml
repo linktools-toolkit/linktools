@@ -16,7 +16,7 @@ _jar: &JAR
     - '{absolute_path}'
 
 ############################################################################################
-# java jars
+# smali: https://github.com/JesusFreke/smali
 ############################################################################################
 TOOL_BAKSMALI:
   <<: *JAR
@@ -28,50 +28,16 @@ TOOL_SMALI:
   version: '2.5.2'
   download_url: 'https://bitbucket.org/JesusFreke/smali/downloads/smali-{version}.jar'
 
+############################################################################################
+# apktool: https://github.com/iBotPeaches/Apktool
+############################################################################################
 TOOL_APKTOOL:
   <<: *JAR
-  version: '2.10.0'
+  version: '2.11.0'
   download_url: 'https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_{version}.jar'
 
-TOOL_BURPSUITE:
-  <<: *JAR
-  version: '2023.10'
-  depends_on: 'burpsuite-keygen'
-  download_url: 'https://portswigger-cdn.net/burp/releases/download?product=pro&type=Jar&version={version}'
-  target_path: 'burpsuite_pro_v{version}.jar'
-  executable_cmdline:
-    when:
-      - system: [darwin, linux]
-        then:
-          - 'java'
-          - '-Dfile.encoding=utf-8'
-          - '--add-opens=java.desktop/javax.swing=ALL-UNNAMED'
-          - '--add-opens=java.base/java.lang=ALL-UNNAMED'
-          - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
-          - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
-          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
-          - '-jar'
-          - '{absolute_path}'
-      - system: windows
-        then:
-          - 'java'
-          - '--add-opens=java.desktop/javax.swing=ALL-UNNAMED'
-          - '--add-opens=java.base/java.lang=ALL-UNNAMED'
-          - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
-          - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
-          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
-          - '-jar'
-          - '{absolute_path}'
-      - else: ~
-
-TOOL_BURPSUITE_KEYGEN:
-  <<: *JAR
-  version: '2_1_06'
-  name: 'burpsuite-keygen'
-  download_url: 'https://github.com/linktools-toolkit/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar'
-
 ############################################################################################
-# java
+# java: https://github.com/SAP/SapMachine
 ############################################################################################
 TOOL_JAVA: &TOOL_JAVA
   version: '17.0.8' # '11.0.18'
@@ -113,7 +79,7 @@ TOOL_JARSIGNER:
   <<: *TOOL_JAVA
 
 ############################################################################################
-# dex2jar
+# dex2jar: https://github.com/pxb1988/dex2jar
 ############################################################################################
 TOOL_DEX2JAR: &TOOL_DEX2JAR
   version: '2.4'
@@ -131,7 +97,7 @@ TOOL_JAR2DEX:
   <<: *TOOL_DEX2JAR
 
 ############################################################################################
-# adb
+# adb: https://developer.android.com/tools/releases/platform-tools?hl=zh-cn#downloads
 ############################################################################################
 TOOL_ADB: &TOOL_ADB
   version: 'latest'
@@ -160,7 +126,7 @@ TOOL_FASTBOOT:
   <<: *TOOL_ADB
 
 ############################################################################################
-# aapt
+# aapt: https://androidsdkoffline.blogspot.com/p/android-sdk-build-tools.html
 ############################################################################################
 TOOL_AAPT: &TOOL_AAPT
   version: 'r34'
@@ -203,7 +169,7 @@ TOOL_APKSIGNER:
       - else: ~
 
 ############################################################################################
-# jadx
+# jadx: https://github.com/skylot/jadx
 ############################################################################################
 TOOL_JADX: &TOOL_JADX
   version: '1.5.1'
@@ -225,7 +191,7 @@ TOOL_JADX_GUI:
   name: 'jadx-gui'
 
 ############################################################################################
-# vdexExtractor
+# vdexExtractor: https://github.com/anestisb/vdexExtractor
 ############################################################################################
 TOOL_VDEX_EXTRACTOR:
   name: 'vdexExtractor'
@@ -281,7 +247,7 @@ TOOL_COMPACT_DEX_CONVERTER:
       - else: ~
 
 ############################################################################################
-# sib
+# sib: https://github.com/SonicCloudOrg/sonic-ios-bridge
 ############################################################################################
 TOOL_SIB:
   version: '1.3.20-20240914'
@@ -339,10 +305,10 @@ TOOL_IOS:
       - else: ~
 
 ############################################################################################
-# ipatool
+# ipatool: https://github.com/majd/ipatool
 ############################################################################################
 TOOL_IPATOOL:
-  version: '2.1.4'
+  version: '2.1.5'
   download_url:
     when:
       - system: darwin
@@ -376,7 +342,7 @@ TOOL_IPATOOL:
       - else: ~
 
 ############################################################################################
-# hdc
+# hdc: https://developer.huawei.com/consumer/cn/download/
 ############################################################################################
 TOOL_HDC:
   version: '20240715'
@@ -405,7 +371,7 @@ TOOL_HDC:
       - else: ~
 
 ############################################################################################
-# flinux
+# flinux: https://github.com/wishstudio/flinux
 ############################################################################################
 TOOL_FLINUX:
   version: '20240505'
@@ -420,3 +386,43 @@ TOOL_FLINUX:
       - system: windows
         then: 'flinux.exe'
       - else: ~
+
+############################################################################################
+# burpsuite
+############################################################################################
+TOOL_BURPSUITE:
+  <<: *JAR
+  version: '2023.10'
+  depends_on: 'burpsuite-keygen'
+  download_url: 'https://portswigger-cdn.net/burp/releases/download?product=pro&type=Jar&version={version}'
+  target_path: 'burpsuite_pro_v{version}.jar'
+  executable_cmdline:
+    when:
+      - system: [darwin, linux]
+        then:
+          - 'java'
+          - '-Dfile.encoding=utf-8'
+          - '--add-opens=java.desktop/javax.swing=ALL-UNNAMED'
+          - '--add-opens=java.base/java.lang=ALL-UNNAMED'
+          - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
+          - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
+          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
+          - '-jar'
+          - '{absolute_path}'
+      - system: windows
+        then:
+          - 'java'
+          - '--add-opens=java.desktop/javax.swing=ALL-UNNAMED'
+          - '--add-opens=java.base/java.lang=ALL-UNNAMED'
+          - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
+          - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
+          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
+          - '-jar'
+          - '{absolute_path}'
+      - else: ~
+
+TOOL_BURPSUITE_KEYGEN:
+  <<: *JAR
+  version: '2_1_06'
+  name: 'burpsuite-keygen'
+  download_url: 'https://github.com/linktools-toolkit/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar'

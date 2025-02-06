@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from importlib.machinery import ModuleSpec
 
     T = TypeVar("T")
+    R = TypeVar("R")
     P = ParamSpec("P")
 
 DEFAULT_ENCODING = "utf-8"
@@ -912,7 +913,7 @@ def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional
             pass
 
 
-def let(value: "Any", fn: "Callable[[Any], T]") -> "T":
+def let(value: "T", fn: "Callable[[T], R]") -> "R":
     return fn(value)
 
 
