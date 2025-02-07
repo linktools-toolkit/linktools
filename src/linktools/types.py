@@ -209,7 +209,7 @@ class EventHandlerMixin(object):
     def on(self, event: str, callback: "_t.Callable[..., _t.Any]", times: int = None):
         handler = self._event_handler
         with handler.lock:
-            handler.logger.debug(f"Register event handler {callback} for event {event}")
+            handler.logger.debug(f"Register event `{event}` handler `{callback}`")
             callbacks = handler.get(event, None)
             if callbacks is None:
                 callbacks = handler[event] = dict()
@@ -221,7 +221,7 @@ class EventHandlerMixin(object):
     def off(self, event: str, callback: "_t.Callable[..., _t.Any]"):
         handler = self._event_handler
         with handler.lock:
-            handler.logger.debug(f"Unregister event handler {callback} for event {event}")
+            handler.logger.debug(f"Unregister event `{event}` handler `{callback}`")
             if event in handler:
                 callbacks = handler.get(event)
                 try:
@@ -246,12 +246,12 @@ class EventHandlerMixin(object):
             for callback in remove_list:
                 callbacks.pop(callback)
             del remove_list
-        handler.logger.debug(f"Event {event} invoke {len(invoke_list)} callbacks")
+        handler.logger.debug(f"Event `{event}` invoke {len(invoke_list)} callbacks")
         for callback in invoke_list:
             try:
                 callback(*args, **kwargs)
             except Exception as e:
-                handler.logger.warning(f"Event handler {callback} error: {e}")
+                handler.logger.warning(f"Event `{event}` handler `{callback}` error", exc_info=e)
 
 
 class CacheQueue(_t.Generic[T]):

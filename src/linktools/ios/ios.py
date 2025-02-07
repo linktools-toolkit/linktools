@@ -370,7 +370,6 @@ class GoIOSForward(Stoppable):
                 remote_port,
                 text=True,
                 bufsize=1,
-                universal_newlines=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )

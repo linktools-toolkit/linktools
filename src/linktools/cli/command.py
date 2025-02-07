@@ -1028,7 +1028,7 @@ class CommandMain:
             result = self.command(*args, **kwargs)
         except SystemExit as e:
             result = e.code
-        except KeyboardInterrupt as e:
+        except (KeyboardInterrupt, EOFError) as e:
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.command.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,

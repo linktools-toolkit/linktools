@@ -51,7 +51,7 @@ alias jadx="ct-tools --set version=1.5.0 jadx-gui"  # 指定jadx版本号
 $ python3 -m linktools
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.0.1.dev0)
+  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.8.14)
  / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
 /_/_/_/ /_/_/|_|\__/\____/\____/_/____/
 
@@ -72,13 +72,13 @@ $ python3 -m linktools
 │   ├── 📘 env: Manage and configure the Linktools environment
 │   ├── 👉 grep: Search and match files using regular expressions
 │   └── 👉 tools: Execute tools directly from remote URLs
-└── 📖 it: iOS scripts
-    ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
-    ├── 👉 ipa: Parse and extract detailed information from IPA files
-    ├── 👉 objection: Simplify security testing with Objection on jailbroken devices
-    ├── 👉 scp: Securely copy files to/from a jailbroken iOS device using OpenSSH
-    ├── 👉 sib: Manage multiple iOS devices effortlessly with sib commands
-    └── 👉 ssh: Remotely login to jailbroken iOS devices using the OpenSSH client
+├── 📖 it: iOS scripts
+│   ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
+│   ├── 👉 ios: Manage multiple iOS devices effortlessly with go-ios commands
+│   ├── 👉 ipa: Parse and extract detailed information from IPA files
+│   ├── 👉 objection: Simplify security testing with Objection on jailbroken devices
+│   ├── 👉 scp: Securely copy files to/from a jailbroken iOS device using OpenSSH
+│   └── 👉 ssh: Remotely login to jailbroken iOS devices using the OpenSSH client
 ```
 
 ### 通用功能（脚本前缀为ct-）
@@ -93,9 +93,6 @@ $ python3 -m linktools
 ```bash
 # 生成alias脚本，常配合~/.bashrc等文件使用
 $ ct-env --silent alias --shell bash
-
-# 生成自动补全脚本，常配合~/.bashrc等文件使用
-$ ct-env --silent completion --shell bash
 
 # 生成配置java环境变量脚本，常配合~/.bashrc等文件使用
 $ ct-env --silent java 17.0.11 --shell bash
@@ -154,7 +151,7 @@ $ ct-tools --set version=2.5.0 apktool
 #### 👉 at-adb
 
 <details>
-<summary>若环境变量中存在adb，则直接执行，否则自动下载最新版本。该功能支持操作多台手机</summary>
+<summary>若环境变量中存在adb可执行程序，则直接执行；否则自动下载最新版本执行。该功能支持操作多台手机</summary>
 
 ##### 常用命令
 
@@ -437,10 +434,50 @@ $ at-agent --plugin app-release.apk
 
 ### ios相关功能（脚本前缀为it-）
 
+#### 👉 it-ios
+
+<details>
+<summary>若环境变量中存在ios可执行程序，则直接执行；否则自动下载指定版本执行。该功能支持操作多台手机</summary>
+
+```bash
+# 列出所有设备
+$ it-ios list
+
+# 指定序列号，并调用ios info
+$ it-ios -s xxx info
+
+# 使用上次使用的设备，并调用ios info
+$ it-ios -l info
+
+# 未指定则会需要选择一台设备，并调用ios info
+$ it-ios info
+More than one device/emulator
+>> 1: 00008030-001174D10CC1802E (iPhone)
+   2: 00008030-001174D10CC1803E (iPhone)
+Choose device [1~2] (1): 1
+```
+
+</details>
+
+#### 👉 it-ssh
+
+<details>
+<summary>通过ssh连接设备，需要设备已越狱并且已安装OpenSSH</summary>
+
+```bash
+# 使用ssh连接设备
+$ it-ssh
+
+# 使用ssh连接设备并执行命令
+$ it-ssh sh -c "id"
+```
+
+</details>
+
 #### 👉 it-frida
 
 <details>
-<summary>该功能旨在方便使用frida，支持加载远程脚本，内置了常用功能</summary>
+<summary>该功能旨在方便使用frida，支持加载远程脚本，内置了部分常用功能，需要设备已越狱并且已安装frida</summary>
 
 ```
 $ it-frida -h                                                                                                                                       ░▒▓ ✔  12:37:52
