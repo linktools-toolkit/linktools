@@ -218,8 +218,7 @@ class Process(subprocess.Popen):
                 elif code == STDERR:
                     err = data
                 yield out, err
-        else:
-            utils.wait_process(self, timeout)
+        utils.wait_process(self, timeout)
 
     def recursive_kill(self) -> None:
         import psutil

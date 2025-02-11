@@ -12,6 +12,7 @@ import android.text.TextUtils;
 import org.ironman.framework.proxy.AbstractProxy;
 import org.ironman.framework.proxy.ActivityManagerProxy;
 import org.ironman.framework.proxy.ActivityTaskManagerProxy;
+import org.ironman.framework.proxy.PackageManagerProxy;
 import org.ironman.framework.util.LogUtil;
 import org.ironman.framework.util.ReflectHelper;
 
@@ -190,8 +191,26 @@ public final class Environment {
         }
 
         public void fixServices() {
+            AbstractProxy[] activityManagerProxies = {
+                    AbstractProxy.get(ActivityManagerProxy.class),
+                    AbstractProxy.get(ActivityTaskManagerProxy.class),
+            };
+
+            for (AbstractProxy proxy : activityManagerProxies) {
+                proxy.registerProxyHandler(new String[]{
+                        "startActivity",
+                        "startService",
+                        "broadcastIntent",
+                }, (handler, obj, method, args) -> {
+                    LogUtil.d(TAG, "%s: set applicationThread null", method.getName());
+                    args[0] = null; // set applicationThread = null;
+                    return handler.handle(obj, method, args);
+                });
+            }
+
             AbstractProxy.get(ActivityManagerProxy.class).hook();
             AbstractProxy.get(ActivityTaskManagerProxy.class).hook();
+            AbstractProxy.get(PackageManagerProxy.class).hook();
         }
     }
 
