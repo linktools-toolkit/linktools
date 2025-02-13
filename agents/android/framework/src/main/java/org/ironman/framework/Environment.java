@@ -13,6 +13,7 @@ import org.ironman.framework.proxy.AbstractProxy;
 import org.ironman.framework.proxy.ActivityManagerProxy;
 import org.ironman.framework.proxy.ActivityTaskManagerProxy;
 import org.ironman.framework.proxy.PackageManagerProxy;
+import org.ironman.framework.proxy.PermissionManagerProxy;
 import org.ironman.framework.util.LogUtil;
 import org.ironman.framework.util.ReflectHelper;
 
@@ -211,6 +212,7 @@ public final class Environment {
             AbstractProxy.get(ActivityManagerProxy.class).hook();
             AbstractProxy.get(ActivityTaskManagerProxy.class).hook();
             AbstractProxy.get(PackageManagerProxy.class).hook();
+            AbstractProxy.get(PermissionManagerProxy.class).hook();
         }
     }
 

@@ -87,6 +87,11 @@ public class Main {
             }
         }));
 
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            Output.err.println(e);
+            System.exit(-1);
+        });
+
         try {
             Main main = new Main();
             main.printLogo();

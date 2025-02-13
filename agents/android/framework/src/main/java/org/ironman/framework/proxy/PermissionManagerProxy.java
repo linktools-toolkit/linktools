@@ -10,9 +10,9 @@ import org.ironman.framework.util.ReflectHelper;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 
-public class PackageManagerProxy extends AbstractProxy {
+public class PermissionManagerProxy extends AbstractProxy {
 
-    private static final String TAG = PackageManagerProxy.class.getSimpleName();
+    private static final String TAG = PermissionManagerProxy.class.getSimpleName();
 
     @Override
     protected void internalInit() throws Exception {
@@ -20,8 +20,8 @@ public class PackageManagerProxy extends AbstractProxy {
 
         try {
             Class<?> holder = ActivityThread.class;
-            Object pm = ActivityThread.getPackageManager();
-            Field field = helper.getField(holder, "sPackageManager");
+            Object pm = helper.invoke(ActivityThread.class, "getPermissionManager");
+            Field field = helper.getField(ActivityThread.class, "sPermissionManager");
 
             registerHookHandler(new IHookHandler() {
                 @Override
@@ -44,16 +44,14 @@ public class PackageManagerProxy extends AbstractProxy {
                 }
             });
         } catch (Exception e) {
-            LogUtil.i(TAG, "Failed to get ActivityThread.sPackageManager: %s", e);
+            LogUtil.i(TAG, "Failed to get ActivityThread.sPermissionManager: %s", e);
         }
 
         try {
-            PackageManager holder = ActivityThread.currentApplication().getPackageManager();
-            Field field = helper.getField(holder, "mPM");
-            Object pm = field.get(holder);
-            if (pm == null) {
-                throw new NullPointerException(field.getName() + " is null");
-            }
+            PackageManager packageManager = ActivityThread.currentApplication().getPackageManager();
+            Object holder = helper.invoke(packageManager, "getPermissionManager");
+            Object pm = helper.get(holder, "mPermissionManager");
+            Field field = helper.getField(holder, "mPermissionManager");
 
             registerHookHandler(new IHookHandler() {
                 @Override
@@ -71,13 +69,12 @@ public class PackageManagerProxy extends AbstractProxy {
 
                 @Override
                 public void unhook() throws Exception {
-                    Log.d(TAG, "Unhook " + pm.getClass().getName() + "." + field.getName());
+                    Log.d(TAG, "Unhook " + holder.getClass().getName() + "." + field.getName());
                     field.set(holder, pm);
                 }
             });
-
         } catch (Exception e) {
-            LogUtil.i(TAG, "Failed to get ApplicationPackageManager.mPM: %s", e);
+            LogUtil.i(TAG, "Failed to get PermissionManager.mPermissionManager: %s", e);
         }
     }
 }

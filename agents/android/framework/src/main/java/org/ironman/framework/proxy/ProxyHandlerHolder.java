@@ -1,5 +1,6 @@
 package org.ironman.framework.proxy;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
 public class ProxyHandlerHolder {
@@ -12,8 +13,13 @@ public class ProxyHandlerHolder {
     }
 
     public Object handle(Object obj, Method method, Object[] args) throws Throwable {
-        return next == null || next.handler == null ?
-                method.invoke(obj, args):
-                next.handler.handle(next, obj, method, args);
+        if (next == null || next.handler == null) {
+            try {
+                return method.invoke(obj, args);
+            } catch (InvocationTargetException e) {
+                throw e.getTargetException();
+            }
+        }
+        return next.handler.handle(next, obj, method, args);
     }
 }

@@ -12,55 +12,39 @@ public class ActivityTaskManagerProxy extends AbstractProxy {
 
     private static final String TAG = ActivityManagerProxy.class.getSimpleName();
 
-    private Object mActivityTaskManagerSingleton = null;
-    private Object mActivityTaskManager = null;
-    private Field mSingletonInstanceField = null;
-
     @Override
     protected void internalInit() throws Exception {
         ReflectHelper helper = ReflectHelper.getDefault();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // "android/app/ActivityTaskManager.java"
-            mActivityTaskManagerSingleton = helper.get(
+            Object holder = helper.get(
                     "android.app.ActivityTaskManager",
                     "IActivityTaskManagerSingleton"
             );
-            mActivityTaskManager = helper.invoke(
-                    mActivityTaskManagerSingleton,
-                    "get"
-            );
-            mSingletonInstanceField = helper.getField(
-                    mActivityTaskManagerSingleton,
-                    "mInstance"
-            );
-        }
+            Object atm = helper.invoke(holder, "get");
+            Field field = helper.getField(holder, "mInstance");
 
-    }
+            registerHookHandler(new IHookHandler() {
+                @Override
+                public void hook() throws Exception {
+                    LogUtil.d(TAG, "Hook " + holder.getClass().getName() + "." + field.getName());
+                    field.set(
+                            holder,
+                            Proxy.newProxyInstance(
+                                    atm.getClass().getClassLoader(),
+                                    atm.getClass().getInterfaces(),
+                                    (proxy, method, args) -> invokeProxyHandler(atm, method, args)
+                            )
+                    );
+                }
 
-    @Override
-    protected void internalHook() throws Exception {
-        if (mActivityTaskManagerSingleton != null && mActivityTaskManager != null && mSingletonInstanceField != null) {
-            LogUtil.d(TAG, "Hook " + mActivityTaskManagerSingleton.getClass().getName() + "." + mSingletonInstanceField.getName());
-            mSingletonInstanceField.set(
-                    mActivityTaskManagerSingleton,
-                    Proxy.newProxyInstance(
-                            mActivityTaskManager.getClass().getClassLoader(),
-                            mActivityTaskManager.getClass().getInterfaces(),
-                            (proxy, method, args) -> handle(mActivityTaskManager, method, args)
-                    )
-            );
-        }
-    }
-
-    @Override
-    protected void internalUnhook() throws Exception {
-        if (mActivityTaskManagerSingleton != null && mActivityTaskManager != null && mSingletonInstanceField != null) {
-            LogUtil.d(TAG, "Unhook " + mActivityTaskManagerSingleton.getClass().getName() + "." + mSingletonInstanceField.getName());
-            mSingletonInstanceField.set(
-                    mActivityTaskManagerSingleton,
-                    mActivityTaskManager
-            );
+                @Override
+                public void unhook() throws Exception {
+                    LogUtil.d(TAG, "Unhook " + holder.getClass().getName() + "." + field.getName());
+                    field.set(holder, atm);
+                }
+            });
         }
     }
 }

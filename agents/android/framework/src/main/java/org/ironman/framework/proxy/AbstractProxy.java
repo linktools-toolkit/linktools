@@ -2,8 +2,12 @@ package org.ironman.framework.proxy;
 
 import org.ironman.framework.util.LogUtil;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,11 +18,11 @@ public abstract class AbstractProxy {
 
     private boolean mInit = false;
     private boolean mHooked = false;
+
+    protected final List<IHookHandler> mHookHandler = new ArrayList<>();
     protected final Map<String, ProxyHandlerHolder> mProxyHandler = new ConcurrentHashMap<>();
 
     protected abstract void internalInit() throws Exception;
-    protected abstract void internalHook() throws Exception;
-    protected abstract void internalUnhook() throws Exception;
 
     protected AbstractProxy() {
 
@@ -47,7 +51,13 @@ public abstract class AbstractProxy {
                         internalInit();
                         mInit = true;
                     }
-                    internalHook();
+                    for (IHookHandler handler : mHookHandler) {
+                        try {
+                            handler.hook();
+                        } catch (Exception e) {
+                            LogUtil.printStackTrace(TAG, e, null);
+                        }
+                    }
                     mHooked = true;
                 } catch (Exception e) {
                     LogUtil.printStackTrace(TAG, e, null);
@@ -60,13 +70,25 @@ public abstract class AbstractProxy {
         synchronized (this) {
             if (mHooked) {
                 try {
-                    internalUnhook();
+                    ListIterator<IHookHandler> it = mHookHandler.listIterator(mHookHandler.size());
+                    while (it.hasPrevious()) {
+                        IHookHandler handler = it.previous();
+                        try {
+                            handler.unhook();
+                        } catch (Exception e) {
+                            LogUtil.printStackTrace(TAG, e, null);
+                        }
+                    }
                     mHooked = false;
                 } catch (Exception e) {
                     LogUtil.printStackTrace(TAG, e, null);
                 }
             }
         }
+    }
+
+    protected void registerHookHandler(IHookHandler handler) {
+        mHookHandler.add(handler);
     }
 
     public void registerProxyHandler(String method, IProxyHandler handler) {
@@ -95,10 +117,16 @@ public abstract class AbstractProxy {
         }
     }
 
-    protected Object handle(Object obj, Method method, Object[] args) throws Throwable {
-        ProxyHandlerHolder handler = mProxyHandler.get(method.getName());
-        return handler == null || handler.handler == null ?
-                method.invoke(obj, args) :
-                handler.handler.handle(handler, obj, method, args);
+    protected Object invokeProxyHandler(Object obj, Method method, Object[] args) throws Throwable {
+        LogUtil.v(TAG, "handle: %s.%s", method.getDeclaringClass(), method.getName());
+        ProxyHandlerHolder current = mProxyHandler.get(method.getName());
+        if (current == null || current.handler == null) {
+            try {
+                return method.invoke(obj, args);
+            } catch (InvocationTargetException e) {
+                throw e.getTargetException();
+            }
+        }
+        return current.handler.handle(current, obj, method, args);
     }
 }

@@ -12,66 +12,36 @@ public class ActivityManagerProxy extends AbstractProxy {
 
     private static final String TAG = ActivityManagerProxy.class.getSimpleName();
 
-    private Object mActivityManager = null;
-    private Object mActivityManagerSingleton = null;
-    private Field mSingletonInstanceField = null;
 
     @Override
     protected void internalInit() throws Exception {
         ReflectHelper helper = ReflectHelper.getDefault();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            mActivityManagerSingleton = helper.get(
-                    "android.app.ActivityManager",
-                    "IActivityManagerSingleton"
-            );
-            mActivityManager = helper.invoke(
-                    mActivityManagerSingleton,
-                    "get"
-            );
-            mSingletonInstanceField = helper.getField(
-                    mActivityManagerSingleton,
-                    "mInstance"
-            );
-        } else {
-            mActivityManagerSingleton = helper.get(
-                    "android.app.ActivityManagerNative",
-                    "gDefault"
-            );
-            mActivityManager = helper.invoke(
-                    mActivityManagerSingleton,
-                    "get"
-            );
-            mSingletonInstanceField = helper.getField(
-                    mActivityManagerSingleton,
-                    "mInstance"
-            );
-        }
-    }
+        Object holder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ?
+                helper.get("android.app.ActivityManager", "IActivityManagerSingleton") :
+                helper.get("android.app.ActivityManagerNative", "gDefault");
+        Object am = helper.invoke(holder, "get");
+        Field field = helper.getField(holder, "mInstance");
 
-    @Override
-    protected void internalHook() throws Exception {
-        if (mActivityManagerSingleton != null && mActivityManager != null && mSingletonInstanceField != null) {
-            LogUtil.d(TAG, "Hook " + mActivityManagerSingleton.getClass().getName() + "." + mSingletonInstanceField.getName());
-            mSingletonInstanceField.set(
-                    mActivityManagerSingleton,
-                    Proxy.newProxyInstance(
-                            mActivityManager.getClass().getClassLoader(),
-                            mActivityManager.getClass().getInterfaces(),
-                            (proxy, method, args) -> handle(mActivityManager, method, args)
-                    )
-            );
-        }
-    }
+        registerHookHandler(new IHookHandler() {
+            @Override
+            public void hook() throws Exception {
+                LogUtil.d(TAG, "Hook " + holder.getClass().getName() + "." + field.getName());
+                field.set(
+                        holder,
+                        Proxy.newProxyInstance(
+                                am.getClass().getClassLoader(),
+                                am.getClass().getInterfaces(),
+                                (proxy, method, args) -> invokeProxyHandler(am, method, args)
+                        )
+                );
+            }
 
-    @Override
-    protected void internalUnhook() throws Exception {
-        if (mActivityManagerSingleton != null && mActivityManager != null && mSingletonInstanceField != null) {
-            LogUtil.d(TAG, "Unhook " + mActivityManagerSingleton.getClass().getName() + "." + mSingletonInstanceField.getName());
-            mSingletonInstanceField.set(
-                    mActivityManagerSingleton,
-                    mActivityManager
-            );
-        }
+            @Override
+            public void unhook() throws Exception {
+                LogUtil.d(TAG, "Unhook " + holder.getClass().getName() + "." + field.getName());
+                field.set(holder, am);
+            }
+        });
     }
 }
