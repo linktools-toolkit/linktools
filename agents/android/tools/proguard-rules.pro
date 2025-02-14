@@ -20,10 +20,10 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
--keep public class org.ironman.framework.** { public *; }
+-keep public class org.ironman.framework.** { public protected *; }
 -keep public class org.ironman.framework.bean.** { *; }
--keep public class android.tools.Main { public *; }
--keep public interface android.tools.** { public *; }
+-keep public class android.tools.Main { public protected *; }
+-keep public interface android.tools.** { public protected *; }
 
 ##---------------Begin: proguard configuration for jcommander  ----------
 

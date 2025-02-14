@@ -1,9 +1,13 @@
 package org.ironman.framework.proxy;
 
+import android.app.ActivityThread;
+import android.app.Application;
+
 import org.ironman.framework.util.LogUtil;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -87,8 +91,20 @@ public abstract class AbstractProxy {
         }
     }
 
+    protected Application getApplication() {
+        return ActivityThread.currentApplication();
+    }
+
     protected void registerHookHandler(IHookHandler handler) {
         mHookHandler.add(handler);
+    }
+
+    protected Object newProxyInstance(Object obj) {
+        return Proxy.newProxyInstance(
+                obj.getClass().getClassLoader(),
+                obj.getClass().getInterfaces(),
+                (proxy, method, args) -> invokeProxyHandler(obj, method, args)
+        );
     }
 
     public void registerProxyHandler(String method, IProxyHandler handler) {

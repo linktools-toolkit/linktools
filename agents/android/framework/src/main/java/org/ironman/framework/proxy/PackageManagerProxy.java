@@ -2,7 +2,6 @@ package org.ironman.framework.proxy;
 
 import android.app.ActivityThread;
 import android.content.pm.PackageManager;
-import android.util.Log;
 
 import org.ironman.framework.util.LogUtil;
 import org.ironman.framework.util.ReflectHelper;
@@ -26,7 +25,7 @@ public class PackageManagerProxy extends AbstractProxy {
             registerHookHandler(new IHookHandler() {
                 @Override
                 public void hook() throws Exception {
-                    Log.d(TAG, "Hook " + holder.getName() + "." + field.getName());
+                    LogUtil.d(TAG, "Hook " + holder.getName() + "." + field.getName());
                     field.set(
                             holder,
                             Proxy.newProxyInstance(
@@ -39,7 +38,7 @@ public class PackageManagerProxy extends AbstractProxy {
 
                 @Override
                 public void unhook() throws Exception {
-                    Log.d(TAG, "Unhook " + holder.getName() + "." + field.getName());
+                    LogUtil.d(TAG, "Unhook " + holder.getName() + "." + field.getName());
                     field.set(holder, pm);
                 }
             });
@@ -48,7 +47,7 @@ public class PackageManagerProxy extends AbstractProxy {
         }
 
         try {
-            PackageManager holder = ActivityThread.currentApplication().getPackageManager();
+            PackageManager holder = getApplication().getPackageManager();
             Field field = helper.getField(holder, "mPM");
             Object pm = field.get(holder);
             if (pm == null) {
@@ -58,20 +57,13 @@ public class PackageManagerProxy extends AbstractProxy {
             registerHookHandler(new IHookHandler() {
                 @Override
                 public void hook() throws Exception {
-                    Log.d(TAG, "Hook " + holder.getClass().getName() + "." + field.getName());
-                    field.set(
-                            holder,
-                            Proxy.newProxyInstance(
-                                    pm.getClass().getClassLoader(),
-                                    pm.getClass().getInterfaces(),
-                                    (proxy, method, args) -> invokeProxyHandler(pm, method, args)
-                            )
-                    );
+                    LogUtil.d(TAG, "Hook " + holder.getClass().getName() + "." + field.getName());
+                    field.set(holder, newProxyInstance(pm));
                 }
 
                 @Override
                 public void unhook() throws Exception {
-                    Log.d(TAG, "Unhook " + pm.getClass().getName() + "." + field.getName());
+                    LogUtil.d(TAG, "Unhook " + pm.getClass().getName() + "." + field.getName());
                     field.set(holder, pm);
                 }
             });

@@ -6,7 +6,6 @@ import org.ironman.framework.util.LogUtil;
 import org.ironman.framework.util.ReflectHelper;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Proxy;
 
 public class ActivityTaskManagerProxy extends AbstractProxy {
 
@@ -29,14 +28,7 @@ public class ActivityTaskManagerProxy extends AbstractProxy {
                 @Override
                 public void hook() throws Exception {
                     LogUtil.d(TAG, "Hook " + holder.getClass().getName() + "." + field.getName());
-                    field.set(
-                            holder,
-                            Proxy.newProxyInstance(
-                                    atm.getClass().getClassLoader(),
-                                    atm.getClass().getInterfaces(),
-                                    (proxy, method, args) -> invokeProxyHandler(atm, method, args)
-                            )
-                    );
+                    field.set(holder, newProxyInstance(atm));
                 }
 
                 @Override
