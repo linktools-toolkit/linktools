@@ -142,7 +142,7 @@ class Timeout:
                 return False
         return True
 
-    def ensure(self, err_type: _t.Type[Exception] = TimeoutError, message=None) -> None:
+    def ensure(self, err_type: _t.Type[Exception] = TimeoutError, message="Timeout") -> None:
         if not self.check():
             raise err_type(message)
 

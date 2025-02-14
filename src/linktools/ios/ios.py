@@ -112,6 +112,13 @@ class GoIOS(Bridge):
                         if level in ("error", "fatal"):
                             if not ignore_errors:
                                 raise self._error_type(_get_log_err_msg(data))
+        if not ignore_errors:
+            code = process.poll()
+            if code is None:
+                timeout.ensure(
+                    self._error_type,
+                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
+                )
 
         if isinstance(result, bytes):
             result = result.decode(errors="ignore")

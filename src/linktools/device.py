@@ -106,14 +106,21 @@ class Bridge(ABC):
                     if data:
                         _logger.error(data)
 
-        if not ignore_errors and process.poll() not in (0, None):
-            if isinstance(err, bytes):
-                err = err.decode(errors="ignore")
-                err = err.strip()
-            elif isinstance(err, str):
-                err = err.strip()
-            if err:
-                raise self._error_type(err)
+        if not ignore_errors:
+            code = process.poll()
+            if code is None:
+                timeout.ensure(
+                    self._error_type,
+                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
+                )
+            if code not in (0, None):
+                if isinstance(err, bytes):
+                    err = err.decode(errors="ignore")
+                    err = err.strip()
+                elif isinstance(err, str):
+                    err = err.strip()
+                if err:
+                    raise self._error_type(err)
 
         if isinstance(out, bytes):
             out = out.decode(errors="ignore")
