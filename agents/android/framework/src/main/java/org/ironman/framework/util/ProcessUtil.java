@@ -37,8 +37,9 @@ public class ProcessUtil {
 
             process.pid = Integer.parseInt(dir.getName());
 
+            BufferedReader reader = null;
             try {
-                BufferedReader reader = new BufferedReader(new FileReader(new File(dir, "stat")));
+                reader = new BufferedReader(new FileReader(new File(dir, "stat")));
                 String line;
 
                 while ((line = reader.readLine()) != null) {
@@ -62,10 +63,15 @@ public class ProcessUtil {
                 }
             } catch (IOException e) {
                 // ignore
+            } finally {
+                if (reader != null) {
+                    CommonUtil.closeQuietly(reader);
+                    reader = null;
+                }
             }
 
             try {
-                BufferedReader reader = new BufferedReader(new FileReader(new File(dir, "status")));
+                reader = new BufferedReader(new FileReader(new File(dir, "status")));
                 String line;
 
                 while ((line = reader.readLine()) != null) {
@@ -79,10 +85,15 @@ public class ProcessUtil {
                 reader.close();
             } catch (IOException e) {
                 // ignore
+            } finally {
+                if (reader != null) {
+                    CommonUtil.closeQuietly(reader);
+                    reader = null;
+                }
             }
 
             try {
-                BufferedReader reader = new BufferedReader(new FileReader(new File(dir, "cmdline")));
+                reader = new BufferedReader(new FileReader(new File(dir, "cmdline")));
                 String line;
                 StringBuilder buffer = new StringBuilder();
                 while ((line = reader.readLine()) != null) {
@@ -90,7 +101,7 @@ public class ProcessUtil {
                 }
 
                 String cmdline = buffer.toString().trim().replace('\u0000', ' ');
-                if (cmdline.length() > 0) {
+                if (!cmdline.isEmpty()) {
                     process.cmd = cmdline;
                     String[] args = cmdline.split(" +");
                     if (args.length > 0) {
@@ -103,6 +114,11 @@ public class ProcessUtil {
                 reader.close();
             } catch (IOException e) {
                 // ignore
+            } finally {
+                if (reader != null) {
+                    CommonUtil.closeQuietly(reader);
+                    reader = null;
+                }
             }
 
             processList.add(process);
