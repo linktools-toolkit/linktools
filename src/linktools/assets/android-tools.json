@@ -1,10 +1,10 @@
 {
     "AGENT_APK": {
         "name": "android-tools.apk",
-        "md5": "e9a34e732fe656990f164179950e7d5c",
+        "md5": "3b035ca9d87c15286333f2070391b08c",
         "main": "android.tools.Main",
-        "size": 90811,
-        "time": "2025-02-14 16:19:09"
+        "size": 90923,
+        "time": "2025-02-20 16:29:23"
     },
     "FRIDA_SERVER": [
         {
