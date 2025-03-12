@@ -329,7 +329,10 @@ class CacheQueue(_t.Generic[T]):
             self._get_ts = 0
 
 
-def _filter_missing_items(d: _t.Dict[_t.Any, _t.Any]) -> _t.Dict[_t.Any, _t.Any]:
+_basic_cache_types = (type(None), int, float, bool, complex)
+
+
+def _filter_cache_items(d: _t.Dict[_t.Any, _t.Any]) -> _t.Dict[_t.Any, _t.Any]:
     return {k: v for k, v in d.items() if v}
 
 
@@ -368,11 +371,15 @@ class _FileCacheData(_t.Generic[T]):
         self._lock.release()
 
     def set(self, key: str, value: T, ttl: int = None) -> None:
-        self._data[key] = _filter_missing_items({
+        self._data[key] = _filter_cache_items({
             "data": self._cache.dump(value),
             "ttl": int(ttl) if ttl else None,
             "ts": int(_time.time()),
         })
+
+    def update(self, **kwargs: T) -> None:
+        for key, value in kwargs.items():
+            self.set(key, value)
 
     def _get(self, key: str) -> _t.Optional[_t.Dict[str, _t.Any]]:
         value = self._data.get(key, None)
@@ -391,6 +398,13 @@ class _FileCacheData(_t.Generic[T]):
             return self._cache.load(value.get("data", None))
         return default
 
+    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+        value = self._get(key)
+        if value:
+            self._data.pop(key)
+            return self._cache.load(value.get("data", None))
+        return default
+
     def peek(self) -> _t.Optional[str]:
         for key in list(self._data.keys()):
             value = self._get(key)
@@ -405,13 +419,6 @@ class _FileCacheData(_t.Generic[T]):
                 return key, self._cache.load(value.get("data", None))
         return None, None
 
-    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
-        value = self._get(key)
-        if value:
-            self._data.pop(key)
-            return self._cache.load(value.get("data", None))
-        return default
-
     def incr(self, key: str, delta: int = 1, default: int = 0) -> int:
         value = self._get(key)
         if value:
@@ -420,7 +427,7 @@ class _FileCacheData(_t.Generic[T]):
                 raise TypeError(f"the value of key `{key}` is not int")
             result = result + delta
             value["data"] = self._cache.dump(result)
-            value["time"] = int(_time.time())
+            value["ts"] = int(_time.time())
             self._data[key] = value
         else:
             result = default
@@ -439,7 +446,7 @@ class _FileCacheData(_t.Generic[T]):
             if value:
                 yield key, self._cache.load(value.get("data", None))
 
-    def __len__(self):
+    def __len__(self) -> int:
         count = 0
         for key in list(self._data.keys()):
             value = self._get(key)
@@ -452,9 +459,6 @@ class _FileCacheData(_t.Generic[T]):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-
-_basic_cache_types = (type(None), int, float, bool, complex)
 
 
 class FileCache(_t.Generic[T]):
@@ -474,13 +478,21 @@ class FileCache(_t.Generic[T]):
     def open(self) -> "_FileCacheData[T]":
         return _FileCacheData(self, "data")
 
-    def set(self, key: str, value: T, ttl: int = None):
+    def set(self, key: str, value: T, ttl: int = None) -> None:
         with self.open() as data:
             data.set(key, value, ttl)
+
+    def update(self, **kwargs: T) -> None:
+        with self.open() as data:
+            data.update(**kwargs)
 
     def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
         with self.open() as data:
             return data.get(key, default=default)
+
+    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+        with self.open() as data:
+            return data.pop(key, default=default)
 
     def peek(self) -> _t.Optional[T]:
         with self.open() as data:
@@ -490,15 +502,15 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             return data.peekitem()
 
-    def pop(self, key: str, default: _t.Any = None) -> T:
-        with self.open() as data:
-            return data.pop(key, default=default)
-
     def incr(self, key: str, delta: int = 1, default: int = 0) -> int:
         with self.open() as data:
             return data.incr(key, delta, default)
 
-    def items(self):
+    def keys(self) -> "_t.Generator[str, None, None]":
+        with self.open() as data:
+            yield from data.keys()
+
+    def items(self) -> "_t.Generator[_t.Tuple[str, T], None, None]":
         with self.open() as data:
             yield from data.items()
 
@@ -514,7 +526,7 @@ class FileCache(_t.Generic[T]):
                 return self._dump(data)
         return data
 
-    def __len__(self):
+    def __len__(self) -> int:
         with self.open() as data:
             return len(data)
 
