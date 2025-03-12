@@ -29,31 +29,28 @@
 
 import abc
 import functools
-import os
 from argparse import ArgumentParser, Action, Namespace
 from typing import Optional, Callable, List, Type, Generic
 
-from . import BaseCommand
-from .. import utils
+from . import BaseCommand, CommandParser
 from ..android import Adb, AdbError, AdbDevice
 from ..device import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
 from ..ios import GoIOS, GoIOSError, GoIOSDevice
 from ..rich import choose
-from ..types import PathType
+from ..types import PathType, FileCache
 
 
 class DeviceCache:
 
-    def __init__(self, path: PathType):
-        self.path = path
+    def __init__(self, path: PathType, key: str):
+        self._cache = FileCache(path)
+        self._key = key
 
     def read(self) -> Optional[str]:
-        if os.path.exists(self.path):
-            return utils.read_file(self.path, text=True).strip()
-        return None
+        return self._cache.get(self._key, None)
 
     def write(self, cache: str) -> None:
-        utils.write_file(self.path, cache)
+        self._cache.set(self._key, cache)
 
     def __call__(self, fn: Callable[..., BaseDevice]):
         @functools.wraps(fn)
@@ -125,13 +122,7 @@ class DeviceCommandMixin:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
-
-        cache = DeviceCache(
-            self.environ.get_temp_path(
-                "cli", "cache", "device_id",
-                create_parent=True
-            )
-        )
+        cache = DeviceCache(self.environ.get_temp_path("cli", "cache"), "device")
 
         @cache
         def pick(bridge: Bridge):
@@ -195,13 +186,7 @@ class AndroidCommandMixin:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
-
-        cache = DeviceCache(
-            self.environ.get_temp_path(
-                "cli", "cache", "android_id",
-                create_parent=True
-            )
-        )
+        cache = DeviceCache(self.environ.get_temp_path("cli", "cache"), "android")
 
         @cache
         def pick(adb: Adb):
@@ -330,13 +315,7 @@ class IOSCommandMixin:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
-
-        cache = DeviceCache(
-            self.environ.get_temp_path(
-                "cli", "cache", "ios_id",
-                create_parent=True
-            )
-        )
+        cache = DeviceCache(self.environ.get_temp_path("cli", "cache"), "ios")
 
         @cache
         def pick(ios: GoIOS):
@@ -403,7 +382,7 @@ class AndroidCommand(BaseCommand, metaclass=abc.ABCMeta):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [AdbError]
 
-    def init_base_arguments(self, parser: ArgumentParser):
+    def init_base_arguments(self, parser: CommandParser):
         super().init_base_arguments(parser)
         AndroidCommandMixin.add_android_options(self, parser)
 
@@ -418,7 +397,7 @@ class IOSCommand(BaseCommand, metaclass=abc.ABCMeta):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [GoIOSError]
 
-    def init_base_arguments(self, parser: ArgumentParser):
+    def init_base_arguments(self, parser: CommandParser):
         super().init_base_arguments(parser)
         IOSCommandMixin.add_ios_options(self, parser)
 

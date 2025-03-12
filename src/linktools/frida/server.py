@@ -65,8 +65,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
         :return: 是否正在运行
         """
         try:
-            processes = self.enumerate_processes()
-            return processes is not None
+            return self.enumerate_processes() is not None
         except (frida.TransportError, frida.ServerNotRunningError, frida.InvalidArgumentError) as e:
             _logger.debug(f"Frida server is not running: {e}")
             return False
@@ -99,10 +98,10 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
                             return True
                         time.sleep(min(timeout.remain, 0.5))
                     _logger.debug("Kill frida server ...")
-                    utils.ignore_errors(self._stop)
+                    utils.ignore_errors(self._stop, kwargs=dict(force=True))
                 except Exception as e:
                     _logger.debug("Kill frida server ...")
-                    utils.ignore_errors(self._stop)
+                    utils.ignore_errors(self._stop, kwargs=dict(force=True))
                     last_error = e
 
             raise ServerNotRunningError("Frida server failed to run ...") from last_error
@@ -112,7 +111,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
 
         except BaseException as e:
             _logger.debug("Kill frida server ...")
-            utils.ignore_errors(self._stop)
+            utils.ignore_errors(self._stop, kwargs=dict(force=True))
             raise e
 
     def stop(self) -> bool:
@@ -122,7 +121,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
         """
         _logger.info("Kill frida server ...")
         try:
-            self._stop()
+            self._stop(force=False)
             return True
         except frida.ServerNotRunningError:
             return True
@@ -134,7 +133,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
         pass
 
     @abc.abstractmethod
-    def _stop(self):
+    def _stop(self, force: bool = False):
         pass
 
     def __enter__(self):
@@ -158,7 +157,7 @@ class FridaAndroidServer(FridaServer):
         self._forward: Optional[Stoppable] = None
 
         self._serve = serve
-        self._server_name = f"{environ.name}-fs-{self._remote_port}"
+        self._server_name = f"{environ.name}-fs-{frida.__version__}-{self._remote_port}"
         self._server_dir = self._device.get_data_path("fs-ln")
         self._server_path = self._device.join_path(self._server_dir, self._server_name)
 
@@ -196,10 +195,11 @@ class FridaAndroidServer(FridaServer):
                 log_output=True,
             )
 
-    def _stop(self):
+    def _stop(self, force: bool = False):
         if self._serve:
             # 就算杀死adb进程，frida server也不一定真的结束了，所以kill一下frida server进程
-            self._device.sudo("killall", "-9", self._server_name, ignore_errors=True)
+            args = ["killall", "-9"] if force else ["killall"]
+            self._device.sudo(*args, self._server_name, ignore_errors=True)
         if self._forward:
             # 把转发端口给移除了，不然会一直占用这个端口
             self._forward.stop()
@@ -285,11 +285,11 @@ class FridaAndroidServer(FridaServer):
                 temp_path = file.save()
                 temp_name = utils.guess_file_name(self.url)
                 if temp_name.endswith(".xz"):
-                    with lzma.open(temp_path, "rb") as read, open(self.path, "wb") as write:
-                        shutil.copyfileobj(read, write)
+                    with lzma.open(temp_path, "rb") as in_, open(self.path, "wb") as out_:
+                        shutil.copyfileobj(in_, out_)
                 elif temp_name.endswith(".gz"):
-                    with gzip.GzipFile(temp_path, "rb") as read, open(self.path, "wb") as write:
-                        shutil.copyfileobj(read, write)
+                    with gzip.GzipFile(temp_path, "rb") as in_, open(self.path, "wb") as out_:
+                        shutil.copyfileobj(in_, out_)
 
                 file.clear()
 
@@ -323,7 +323,7 @@ class FridaIOSServer(FridaServer):  # proxy for frida.core.Device
             self._remote_port
         )
 
-    def _stop(self):
+    def _stop(self, force: bool = False):
         if self._forward:
             utils.ignore_errors(self._forward.stop)
             self._forward = None

@@ -35,29 +35,43 @@ from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
 
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
-from .types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError
+from .types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError, FileCache
 from .utils import get_md5, get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent
 
 if TYPE_CHECKING:
     from typing import Literal
     from ._environ import BaseEnviron
 
+    ValidatorType = Union["UrlFile.Validator", Iterable["UrlFile.Validator"]]
+
 
 class UrlFile(metaclass=abc.ABCMeta):
+    """
+    从指定url下载的文件
+    """
 
     def __init__(self, environ: "BaseEnviron", url: str):
         self._url = url
         self._environ = environ
+        self._ident = f"{get_md5(url)}_{guess_file_name(url)[-100:]}"
+
+    @cached_property(lock=True)
+    def _lock(self):
+        cache = FileCache(self._environ.get_temp_path("download", "cache"))
+        return cache.lock(self._ident)
 
     @property
     def is_local(self):
+        """
+        是否是本地文件
+        """
         return False
 
     @timeoutable
-    def save(self, dest_dir: PathType = None, dest_name: str = None,
+    def save(self,
+             dest_dir: PathType = None, dest_name: str = None,
              timeout: TimeoutType = None, max_retries: int = 3,
-             validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]" = None,
-             **kwargs) -> str:
+             validators: "ValidatorType" = None, **kwargs) -> str:
         """
         从指定url下载文件
         :param dest_dir: 文件夹路径，如果为空，则会返回临时文件路径
@@ -113,20 +127,19 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @abc.abstractmethod
-    def _download(self, max_retries: int, timeout: Timeout,
-                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
-                  **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: Timeout, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
         pass
 
     @abc.abstractmethod
     def _clear(self):
         pass
 
+    @timeoutable
     def _acquire(self, timeout: TimeoutType = None):
-        pass
+        self._lock.acquire(timeout=timeout.remain)
 
     def _release(self):
-        pass
+        ignore_errors(self._lock.release)
 
     def __enter__(self):
         self._acquire()
@@ -139,12 +152,18 @@ class UrlFile(metaclass=abc.ABCMeta):
         return f"{self.__class__.__name__}({self._url})"
 
     class Validator(abc.ABC):
+        """
+        文件完整性校验
+        """
 
         @abc.abstractmethod
         def validate(self, file: "UrlFile", path: str):
             pass
 
     class HashValidator(Validator):
+        """
+        文件哈希校验
+        """
 
         def __init__(self, algorithm: "Literal['md5', 'sha1', 'sha256']", hash: str):
             self._algorithm = algorithm
@@ -155,6 +174,9 @@ class UrlFile(metaclass=abc.ABCMeta):
                 raise DownloadError(f"{file} {self._algorithm} hash does not match {self._hash}")
 
     class SizeValidator(Validator):
+        """
+        文件大小校验
+        """
 
         def __init__(self, size: int):
             self._size = size
@@ -176,9 +198,7 @@ class LocalFile(UrlFile):
     def is_local(self):
         return True
 
-    def _download(self,
-                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
-                  **kwargs) -> Tuple[str, str]:
+    def _download(self, *, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
         src_path = self._url
         if not os.path.exists(src_path):
             raise DownloadError(f"{src_path} does not exist")
@@ -191,28 +211,18 @@ class LocalFile(UrlFile):
         return src_path, guess_file_name(src_path)
 
     def _clear(self):
-        pass
+        self._environ.logger.debug(f"{self._url} is local file, skip")
 
 
 class HttpFile(UrlFile):
 
     def __init__(self, environ: "BaseEnviron", url: str):
         super().__init__(environ, url)
-        self._ident = f"{get_md5(url)}_{guess_file_name(url)[-100:]}"
-        self._root_path = self._environ.get_temp_path("download", self._ident)
+        self._root_path = self._environ.get_temp_path("download", "data", self._ident)
         self._local_path = os.path.join(self._root_path, "file")
         self._context_path = os.path.join(self._root_path, "context")
 
-    @cached_property(lock=True)
-    def _lock(self):
-        from filelock import FileLock
-        return FileLock(
-            self._environ.get_temp_path("download", "lock", self._ident, create_parent=True)
-        )
-
-    def _download(self, max_retries: int, timeout: Timeout,
-                  validators: "Union[UrlFile.Validator, Iterable[UrlFile.Validator]]",
-                  **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: Timeout, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
         if not os.path.exists(self._root_path):
             os.makedirs(self._root_path, exist_ok=True)
 
@@ -279,13 +289,6 @@ class HttpFile(UrlFile):
             os.remove(self._context_path)
         if not os.listdir(self._root_path):
             shutil.rmtree(self._root_path, ignore_errors=True)
-
-    @timeoutable
-    def _acquire(self, timeout: TimeoutType = None):
-        self._lock.acquire(timeout=timeout.remain, poll_interval=1)
-
-    def _release(self):
-        ignore_errors(self._lock.release)
 
 
 class HttpContextVar(property):

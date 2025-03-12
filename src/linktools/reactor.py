@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-import functools
 import threading
 import time
 import traceback
@@ -51,22 +50,21 @@ class Reactor:
         running = True
         while running:
             now = time.time()
-            work = None
+            fn, when, interval = None, None, None
             timeout = None
             with self._lock:
                 for item in self._pending:
-                    (f, when) = item
-                    if now >= when:
-                        work = f
+                    if now >= item[1]:
+                        (fn, when, interval) = item
                         self._pending.remove(item)
                         break
                 if len(self._pending) > 0:
                     timeout = max([min(map(lambda item: item[1], self._pending)) - now, 0])
                 previous_pending_length = len(self._pending)
 
-            if work is not None:
+            if fn is not None:
                 try:
-                    work()
+                    self._work(fn)
                 except (KeyboardInterrupt, EOFError) as e:
                     if self._on_error is not None:
                         self._on_error(e, traceback.format_exc())
@@ -76,6 +74,9 @@ class Reactor:
                         self._on_error(e, traceback.format_exc())
                     else:
                         _logger.warning("Reactor caught an exception", exc_info=True)
+                if interval:
+                    with self._lock:
+                        self._pending.append((fn, when + interval, interval))
 
             with self._lock:
                 if self._running and len(self._pending) == previous_pending_length:
@@ -96,14 +97,14 @@ class Reactor:
     def signal_stop(self, delay: float = None):
         self.schedule(self._stop, delay)
 
-    def schedule(self, fn: Callable[[], any], delay: float = None):
+    def schedule(self, fn: Callable[[], any], delay: float = None, interval: float = None):
         now = time.time()
         if delay is not None:
             when = now + delay
         else:
             when = now
         with self._lock:
-            self._pending.append((functools.partial(self._work, fn), when))
+            self._pending.append((fn, when, interval))
             self._cond.notify()
 
     def _work(self, fn: Callable[[], any]):
@@ -114,7 +115,8 @@ class Reactor:
         worker = self._worker
         if worker:
             if threading.current_thread().ident == worker.ident:
-                raise RuntimeError("Cannot wait on the reactor from its own thread")
+                _logger.warning("Cannot wait on the reactor from its own thread")
+                return False
             return utils.wait_thread(worker, timeout)
         return True
 

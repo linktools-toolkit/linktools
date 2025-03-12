@@ -40,7 +40,7 @@ public class Component<II extends PackageParser.IntentInfo> {
                 break;
         }
 
-        if (component.intents != null && component.intents.size() > 0) {
+        if (component.intents != null && !component.intents.isEmpty()) {
             intents = new ArrayList<>(component.intents.size());
             for (II intent : component.intents) {
                 intents.add(new IntentFilter(intent));

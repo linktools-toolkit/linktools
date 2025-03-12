@@ -563,6 +563,20 @@ class Config:
                 self.update_from_file(os.path.join(root, name))
         return True
 
+    def update_cache(self, **kwargs: Any) -> "Config":
+        """
+        更新缓存
+        """
+        self._cache.save(**kwargs)
+        return self
+
+    def remove_cache(self, *keys: str) -> "Config":
+        """
+        删除缓存
+        """
+        self._cache.remove(*keys)
+        return self
+
     def __contains__(self, key) -> bool:
         return key in self._map
 

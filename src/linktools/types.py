@@ -28,6 +28,7 @@
 """
 import abc as _abc
 import collections as _collections
+import shelve as _shelve
 import threading as _threading
 import time as _time
 import types as _types
@@ -326,6 +327,196 @@ class CacheQueue(_t.Generic[T]):
             self._queue.clear()
             self._put_ts = 0
             self._get_ts = 0
+
+
+def _filter_missing_items(d: _t.Dict[_t.Any, _t.Any]) -> _t.Dict[_t.Any, _t.Any]:
+    return {k: v for k, v in d.items() if v}
+
+
+class _FileCacheLock:
+
+    def __init__(self, cache: "FileCache", type: str, key: str):
+        from filelock import FileLock
+        path = cache.directory / type
+        path.mkdir(parents=True, exist_ok=True)
+        self._lock = FileLock(str(path / f"{key or ''}.lock"))
+
+    def acquire(self, timeout: TimeoutType = None):
+        self._lock.acquire(Timeout(timeout).remain, poll_interval=1)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
+
+
+class _FileCacheData(_t.Generic[T]):
+
+    def __init__(self, cache: "FileCache", type: str):
+        self._cache = cache
+        self._lock = _FileCacheLock(cache, type, "data")
+        self._lock.acquire()
+        self._data = _shelve.open(str(cache.directory / type / "data"))
+
+    def close(self) -> None:
+        self._data.close()
+        self._lock.release()
+
+    def set(self, key: str, value: T, ttl: int = None) -> None:
+        self._data[key] = _filter_missing_items({
+            "data": self._cache.dump(value),
+            "ttl": int(ttl) if ttl else None,
+            "ts": int(_time.time()),
+        })
+
+    def _get(self, key: str) -> _t.Optional[_t.Dict[str, _t.Any]]:
+        value = self._data.get(key, None)
+        if value:
+            timestamp = value.get("ts", None)
+            ttl = value.get("ttl", None)
+            if timestamp and ttl and timestamp + ttl < _time.time():
+                self._data.pop(key)
+                return None
+            return value
+        return None
+
+    def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+        value = self._get(key)
+        if value:
+            return self._cache.load(value.get("data", None))
+        return default
+
+    def peek(self) -> _t.Optional[str]:
+        for key in list(self._data.keys()):
+            value = self._get(key)
+            if value:
+                return key
+        return None
+
+    def peekitem(self) -> _t.Tuple[_t.Optional[str], _t.Optional[T]]:
+        for key in list(self._data.keys()):
+            value = self._get(key)
+            if value:
+                return key, self._cache.load(value.get("data", None))
+        return None, None
+
+    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+        value = self._get(key)
+        if value:
+            self._data.pop(key)
+            return self._cache.load(value.get("data", None))
+        return default
+
+    def incr(self, key: str, delta: int = 1, default: int = 0) -> int:
+        value = self._get(key)
+        if value:
+            result = self._cache.load(value.get("data", None))
+            if not isinstance(result, (int, float)):
+                raise TypeError(f"the value of key `{key}` is not int")
+            result = result + delta
+            value["data"] = self._cache.dump(result)
+            value["time"] = int(_time.time())
+            self._data[key] = value
+        else:
+            result = default
+            self.set(key, result)
+        return result
+
+    def keys(self) -> "_t.Generator[str, None, None]":
+        for key in list(self._data.keys()):
+            value = self._get(key)
+            if value:
+                yield key
+
+    def items(self) -> "_t.Generator[_t.Tuple[str, T], None, None]":
+        for key in list(self._data.keys()):
+            value = self._get(key)
+            if value:
+                yield key, self._cache.load(value.get("data", None))
+
+    def __len__(self):
+        count = 0
+        for key in list(self._data.keys()):
+            value = self._get(key)
+            if value:
+                count += 1
+        return count
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+_basic_cache_types = (type(None), int, float, bool, complex)
+
+
+class FileCache(_t.Generic[T]):
+
+    def __init__(self, directory: PathType, load: _t.Callable[[str], T] = None, dump: _t.Callable[[T], str] = None):
+        self._directory = _Path(directory)
+        self._load = load
+        self._dump = dump
+
+    @property
+    def directory(self) -> _Path:
+        return self._directory
+
+    def lock(self, key: str) -> "_FileCacheLock":
+        return _FileCacheLock(self, "lock", key)
+
+    def open(self) -> "_FileCacheData[T]":
+        return _FileCacheData(self, "data")
+
+    def set(self, key: str, value: T, ttl: int = None):
+        with self.open() as data:
+            data.set(key, value, ttl)
+
+    def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+        with self.open() as data:
+            return data.get(key, default=default)
+
+    def peek(self) -> _t.Optional[T]:
+        with self.open() as data:
+            return data.peek()
+
+    def peekitem(self) -> _t.Tuple[_t.Optional[str], _t.Optional[T]]:
+        with self.open() as data:
+            return data.peekitem()
+
+    def pop(self, key: str, default: _t.Any = None) -> T:
+        with self.open() as data:
+            return data.pop(key, default=default)
+
+    def incr(self, key: str, delta: int = 1, default: int = 0) -> int:
+        with self.open() as data:
+            return data.incr(key, delta, default)
+
+    def items(self):
+        with self.open() as data:
+            yield from data.items()
+
+    def load(self, data: _t.Any) -> T:
+        if self._load:
+            if not isinstance(data, _basic_cache_types):
+                return self._load(data)
+        return data
+
+    def dump(self, data: T) -> _t.Any:
+        if self._dump:
+            if not isinstance(data, _basic_cache_types):
+                return self._dump(data)
+        return data
+
+    def __len__(self):
+        with self.open() as data:
+            return len(data)
 
 
 # Code stolen from celery.local.Proxy: https://github.com/celery/celery/blob/main/celery/local.py

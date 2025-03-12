@@ -81,8 +81,6 @@ public class ProcessUtil {
                         process.gid = Long.parseLong(line.split("\\s+")[1]);
                     }
                 }
-
-                reader.close();
             } catch (IOException e) {
                 // ignore
             } finally {
@@ -110,8 +108,6 @@ public class ProcessUtil {
                         process.name = index >= 0 ? name.substring(index + 1) : name;
                     }
                 }
-
-                reader.close();
             } catch (IOException e) {
                 // ignore
             } finally {
