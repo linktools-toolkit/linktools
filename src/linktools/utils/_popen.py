@@ -82,8 +82,7 @@ if utils.is_unix_like():
                             self.buffer.extend(data)
                 except OSError as e:
                     if e.errno != errno.EBADF:
-                        from .._environ import environ
-                        environ.logger.debug(f"Read io error: {e}")
+                        utils.get_logger().debug(f"Read io error: {e}")
                 if data:
                     while True:
                         index = self.buffer.find(b"\n")
@@ -151,8 +150,7 @@ else:
                     self._queue.put((code, data))
             except OSError as e:
                 if e.errno != errno.EBADF:
-                    from .._environ import environ
-                    environ.logger.debug(f"Handle output error: {e}")
+                    utils.get_logger().debug(f"Handle output error: {e}")
             finally:
                 event.set()
                 self._queue.put((None, None))
@@ -229,13 +227,11 @@ class Process(subprocess.Popen):
                 except psutil.NoSuchProcess:
                     pass
                 except Exception as e:
-                    from .._environ import environ
-                    environ.logger.debug(f"Kill children process failed: {e}")
+                    utils.get_logger().debug(f"Kill children process failed: {e}")
         except psutil.NoSuchProcess:
             pass
         except Exception as e:
-            from .._environ import environ
-            environ.logger.debug(f"List children process failed: {e}")
+            utils.get_logger().debug(f"List children process failed: {e}")
 
         self.terminate()
 
@@ -252,8 +248,6 @@ def popen(
         env: Dict[str, str] = None, append_env: Dict[str, str] = None, default_env: Dict[str, str] = None,
         **kwargs
 ) -> Process:
-    from .._environ import environ
-
     args = [str(arg) for arg in args]
 
     if capture_output is True:
@@ -267,7 +261,7 @@ def popen(
         try:
             cwd = os.getcwd()
         except FileNotFoundError:
-            cwd = environ.temp_path
+            cwd = utils.get_environ().temp_path
             cwd.mkdir(parents=True, exist_ok=True)
 
     if append_env or default_env:
@@ -279,7 +273,7 @@ def popen(
             maps.append(default_env)
         env = ChainMap(*maps)
 
-    environ.logger.debug(f"Exec cmdline: {list2cmdline(args)}")
+    utils.get_logger().debug(f"Exec cmdline: {list2cmdline(args)}")
 
     return Process(
         args,

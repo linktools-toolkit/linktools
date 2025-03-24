@@ -279,7 +279,7 @@ TOOL_SIB:
 # Go-iOS: https://github.com/danielpaulus/go-ios
 ############################################################################################
 TOOL_IOS:
-  version: '1.0.174'
+  version: '1.0.176'
   download_url:
     when:
       - system: darwin
@@ -308,7 +308,7 @@ TOOL_IOS:
 # ipatool: https://github.com/majd/ipatool
 ############################################################################################
 TOOL_IPATOOL:
-  version: '2.1.5'
+  version: '2.1.6'
   download_url:
     when:
       - system: darwin
@@ -345,7 +345,7 @@ TOOL_IPATOOL:
 # hdc: https://developer.huawei.com/consumer/cn/download/
 ############################################################################################
 TOOL_HDC:
-  version: '20240715'
+  version: '20250324'
   download_url:
     when:
       - system: darwin

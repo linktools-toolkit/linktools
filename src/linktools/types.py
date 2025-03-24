@@ -28,18 +28,18 @@
 """
 import abc as _abc
 import collections as _collections
+import logging as _logging
 import shelve as _shelve
 import threading as _threading
 import time as _time
 import types as _types
 import typing as _t
+import weakref as _weakref
 from pathlib import Path as _Path
 
 T = _t.TypeVar("T")
 
 if _t.TYPE_CHECKING:
-    import logging as _logging
-
     P = _t.ParamSpec("P")
 
 PathType = _t.Union[str, _Path]
@@ -47,7 +47,15 @@ QueryDataType = _t.Union[str, int, float]
 QueryType = _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataType]]
 TimeoutType = _t.Union["Timeout", float, int, None]
 
-_cached_property_lock = _threading.RLock()
+_logger: "_t.Optional[_logging.Logger]" = None
+
+
+def _get_logger() -> "_logging.Logger":
+    global _logger
+    if _logger is None:
+        from ._environ import environ
+        _logger = environ.get_logger()
+    return _logger
 
 
 class Error(Exception):
@@ -143,7 +151,7 @@ class Timeout:
                 return False
         return True
 
-    def ensure(self, err_type: _t.Type[Exception] = TimeoutError, message="Timeout") -> None:
+    def ensure(self, err_type: "_t.Callable[[str], Exception]" = TimeoutError, message: str = "Timeout") -> None:
         if not self.check():
             raise err_type(message)
 
@@ -167,6 +175,9 @@ class Stoppable(_abc.ABC):
             self.stop()
             raise
 
+    def _stop_on_exit(self):
+        _weakref.finalize(self, self.stop)
+
     def __enter__(self):
         return self
 
@@ -177,20 +188,15 @@ class Stoppable(_abc.ABC):
 class _EventHandler(dict):
 
     def __init__(self):
-        from ._environ import environ
         super().__init__()
         self._lock = _threading.RLock()
-        self._logger = environ.get_logger("event")
 
     @property
     def lock(self) -> _threading.RLock():
         return self._lock
 
-    @property
-    def logger(self) -> "_logging.Logger":
-        return self._logger
 
-
+_event_handler_lock = _threading.RLock()
 _event_handler_name = "__EventHandlerMixin_event_handler"
 
 
@@ -200,7 +206,7 @@ class EventHandlerMixin(object):
     def _event_handler(self) -> "_EventHandler":
         value = getattr(self, _event_handler_name, None)
         if value is None:
-            with _cached_property_lock:
+            with _event_handler_lock:
                 value = getattr(self, _event_handler_name, None)
                 if value is None:
                     value = _EventHandler()
@@ -208,9 +214,10 @@ class EventHandlerMixin(object):
         return value
 
     def on(self, event: str, callback: "_t.Callable[..., _t.Any]", times: int = None):
+        logger = _get_logger()
         handler = self._event_handler
         with handler.lock:
-            handler.logger.debug(f"Register event `{event}` handler `{callback}`")
+            logger.debug(f"Register event `{event}` handler `{callback}`")
             callbacks = handler.get(event, None)
             if callbacks is None:
                 callbacks = handler[event] = dict()
@@ -220,9 +227,10 @@ class EventHandlerMixin(object):
             }
 
     def off(self, event: str, callback: "_t.Callable[..., _t.Any]"):
+        logger = _get_logger()
         handler = self._event_handler
         with handler.lock:
-            handler.logger.debug(f"Unregister event `{event}` handler `{callback}`")
+            logger.debug(f"Unregister event `{event}` handler `{callback}`")
             if event in handler:
                 callbacks = handler.get(event)
                 try:
@@ -234,6 +242,7 @@ class EventHandlerMixin(object):
         self.on(event, callback, 1)
 
     def trigger(self, event: str, *args: _t.Any, **kwargs: _t.Any):
+        logger = _get_logger()
         handler = self._event_handler
         invoke_list, remove_list = [], []
         with handler.lock:
@@ -247,15 +256,15 @@ class EventHandlerMixin(object):
             for callback in remove_list:
                 callbacks.pop(callback)
             del remove_list
-        handler.logger.debug(f"Event `{event}` invoke {len(invoke_list)} callbacks")
+        logger.debug(f"Event `{event}` invoke {len(invoke_list)} callbacks")
         for callback in invoke_list:
             try:
                 callback(*args, **kwargs)
             except Exception as e:
-                handler.logger.warning(f"Event `{event}` handler `{callback}` error", exc_info=e)
+                logger.warning(f"Event `{event}` handler `{callback}` error", exc_info=e)
 
 
-class CacheQueue(_t.Generic[T]):
+class SlidingQueue(_t.Generic[T]):
     """
     A thread-safe, generic data queue for producer-consumer patterns.
     """
@@ -264,8 +273,8 @@ class CacheQueue(_t.Generic[T]):
         self._lock = _threading.RLock()  # Recursive lock for thread-safe operations
         self._size = size
         self._queue = _collections.deque([])
-        self._put_ts = 0  # Timestamp of the last put operation
-        self._get_ts = 0  # Timestamp of the last get operation
+        self._last_put_time = 0  # Timestamp of the last put operation
+        self._last_get_time = 0  # Timestamp of the last get operation
 
     def put(self, item: T) -> _t.Optional[T]:
         """
@@ -276,7 +285,7 @@ class CacheQueue(_t.Generic[T]):
             if 0 <= self._size <= len(self._queue):
                 result = self._queue.popleft()
             self._queue.append(item)
-            self._put_ts = int(_time.time())
+            self._last_put_time = int(_time.time())
             return result
 
     def get(self) -> _t.Optional[T]:
@@ -285,7 +294,7 @@ class CacheQueue(_t.Generic[T]):
         """
         with self._lock:
             if len(self._queue) > 0:
-                self._get_ts = int(_time.time())
+                self._last_get_time = int(_time.time())
                 return self._queue.popleft()
             return None
 
@@ -298,19 +307,21 @@ class CacheQueue(_t.Generic[T]):
                 return self._queue[0]
             return None
 
-    def is_backlog(self, timeout: int) -> bool:
+    def is_backlogged(self, timeout: int) -> bool:
         """
         Check if the item in the queue has been waiting for more than the given timeout.
         """
         with self._lock:
-            return self._get_ts + timeout < int(_time.time())
+            if len(self._queue) == 0:
+                return False
+            return self._last_get_time + timeout < int(_time.time())
 
-    def is_starve(self, timeout: int) -> bool:
+    def is_starving(self, timeout: int) -> bool:
         """
         Check if the queue has not received new items for more than the given timeout.
         """
         with self._lock:
-            return self._put_ts + timeout < int(_time.time())
+            return self._last_put_time + timeout < int(_time.time())
 
     def is_empty(self) -> bool:
         """
@@ -325,8 +336,8 @@ class CacheQueue(_t.Generic[T]):
         """
         with self._lock:
             self._queue.clear()
-            self._put_ts = 0
-            self._get_ts = 0
+            self._last_put_time = 0
+            self._last_get_time = 0
 
 
 _basic_cache_types = (type(None), int, float, bool, complex)
@@ -345,7 +356,7 @@ class _FileCacheLock:
         self._lock = FileLock(str(path / f"{key or ''}.lock"))
 
     def acquire(self, timeout: TimeoutType = None):
-        self._lock.acquire(Timeout(timeout).remain, poll_interval=1)
+        self._lock.acquire(Timeout(timeout).remain)
 
     def release(self):
         self._lock.release()

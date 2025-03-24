@@ -1021,12 +1021,12 @@ if __name__ == '__main__':
     import cv2
 
     from ..rich import init_logging
-    from ..types import CacheQueue
+    from ..types import SlidingQueue
 
     init_logging(level=logging.DEBUG, show_level=True)
 
     video_codec = av.codec.CodecContext.create("h264", "r")
-    video_frames = CacheQueue[av.VideoFrame](100)
+    video_frames = SlidingQueue[av.VideoFrame](100)
 
 
     def on_init(session: ScrcpySession):

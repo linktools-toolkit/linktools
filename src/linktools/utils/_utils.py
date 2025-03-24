@@ -40,9 +40,12 @@ from ..types import PathType, QueryType, Proxy, IterProxy, Error, TimeoutType
 if TYPE_CHECKING:
     import subprocess
     import threading
+    import logging
 
     from typing import ParamSpec, Literal, Union, Callable, Optional, Type, Any, TypeVar, Dict, Iterable
     from importlib.machinery import ModuleSpec
+
+    from .._environ import Environ
 
     T = TypeVar("T")
     R = TypeVar("R")
@@ -66,6 +69,24 @@ except ModuleNotFoundError:
         _is_unix_like = True
 else:
     _is_windows_like = True
+
+_environ = None
+_logger = None
+
+
+def get_environ() -> "Environ":
+    global _environ
+    if _environ is None:
+        from .._environ import environ
+        _environ = environ
+    return _environ
+
+
+def get_logger() -> "logging.Logger":
+    global _logger
+    if _logger is None:
+        _logger = get_environ().get_logger("utils")
+    return _logger
 
 
 def ignore_errors(
@@ -482,12 +503,12 @@ def user_agent(style=None) -> str:
     global _user_agent
 
     if _user_agent is None:
-        from .._environ import environ
         from ..references.fake_useragent import UserAgent
 
         class _UserAgent(UserAgent):
 
             def __init__(self):
+                environ = get_environ()
                 super().__init__(
                     path=environ.get_asset_path(f"browsers.json"),
                     fallback=environ.get_config("DEFAULT_USER_AGENT", type=str),
@@ -502,8 +523,8 @@ def user_agent(style=None) -> str:
         return _user_agent.random
 
     except Exception as e:
-        from .._environ import environ
-        environ.logger.debug(f"fetch user agent error: {e}")
+        logger = get_logger()
+        logger.debug(f"fetch user agent error: {e}")
 
     return _user_agent.fallback
 

@@ -37,12 +37,12 @@ from typing import TYPE_CHECKING, TypeVar, Type, Any
 
 from . import utils, metadata
 from .decorator import cached_property, cached_classproperty
-from .types import PathType
 
 if TYPE_CHECKING:
     from ._config import ConfigDict, Config
     from ._tools import Tools, Tool
     from ._url import UrlFile
+    from .types import PathType
 
     T = TypeVar("T")
 
@@ -72,7 +72,7 @@ class BaseEnviron(abc.ABC):
         return NotImplemented
 
     @property
-    def root_path(self) -> PathType:
+    def root_path(self) -> "PathType":
         """
         模块路径
         """
