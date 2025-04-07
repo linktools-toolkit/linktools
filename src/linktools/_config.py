@@ -648,8 +648,7 @@ class Config:
 
             default = cache
             if default is not __missing__ and not self.always_ask:
-                if not config.reload:
-                    return default
+                return default
 
             if default is __missing__:
                 default = self.default
@@ -697,8 +696,7 @@ class Config:
 
             default = cache
             if default is not __missing__ and not self.always_ask:
-                if not config.reload:
-                    return default
+                return default
 
             if default is __missing__:
                 default = self.default

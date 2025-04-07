@@ -176,6 +176,20 @@ def _filter_kwargs(kwargs):
     return {k: v for k, v in kwargs.items() if v is not __missing__}
 
 
+class _SubCommandActionInfo:
+
+    def __init__(self, action: Action, no_param: bool):
+        self.action = action
+        self.no_param = no_param
+
+    @property
+    def dest(self):
+        return self.action.dest
+
+    def __repr__(self):
+        return f"SubCommandActionInfo(dest={self.dest})"
+
+
 _subcommand_index: int = 0
 _subcommand_map: Dict[str, Set[str]] = {}
 
@@ -284,6 +298,7 @@ def subcommand(
 def subcommand_argument(
         name_or_flag: str,
         *name_or_flags: str,
+        no_param: bool = False,
         action: Union[str, Type[Action]] = __missing__,
         choices: "Iterable[T]" = __missing__,
         const: Any = __missing__,
@@ -303,6 +318,7 @@ def subcommand_argument(
         subcommand_argument_info = _SubCommandMethodArgumentInfo()
         subcommand_argument_info.set_args(
             *[name_or_flag, *name_or_flags],
+            no_param=no_param,
             action=action,
             nargs=nargs,
             const=const,
@@ -426,9 +442,11 @@ class _SubCommandMethod(SubCommand):
             argument_args = argument.args
             argument_kwargs = dict(argument.kwargs)
 
+            no_param = argument_kwargs.pop("no_param", __missing__)
+
             # 解析dest，把注解的参数和方法参数对应上
-            dest = argument_kwargs.get("dest", None)
-            if not dest:
+            dest = argument_kwargs.get("dest", __missing__)
+            if dest is __missing__:
                 prefix_chars = parser.prefix_chars
                 if not argument_args or len(argument_args) == 1 and argument_args[0][0] not in prefix_chars:
                     dest = argument_args[0]
@@ -451,31 +469,33 @@ class _SubCommandMethod(SubCommand):
 
             # 验证一下dest是否在参数列表中，不在就报错
             signature = inspect.signature(method)
-            if dest not in signature.parameters:
+            if not no_param and dest and dest not in signature.parameters:
                 raise SubCommandError(
-                    f"Check subcommand argument error, "
-                    f"{self.info} has no `{dest}` argument")
+                    f"Check subcommand parameter error, {self.info} has no `{dest}` parameter. {os.linesep}"
+                    f"You can do any of the following: {os.linesep}"
+                    f"1. add `{dest}` parameter to {self.info}, {os.linesep}"
+                    f"2. add `no_param=True` parameter to argument `{', '.join(argument_args)}`.")
 
             # 根据方法参数的注解，设置一些默认值
-            parameter = signature.parameters[dest]
+            parameter = signature.parameters[dest] if not no_param else None
             if "config" in argument_kwargs:
                 config = argument_kwargs.get("config")
                 if isinstance(config, ConfigProperty):
                     if "action" not in argument_kwargs:
                         argument_kwargs.setdefault("action", ConfigAction)
-                        if parameter.annotation != signature.empty:
+                        if parameter and parameter.annotation != signature.empty:
                             if parameter.annotation in (int, float, str, bool):
                                 argument_kwargs.setdefault("type", parameter.annotation)
                     argument_kwargs.setdefault("required", False)
 
-            if "default" not in argument_kwargs:
+            if parameter and "default" not in argument_kwargs:
                 if parameter.default != signature.empty:
                     argument_kwargs.setdefault("default", parameter.default)
                     argument_kwargs.setdefault("required", False)
                 else:
                     argument_kwargs.setdefault("required", True)
 
-            if "action" not in argument_kwargs:
+            if parameter and "action" not in argument_kwargs:
                 if parameter.annotation != signature.empty:
                     if parameter.annotation in (int, float, str):
                         argument_kwargs.setdefault("type", parameter.annotation)
@@ -485,10 +505,8 @@ class _SubCommandMethod(SubCommand):
                         else:
                             argument_kwargs.setdefault("action", "store_true")
 
-            actions.append(parser.add_argument(
-                *argument_args,
-                **_filter_kwargs(argument_kwargs)
-            ))
+            action = parser.add_argument(*argument_args, **_filter_kwargs(argument_kwargs))
+            actions.append(_SubCommandActionInfo(action, no_param=no_param))
 
         return parser
 
@@ -505,7 +523,8 @@ class _SubCommandMethod(SubCommand):
 
         method_kwargs = dict()
         for action in actions:
-            method_kwargs[action.dest] = getattr(args, action.dest)
+            if not action.no_param:
+                method_kwargs[action.dest] = getattr(args, action.dest)
 
         return method(*method_args, **method_kwargs)
 
