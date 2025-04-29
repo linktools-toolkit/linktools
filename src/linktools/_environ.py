@@ -33,7 +33,9 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, Type, Any
+from typing import TYPE_CHECKING, TypeVar, Type, Any, Iterable
+
+from setuptools.command.develop import develop
 
 from . import utils, metadata
 from .decorator import cached_property, cached_classproperty
@@ -298,17 +300,17 @@ class BaseEnviron(abc.ABC):
 
         config = ConfigDict()
 
-        template_path = environ.get_path("template", "tools.yml")
+        develop_path = environ.get_path("develop", "tools.yml")
         data_path = environ.get_data_path("tools", "tools.json")
         asset_path = environ.get_asset_path("tools.json")
 
         if os.path.exists(data_path):
             config.update_from_file(data_path, json.load)
-        elif metadata.__release__ or not os.path.exists(template_path):
+        elif not metadata.__develop__ or not os.path.exists(develop_path):
             config.update_from_file(asset_path, json.load)
         else:
             import yaml
-            config.update_from_file(template_path, yaml.safe_load)
+            config.update_from_file(develop_path, yaml.safe_load)
 
         tools = Tools(self, config)
         paths = os.environ["PATH"].split(os.pathsep)
@@ -371,8 +373,8 @@ class Environ(BaseEnviron):
         return metadata.__description__
 
     @cached_property
-    def root_path(self) -> str:
-        return os.path.dirname(__file__)
+    def root_path(self) -> Path:
+        return Path(os.path.dirname(__file__))
 
     def get_asset_path(self, *paths: str) -> Path:
         return self.get_path("assets", *paths)
@@ -385,7 +387,7 @@ class Environ(BaseEnviron):
             "DEFAULT_USER_AGENT",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 "
+            "Chrome/135.0.0.0 "
             "Safari/537.36"
         )
 

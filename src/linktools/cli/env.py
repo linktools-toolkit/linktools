@@ -41,8 +41,10 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     import argparse
     import os
 
-    from .. import utils
-    from .command import SubCommand
+    from .. import utils, environ as _environ
+    from ..metadata import __release__, __ep_updater__
+    from .command import SubCommand, iter_entry_point_commands
+    from .update import update_all
 
     commands: "List[SubCommand]" = []
 
@@ -71,7 +73,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         return "bash" if environ.system != "windows" else "powershell"
 
     @register_command(name="shell", description="run shell command")
-    class Command(SubCommand):
+    class ShellCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
@@ -98,7 +100,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return shell.popen(append_env=env).call()
 
     @register_command(name="alias", description="generate shell alias script")
-    class Command(SubCommand):
+    class AliasCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
@@ -131,7 +133,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 command_info.id: command_info
                 for command_info in (
                     *iter_module_commands(commands, onerror="warn"),
-                    *iter_entry_point_commands(metadata.__ep_group__, onerror="warn")
+                    *iter_entry_point_commands(metadata.__ep_scripts__, onerror="warn")
                 )
             }
             for command_info in command_infos.values():
@@ -171,7 +173,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             print(result, flush=True)
 
     @register_command(name="completion", description="generate shell auto complete script (deprecated)")
-    class Command(SubCommand):
+    class CompletionCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
@@ -183,7 +185,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             environ.logger.warning("Not support generate completion script, already integrated into alias subcommand")
 
     @register_command(name="java", description="generate java environment script")
-    class Command(SubCommand):
+    class JavaCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
@@ -227,33 +229,28 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             result = os.linesep.join(lines)
             print(result, flush=True)
 
-    @register_command(name="update", description=f"update {environ.name} packages")
-    class Command(SubCommand):
+    if environ is _environ:
 
-        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
-            parser = super().create_parser(type)
-            parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
-            return parser
+        @register_command(name="update", description=f"update {_environ.name} packages")
+        class UpdateCommand(SubCommand):
 
-        def run(self, args: "argparse.Namespace"):
-            try:
-                package = environ.name
-                if args.dependencies:
-                    dependencies = f"[{','.join(args.dependencies)}]"
-                    package = f"{package}{dependencies}"
-                utils.popen(
-                    utils.get_interpreter(), "-m", "pip", "install", "-U", package,
-                ).check_call()
-            except Exception as e:
-                environ.logger.warning(f"Update {environ.name} packages failed: {e}")
+            def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
+                parser = super().create_parser(type)
+                parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
+                return parser
+
+            def run(self, args: "argparse.Namespace"):
+                try:
+                    update_all(args.dependencies or [])
+                except Exception as e:
+                    _environ.logger.warning(f"Update {_environ.name} packages failed: {e}")
 
     @register_command(name="clean", description="clean temporary files")
-    class Command(SubCommand):
+    class CleanCommand(SubCommand):
 
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
-            parser.add_argument("days", metavar="DAYS", nargs="?", type=int, default=7,
-                                help="expire days")
+            parser.add_argument("days", metavar="DAYS", nargs="?", type=int, default=7, help="expire days")
             return parser
 
         def run(self, args: "argparse.Namespace"):

@@ -72,13 +72,13 @@ $ python3 -m linktools
 │   ├── 📘 env: Manage and configure the Linktools environment
 │   ├── 👉 grep: Search and match files using regular expressions
 │   └── 👉 tools: Execute tools directly from remote URLs
-├── 📖 it: iOS scripts
-│   ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
-│   ├── 👉 ios: Manage multiple iOS devices effortlessly with go-ios commands
-│   ├── 👉 ipa: Parse and extract detailed information from IPA files
-│   ├── 👉 objection: Simplify security testing with Objection on jailbroken devices
-│   ├── 👉 scp: Securely copy files to/from a jailbroken iOS device using OpenSSH
-│   └── 👉 ssh: Remotely login to jailbroken iOS devices using the OpenSSH client
+└── 📖 it: iOS scripts
+    ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
+    ├── 👉 ios: Manage multiple iOS devices effortlessly with go-ios commands
+    ├── 👉 ipa: Parse and extract detailed information from IPA files
+    ├── 👉 objection: Simplify security testing with Objection on jailbroken devices
+    ├── 👉 scp: Securely copy files to/from a jailbroken iOS device using OpenSSH
+    └── 👉 ssh: Remotely login to jailbroken iOS devices using the OpenSSH client
 ```
 
 ### 通用功能（脚本前缀为ct-）
@@ -122,7 +122,7 @@ $ ct-env clean 7
 
 ##### 常用命令
 
-所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/template/tools.yml)查看，此处以apktool举例
+所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/develop/tools.yml)查看，此处以apktool举例
 
 ```bash
 # 初始化并执行apktool命令

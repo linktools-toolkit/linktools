@@ -26,4 +26,4 @@ include-package-data = true
 linktools = ["assets/**"]
 
 [tool.setuptools.exclude-package-data]
-linktools = ["template/**"]
+linktools = ["develop/**"]

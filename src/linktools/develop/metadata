@@ -27,7 +27,6 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-
 class __MissingType:
     __eq__ = lambda l, r: \
         l is r or type(l) is type(r)
@@ -35,11 +34,19 @@ class __MissingType:
     __bool__ = lambda _: False
 
 
+def __is_develop():
+    import os
+    path = os.path.join(os.path.dirname(__file__), "develop")
+    return os.path.isdir(path)
+
+
 __name__ = "linktools"
-__release__ = {{ "True" if release else "False" }}
 __version__ = "{{ version }}"
-__ep_group__ = "linktools_scripts"
+__release__ = {{ "True" if release else "False" }}
+__develop__ = __is_develop()
 __missing__ = __MissingType()
+__ep_script__ = "linktools_scripts"
+__ep_updater__ = "linktools_updater"
 __description__ = f"""\
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
@@ -47,3 +54,6 @@ __description__ = f"""\
  / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
 /_/_/_/ /_/_/|_|\\__/\\____/\\____/_/____/
 """
+
+del __is_develop
+del __MissingType

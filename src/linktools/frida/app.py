@@ -19,9 +19,8 @@ from frida.core import Session, Script
 
 from .script import FridaUserScript, FridaEvalCode, FridaScriptFile
 from .server import FridaServer
-from .. import utils, environ
+from .. import utils, environ, metadata
 from ..decorator import timeoutable, cached_property
-from ..metadata import __release__
 from ..reactor import Reactor
 from ..types import TimeoutType, Stoppable
 
@@ -553,7 +552,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
 
         # 初始化内置脚本
         script_path = environ.get_asset_path("frida.min.js")
-        if not __release__ or environ.debug or not os.path.exists(script_path):
+        if metadata.__develop__ or environ.debug or not os.path.exists(script_path):
             script_path = environ.get_asset_path("frida.js")
         self._internal_script = FridaScriptFile(script_path)
 

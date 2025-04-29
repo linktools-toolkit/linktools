@@ -83,7 +83,17 @@ if __name__ == '__main__':
         version = ".".join(map(str, items))
         version = f"{version}.post100.dev0"
 
-    with open(get_src_path("template", "tools.yml"), "rb") as fd_in, \
+    with open(get_src_path("develop", "metadata"), "rt", encoding="utf-8") as fd_in, \
+            open(get_src_path("metadata.py"), "wt", encoding="utf-8") as fd_out:
+        fd_out.write(
+            Template(fd_in.read()).render(
+                release=release,
+                version=version,
+                develop=False,
+            )
+        )
+
+    with open(get_src_path("develop", "tools.yml"), "rb") as fd_in, \
             open(get_src_path("assets", "tools.json"), "wt") as fd_out:
         json.dump(
             {
@@ -92,15 +102,6 @@ if __name__ == '__main__':
                 if key[0].isupper()
             },
             fd_out
-        )
-
-    with open(get_src_path("template", "metadata"), "rt", encoding="utf-8") as fd_in, \
-            open(get_src_path("metadata.py"), "wt", encoding="utf-8") as fd_out:
-        fd_out.write(
-            Template(fd_in.read()).render(
-                release=release,
-                version=version,
-            )
         )
 
     with open(get_root_path("requirements.yml"), "rt", encoding="utf-8") as fd:
