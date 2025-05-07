@@ -26,90 +26,150 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-
-from typing import TYPE_CHECKING, Iterable
+import abc
+import pathlib
+from argparse import Namespace
+from typing import TYPE_CHECKING, Iterable, Optional
 from urllib import parse
 
-from . import iter_entry_point_commands
+from . import BaseCommand, CommandParser, CommandError
 from .. import utils
-from .._environ import environ
-from ..metadata import __release__, __develop__, __ep_updater__
 
 if TYPE_CHECKING:
     from typing import TypeVar
+    from ..types import PathType
 
     T = TypeVar("T")
 
 
-def get_repository_url(name: str):
-    try:
-        from importlib.metadata import distribution
-    except ImportError:
-        from importlib_metadata import distribution
+class Updater(metaclass=abc.ABCMeta):
 
-    dist = distribution(name)
-    for item in dist.metadata.get_all("Project-Url") or []:
-        key, url = item.split(",", 1)
-        if key.strip().lower() == "repository":
-            return url.strip()
-    return None
+    def __init__(self):
+        self._cwd: Optional[str] = None
+
+    def update(
+            self,
+            name: str,
+            index_url: str = None,
+            extra_index_url: str = None,
+            dependencies: "Iterable[str]" = None,
+    ):
+        pip_args = ["pip", "install"]
+        pip_deps = f"[{','.join(dependencies)}]" if dependencies else ""
+        pip_args.extend(self._append_package_args(name, pip_deps))
+
+        if index_url:
+            pip_args.append(f"--index-url={index_url}")
+            url = parse.urlparse(index_url)
+            if url.scheme == "http":
+                pip_args.append("--trusted-host")
+                pip_args.append(url.netloc)
+
+        if extra_index_url:
+            pip_args.append(f"--extra-index-url={extra_index_url}")
+            url = parse.urlparse(extra_index_url)
+            if url.scheme == "http":
+                pip_args.append("--trusted-host")
+                pip_args.append(url.netloc)
+
+        utils.popen(
+            utils.get_interpreter(), "-m", *pip_args,
+            cwd=self._cwd,
+        ).check_call()
+
+    @abc.abstractmethod
+    def _append_package_args(self, name: str, deps: str) -> "Iterable[str]":
+        pass
 
 
-def update(
-        name: str,
-        develop: bool,
-        release: bool,
-        *,
-        project_path: str = None,
-        repository_url: str = None,
-        extra_index_url: str = None,
-        dependencies: "Iterable[str]" = None
-) -> None:
-    pip_args = ["pip", "install"]
-    pip_deps = f"[{','.join(dependencies)}]" if dependencies else ""
-    pip_cwd = project_path
+class DevelopUpdater(Updater):
 
-    if develop:
-        pip_args.append("--editable")
-        pip_args.append(f".{pip_deps}")
+    def __init__(self, project_path: "PathType", max_depth: int = 2):
+        super().__init__()
+        self._project_path = project_path
+        self._max_depth = max_depth
 
-    elif not release:
+    def _append_package_args(self, name: str, deps: str) -> "Iterable[str]":
+        self._cwd = self.get_project_url(self._project_path, self._max_depth)
+        if not self._cwd:
+            raise CommandError(
+                f"{self._project_path} does not appear to be a Python project: "
+                f"neither 'setup.py' nor 'pyproject.toml' found."
+            )
+        return ["--editable", f".{deps}"]
+
+    @classmethod
+    def get_project_url(cls, path: "PathType", max_depth: int) -> Optional[pathlib.Path]:
+        path = pathlib.Path(path)
+        for i in range(max(max_depth, 0) + 1):
+            if path.is_dir():
+                if (path / "pyproject.toml").exists() or (path / "setup.py").exists():
+                    return path
+            path = path.parent
+        return None
+
+
+class GitUpdater(Updater):
+
+    def __init__(self, repository_url: str = None):
+        super().__init__()
+        self._repository_url = repository_url
+
+    def _append_package_args(self, name: str, deps: str) -> "Iterable[str]":
+        repository_url = self._repository_url
         if not repository_url:
-            repository_url = get_repository_url(name)
+            repository_url = self.get_repository_url(name)
         if not repository_url:
-            pip_args.append("--upgrade")
-            pip_args.append(f"{name}{pip_deps}")
-        else:
-            pip_args.append("--ignore-installed")
-            pip_args.append(f"{name}{pip_deps}@git+{repository_url.strip()}")
+            raise CommandError(f"{name} has no repository url")
+        return ["--ignore-installed", f"{name}{deps}@git+{repository_url.strip()}"]
 
-    else:
-        pip_args.append("--upgrade")
-        pip_args.append(f"{name}{pip_deps}")
+    @classmethod
+    def get_repository_url(cls, name: str):
+        try:
+            from importlib.metadata import distribution
+        except ImportError:
+            from importlib_metadata import distribution
 
-    if extra_index_url:
-        pip_args.append(f"--extra-index-url={extra_index_url}")
-        url = parse.urlparse(extra_index_url)
-        if url.scheme == "http":
-            pip_args.append("--trusted-host")
-            pip_args.append(url.netloc)
-
-    utils.popen(
-        utils.get_interpreter(), "-m", *pip_args,
-        cwd=pip_cwd,
-    ).check_call()
+        dist = distribution(name)
+        for item in dist.metadata.get_all("Project-Url") or []:
+            key, url = item.split(",", 1)
+            if key.strip().lower() == "repository":
+                return url.strip()
+        return None
 
 
-def update_all(dependencies: "Iterable[str]"):
-    environ.logger.info("Update main packages ...")
-    update(
-        environ.name,
-        develop=__develop__,
-        release=__release__,
-        project_path=environ.root_path.parent.parent,
-        dependencies=dependencies,
-    )
+class PypiUpdater(Updater):
 
-    for command_info in iter_entry_point_commands(__ep_updater__, onerror="warn"):
-        environ.logger.info(f"Update package through {command_info.module} ...")
-        command_info.command()
+    def _append_package_args(self, name: str, deps: str) -> "Iterable[str]":
+        return ["--upgrade", f"{name}{deps}"]
+
+
+class UpdateCommand(BaseCommand):
+
+    def __init__(
+            self,
+            name: str,
+            updater: Updater,
+            index_url: str = None,
+            extra_index_url: str = None,
+    ):
+        super().__init__()
+        self._update_name = name
+        self._index_url = index_url
+        self._extra_index_url = extra_index_url
+        self._updater = updater
+
+    def init_arguments(self, parser: CommandParser) -> None:
+        parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
+        parser.add_argument("--index-url", metavar="INDEX_URL", default=self._index_url)
+        parser.add_argument("--extra-index-url", metavar="EXTRA_INDEX_URL", default=self._extra_index_url)
+
+    def run(self, args: Namespace) -> Optional[int]:
+        if not self._updater:
+            raise CommandError(f"No updater found")
+        self._updater.update(
+            name=self._update_name,
+            dependencies=args.dependencies,
+            index_url=args.index_url,
+            extra_index_url=args.extra_index_url,
+        )

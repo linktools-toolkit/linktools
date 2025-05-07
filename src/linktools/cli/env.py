@@ -42,9 +42,9 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     import os
 
     from .. import utils, environ as _environ
-    from ..metadata import __release__, __ep_updater__
+    from ..metadata import __release__, __develop__, __ep_updater__
     from .command import SubCommand, iter_entry_point_commands
-    from .update import update_all
+    from .update import DevelopUpdater, GitUpdater, PypiUpdater
 
     commands: "List[SubCommand]" = []
 
@@ -241,7 +241,17 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             def run(self, args: "argparse.Namespace"):
                 try:
-                    update_all(args.dependencies or [])
+                    environ.logger.info("Update main packages ...")
+                    updater = utils.coalesce(*[
+                        DevelopUpdater(environ.root_path) if __develop__ else None,
+                        GitUpdater() if not __release__ else None,
+                        PypiUpdater()
+                    ])
+                    updater.update(environ.name, dependencies=args.dependencies or [])
+
+                    for command_info in iter_entry_point_commands(__ep_updater__, onerror="warn"):
+                        environ.logger.info(f"Update package through {command_info.module} ...")
+                        command_info.command([])
                 except Exception as e:
                     _environ.logger.warning(f"Update {_environ.name} packages failed: {e}")
 
@@ -267,14 +277,15 @@ if __name__ == '__main__':
 
     class Command(BaseCommand):
 
-        class Main(CommandMain):
-
-            def init_logging(self):
-                logging.basicConfig(level=logging.CRITICAL)
-
         @property
         def main(self) -> "CommandMain":
-            return self.Main(self)
+
+            class Main(CommandMain):
+
+                def init_logging(self):
+                    logging.basicConfig(level=logging.CRITICAL)
+
+            return Main(self)
 
         def init_base_arguments(self, parser: "argparse.ArgumentParser"):
             pass

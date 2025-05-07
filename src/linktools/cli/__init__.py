@@ -36,6 +36,8 @@ from .command import \
     iter_module_commands, iter_entry_point_commands, \
     CommandMain, CommandParser
 
+from .update import UpdateCommand, PypiUpdater, DevelopUpdater, GitUpdater
+
 from .device import \
     DeviceCommandMixin, AndroidCommandMixin, IOSCommandMixin, \
     AndroidCommand, IOSCommand

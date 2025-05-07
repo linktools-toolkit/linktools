@@ -144,7 +144,7 @@ def cast_bool(obj: "Any", default: "Any" = __missing__) -> bool:
     return cast(bool, obj, default)
 
 
-def coalesce(*args: "Any") -> "Any":
+def coalesce(*args: "T") -> "T":
     """
     从参数列表中返回第一个不为None的值
     """
@@ -343,7 +343,7 @@ def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
         return False
 
 
-def join_path(root_path: PathType, *paths: [str]) -> Path:
+def join_path(root_path: PathType, *paths: str) -> Path:
     target_path = Path(root_path)
     for path in paths:
         parent_path = str(target_path)
