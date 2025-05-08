@@ -27,24 +27,10 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-class __MissingType:
-    __eq__ = lambda l, r: \
-        l is r or type(l) is type(r)
-    __repr__ = lambda _: "__missing__"
-    __bool__ = lambda _: False
-
-
-def __is_develop():
-    import os
-    path = os.path.join(os.path.dirname(__file__), "develop")
-    return os.path.isdir(path)
-
-
 __name__ = "linktools"
 __version__ = "{{ version }}"
 __release__ = {{ "True" if release else "False" }}
-__develop__ = __is_develop()
-__missing__ = __MissingType()
+__develop__ = {{ "True" if develop else "False" }}
 __ep_script__ = "linktools_scripts"
 __ep_updater__ = "linktools_updater"
 __description__ = f"""\
@@ -55,5 +41,12 @@ __description__ = f"""\
 /_/_/_/ /_/_/|_|\\__/\\____/\\____/_/____/
 """
 
-del __is_develop
+class __MissingType:
+    __eq__ = lambda l, r: \
+        l is r or type(l) is type(r)
+    __repr__ = lambda _: "__missing__"
+    __bool__ = lambda _: False
+
+__missing__ = __MissingType()
+
 del __MissingType
