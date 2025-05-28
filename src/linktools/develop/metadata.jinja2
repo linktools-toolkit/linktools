@@ -27,17 +27,17 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-__name__ = "linktools"
+__name__ = "{{ config.get('project', 'name') }}"
 __version__ = "{{ version }}"
 __release__ = {{ "True" if release else "False" }}
 __develop__ = {{ "True" if develop else "False" }}
-__ep_script__ = "linktools_scripts"
-__ep_updater__ = "linktools_updater"
+__ep_scripts__ = "{{ scripts_entrypoint }}"
+__ep_updater__ = "{{ updater_entrypoint }}"
 __description__ = f"""\
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \\/ //_/ __/ __ \\/ __ \\/ / ___/  linktools toolkit (v{{ version }})
- / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
+  / / / __ \\/ //_/ __/ __ \\/ __ \\/ / ___/  {{ config.get('project', 'name') }} toolkit (v{{ version }})
+ / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: {{ config.get('project', 'authors')[0]['name'] }} <{{ config.get('project', 'authors')[0]['email'] }}>
 /_/_/_/ /_/_/|_|\\__/\\____/\\____/_/____/
 """
 
