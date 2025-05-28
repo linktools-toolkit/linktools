@@ -33,9 +33,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, Type, Any, Iterable
-
-from setuptools.command.develop import develop
+from typing import TYPE_CHECKING, TypeVar, Type, Any
 
 from . import utils, metadata
 from .decorator import cached_property, cached_classproperty

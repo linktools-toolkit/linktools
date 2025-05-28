@@ -39,11 +39,8 @@ from typing import List, Dict, Optional, Mapping
 import frida
 
 from .. import environ, utils
-from ..mobile.android import AdbDevice
-from ..mobile.ios import GoIOSDevice
-from ..mobile.ios import GoIOSDevice
-from ..mobile.ios import GoIOSDevice
 from ..decorator import cached_classproperty
+from ..mobile.android import AdbDevice
 from ..mobile.ios import GoIOSDevice
 from ..types import Timeout, Stoppable, DownloadHttpError
 

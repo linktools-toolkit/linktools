@@ -7,8 +7,6 @@ dependencies:
 dev-dependencies:
   - pyyaml
 
-release-dependencies: []
-
 optional-dependencies:
   # 下载时使用requests包，并且支持socks5代理
   # Use requests package for downloading, and support socks5 proxy

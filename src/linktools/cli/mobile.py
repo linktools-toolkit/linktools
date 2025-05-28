@@ -33,10 +33,8 @@ from argparse import ArgumentParser, Action, Namespace
 from typing import Optional, Callable, List, Type, Generic
 
 from . import BaseCommand, CommandParser
+from ..mobile import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
 from ..mobile.android import Adb, AdbError, AdbDevice
-from ..mobile import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
-from ..mobile import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
-from ..mobile import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
 from ..mobile.ios import GoIOS, GoIOSError, GoIOSDevice
 from ..rich import choose
 from ..types import PathType, FileCache
