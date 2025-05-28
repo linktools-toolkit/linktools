@@ -14,6 +14,21 @@ from .types import TimeoutType
 _logger = environ.get_logger("reactor")
 
 
+class _ReactorEvent:
+
+    def __init__(self, fn: Callable[[], any], when: float, interval: float):
+        self.fn = fn
+        self.when = when
+        self.interval = interval
+
+    def copy(self, **kwargs):
+        return _ReactorEvent(
+            kwargs.get("fn", self.fn),
+            kwargs.get("when", self.when),
+            kwargs.get("interval", self.interval),
+        )
+
+
 # Code stolen from frida_tools.application.Reactor
 class Reactor:
 
@@ -21,10 +36,10 @@ class Reactor:
         self._running = False
         self._on_stop = on_stop
         self._on_error = on_error
-        self._pending = deque([])
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._worker = None
+        self._pending: "deque[_ReactorEvent]" = deque([])
 
     def is_running(self) -> "bool":
         with self._lock:
@@ -50,16 +65,18 @@ class Reactor:
         running = True
         while running:
             now = time.time()
-            fn, when, interval = None, None, None
+            fn = None
             timeout = None
             with self._lock:
                 for item in self._pending:
-                    if now >= item[1]:
-                        (fn, when, interval) = item
+                    if now >= item.when:
                         self._pending.remove(item)
+                        if item.interval is not None:
+                            self._pending.append(item.copy(when=item.when + item.interval))
+                        fn = item.fn
                         break
                 if len(self._pending) > 0:
-                    timeout = max([min(map(lambda item: item[1], self._pending)) - now, 0])
+                    timeout = max([min(map(lambda o: o.when, self._pending)) - now, 0])
                 previous_pending_length = len(self._pending)
 
             if fn is not None:
@@ -74,9 +91,6 @@ class Reactor:
                         self._on_error(e, traceback.format_exc())
                     else:
                         _logger.warning("Reactor caught an exception", exc_info=True)
-                if interval:
-                    with self._lock:
-                        self._pending.append((fn, when + interval, interval))
 
             with self._lock:
                 if self._running and len(self._pending) == previous_pending_length:
@@ -104,7 +118,8 @@ class Reactor:
         else:
             when = now
         with self._lock:
-            self._pending.append((fn, when, interval))
+            item = _ReactorEvent(fn, when, interval)
+            self._pending.append(item)
             self._cond.notify()
 
     def _work(self, fn: Callable[[], any]):

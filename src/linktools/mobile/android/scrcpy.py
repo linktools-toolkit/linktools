@@ -37,9 +37,9 @@ import time
 from typing import List, Dict, Any, Optional, Callable
 
 from .adb import AdbDevice, AdbError
-from .. import environ, utils
-from ..decorator import cached_classproperty
-from ..types import Stoppable
+from ... import environ, utils
+from ...decorator import cached_classproperty
+from ...types import Stoppable
 
 logger = environ.get_logger("android.scrcpy")
 
@@ -412,8 +412,9 @@ class ScrcpyServer(Stoppable):
             server_url = server_info["url"].format(**server_info)
             server_path = environ.get_data_path("android", "scrcpy", server_name, create_parent=True)
             if not server_path.exists():
-                url_file = environ.get_url_file(server_url)
-                url_file.save(server_path.parent, server_path.name)
+                with environ.get_url_file(server_url) as url_file:
+                    if not server_path.exists():
+                        url_file.save(server_path.parent, server_path.name)
 
             remote_path = self._device.push_file(
                 server_path,
@@ -1020,8 +1021,8 @@ if __name__ == '__main__':
     import av
     import cv2
 
-    from ..rich import init_logging
-    from ..types import SlidingQueue
+    from ...rich import init_logging
+    from ...types import SlidingQueue
 
     init_logging(level=logging.DEBUG, show_level=True)
 

@@ -30,7 +30,7 @@ import os
 from argparse import ArgumentParser, Namespace
 from typing import Optional
 
-from linktools.android import AdbDevice
+from linktools.mobile.android import AdbDevice
 from linktools.cli import AndroidCommand, CommandError
 
 

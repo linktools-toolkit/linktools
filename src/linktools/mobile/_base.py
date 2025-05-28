@@ -4,9 +4,9 @@ import subprocess
 from abc import ABC, abstractmethod
 from typing import Any, Generator, TypeVar, Callable, Union, IO
 
-from . import utils, Tool, environ
-from .decorator import timeoutable
-from .types import TimeoutType, Error
+from .. import utils, Tool, environ
+from ..decorator import timeoutable
+from ..types import TimeoutType, Error
 
 BridgeType = TypeVar("BridgeType", bound="Bridge")
 DeviceType = TypeVar("DeviceType", bound="BaseDevice")
@@ -152,11 +152,10 @@ class BaseDevice(ABC):
         pass
 
     @abstractmethod
-    def copy(self, timeout: TimeoutType):
+    def copy(self, **kwargs) -> "DeviceType":
         """
         获取设备名
-        :param timeout: 超时时间
-        :return: 设备名
+        :return: 设备对象
         """
         pass
 

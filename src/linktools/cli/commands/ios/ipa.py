@@ -6,7 +6,7 @@ from argparse import ArgumentParser, Namespace
 from typing import Optional
 
 from linktools.cli import BaseCommand
-from linktools.ios import IPA
+from linktools.mobile.ios import IPA
 
 
 class Command(BaseCommand):

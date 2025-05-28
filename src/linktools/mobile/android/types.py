@@ -28,7 +28,7 @@
 """
 from typing import Optional
 
-from .. import utils
+from ... import utils
 
 
 class PatternMatcher:

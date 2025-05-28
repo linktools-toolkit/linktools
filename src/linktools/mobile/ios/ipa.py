@@ -11,7 +11,7 @@ import re
 import zipfile
 from typing import Optional, Dict, Any, List
 
-from ..types import Error
+from ...types import Error
 
 _INFO_PLIST = "Info.plist"
 

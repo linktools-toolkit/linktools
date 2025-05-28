@@ -28,4 +28,4 @@
 """
 
 from .adb import Adb, AdbDevice, AdbError
-from .struct import App, Permission, Component, Activity, Service, Receiver, Provider, IntentFilter
+from .types import App, Permission, Component, Activity, Service, Receiver, Provider, IntentFilter

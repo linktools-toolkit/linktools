@@ -33,12 +33,11 @@ import re
 import time
 from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar
 
-from .struct import App, UnixSocket, InetSocket, Process, File, SystemService
-from .. import utils
-from .._environ import environ
-from ..decorator import cached_property, cached_classproperty, timeoutable
-from ..device import BridgeError, Bridge, BaseDevice
-from ..types import TimeoutType, Stoppable
+from .types import App, UnixSocket, InetSocket, Process, File, SystemService
+from .._base import BridgeError, Bridge, BaseDevice
+from ... import utils, environ
+from ...decorator import cached_property, cached_classproperty, timeoutable
+from ...types import TimeoutType, Stoppable
 
 if TYPE_CHECKING:
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="AdbDevice")

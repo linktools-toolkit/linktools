@@ -7,11 +7,10 @@ import time
 from subprocess import TimeoutExpired
 from typing import Any, Generator, List, Callable, Dict, TYPE_CHECKING, TypeVar
 
-from .. import utils
-from .._environ import environ
-from ..decorator import cached_property, timeoutable
-from ..device import BridgeError, Bridge, BaseDevice
-from ..types import Stoppable
+from .._base import BridgeError, Bridge, BaseDevice
+from ... import utils, environ
+from ...decorator import cached_property, timeoutable
+from ...types import Stoppable
 
 if TYPE_CHECKING:
     from linktools.ssh import SSHClient

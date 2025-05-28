@@ -3,14 +3,14 @@
 
 from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar
 
-from .. import utils
-from .._environ import environ
-from ..decorator import cached_property, timeoutable
-from ..device import BridgeError, Bridge, BaseDevice
-from ..types import TimeoutType
+from .._base import BridgeError, Bridge, BaseDevice
+from ... import utils
+from ..._environ import environ
+from ...decorator import cached_property, timeoutable
+from ...types import TimeoutType
 
 if TYPE_CHECKING:
-    DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="Device")
+    DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="HdcDevice")
 
 _logger = environ.get_logger("harmony.hdc")
 

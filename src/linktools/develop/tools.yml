@@ -1,6 +1,6 @@
 # All tools
 
-_py: &PY
+$py: &PY
   depends_on: 'python'
   absolute_path: '{tools.python.absolute_path}'
   executable_cmdline:
@@ -8,7 +8,7 @@ _py: &PY
     - '-m'
     - '{name}'
 
-_jar: &JAR
+$jar: &JAR
   depends_on: 'java'
   executable_cmdline:
     - 'java'
@@ -249,31 +249,31 @@ TOOL_COMPACT_DEX_CONVERTER:
 ############################################################################################
 # sib: https://github.com/SonicCloudOrg/sonic-ios-bridge
 ############################################################################################
-TOOL_SIB:
-  version: '1.3.20-20240914'
-  download_url:
-    when:
-      - system: darwin
-        machine: arm64
-        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_macosx_arm64.tar.gz'
-      - system: darwin
-        machine: x86_64
-        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_macosx_x86_64.tar.gz'
-      - system: linux
-        machine: x86_64
-        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_linux_x86_64.tar.gz'
-      - system: windows
-        machine: amd64
-        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_windows_x86_64.tar.gz'
-      - else: ~
-  unpack_path: 'sib-{version}'
-  target_path:
-    when:
-      - system: [darwin, linux]
-        then: 'sib'
-      - system: windows
-        then: 'sib.exe'
-      - else: ~
+#TOOL_SIB:
+#  version: '1.3.20-20240914'
+#  download_url:
+#    when:
+#      - system: darwin
+#        machine: arm64
+#        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_macosx_arm64.tar.gz'
+#      - system: darwin
+#        machine: x86_64
+#        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_macosx_x86_64.tar.gz'
+#      - system: linux
+#        machine: x86_64
+#        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_linux_x86_64.tar.gz'
+#      - system: windows
+#        machine: amd64
+#        then: 'https://github.com/ice-black-tea/sonic-ios-bridge/releases/download/v{version}/sonic-ios-bridge_{version}_windows_x86_64.tar.gz'
+#      - else: ~
+#  unpack_path: 'sib-{version}'
+#  target_path:
+#    when:
+#      - system: [darwin, linux]
+#        then: 'sib'
+#      - system: windows
+#        then: 'sib.exe'
+#      - else: ~
 
 ############################################################################################
 # Go-iOS: https://github.com/danielpaulus/go-ios

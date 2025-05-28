@@ -30,7 +30,7 @@ from argparse import ArgumentParser, Namespace
 from typing import Optional
 
 from linktools import utils, environ
-from linktools.android import App, Permission, \
+from linktools.mobile.android import App, Permission, \
     Component, Activity, Service, Receiver, Provider, IntentFilter
 from linktools.cli import AndroidCommand
 from linktools.cli.argparse import BooleanOptionalAction

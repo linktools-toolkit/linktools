@@ -294,13 +294,10 @@ class HttpFile(UrlFile):
 class HttpContextVar(property):
 
     def __init__(self, key, default=None):
-        def fget(o: "HttpContext"):
-            return o.db.get(key, default)
-
-        def fset(o: "HttpContext", v):
-            o.db[key] = v
-
-        super().__init__(fget=fget, fset=fset)
+        super().__init__(
+            fget=lambda o: o._db.get(key, default),
+            fset=lambda o, v: o._db.__setitem__(key, v)
+        )
 
 
 class HttpContext:
@@ -322,10 +319,6 @@ class HttpContext:
 
     def __exit__(self, *args, **kwargs):
         self._db.__exit__(*args, **kwargs)
-
-    @property
-    def db(self) -> shelve.Shelf:
-        return self._db
 
     def download(self, timeout: TimeoutType):
         self._environ.logger.debug(f"Download file to temp path {self.file_path}")

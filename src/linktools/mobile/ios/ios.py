@@ -31,14 +31,14 @@ import subprocess
 import time
 from typing import TYPE_CHECKING, TypeVar, List, Generator, Any, Callable, Dict
 
-from .struct import App, Process
-from .. import utils, environ
-from ..decorator import timeoutable, cached_property
-from ..device import BridgeError, Bridge, BaseDevice
-from ..types import Stoppable, TimeoutType, Timeout
+from .types import App, Process
+from .._base import BridgeError, Bridge, BaseDevice
+from ... import utils, environ
+from ...decorator import timeoutable, cached_property
+from ...types import Stoppable, TimeoutType, Timeout
 
 if TYPE_CHECKING:
-    from ..ssh import SSHClient
+    from linktools.ssh import SSHClient
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="GoIOSDevice")
 
@@ -431,7 +431,7 @@ class GoIOSForward(Stoppable):
 
 if __name__ == '__main__':
     import logging
-    from ..rich import init_logging
+    from linktools.rich import init_logging
 
     init_logging(level=logging.DEBUG, show_level=True)
 

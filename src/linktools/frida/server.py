@@ -39,9 +39,12 @@ from typing import List, Dict, Optional, Mapping
 import frida
 
 from .. import environ, utils
-from ..android import AdbDevice
+from ..mobile.android import AdbDevice
+from ..mobile.ios import GoIOSDevice
+from ..mobile.ios import GoIOSDevice
+from ..mobile.ios import GoIOSDevice
 from ..decorator import cached_classproperty
-from ..ios import GoIOSDevice
+from ..mobile.ios import GoIOSDevice
 from ..types import Timeout, Stoppable, DownloadHttpError
 
 _logger = environ.get_logger("frida.server")

@@ -10,7 +10,7 @@ from paramiko.ssh_exception import SSHException
 
 from linktools import utils
 from linktools.cli import IOSCommand
-from linktools.ios import SibDevice
+from linktools.mobile.ios import SibDevice
 from linktools.ssh import SSHClient
 
 _REMOTE_PATH_PREFIX = ":"

@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : __init__.py.py 
-@time    : 2023/01/14
-@site    :  
-@software: PyCharm 
+@file    : __init__.py
+@time    : 2018/11/25
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -27,18 +27,4 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from . import argparse
-
-from .command import \
-    BaseCommand, BaseCommandGroup, CommandError, \
-    SubCommand, SubCommandGroup, SubCommandWrapper, \
-    subcommand, subcommand_argument, SubCommandError, NotFoundSubCommand, \
-    iter_module_commands, iter_entry_point_commands, \
-    CommandMain, CommandParser
-
-from .update import UpdateCommand, PypiUpdater, DevelopUpdater, GitUpdater
-
-from .mobile import \
-    DeviceCommandMixin, \
-    AndroidCommandMixin, AndroidCommand, \
-    IOSCommandMixin, IOSCommand
+from ._base import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices

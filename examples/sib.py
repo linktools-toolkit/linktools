@@ -32,7 +32,7 @@ from typing import Optional
 
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument, IOSCommand
-from linktools.ios import GoIOSDevice
+from linktools.mobile.ios import GoIOSDevice
 
 
 class Command(IOSCommand):
