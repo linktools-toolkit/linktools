@@ -1,5 +1,6 @@
 [build-system]
 requires = ["linktools-setup"]
+# requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@master"]
 build-backend = "linktools_setup.build_meta"
 
 [project]
@@ -26,20 +27,18 @@ include-package-data = true
 linktools = ["assets/**"]
 
 [tool.setuptools.exclude-package-data]
-linktools = ["develop/**"]
+linktools = ["assets/develop/**"]
 
 [tool.linktools]
 version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [
-  {type = "jinja2", source = "src/linktools/develop/metadata.jinja2", dest = "src/linktools/metadata.py"},
-  {type = "yml2json", source = "src/linktools/develop/tools.yml", dest = "src/linktools/assets/tools.json"},
+  {type = "jinja2", source = "metadata.jinja2", dest = "src/linktools/metadata.py"},
+  {type = "yml2json", source = "src/linktools/assets/develop/tools.yml", dest = "src/linktools/assets/tools.json"},
 ]
 
 [tool.linktools.scripts]
 console = [
   {name = "lt", module = "linktools.__main__"},
-  {path = "src/linktools/cli/commands/common", prefix = "ct", module = "linktools.cli.commands.common"},
-  {path = "src/linktools/cli/commands/android", prefix = "at", module = "linktools.cli.commands.android"},
-  {path = "src/linktools/cli/commands/ios", prefix = "it", module = "linktools.cli.commands.ios"},
+  {path = "src/linktools/cli/commands", module = "linktools.cli.commands"},
 ]

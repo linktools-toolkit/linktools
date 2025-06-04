@@ -148,16 +148,18 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
         else eps.select(group=group)
     for ep in eps:
         try:
-            main = ep.load()
-            if isinstance(main, CommandMain):
+            obj = ep.load()
+            if isinstance(obj, CommandMain):
                 info = _CommandInfo()
-                info.id = _join_id(main.command.parent, main.command.name)
-                info.parent_id = main.command.parent
-                info.module = main.command.module  # ep.module
-                info.command = main.command
-                info.command_name = main.command.name
-                info.command_description = main.command.description
+                info.id = _join_id(obj.command.parent, obj.command.name)
+                info.parent_id = obj.command.parent
+                info.module = obj.command.module  # ep.module
+                info.command = obj.command
+                info.command_name = obj.command.name
+                info.command_description = obj.command.description
                 yield info
+            elif isinstance(obj, ModuleType):
+                yield from iter_module_commands(obj)
         except Exception as e:
             if callable(onerror):
                 onerror(ep.name, e)
