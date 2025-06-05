@@ -40,11 +40,12 @@ if TYPE_CHECKING:
 def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     import argparse
     import os
+    import re
 
     from .. import utils, environ as _environ
     from ..metadata import __release__, __develop__, __ep_updater__
-    from .command import SubCommand, iter_entry_point_commands
-    from .update import DevelopUpdater, GitUpdater, PypiUpdater
+    from .command import SubCommand, iter_entry_point_commands, CommandError
+    from .update import DevelopUpdater, GitUpdater, PypiUpdater, UpdateCommand
 
     commands: "List[SubCommand]" = []
 
@@ -232,28 +233,85 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     if environ is _environ:
 
         @register_command(name="update", description=f"update {_environ.name} packages")
-        class UpdateCommand(SubCommand):
+        class _UpdateCommand(SubCommand):
 
             def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
                 parser = super().create_parser(type)
-                parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
+                parser.add_argument("packages", nargs='*', help=f"such as `{environ.name}[all]`")
                 return parser
 
             def run(self, args: "argparse.Namespace"):
-                try:
-                    environ.logger.info("Update main packages ...")
-                    updater = utils.coalesce(*[
-                        DevelopUpdater(environ.root_path) if __develop__ else None,
-                        GitUpdater() if not __release__ else None,
-                        PypiUpdater()
-                    ])
-                    updater.update(environ.name, dependencies=args.dependencies or [])
 
-                    for command_info in iter_entry_point_commands(__ep_updater__, onerror="warn"):
-                        environ.logger.info(f"Update package through {command_info.module} ...")
-                        command_info.command([])
+                def parse_package(package):
+                    match = re.match(r"^([a-zA-Z0-9_-]+)(?:\[([a-zA-Z0-9_,-]+)\])?$", package)
+                    if not match:
+                        raise CommandError(f"Invalid package: {package}")
+                    name, deps = match.group(1), match.group(2)
+                    return name, deps.split(",") if deps else []
+
+                def get_package(name):
+                    if not args.packages:  # 如果参数没指定，则默认更新所有包
+                        return name, name, set()
+                    if name in packages:
+                        deps = packages[name]
+                        return f"{name}[{','.join(deps)}]" if deps else name, name, packages[name]
+                    return None, None, None
+
+                packages = {}
+                if args.packages:
+                    packages = {environ.name: set()}
+                    for package in args.packages:
+                        name, deps = parse_package(package)
+                        if name:
+                            packages.setdefault(name, set()).update(deps)
+
+                success_list, error_list = [], []
+
+                # update main package
+                package, name, deps = get_package(environ.name)
+                environ.logger.info(f"Update {package} ...")
+                updater = utils.coalesce(*[
+                    DevelopUpdater(environ.root_path) if __develop__ else None,
+                    GitUpdater() if not __release__ else None,
+                    PypiUpdater()
+                ])
+                try:
+                    updater.update(name, dependencies=deps)
+                    if name not in success_list:
+                        success_list.append(name)
                 except Exception as e:
-                    _environ.logger.warning(f"Update {_environ.name} packages failed: {e}")
+                    error_list.append((name, e))
+                    _environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
+
+                # update sub packages
+                for command_info in iter_entry_point_commands(__ep_updater__, onerror="warn"):
+                    command = command_info.command
+                    if not isinstance(command, UpdateCommand):
+                        _environ.logger.warning(f"Not support {command_info.module} command, require UpdateCommand")
+                        continue
+                    package, name, deps = get_package(command.update_name)
+                    if package:
+                        environ.logger.info(f"Update {package} ...")
+                        try:
+                            command([*deps])
+                            if name not in success_list:
+                                success_list.append(name)
+                        except Exception as e:
+                            error_list.append((name, e))
+                            _environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
+
+                for name in success_list:
+                    package, name, deps = get_package(name)
+                    environ.logger.info(f"Update {package} success.")
+
+                for name, e in error_list:
+                    package, name, deps = get_package(name)
+                    environ.logger.error(f"Update {package} failed: {e}.")
+
+                for name in packages.keys():
+                    if name not in success_list and name not in error_list:
+                        package, name, deps = get_package(name)
+                        environ.logger.error(f"Update {package} failed: not found update script.")
 
     @register_command(name="clean", description="clean temporary files")
     class CleanCommand(SubCommand):

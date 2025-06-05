@@ -384,7 +384,7 @@ def read_file(path: "PathType", text: bool = False, encoding=DEFAULT_ENCODING) -
             return fd.read()
 
 
-def write_file(path: "PathType", data: [str, bytes], encoding=DEFAULT_ENCODING) -> None:
+def write_file(path: "PathType", data: "Union[str, bytes]", encoding=DEFAULT_ENCODING) -> None:
     """
     写入文件数据
     """

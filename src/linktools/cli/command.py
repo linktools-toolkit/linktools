@@ -81,7 +81,7 @@ class CommandParser(ArgumentParser):
     def command(self) -> "BaseCommand":
         return self._command
 
-    def parse_known_args(self, args = None, namespace = None):
+    def parse_known_args(self, args=None, namespace=None):
         namespace, args = super().parse_known_args(args, namespace)
         for action in self._actions:
             if isinstance(action, ConfigAction):
@@ -807,7 +807,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         命令名
         """
-        name = self.__module__
+        name = self.module
         index = name.rfind(".")
         if index >= 0:
             name = name[index + 1:]

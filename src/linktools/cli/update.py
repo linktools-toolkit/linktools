@@ -27,6 +27,7 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import abc
+import inspect
 import pathlib
 from argparse import Namespace
 from typing import TYPE_CHECKING, Iterable, Optional
@@ -158,6 +159,27 @@ class UpdateCommand(BaseCommand):
         self._index_url = index_url
         self._extra_index_url = extra_index_url
         self._updater = updater
+        self._module = self._get_caller_module(inspect.currentframe()) or self.__module__
+
+    @classmethod
+    def _get_caller_module(cls, frame):
+        if not frame:
+            return None
+        frame = frame.f_back
+        if not frame:
+            return None
+        module = inspect.getmodule(frame)
+        if not module:
+            return None
+        return module.__name__
+
+    @property
+    def module(self) -> str:
+        return self._module
+
+    @property
+    def update_name(self) -> str:
+        return self._update_name
 
     def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("dependencies", metavar="DEPENDENCY", nargs='*', default=None)
