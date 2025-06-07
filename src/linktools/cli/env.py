@@ -173,18 +173,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             utils.write_file(alias_path, result)
             print(result, flush=True)
 
-    @register_command(name="completion", description="generate shell auto complete script (deprecated)")
-    class CompletionCommand(SubCommand):
-
-        def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
-            parser = super().create_parser(type)
-            parser.add_argument("-s", "--shell", help="output code for the specified shell",
-                                choices=["bash", "zsh", "tcsh", "fish", "powershell"])
-            return parser
-
-        def run(self, args: "argparse.Namespace"):
-            environ.logger.warning("Not support generate completion script, already integrated into alias subcommand")
-
     @register_command(name="java", description="generate java environment script")
     class JavaCommand(SubCommand):
 
