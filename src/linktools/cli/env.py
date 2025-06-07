@@ -230,14 +230,18 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             def run(self, args: "argparse.Namespace"):
 
+                def unify_name(name):
+                    return name.lower().replace("-", "_") if name else name
+
                 def parse_package(package):
                     match = re.match(r"^([a-zA-Z0-9_-]+)(?:\[([a-zA-Z0-9_,-]+)\])?$", package)
                     if not match:
                         raise CommandError(f"Invalid package: {package}")
                     name, deps = match.group(1), match.group(2)
-                    return name, deps.split(",") if deps else []
+                    return unify_name(name), deps.split(",") if deps else []
 
                 def get_package(name):
+                    name = unify_name(name)
                     if not args.packages:  # 如果参数没指定，则默认更新所有包
                         return name, name, set()
                     if name in packages:
