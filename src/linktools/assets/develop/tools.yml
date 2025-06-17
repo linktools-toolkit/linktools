@@ -172,7 +172,7 @@ TOOL_APKSIGNER:
 # jadx: https://github.com/skylot/jadx
 ############################################################################################
 TOOL_JADX: &TOOL_JADX
-  version: '1.5.1'
+  version: '1.5.2'
   depends_on: 'java'
   download_url: 'https://github.com/skylot/jadx/releases/download/v{version}/jadx-{version}.zip'
   unpack_path: 'jadx-{version}'

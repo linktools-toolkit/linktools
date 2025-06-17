@@ -122,7 +122,7 @@ $ ct-env clean 7
 
 ##### 常用命令
 
-所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/develop/tools.yml)查看，此处以apktool举例
+所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/assets/develop/tools.yml)查看，此处以apktool举例
 
 ```bash
 # 初始化并执行apktool命令

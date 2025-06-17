@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     T = TypeVar("T")
     P = ParamSpec("P")
+    WRAPPER = Callable[[T], T]
 
 
 def singleton(cls: "Type[T]") -> "Callable[P, T]":
@@ -228,4 +229,4 @@ def _timeoutable(fn: "Callable[P, T]") -> "Callable[P, T]":
     return wrapper
 
 
-timeoutable: "Callable[[T], T]" = _timeoutable
+timeoutable: "WRAPPER" = _timeoutable

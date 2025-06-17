@@ -50,10 +50,11 @@ class UrlFile(metaclass=abc.ABCMeta):
     从指定url下载的文件
     """
 
-    def __init__(self, environ: "BaseEnviron", url: str):
+    def __init__(self, environ: "BaseEnviron", url: str, is_local: bool):
         self._url = url
         self._environ = environ
         self._ident = f"{get_md5(url)}_{guess_file_name(url)[-100:]}"
+        self._is_local = is_local
 
     @cached_property(lock=True)
     def _lock(self):
@@ -65,7 +66,7 @@ class UrlFile(metaclass=abc.ABCMeta):
         """
         是否是本地文件
         """
-        return False
+        return self._is_local
 
     @timeoutable
     def save(self,
@@ -191,12 +192,9 @@ class LocalFile(UrlFile):
     def __init__(self, environ: "BaseEnviron", url: str):
         super().__init__(
             environ,
-            os.path.abspath(os.path.expanduser(url))
+            os.path.abspath(os.path.expanduser(url)),
+            is_local=True,
         )
-
-    @property
-    def is_local(self):
-        return True
 
     def _download(self, *, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
         src_path = self._url
@@ -217,7 +215,7 @@ class LocalFile(UrlFile):
 class HttpFile(UrlFile):
 
     def __init__(self, environ: "BaseEnviron", url: str):
-        super().__init__(environ, url)
+        super().__init__(environ, url, is_local=False)
         self._root_path = self._environ.get_temp_path("download", "data", self._ident)
         self._local_path = os.path.join(self._root_path, "file")
         self._context_path = os.path.join(self._root_path, "context")

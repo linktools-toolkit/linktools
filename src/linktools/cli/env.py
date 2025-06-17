@@ -220,7 +220,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     if environ is _environ:
 
-        @register_command(name="update", description=f"update {_environ.name} packages")
+        @register_command(name="update", description=f"update {environ.name} packages")
         class _UpdateCommand(SubCommand):
 
             def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
@@ -259,6 +259,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
                 success_list, error_list = [], []
 
+                stub_path = get_stub_path()
+                environ.logger.info(f"Remove stub path {stub_path} ...")
+                utils.remove_file(stub_path)
+
+                alias_path = get_alias_path()
+                environ.logger.info(f"Remove alias path {alias_path} ...")
+                utils.remove_file(alias_path)
+
                 # update main package
                 package, name, deps = get_package(environ.name)
                 environ.logger.info(f"Update {package} ...")
@@ -273,13 +281,13 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         success_list.append(name)
                 except Exception as e:
                     error_list.append((name, e))
-                    _environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
+                    environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
 
                 # update sub packages
                 for command_info in iter_entry_point_commands(__ep_updater__, onerror="warn"):
                     command = command_info.command
                     if not isinstance(command, UpdateCommand):
-                        _environ.logger.warning(f"Not support {command_info.module} command, require UpdateCommand")
+                        environ.logger.warning(f"Not support {command_info.module} command, require UpdateCommand")
                         continue
                     package, name, deps = get_package(command.update_name)
                     if package:
@@ -290,7 +298,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 success_list.append(name)
                         except Exception as e:
                             error_list.append((name, e))
-                            _environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
+                            environ.logger.error(f"Update {package} failed: {e}", exc_info=environ.debug)
 
                 for name in success_list:
                     package, name, deps = get_package(name)
