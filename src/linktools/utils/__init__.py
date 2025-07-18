@@ -32,7 +32,7 @@ from ._utils import (
     cast, cast_int as int, cast_bool as bool,
     coalesce, is_contain, is_empty,
     get_item, pop_item, get_list_item,
-    get_hash, get_file_hash, get_md5, get_file_md5,
+    get_hash, get_hash_ident, get_file_hash, get_md5, get_file_md5,
     make_uuid, gzip_compress,
     is_sub_path, join_path, read_file, write_file, remove_file, clear_directory,
     get_lan_ip, get_wan_ip,

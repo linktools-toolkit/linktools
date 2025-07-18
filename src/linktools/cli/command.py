@@ -346,10 +346,12 @@ def subcommand_argument(
 
 
 class _SubCommandInfo:
+    node: "SubCommand"
+    children: "List[_SubCommandInfo]"
 
     def __init__(self, subcommand: "Union[SubCommand, _SubCommandInfo]"):
-        self.node: SubCommand = subcommand.node if isinstance(subcommand, _SubCommandInfo) else subcommand
-        self.children: List[_SubCommandInfo] = []
+        self.node = subcommand.node if isinstance(subcommand, _SubCommandInfo) else subcommand
+        self.children = []
 
     def __repr__(self):
         return f"SubCommandInfo(node={self.node.id})"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 import unittest
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import BaseCommand, subcommand, subcommand_argument, commands, SubCommandWrapper
+from linktools.cli import BaseCommand, subcommand, subcommand_argument, commands, SubCommandWrapper, CommandParser
 
 
 class TestCommands(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestCommands(unittest.TestCase):
             def __init__(self):
                 self.subcommands = list(self.walk_subcommands(commands))
 
-            def init_arguments(self, parser: ArgumentParser) -> None:
+            def init_arguments(self, parser: CommandParser) -> None:
                 self.add_subcommands(parser, self.subcommands)
 
             def run(self, args: Namespace) -> Optional[int]:

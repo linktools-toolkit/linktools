@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
 from .decorator import cached_property, timeoutable
 from .rich import create_progress
 from .types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError, FileCache
-from .utils import get_md5, get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent
+from .utils import get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent, get_hash_ident
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -53,7 +53,7 @@ class UrlFile(metaclass=abc.ABCMeta):
     def __init__(self, environ: "BaseEnviron", url: str, is_local: bool):
         self._url = url
         self._environ = environ
-        self._ident = f"{get_md5(url)}_{guess_file_name(url)[-100:]}"
+        self._ident = f"{get_hash_ident(url)}_{guess_file_name(url)[-100:]}"
         self._is_local = is_local
 
     @cached_property(lock=True)

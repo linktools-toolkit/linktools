@@ -29,7 +29,7 @@
 
 import hashlib
 import os
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from datetime import datetime
 from typing import Optional, Type, List, Union
 
@@ -38,7 +38,7 @@ from rich import get_console
 from rich.table import Table
 
 from linktools import utils
-from linktools.cli import subcommand, subcommand_argument, AndroidCommand
+from linktools.cli import subcommand, subcommand_argument, AndroidCommand, CommandParser
 
 
 class Command(AndroidCommand):
@@ -50,7 +50,7 @@ class Command(AndroidCommand):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [OpenSSL.crypto.Error]
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(parser)
 
     def run(self, args: Namespace) -> Optional[int]:

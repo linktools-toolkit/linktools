@@ -30,11 +30,11 @@
 import datetime
 import json
 import sys
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 from linktools import utils, environ
-from linktools.cli import AndroidCommand
+from linktools.cli import AndroidCommand, CommandParser
 
 
 class Command(AndroidCommand):
@@ -42,7 +42,7 @@ class Command(AndroidCommand):
     Fetch basic information about the currently running application
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         group = parser.add_mutually_exclusive_group()
         group.add_argument('-p', '--package', action='store_const', const=True, default=False,
                            help='show current package name')

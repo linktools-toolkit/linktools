@@ -29,7 +29,7 @@
 
 import abc
 import functools
-from argparse import ArgumentParser, Action, Namespace
+from argparse import Action, Namespace
 from typing import Optional, Callable, List, Type, Generic
 
 from . import BaseCommand, CommandParser
@@ -118,7 +118,7 @@ class IOSPicker(DevicePicker[GoIOS, GoIOSDevice]):
 
 class DeviceCommandMixin:
 
-    def add_device_options(self: "BaseCommand", parser: ArgumentParser):
+    def add_device_options(self: "BaseCommand", parser: CommandParser):
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
@@ -182,7 +182,7 @@ class DeviceCommandMixin:
 
 class AndroidCommandMixin:
 
-    def add_android_options(self: BaseCommand, parser: ArgumentParser) -> None:
+    def add_android_options(self: BaseCommand, parser: CommandParser) -> None:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
@@ -311,7 +311,7 @@ class AndroidCommandMixin:
 
 class IOSCommandMixin:
 
-    def add_ios_options(self: BaseCommand, parser: ArgumentParser):
+    def add_ios_options(self: BaseCommand, parser: CommandParser):
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"

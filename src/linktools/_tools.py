@@ -121,6 +121,39 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
     return default  # ==> not found "else"
 
 
+class ToolStub(object):
+
+    def __init__(self, path: "PathType", name: str, environ: "BaseEnviron" = None):
+        self.system = environ.system if environ else utils.get_system()
+        self.name = f"{name}.bat" if self.system == "windows" else name
+        self.path = pathlib.Path(path, self.name)
+
+    @property
+    def exists(self) -> bool:
+        return self.path and os.path.exists(self.path)
+
+    def create(self, cmdline: str) -> "PathType":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "wt") as fd:
+            if self.system == "windows":
+                fd.write(f"@echo off\n")
+                fd.write(f"{cmdline} %*\n")
+            else:
+                fd.write(f"#!{shutil.which('sh')}\n")
+                fd.write(f"{cmdline} \"$@\"\n")
+                # fd.write(f"trap 'kill 0' INT TERM\n")
+                # fd.write(f"{cmdline} \"$@\" &\n")
+                # fd.write(f"wait\n")
+        os.chmod(self.path, 0o755)
+        return self.path
+
+    def remove(self):
+        utils.ignore_errors(os.remove, args=(self.path,))
+
+    def __repr__(self):
+        return f"ToolStub<{self.name}>"
+
+
 class ToolProperty(object):
 
     def __init__(self, name=None, raw: bool = False, default: Any = None,
@@ -286,7 +319,7 @@ class Tool(metaclass=ToolMeta):
             cmdline = shutil.which(cmdline)
             if not utils.is_empty(cmdline):
                 try:
-                    if os.path.samefile(cmdline, self.stub_path):
+                    if os.path.samefile(cmdline, self._stub.path):
                         cmdline = ""
                 except FileNotFoundError:
                     pass
@@ -333,13 +366,13 @@ class Tool(metaclass=ToolMeta):
                 return True
         return False
 
-    @cached_property
-    def stub_path(self) -> pathlib.Path:
-        """
-        获取stub脚本路径
-        :return: stub脚本路径
-        """
-        return self._tools.stub_path / self.get_stub_name(self.name, system=self.system)
+    @property
+    def _stub(self) -> ToolStub:
+        return ToolStub(
+            self._tools.stub_path,
+            self.name,
+            environ=self._tools.environ
+        )
 
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -391,14 +424,9 @@ class Tool(metaclass=ToolMeta):
                         os.makedirs(self.root_path, exist_ok=True)
                         shutil.move(temp_path, self.absolute_path)
 
-        if not os.access(self.stub_path, os.X_OK):
-            self._tools.logger.debug(f"Create stub {self.stub_path}")
-            self.stub_path.parent.mkdir(parents=True, exist_ok=True)
-            self.create_stub_file(
-                self.stub_path,
-                self.make_stub_cmdline(self.name),
-                system=self.system,
-            )
+        if not os.access(self._stub.path, os.X_OK):
+            self._tools.logger.debug(f"Create {self._stub}")
+            self._stub.create(self.make_cmdline())
 
         # change tool file permission
         cmdline = self.executable_cmdline
@@ -412,9 +440,9 @@ class Tool(metaclass=ToolMeta):
         """
         清理工具相关文件
         """
-        if self.stub_path:
-            self._tools.logger.debug(f"Delete {self.stub_path}")
-            utils.ignore_errors(os.remove, args=(self.stub_path,))
+        if self._stub.exists:
+            self._tools.logger.debug(f"Delete {self._stub}")
+            self._stub.remove()
         if not self.exists:
             self._tools.logger.debug(f"{self} does not exist, skip")
             return
@@ -510,31 +538,9 @@ class Tool(metaclass=ToolMeta):
     def __repr__(self):
         return f"Tool<{self.name}>"
 
-    @classmethod
-    def get_stub_name(cls, name: str, system: str = None) -> str:
-        return f"{name}.bat" \
-            if (system or utils.get_system()) == "windows" \
-            else name
-
-    @classmethod
-    def create_stub_file(cls, path: PathType, cmdline: str, system: str = None) -> PathType:
-        with open(path, "wt") as fd:
-            if (system or utils.get_system()) == "windows":
-                fd.write(f"@echo off\n")
-                fd.write(f"{cmdline} %*\n")
-            else:
-                fd.write(f"#!{shutil.which('sh')}\n")
-                fd.write(f"{cmdline} \"$@\"\n")
-                # fd.write(f"trap 'kill 0' INT TERM\n")
-                # fd.write(f"{cmdline} \"$@\" &\n")
-                # fd.write(f"wait\n")
-        os.chmod(path, 0o755)
-        return path
-
-    @classmethod
-    def make_stub_cmdline(cls, name: str) -> str:
+    def make_cmdline(self) -> str:
         from .cli import env
-        return utils.list2cmdline([utils.get_interpreter(), "-m", env.__name__, "tool", name])
+        return utils.list2cmdline([utils.get_interpreter(), "-m", env.__name__, "tool", self.name])
 
 
 class Tools(object):

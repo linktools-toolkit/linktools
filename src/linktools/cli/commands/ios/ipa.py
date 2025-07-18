@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 import json
 import os
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import BaseCommand
+from linktools.cli import BaseCommand, CommandParser
 from linktools.mobile.ios import IPA
 
 
@@ -14,7 +14,7 @@ class Command(BaseCommand):
     Parse and extract detailed information from IPA files
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("path", help="ipa file path")
 
     def run(self, args: Namespace) -> Optional[int]:

@@ -31,7 +31,7 @@ import os
 import re
 import shutil
 import zipfile
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional, Union, Callable
 
 import lief
@@ -41,7 +41,7 @@ from rich.highlighter import NullHighlighter
 from rich.text import Text
 
 from linktools import utils, environ
-from linktools.cli import BaseCommand
+from linktools.cli import BaseCommand, CommandParser
 
 pprint = functools.partial(get_console().print, sep="", markup=False, highlight=NullHighlighter)
 
@@ -217,7 +217,7 @@ class Command(BaseCommand):
     Search and match files using regular expressions
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument('-i', '--ignore-case', action='store_true', default=False,
                             help='ignore case')
         parser.add_argument('pattern', action='store', default=None,

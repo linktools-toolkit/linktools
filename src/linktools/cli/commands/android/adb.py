@@ -26,10 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import AndroidCommand, CommandMain
+from linktools.cli import AndroidCommand, CommandMain, CommandParser
 
 
 class Command(AndroidCommand):
@@ -56,7 +56,7 @@ class Command(AndroidCommand):
     def main(self) -> CommandMain:
         return CommandMain(self, show_log_time=False, show_log_level=False)
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("adb_args", nargs="...", metavar="args", help="adb args")
 
     def run(self, args: Namespace) -> Optional[int]:

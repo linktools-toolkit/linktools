@@ -27,11 +27,11 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import os
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
+from linktools.cli import AndroidCommand, CommandError, CommandParser
 from linktools.mobile.android import AdbDevice
-from linktools.cli import AndroidCommand, CommandError
 
 
 class AgentDevice(AdbDevice):
@@ -52,7 +52,7 @@ class Command(AndroidCommand):
     Debug and interact with android-tools.apk for troubleshooting
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("-p", "--privilege", action="store_true", default=False,
                             help="run with root privilege")
         parser.add_argument("-u", "--user", action="store",

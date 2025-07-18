@@ -70,6 +70,17 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             f"alias_v{environ.version}",
         )
 
+    def remove_cache_files():
+        stub_path = get_stub_path()
+        if os.path.exists(stub_path):
+            environ.logger.info(f"Remove stub path {stub_path} ...")
+            utils.remove_file(stub_path)
+
+        alias_path = get_alias_path()
+        if os.path.exists(alias_path):
+            environ.logger.info(f"Remove alias path {alias_path} ...")
+            utils.remove_file(alias_path)
+
     def get_default_shell(environ: "BaseEnviron") -> "Optional[str]":
         return "bash" if environ.system != "windows" else "powershell"
 
@@ -123,7 +134,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             from ..cli import commands
             from ..cli.argparse import ArgParseComplete
             from ..cli.command import iter_module_commands, iter_entry_point_commands
-            from .._tools import Tool
+            from .._tools import ToolStub
 
             stub_path = get_stub_path()
             stub_path.mkdir(parents=True, exist_ok=True)
@@ -145,13 +156,10 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         temp = command_infos[temp.parent_id]
                         names.append(temp.command_name)
                     executable = "-".join(reversed(names))
-                    executables.append(executable)
-                    Tool.create_stub_file(
-                        stub_path / Tool.get_stub_name(executable),
-                        utils.list2cmdline([utils.get_interpreter(), "-m", command_info.module]),
-                        system=environ.system
-                    )
+                    stub = ToolStub(stub_path, executable, environ=environ)
+                    stub.create(utils.list2cmdline([utils.get_interpreter(), "-m", command_info.module]))
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
+                    executables.append(executable)
 
             lines = []
             completion = ArgParseComplete.shellcode(executables, shell=shell)
@@ -189,7 +197,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             if args.version:
                 java = java.copy(version=args.version)
 
-            cmdline = java.make_stub_cmdline("java")
+            cmdline = java.make_cmdline()
             shell = args.shell or get_default_shell(environ)
 
             lines = []
@@ -257,16 +265,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         if name:
                             packages.setdefault(name, set()).update(deps)
 
-                success_list, error_list = [], []
-
-                stub_path = get_stub_path()
-                environ.logger.info(f"Remove stub path {stub_path} ...")
-                utils.remove_file(stub_path)
-
-                alias_path = get_alias_path()
-                environ.logger.info(f"Remove alias path {alias_path} ...")
-                utils.remove_file(alias_path)
-
                 # update main package
                 package, name, deps = get_package(environ.name)
                 environ.logger.info(f"Update {package} ...")
@@ -275,6 +273,9 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     GitUpdater() if not __release__ else None,
                     PypiUpdater()
                 ])
+
+                remove_cache_files()
+                success_list, error_list = [], []
                 try:
                     updater.update(name, dependencies=deps)
                     if name not in success_list:
@@ -345,13 +346,13 @@ if __name__ == '__main__':
 
             return Main(self)
 
-        def init_base_arguments(self, parser: "argparse.ArgumentParser"):
+        def init_base_arguments(self, parser: "CommandParser"):
             pass
 
-        def init_global_arguments(self, parser: "argparse.ArgumentParser") -> None:
+        def init_global_arguments(self, parser: "CommandParser") -> None:
             pass
 
-        def init_arguments(self, parser: "argparse.ArgumentParser") -> None:
+        def init_arguments(self, parser: "CommandParser") -> None:
             parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
             command_parser = parser.add_subparsers(metavar="COMMAND", help="Command Help")

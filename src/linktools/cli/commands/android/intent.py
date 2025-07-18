@@ -26,11 +26,11 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-import os
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import subcommand, subcommand_argument, AndroidCommand
+from linktools.cli import subcommand, subcommand_argument, AndroidCommand, CommandParser
+from linktools.cli.mobile import AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -38,7 +38,7 @@ class Command(AndroidCommand):
     Execute common Android intent actions for automation and testing
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(parser)
 
     def run(self, args: Namespace) -> Optional[int]:
@@ -108,6 +108,12 @@ class Command(AndroidCommand):
                      "-a", "android.intent.action.VIEW",
                      "-d", url,
                      log_output=True)
+
+    @subcommand("start", help="start app by package name", pass_args=True)
+    @subcommand_argument("package", help="package name")
+    def on_start(self, args: AndroidNamespace, package: str = None):
+        device = args.device_picker.pick()
+        device.start(package, log_output=True)
 
 
 command = Command()

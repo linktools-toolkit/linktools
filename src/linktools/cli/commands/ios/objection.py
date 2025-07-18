@@ -26,11 +26,11 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional, List, Type
 
 from linktools import utils, environ
-from linktools.cli import CommandError, IOSCommand
+from linktools.cli import CommandError, IOSCommand, CommandParser
 from linktools.cli.argparse import range_type
 from linktools.frida import FridaIOSServer
 from linktools.types import DownloadError
@@ -45,7 +45,7 @@ class Command(IOSCommand):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("-b", "--bundle-id", action="store", default=None,
                             help="target bundle id (default: frontmost application)")
         parser.add_argument("-s", "--startup-command", action="append", default=[],

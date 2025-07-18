@@ -31,7 +31,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar
+from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar, Iterable
 
 from .types import App, UnixSocket, InetSocket, Process, File, SystemService
 from .._base import BridgeError, Bridge, BaseDevice
@@ -208,7 +208,7 @@ class AdbDevice(BaseDevice):
         return self.shell(*args, **kwargs)
 
     @timeoutable
-    def install(self, path_or_url: str, opts: str = (), **kwargs):
+    def install(self, path_or_url: str, opts: "Iterable[str]" = None, **kwargs):
         """
         安装apk
         :param path_or_url: apk文件路径
@@ -218,9 +218,13 @@ class AdbDevice(BaseDevice):
         apk_path = environ.get_url_file(path_or_url).save()
         _logger.debug(f"Local apk path: {apk_path}")
 
-        remote_name = f"installed_{int(time.time())}.apk"
-        remote_path = self.push_file(apk_path, self.get_data_path("android", "apk"), remote_name, **kwargs)
+        remote_path = None
         try:
+            remote_path = self.push_file(
+                apk_path,
+                self.get_data_path("android", "apk"),
+                f"installed_{int(time.time())}_{utils.get_hash_ident(apk_path)}.apk",
+                **kwargs)
             if self.uid >= 10000:
                 self.shell("am", "start", "--user", "0",
                            "-a", "android.intent.action.VIEW",
@@ -231,7 +235,8 @@ class AdbDevice(BaseDevice):
                 self.shell("pm", "install", *(opts or tuple()), remote_path,
                            **kwargs)
         finally:
-            self.shell("rm", remote_path, **kwargs, ignore_errors=True)
+            if remote_path:
+                self.shell("rm", remote_path, **dict(kwargs, ignore_errors=True))
 
     @timeoutable
     def uninstall(self, package_name: str, **kwargs):

@@ -27,12 +27,12 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import time
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 import paramiko
 
-from linktools.cli import BaseCommand, subcommand, subcommand_argument
+from linktools.cli import BaseCommand, subcommand, subcommand_argument, CommandParser
 from linktools.ssh import SSHClient
 
 
@@ -64,7 +64,7 @@ class Command(BaseCommand):
         forward.stop()
         time.sleep(1000)
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--host", type=str, required=True)
         parser.add_argument("--port", type=int, default=22)
         parser.add_argument("--username", type=str, default="root")

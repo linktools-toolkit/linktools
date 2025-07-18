@@ -26,14 +26,14 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 from linktools import utils, environ
+from linktools.cli import AndroidCommand, CommandParser
+from linktools.cli.argparse import BooleanOptionalAction
 from linktools.mobile.android import App, Permission, \
     Component, Activity, Service, Receiver, Provider, IntentFilter
-from linktools.cli import AndroidCommand
-from linktools.cli.argparse import BooleanOptionalAction
 
 
 class PrintLevel:
@@ -241,7 +241,7 @@ class Command(AndroidCommand):
     Retrieve detailed information about installed applications on Android devices
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         group = parser.add_mutually_exclusive_group()
         group.add_argument('-t', '--top', action='store_true', default=False,
                            help='fetch current running app only')

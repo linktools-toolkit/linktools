@@ -21,12 +21,12 @@ limitations under the License.
 
 import re
 import sys
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from subprocess import PIPE
 from typing import Optional
 
 from linktools import utils
-from linktools.cli import AndroidCommand
+from linktools.cli import AndroidCommand, CommandParser
 
 __version__ = '2.1.0'
 
@@ -39,7 +39,7 @@ class Command(AndroidCommand):
     Filter logcat by package name
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument('-p', '--packages', dest='package', action='store', nargs='*', default=None,
                            help='application package name(s)')
         parser.add_argument('-w', '--tag-width', metavar='N', dest='tag_width', type=int, default=23,

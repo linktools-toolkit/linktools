@@ -26,11 +26,11 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 from linktools import utils
-from linktools.cli import AndroidCommand
+from linktools.cli import AndroidCommand, CommandParser
 
 
 class Command(AndroidCommand):
@@ -42,7 +42,7 @@ class Command(AndroidCommand):
     def _description(self) -> str:
         return "debugger"
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument('package', action='store', default=None,
                             help='regular expression')
         parser.add_argument('activity', action='store', default=None,

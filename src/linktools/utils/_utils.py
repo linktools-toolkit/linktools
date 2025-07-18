@@ -322,6 +322,15 @@ def get_file_md5(path: "PathType"):
     return get_file_hash(path, algorithm="md5")
 
 
+def get_hash_ident(data: "Union[str, bytes]"):
+    if isinstance(data, str):
+        data = bytes(data, "utf8")
+    length = f"{len(data):0>4x}"
+    md5 = get_hash(data, "md5")
+    sha1 = get_hash(data, "sha1")
+    return f"{length[-4:]}{md5[:6]}{sha1[:6]}"
+
+
 def make_uuid() -> str:
     import random
     import uuid
@@ -628,7 +637,7 @@ def get_interpreter_ident() -> str:
     global _interpreter_ident
     if _interpreter_ident is None:
         import platform
-        _interpreter_ident = f"{get_md5(sys.exec_prefix)}_{platform.python_version()}"
+        _interpreter_ident = f"{get_hash_ident(sys.exec_prefix)}_{platform.python_version()}"
     return _interpreter_ident
 
 

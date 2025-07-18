@@ -28,10 +28,10 @@
 """
 import json
 import subprocess
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional, Type, List
 
-from linktools.cli import BaseCommand, CommandMain
+from linktools.cli import BaseCommand, CommandMain, CommandParser
 from linktools.cli.argparse import KeyValueAction
 from linktools.types import DownloadError, ToolError
 
@@ -49,7 +49,7 @@ class Command(BaseCommand):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [ToolError, DownloadError]
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--set", action=KeyValueAction, nargs=1, dest="configs",
                             help="set the config of tool")
 

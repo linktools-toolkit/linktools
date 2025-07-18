@@ -27,11 +27,11 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import re
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional, List, Type
 
 from linktools import utils
-from linktools.cli import CommandError, AndroidCommand, CommandMain
+from linktools.cli import CommandError, AndroidCommand, CommandMain, CommandParser
 from linktools.cli.argparse import range_type, KeyValueAction, BooleanOptionalAction
 from linktools.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaAndroidServer
 from linktools.types import DownloadError
@@ -50,7 +50,7 @@ class Command(AndroidCommand):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("-p", "--package", action="store", default=None,
                             help="target package (default: frontmost application)")
         parser.add_argument("--spawn", action="store_true", default=False,

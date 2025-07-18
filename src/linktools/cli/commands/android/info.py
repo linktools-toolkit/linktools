@@ -26,11 +26,11 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 from linktools import environ
-from linktools.cli import AndroidCommand
+from linktools.cli import AndroidCommand, CommandParser
 
 props = (
     "ro.product.manufacturer",
@@ -76,7 +76,7 @@ class Command(AndroidCommand):
     Collect detailed device information
     """
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument('agent_args', nargs='...', help="agent args")
 
     def run(self, args: Namespace) -> Optional[int]:

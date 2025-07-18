@@ -2,14 +2,14 @@
 # -*- coding:utf-8 -*-
 
 import os
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional, Type, List
 
 import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.cli import IOSCommand
+from linktools.cli import IOSCommand, CommandParser
 from linktools.mobile.ios import SibDevice
 from linktools.ssh import SSHClient
 
@@ -42,7 +42,7 @@ class Command(IOSCommand):
     def known_errors(self) -> List[Type[BaseException]]:
         return super().known_errors + [NotImplementedError, FileNotFoundError, SSHException]
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("-u", "--username", action="store", default="root",
                             help="iOS ssh username (default: root)")
         parser.add_argument("-p", "--port", action="store", type=int, default=22,

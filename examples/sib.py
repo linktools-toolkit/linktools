@@ -27,11 +27,11 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import time
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
 from typing import Optional
 
 from linktools import utils
-from linktools.cli import subcommand, subcommand_argument, IOSCommand
+from linktools.cli import subcommand, subcommand_argument, IOSCommand, CommandParser
 from linktools.mobile.ios import GoIOSDevice
 
 
@@ -56,7 +56,7 @@ class Command(IOSCommand):
             self.logger.info(f"Forward port: {forward.local_port}")
             time.sleep(1000)
 
-    def init_arguments(self, parser: ArgumentParser) -> None:
+    def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(parser)
 
     def run(self, args: Namespace) -> Optional[int]:

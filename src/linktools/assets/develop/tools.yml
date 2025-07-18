@@ -279,7 +279,7 @@ TOOL_COMPACT_DEX_CONVERTER:
 # Go-iOS: https://github.com/danielpaulus/go-ios
 ############################################################################################
 TOOL_IOS:
-  version: '1.0.176'
+  version: '1.0.182'
   download_url:
     when:
       - system: darwin
@@ -308,7 +308,7 @@ TOOL_IOS:
 # ipatool: https://github.com/majd/ipatool
 ############################################################################################
 TOOL_IPATOOL:
-  version: '2.1.6'
+  version: '2.2.0'
   download_url:
     when:
       - system: darwin
