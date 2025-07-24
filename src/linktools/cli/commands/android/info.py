@@ -26,11 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional
 
 from linktools import environ
-from linktools.cli import AndroidCommand, CommandParser
+from linktools.cli import CommandParser, AndroidCommand, AndroidNamespace
 
 props = (
     "ro.product.manufacturer",
@@ -79,8 +78,8 @@ class Command(AndroidCommand):
     def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument('agent_args', nargs='...', help="agent args")
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: AndroidNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         environ.logger.info(f"Property", style="red")
         for prop in props:

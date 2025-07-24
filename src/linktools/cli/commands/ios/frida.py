@@ -27,11 +27,10 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import re
-from argparse import Namespace
 from typing import Optional, Type, List
 
 from linktools import utils
-from linktools.cli import CommandError, IOSCommand, CommandMain, CommandParser
+from linktools.cli import CommandError, CommandMain, CommandParser, IOSCommand, IOSNamespace
 from linktools.cli.argparse import KeyValueAction, range_type, BooleanOptionalAction
 from linktools.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaIOSServer
 from linktools.types import DownloadError
@@ -86,13 +85,13 @@ class Command(IOSCommand):
         parser.add_argument("--child-gating", action=BooleanOptionalAction, default=False,
                             help="enable child gating (default: false)")
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: IOSNamespace) -> Optional[int]:
 
         logger = self.logger
         user_parameters = args.user_parameters
         user_scripts = args.user_scripts
 
-        device = args.device_picker.pick()
+        device = args.device_selector.select()
         bundle_id = args.bundle_id
 
         class Application(FridaApplication):

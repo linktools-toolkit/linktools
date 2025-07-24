@@ -29,7 +29,6 @@
 
 import hashlib
 import os
-from argparse import Namespace
 from datetime import datetime
 from typing import Optional, Type, List, Union
 
@@ -38,7 +37,7 @@ from rich import get_console
 from rich.table import Table
 
 from linktools import utils
-from linktools.cli import subcommand, subcommand_argument, AndroidCommand, CommandParser
+from linktools.cli import subcommand, subcommand_argument, CommandParser, AndroidCommand, AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -53,7 +52,7 @@ class Command(AndroidCommand):
     def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(parser)
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: AndroidNamespace) -> Optional[int]:
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
@@ -121,8 +120,8 @@ class Command(AndroidCommand):
 
     @subcommand("install", help="start setting activity", pass_args=True)
     @subcommand_argument("path", help="cert path")
-    def on_install(self, args: Namespace, path: str):
-        device = args.device_picker.pick()
+    def on_install(self, args: AndroidNamespace, path: str):
+        device = args.device_selector.select()
         dest = device.push_file(path, device.get_data_path("cert"), log_output=True)
         device.shell("am", "start", "--user", "0",
                      "-n", "com.android.certinstaller/.CertInstallerMain",

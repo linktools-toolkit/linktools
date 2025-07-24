@@ -26,10 +26,9 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import AndroidCommand, CommandMain, CommandParser
+from linktools.cli import CommandParser, CommandMain, AndroidCommand, AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -59,14 +58,14 @@ class Command(AndroidCommand):
     def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("adb_args", nargs="...", metavar="args", help="adb args")
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: AndroidNamespace) -> Optional[int]:
         adb_args = args.adb_args
         if adb_args and adb_args[0] not in self._GENERAL_COMMANDS and not adb_args[0].startswith("wait-for-"):
-            device = args.device_picker.pick()
+            device = args.device_selector.select()
             process = device.popen(*adb_args, capture_output=False)
             return process.call()
 
-        adb = args.device_picker.bridge
+        adb = args.device_selector.bridge
         process = adb.popen(*adb_args, capture_output=False)
         return process.call()
 

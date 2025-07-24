@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 import subprocess
-from abc import ABC, abstractmethod
-from typing import Any, Generator, TypeVar, Callable, Union, IO
+from abc import ABCMeta, abstractmethod
+from typing import Any, Generator, TypeVar, Callable, Union, IO, Generic
 
 from .. import utils, Tool, environ
 from ..decorator import timeoutable
@@ -18,7 +18,7 @@ class BridgeError(Error):
     pass
 
 
-class Bridge(ABC):
+class Bridge(Generic[DeviceType], metaclass=ABCMeta):
 
     def __init__(
             self,
@@ -31,7 +31,7 @@ class Bridge(ABC):
         self._error_type = error_type
 
     @abstractmethod
-    def list_devices(self, alive: bool = None) -> Generator["BaseDevice", None, None]:
+    def list_devices(self, alive: bool = None) -> Generator["DeviceType", None, None]:
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -131,7 +131,7 @@ class Bridge(ABC):
         return out or ""
 
 
-class BaseDevice(ABC):
+class BaseDevice(metaclass=ABCMeta):
 
     @property
     @abstractmethod

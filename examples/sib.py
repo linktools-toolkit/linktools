@@ -41,7 +41,7 @@ class Command(IOSCommand):
     @subcommand_argument("--local-port")
     @subcommand_argument("--remote-port")
     def on_reverse(self, args: Namespace, local_port: int = 8000, remote_port: int = None):
-        device: GoIOSDevice = args.device_picker.pick()
+        device = args.device_picker.select()
         with device.ssh() as client:
             with client.reverse(forward_host="localhost", forward_port=local_port, remote_port=remote_port) as reverse:
                 self.logger.info(f"Reverse port: {reverse.remote_port}")
@@ -51,7 +51,7 @@ class Command(IOSCommand):
     @subcommand_argument("--local-port")
     @subcommand_argument("--remote-port")
     def on_forward(self, args: Namespace, local_port: int = None, remote_port: int = 22):
-        device: GoIOSDevice = args.device_picker.pick()
+        device = args.device_picker.select()
         with device.forward(local_port=local_port or utils.get_free_port(), remote_port=remote_port) as forward:
             self.logger.info(f"Forward port: {forward.local_port}")
             time.sleep(1000)

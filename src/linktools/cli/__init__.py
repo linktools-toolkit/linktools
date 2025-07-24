@@ -40,5 +40,5 @@ from .update import UpdateCommand, PypiUpdater, DevelopUpdater, GitUpdater
 
 from .mobile import \
     DeviceCommandMixin, \
-    AndroidCommandMixin, AndroidCommand, \
-    IOSCommandMixin, IOSCommand
+    AndroidCommandMixin, AndroidCommand, AndroidNamespace, \
+    IOSCommandMixin, IOSCommand, IOSNamespace

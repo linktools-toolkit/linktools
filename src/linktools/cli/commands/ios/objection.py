@@ -26,11 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional, List, Type
 
 from linktools import utils, environ
-from linktools.cli import CommandError, IOSCommand, CommandParser
+from linktools.cli import CommandParser, CommandError, IOSCommand, IOSNamespace
 from linktools.cli.argparse import range_type
 from linktools.frida import FridaIOSServer
 from linktools.types import DownloadError
@@ -65,8 +64,8 @@ class Command(IOSCommand):
                             type=range_type(1, 65536), default=27042,
                             help="remote frida port (default: 27042)")
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: IOSNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         server = FridaIOSServer(
             device=device,

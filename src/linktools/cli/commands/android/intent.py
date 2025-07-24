@@ -26,11 +26,9 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import subcommand, subcommand_argument, AndroidCommand, CommandParser
-from linktools.cli.mobile import AndroidNamespace
+from linktools.cli import subcommand, subcommand_argument, CommandParser, AndroidCommand, AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -41,29 +39,29 @@ class Command(AndroidCommand):
     def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(parser)
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: AndroidNamespace) -> Optional[int]:
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
         return subcommand.run(args)
 
     @subcommand("setting", help="start setting activity", pass_args=True)
-    def on_setting(self, args: Namespace):
-        device = args.device_picker.pick()
+    def on_setting(self, args: AndroidNamespace):
+        device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.settings.SETTINGS",
                      log_output=True)
 
     @subcommand("setting-dev", help="start development setting activity", pass_args=True)
-    def on_setting_dev(self, args: Namespace):
-        device = args.device_picker.pick()
+    def on_setting_dev(self, args: AndroidNamespace):
+        device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS",
                      log_output=True)
 
     @subcommand("setting-dev2", help="start development setting activity", pass_args=True)
-    def on_setting_dev2(self, args: Namespace):
-        device = args.device_picker.pick()
+    def on_setting_dev2(self, args: AndroidNamespace):
+        device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.intent.action.View",
                      "com.android.settings/com.android.settings.DevelopmentSettings",
@@ -72,8 +70,8 @@ class Command(AndroidCommand):
     @subcommand("setting-app", help="start application setting activity (default: current running package)",
                 pass_args=True)
     @subcommand_argument("package", nargs="?", help="package name")
-    def on_setting_app(self, args: Namespace, package: str = None):
-        device = args.device_picker.pick()
+    def on_setting_app(self, args: AndroidNamespace, package: str = None):
+        device = args.device_selector.select()
         package = package or device.get_current_package()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
@@ -82,8 +80,8 @@ class Command(AndroidCommand):
 
     @subcommand("setting-cert", help="install cert (require \'/data/local/tmp\' write permission)", pass_args=True)
     @subcommand_argument("path", help="cert file path")
-    def on_setting_cert(self, args: Namespace, path: str):
-        device = args.device_picker.pick()
+    def on_setting_cert(self, args: AndroidNamespace, path: str):
+        device = args.device_selector.select()
         dest = device.push_file(path, device.get_data_path("cert"), log_output=True)
         device.shell("am", "start", "--user", "0",
                      "-n", "com.android.certinstaller/.CertInstallerMain",
@@ -94,16 +92,16 @@ class Command(AndroidCommand):
 
     @subcommand("install", help="install apk file (require \'/data/local/tmp\' write permission)", pass_args=True)
     @subcommand_argument("path", help="apk file path or url")
-    def on_install(self, args: Namespace, path: str):
-        device = args.device_picker.pick()
+    def on_install(self, args: AndroidNamespace, path: str):
+        device = args.device_selector.select()
         device.install(path,
                        opts=["-r", "-t", "-d", "-f"],
                        log_output=True)
 
     @subcommand("browser", help="start browser activity and jump to url", pass_args=True)
     @subcommand_argument("url", help="e.g. https://antiy.cn")
-    def on_browser(self, args: Namespace, url: str):
-        device = args.device_picker.pick()
+    def on_browser(self, args: AndroidNamespace, url: str):
+        device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.intent.action.VIEW",
                      "-d", url,
@@ -112,7 +110,7 @@ class Command(AndroidCommand):
     @subcommand("start", help="start app by package name", pass_args=True)
     @subcommand_argument("package", help="package name")
     def on_start(self, args: AndroidNamespace, package: str = None):
-        device = args.device_picker.pick()
+        device = args.device_selector.select()
         device.start(package, log_output=True)
 
 

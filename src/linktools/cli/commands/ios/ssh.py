@@ -26,14 +26,13 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional, Type, List
 
 import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.cli import IOSCommand, CommandMain, CommandParser
+from linktools.cli import CommandParser, CommandMain, IOSCommand, IOSNamespace
 from linktools.ssh import SSHClient
 
 
@@ -59,8 +58,8 @@ class Command(IOSCommand):
                             help="iOS ssh password")
         parser.add_argument("ssh_args", nargs="...", help="ssh args")
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: IOSNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         local_port = utils.get_free_port()
         with device.forward(local_port, args.port):

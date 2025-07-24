@@ -34,7 +34,7 @@ import os
 import shutil
 import time
 from collections import ChainMap
-from typing import List, Dict, Optional, Mapping
+from typing import List, Dict, Optional, Mapping, Iterable
 
 import frida
 
@@ -257,7 +257,7 @@ class FridaAndroidServer(FridaServer):
         raise FileNotFoundError("Frida server not found ...")
 
     @classmethod
-    def setup(cls, abis: [str] = ("arm", "arm64", "x86_64", "x86"), version: str = frida.__version__):
+    def setup(cls, abis: "Iterable[str]" = ("arm", "arm64", "x86_64", "x86"), version: str = frida.__version__):
         for abi in abis:
             for executable in cls._get_executables(abi, version):
                 try:

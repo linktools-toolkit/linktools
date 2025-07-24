@@ -26,11 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional
 
 from linktools import utils
-from linktools.cli import AndroidCommand, CommandParser
+from linktools.cli import CommandParser, AndroidCommand, AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -50,8 +49,8 @@ class Command(AndroidCommand):
         parser.add_argument('-p', '--port', action='store', type=int, default=8701,
                             help='fetch all apps')
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: AndroidNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         device.shell("am", "force-stop", args.package, log_output=True)
         device.shell("am", "start", "-D", "-n", "{}/{}".format(args.package, args.activity), log_output=True)

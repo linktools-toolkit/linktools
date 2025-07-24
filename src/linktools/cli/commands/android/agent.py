@@ -27,10 +27,9 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import os
-from argparse import Namespace
 from typing import Optional
 
-from linktools.cli import AndroidCommand, CommandError, CommandParser
+from linktools.cli import CommandParser, CommandError, AndroidCommand, AndroidNamespace
 from linktools.mobile.android import AdbDevice
 
 
@@ -65,8 +64,8 @@ class Command(AndroidCommand):
                             help="plugin file path")
         parser.add_argument("agent_args", nargs="...", help="agent args")
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick().copy(AgentDevice)
+    def run(self, args: AndroidNamespace) -> Optional[int]:
+        device = args.device_selector.select().copy(AgentDevice)
 
         agent_args = device.make_agent_args(
             *args.agent_args,

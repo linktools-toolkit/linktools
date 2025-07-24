@@ -131,9 +131,8 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 return 0
 
             from .. import metadata
-            from ..cli import commands
             from ..cli.argparse import ArgParseComplete
-            from ..cli.command import iter_module_commands, iter_entry_point_commands
+            from ..cli.command import iter_entry_point_commands
             from .._tools import ToolStub
 
             stub_path = get_stub_path()
@@ -143,10 +142,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             executables = []
             command_infos = {
                 command_info.id: command_info
-                for command_info in (
-                    *iter_module_commands(commands, onerror="warn"),
-                    *iter_entry_point_commands(metadata.__ep_scripts__, onerror="warn")
-                )
+                for command_info in iter_entry_point_commands(metadata.__ep_scripts__, onerror="warn")
             }
             for command_info in command_infos.values():
                 if command_info.command:

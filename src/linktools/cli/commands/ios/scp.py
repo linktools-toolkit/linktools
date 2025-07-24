@@ -2,15 +2,13 @@
 # -*- coding:utf-8 -*-
 
 import os
-from argparse import Namespace
 from typing import Optional, Type, List
 
 import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.cli import IOSCommand, CommandParser
-from linktools.mobile.ios import SibDevice
+from linktools.cli import CommandParser, IOSCommand, IOSNamespace
 from linktools.ssh import SSHClient
 
 _REMOTE_PATH_PREFIX = ":"
@@ -55,8 +53,8 @@ class Command(IOSCommand):
         parser.add_argument("target", action="store", type=SCPFile, default=None,
                             help=f"target file path, remote path needs to be prefixed with \"{_REMOTE_PATH_PREFIX}\"")
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device: SibDevice = args.device_picker.pick()
+    def run(self, args: IOSNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         local_port = utils.get_free_port()
         with device.forward(local_port, args.port):

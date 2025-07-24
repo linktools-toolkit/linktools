@@ -26,11 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from argparse import Namespace
 from typing import Optional
 
 from linktools import utils, environ
-from linktools.cli import AndroidCommand, CommandParser
+from linktools.cli import CommandParser, AndroidCommand, AndroidNamespace
 from linktools.cli.argparse import BooleanOptionalAction
 from linktools.mobile.android import App, Permission, \
     Component, Activity, Service, Receiver, Provider, IntentFilter
@@ -259,8 +258,8 @@ class Command(AndroidCommand):
         parser.add_argument('--dangerous', action='store_true', default=False,
                             help='show app dangerous permissions and components only')
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: AndroidNamespace) -> Optional[int]:
+        device = args.device_selector.select()
 
         if not utils.is_empty(args.packages):
             apps = device.get_apps(*args.packages, detail=args.detail)

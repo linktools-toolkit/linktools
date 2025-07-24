@@ -38,7 +38,5 @@ convert = [
 ]
 
 [tool.linktools.scripts]
-console = [
-  {name = "lt", module = "linktools.__main__"},
-  {path = "src/linktools/cli/commands", module = "linktools.cli.commands"},
-]
+console = {name = "lt", module = "linktools.__main__"}
+commands = {path = "src/linktools/cli/commands", module = "linktools.cli.commands"}

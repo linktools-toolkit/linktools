@@ -37,10 +37,7 @@ class Command(BaseCommandGroup):
     def init_arguments(self, parser: CommandParser) -> None:
         self.add_subcommands(
             parser=parser,
-            target=(
-                iter_module_commands(commands, onerror="warn"),
-                iter_entry_point_commands(__ep_scripts__, onerror="warn")
-            ),
+            target=iter_entry_point_commands(__ep_scripts__, onerror="warn"),
             sort=True
         )
 

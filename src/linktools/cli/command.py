@@ -98,6 +98,7 @@ class _CommandInfo:
     command: "Optional[BaseCommand]"
     command_name: str
     command_description: str
+    order: str
 
 
 def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error") -> Generator[_CommandInfo, Any, Any]:
@@ -113,6 +114,7 @@ def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error"
                 info.command = None
                 info.command_name = getattr(module, "__command__", None) or info.id[info.id.rfind(".") + 1:]
                 info.command_description = getattr(module, "__description__", None) or ""
+                info.order = getattr(module, "__order__", None) or info.command_name
                 yield info
             elif hasattr(module, "command") and isinstance(module.command, BaseCommand):
                 info.id = name[len(prefix):]
@@ -121,6 +123,7 @@ def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error"
                 info.command = module.command
                 info.command_name = module.command.name
                 info.command_description = module.command.description
+                info.order = module.command.order
                 yield info
         except Exception as e:
             if callable(onerror):
@@ -157,6 +160,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
                 info.command = obj.command
                 info.command_name = obj.command.name
                 info.command_description = obj.command.description
+                info.order = obj.command.order
                 yield info
             elif isinstance(obj, ModuleType):
                 yield from iter_module_commands(obj)
@@ -202,6 +206,7 @@ class _SubCommandMethodInfo:
         global _subcommand_index
         _subcommand_index += 1
         self.name = None
+        self.order = None
         self.pass_args = False
         self.index = _subcommand_index
         self.kwargs: Optional[Dict[str, Any]] = None
@@ -247,7 +252,8 @@ def subcommand(
         conflict_handler: str = __missing__,
         add_help: bool = __missing__,
         allow_abbrev: bool = __missing__,
-        pass_args: bool = False):
+        pass_args: bool = False,
+        order: str = None):
     """
     子命令装饰器
     """
@@ -259,6 +265,7 @@ def subcommand(
         subcommand_info = func.__subcommand_info__
         subcommand_info.func = func
         subcommand_info.pass_args = pass_args
+        subcommand_info.order = order
         subcommand_info.set_args(
             name,
             help=help if help is not __missing__ else "",
@@ -368,11 +375,12 @@ class SubCommand(metaclass=abc.ABCMeta):
 
     ROOT_ID = _join_id()
 
-    def __init__(self, name: str, description: str, id: str = None, parent_id: str = None):
+    def __init__(self, name: str, description: str, id: str = None, parent_id: str = None, order: str = None):
         self.id = id or _join_id(parent_id, name)
         self.parent_id = parent_id or self.ROOT_ID
         self.name = name
         self.description = description
+        self.order = order or self.name
 
     @property
     def has_parent(self):
@@ -425,12 +433,15 @@ class SubCommandGroup(SubCommand):
 
 class _SubCommandMethod(SubCommand):
 
-    def __init__(self, info: _SubCommandMethodInfo, target: Any, id: str = None, parent_id: str = None):
+    def __init__(self, info: _SubCommandMethodInfo, target: Any,
+                 id: str = None, parent_id: str = None,
+                 order: str = None):
         super().__init__(
             id=id,
             parent_id=parent_id,
             name=info.name,
-            description=info.kwargs.get("description", None) or info.kwargs.get("help", None) or ""
+            description=info.kwargs.get("description", None) or info.kwargs.get("help", None) or "",
+            order=order,
         )
         self.info = info
         self.target = target
@@ -537,12 +548,14 @@ class SubCommandWrapper(SubCommand):
 
     def __init__(self, command: "BaseCommand",
                  id: str = None, parent_id: str = None,
-                 name: str = None, description: str = None):
+                 name: str = None, description: str = None,
+                 order: str = None):
         super().__init__(
             id=id or _join_id(command.parent, command.name),
             parent_id=parent_id or _join_id(command.parent),
             name=name or command.name,
-            description=description or command.description
+            description=description or command.description,
+            order=order or command.order,
         )
         self.command = command
 
@@ -576,13 +589,15 @@ class SubCommandMixin:
                 yield SubCommandWrapper(
                     target.command,
                     id=_join_id(parent_id, target.id),
-                    parent_id=_join_id(parent_id, target.parent_id)
+                    parent_id=_join_id(parent_id, target.parent_id),
+                    order=target.order,
                 )
             else:
                 yield SubCommandGroup(
                     target.command_name, target.command_description,
                     id=_join_id(parent_id, target.id),
-                    parent_id=_join_id(parent_id, target.parent_id)
+                    parent_id=_join_id(parent_id, target.parent_id),
+                    order=target.order,
                 )
 
         elif isinstance(target, ModuleType):
@@ -591,13 +606,15 @@ class SubCommandMixin:
                     yield SubCommandWrapper(
                         c.command,
                         id=_join_id(parent_id, c.id),
-                        parent_id=_join_id(parent_id, c.parent_id)
+                        parent_id=_join_id(parent_id, c.parent_id),
+                        order=c.order,
                     )
                 else:
                     yield SubCommandGroup(
                         c.command_name, c.command_description,
                         id=_join_id(parent_id, c.id),
-                        parent_id=_join_id(parent_id, c.parent_id)
+                        parent_id=_join_id(parent_id, c.parent_id),
+                        order=c.order,
                     )
 
         else:
@@ -613,7 +630,7 @@ class SubCommandMixin:
                     if not hasattr(func, "__subcommand_info__"):
                         continue
                     info: _SubCommandMethodInfo = func.__subcommand_info__
-                    subcommand = _SubCommandMethod(info, target, parent_id=parent_id)
+                    subcommand = _SubCommandMethod(info, target, parent_id=parent_id, order=info.order)
                     subcommand_map.setdefault(subcommand.name, list())
                     subcommand_map[info.name].append(subcommand)
 
@@ -636,14 +653,29 @@ class SubCommandMixin:
         target = target or self
         target_parser = parser or self._argument_parser
 
+        subcommand_list = tuple(self.walk_subcommands(target))
+        subcommand_maps = {subcommand_list[i].id: (i, subcommand_list[i]) for i in range(len(subcommand_list))}
+        subcommand_index = {}
+        for i in range(len(subcommand_list)):
+            temp_subcommand = subcommand = subcommand_list[i]
+            group = [subcommand.order if sort else i]
+            while temp_subcommand.has_parent:
+                parent_index, parent_subcommand = subcommand_maps.get(temp_subcommand.parent_id)
+                if parent_subcommand is None or not parent_subcommand.is_group:
+                    raise SubCommandError(f"{temp_subcommand} has no parent subparser")
+                group.append(parent_subcommand.order if sort else parent_index)
+                temp_subcommand = parent_subcommand
+            subcommand_index[subcommand.id] = tuple(reversed(group))
+
         parsers = {}
         root_parser = parser.add_subparsers(metavar="COMMAND", help="Command Help")
         root_parser.required = required
-
-        subcommand_infos: List[_SubCommandInfo] = []
-        for subcommand in self.walk_subcommands(target):
-            subcommand_info = _SubCommandInfo(subcommand)
-            subcommand_infos.append(subcommand_info)
+        subcommand_infos: List[_SubCommandInfo] = sorted(
+            [_SubCommandInfo(subcommand) for subcommand in subcommand_list],
+            key=lambda x: subcommand_index.get(x.node.id)
+        )
+        for subcommand_info in subcommand_infos:
+            subcommand = subcommand_info.node
 
             parent_parser = root_parser
             if subcommand.has_parent:
@@ -667,22 +699,6 @@ class SubCommandMixin:
                     subcommand_info.children.extend(
                         sub_subcommand_infos
                     )
-
-        if sort:
-            map = {info.node.id: info for info in subcommand_infos}
-            groups = {}
-            for info in map.values():
-                group = []
-                parent_id = info.node.parent_id
-                while parent_id in map:
-                    parent = map[info.node.parent_id]
-                    group.append(parent.node.id)
-                    parent_id = parent.node.parent_id
-                groups[info.node.id] = tuple(reversed(group))
-            subcommand_infos = sorted(
-                subcommand_infos,
-                key=lambda x: (groups.get(x.node.id), x.node.name)
-            )
 
         target_parser.set_defaults(**{f"__subcommands_{id(self):x}__": subcommand_infos})
 
@@ -751,8 +767,7 @@ class SubCommandMixin:
             tree: "Tree",
             infos: List[_SubCommandInfo],
             root_id: str,
-            max_level: Optional[int],
-            sort: bool = False
+            max_level: Optional[int]
     ) -> "Tree":
         nodes: "Dict[str, Tuple[Tree, int]]" = {}
         for info in infos:
@@ -767,19 +782,19 @@ class SubCommandMixin:
             current_node_level = parent_node_level + 1
             current_node_expanded = max_level is None or max_level > current_node_level
 
+            dbg_msg = f" [dim](group={info.node.is_group}, id={info.node.id}, order={info.node.order})[/dim]" \
+                if self.environ.debug \
+                else ""
+
             if info.node.is_group or info.children:
                 logo = "📖" if current_node_expanded else "📘"
-                text = f"{logo} [underline red]{info.node.name}[/underline red]" \
-                    if not self.environ.debug \
-                    else f"{logo} [underline red]{info.node.name}[/underline red] [dim](group={info.node.is_group}, id={info.node.id})[/dim]"
+                text = f"{logo} [underline red]{info.node.name}[/underline red]{dbg_msg}"
                 if info.node.description:
                     text = f"{text}: {info.node.description}"
                 current_node = parent_node.add(text, expanded=current_node_expanded)
                 nodes[info.node.id] = current_node, current_node_level
             else:
-                text = f"👉 [bold red]{info.node.name}[/bold red]" \
-                    if not self.environ.debug \
-                    else f"👉 [bold red]{info.node.name}[/bold red] [dim](group={info.node.is_group}, id={info.node.id})[/dim]"
+                text = f"👉 [bold red]{info.node.name}[/bold red]{dbg_msg}"
                 if info.node.description:
                     text = f"{text}: {info.node.description}"
                 current_node = parent_node.add(text, expanded=current_node_expanded)
@@ -791,8 +806,7 @@ class SubCommandMixin:
                     current_node,
                     info.children,
                     SubCommand.ROOT_ID,
-                    current_max_level,
-                    info.node.is_group
+                    current_max_level
                 )
 
         return tree
@@ -842,6 +856,13 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         命令描述，默认从docstring中获取
         """
         return textwrap.dedent((self.__doc__ or "")).strip()
+
+    @cached_property
+    def order(self) -> str:
+        """
+        命令顺序
+        """
+        return self.name
 
     @property
     def known_errors(self) -> List[Type[BaseException]]:

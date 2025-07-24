@@ -21,12 +21,11 @@ limitations under the License.
 
 import re
 import sys
-from argparse import Namespace
 from subprocess import PIPE
 from typing import Optional
 
 from linktools import utils
-from linktools.cli import AndroidCommand, CommandParser
+from linktools.cli import CommandParser, AndroidCommand, AndroidNamespace
 
 __version__ = '2.1.0'
 
@@ -61,8 +60,8 @@ class Command(AndroidCommand):
         parser.add_argument('-a', '--all', dest='all', action='store_true', default=False,
                             help='print all log messages')
 
-    def run(self, args: Namespace) -> Optional[int]:
-        device = args.device_picker.pick()
+    def run(self, args: AndroidNamespace) -> Optional[int]:
+        device = args.device_selector.select()
         package = args.package or []
         min_level = LOG_LEVELS_MAP[args.min_level.upper()]
 

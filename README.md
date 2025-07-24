@@ -51,11 +51,15 @@ alias jadx="ct-tools --set version=1.5.0 jadx-gui"  # 指定jadx版本号
 $ python3 -m linktools
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.8.14)
+  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.8.17)
  / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
 /_/_/_/ /_/_/|_|\__/\____/\____/_/____/
 
 📎 All commands
+├── 📖 ct: Common scripts
+│   ├── 📘 env: Manage and configure the Linktools environment
+│   ├── 👉 grep: Search and match files using regular expressions
+│   └── 👉 tools: Execute tools directly from remote URLs
 ├── 📖 at: Android scripts
 │   ├── 👉 adb: Manage multiple Android devices effortlessly with adb commands
 │   ├── 👉 agent: Debug and interact with android-tools.apk for troubleshooting
@@ -68,10 +72,6 @@ $ python3 -m linktools
 │   ├── 👉 objection: Simplify security testing with Objection on rooted Android devices
 │   ├── 👉 pidcat: Filter logcat by package name
 │   └── 👉 top: Fetch basic information about the currently running application
-├── 📖 ct: Common scripts
-│   ├── 📘 env: Manage and configure the Linktools environment
-│   ├── 👉 grep: Search and match files using regular expressions
-│   └── 👉 tools: Execute tools directly from remote URLs
 └── 📖 it: iOS scripts
     ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
     ├── 👉 ios: Manage multiple iOS devices effortlessly with go-ios commands
