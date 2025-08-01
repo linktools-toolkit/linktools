@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 import subprocess
 from abc import ABCMeta, abstractmethod
-from typing import Any, Generator, TypeVar, Callable, Union, IO, Generic
+from typing import Any, Generator, TypeVar, Callable, Union, IO, Generic, Iterable
 
 from .. import utils, Tool, environ
 from ..decorator import timeoutable
@@ -23,7 +23,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
     def __init__(
             self,
             tool: Tool,
-            options: [str] = None,
+            options: Iterable[str] = None,
             error_type: Callable[[str], BridgeError] = BridgeError
     ):
         self._tool = tool
@@ -176,11 +176,13 @@ def list_devices(alive: bool = None) -> Generator["BaseDevice", None, None]:
     :return: 设备对象
     """
     from .android import Adb
-    from .ios import GoIOS
-    from .harmony import Hdc
     for device in Adb().list_devices(alive=alive):
         yield device
+
+    from .ios import GoIOS
     for device in GoIOS().list_devices(alive=alive):
         yield device
+
+    from .harmony import Hdc
     for device in Hdc().list_devices(alive=alive):
         yield device

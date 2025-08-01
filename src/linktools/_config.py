@@ -413,6 +413,7 @@ class Config:
             },
             self._cache,
             self._data,
+            self._environ.global_config,
         )
 
     @property
@@ -735,8 +736,8 @@ class Config:
                         return config.get(key, type=type or self.type)
                     except Exception as e:
                         last_error = e
-                if last_error is not None:
-                    raise last_error
+
+                raise last_error or ConfigError(f"Cannot find config \"{key}\"")
 
             else:
                 for key in self.keys:

@@ -97,7 +97,7 @@ class BaseEnviron(abc.ABC):
         """
         debug模式
         """
-        return self.get_config("DEBUG", type=bool)
+        return self.get_config("DEBUG", bool)
 
     @debug.setter
     def debug(self, value: bool) -> None:
@@ -111,30 +111,14 @@ class BaseEnviron(abc.ABC):
         """
         存放文件目录
         """
-        prefix = f"{metadata.__name__}".upper()
-        path = os.environ.get(f"{prefix}_DATA_PATH", None)
-        if path:  # 优先使用环境变量中的${DATA_PATH}
-            return Path(path)
-        path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
-        if path:  # 其次使用环境变量中的${STORAGE_PATH}/data
-            return Path(path, "data")
-        # 最后使用默认路径${HOME}/.linktools/data
-        return Path.home().joinpath(f".{metadata.__name__}", "data")
+        return Path(self.global_config["DATA_PATH"])
 
     @cached_property
     def temp_path(self) -> Path:
         """
         存放临时文件目录
         """
-        prefix = f"{metadata.__name__}".upper()
-        path = os.environ.get(f"{prefix}_TEMP_PATH", None)
-        if path:  # 优先使用环境变量中的${TEMP_PATH}
-            return Path(path)
-        path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
-        if path:  # 其次使用环境变量中的${STORAGE_PATH}/temp
-            return Path(path, "temp")
-        # 最后使用默认路径${HOME}/.linktools/temp
-        return Path.home().joinpath(f".{metadata.__name__}", "temp")
+        return Path(self.global_config["TEMP_PATH"])
 
     def get_path(self, *paths: str) -> Path:
         """
@@ -244,14 +228,35 @@ class BaseEnviron(abc.ABC):
         name = f"{self.name}.{name}" if name else self.name
         return self._log_manager.getLogger(name)
 
+    @cached_classproperty(lock=True)
+    def global_config(self) -> "ConfigDict":
+        from ._config import ConfigDict
+
+        prefix = f"{metadata.__name__}".upper()
+
+        data_path = os.environ.get(f"{prefix}_DATA_PATH", None)
+        temp_path = os.environ.get(f"{prefix}_TEMP_PATH", None)
+        if not (data_path and temp_path):
+            storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
+            if not storage_path:
+                storage_path =os.path.join(Path.home(), f".{metadata.__name__}")
+            if not data_path:
+                data_path = os.path.join(storage_path, "data")
+            if not temp_path:
+                temp_path = os.path.join(storage_path, "temp")
+
+        return ConfigDict(
+            DEBUG=False,
+            DATA_PATH=data_path,
+            TEMP_PATH=temp_path,
+        )
+
     def _create_config(self) -> "Config":
         from ._config import Config, ConfigDict
 
         return Config(
             self,
-            ConfigDict(
-                DEBUG=False,
-            ),
+            ConfigDict(),
             namespace="MAIN",
             env_prefix=f"{self.name.upper()}_"
         )

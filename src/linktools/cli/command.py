@@ -947,7 +947,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         class DebugAction(Action):
 
             def __call__(self, parser, namespace, values, option_string=None):
-                environ.debug = True
+                environ.global_config["DEBUG"] = True
                 environ.logger.setLevel(logging.DEBUG)
 
         class LogTimeAction(BooleanOptionalAction):

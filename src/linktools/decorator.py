@@ -35,7 +35,7 @@ from .metadata import __missing__
 from .types import Timeout
 
 if TYPE_CHECKING:
-    from typing import ParamSpec
+    from typing import ParamSpec, Union
 
     T = TypeVar("T")
     P = ParamSpec("P")
@@ -179,7 +179,9 @@ class _CachedClassproperty:
         return self.val
 
 
-def cached_classproperty(fn: "Callable[P, T]" = None, *, lock: bool = False):
+def cached_classproperty(
+        fn: "Callable[P, T]" = None, *, lock: bool = False
+) -> "Union[_CachedClassproperty, Callable[[Callable[P, T]], _CachedClassproperty]]":
     if fn is not None:
         return _CachedClassproperty(fn, threading.RLock() if lock else None)
 

@@ -45,15 +45,14 @@ class FridaUserScript(metaclass=abc.ABCMeta):
         self._source: Union[str, object] = __missing__
         self._lock = threading.RLock()
 
-    @property
-    def source(self) -> Optional[str]:
-        return self.load()
-
     def load(self) -> Optional[str]:
-        with self._lock:
-            if self._source is __missing__:
-                self._source = self._load()
-            return self._source
+        source = self._source
+        if source is __missing__:
+            with self._lock:
+                source = self._source
+                if source is __missing__:
+                    source = self._source = self._load()
+        return source
 
     def clear(self) -> None:
         with self._lock:
@@ -69,7 +68,7 @@ class FridaUserScript(metaclass=abc.ABCMeta):
         pass
 
     def as_dict(self) -> dict:
-        return {"filename": str(self.filename), "source": self.source}
+        return {"filename": str(self.filename), "source": self.load()}
 
     def as_json(self) -> str:
         return json.dumps(self.as_dict())

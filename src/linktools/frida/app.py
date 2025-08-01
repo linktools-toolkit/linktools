@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import threading
-from typing import TYPE_CHECKING, Optional, Union, Dict, Collection, Callable, Any, List
+from typing import TYPE_CHECKING, Optional, Union, Dict, Collection, Callable, Any, List, Iterable
 
 import frida
 from frida.core import Session, Script
@@ -48,7 +48,7 @@ class FridaSession(utils.get_derived_type(Session)):  # proxy for frida.core.Ses
     def __init__(self, session: Session, name: str = None):
         super().__init__(session)
         self._name: str = name or ""
-        self._scripts: [FridaScript] = []
+        self._scripts: List[FridaScript] = []
 
     @property
     def pid(self) -> int:
@@ -59,7 +59,7 @@ class FridaSession(utils.get_derived_type(Session)):  # proxy for frida.core.Ses
         return self._name
 
     @property
-    def scripts(self) -> ["FridaScript"]:
+    def scripts(self) -> List["FridaScript"]:
         return self._scripts
 
     @property
@@ -440,7 +440,7 @@ class FridaManager:
     def remove_script_handler(self, script: FridaScript):
         self._call_cancel_handler(script)
 
-    def add_file_handler(self, files: [FridaScriptFile], handler: FridaFileHandler):
+    def add_file_handler(self, files: Iterable[FridaScriptFile], handler: FridaFileHandler):
         self._call_cancel_handler(files)
 
         last_change_id = 0
@@ -477,7 +477,7 @@ class FridaManager:
 
         self._register_cancel_handler(files, cancel)
 
-    def remove_file_handler(self, files: [FridaScriptFile]):
+    def remove_file_handler(self, files: Iterable[FridaScriptFile]):
         self._call_cancel_handler(files)
 
     def _register_cancel_handler(self, key: Any, handler: Callable[[], Any]):
@@ -562,7 +562,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         elif isinstance(target_identifiers, Collection):
             self._target_identifiers = [re.compile(i) for i in target_identifiers]
         else:
-            self._target_identifiers: [re.Pattern] = []
+            self._target_identifiers: Iterable[re.Pattern] = []
 
         # 初始化用户传递的参数
         self._user_parameters = user_parameters or {}
@@ -573,7 +573,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         elif isinstance(user_scripts, Collection):
             self._user_scripts = user_scripts
         else:
-            self._user_scripts: [FridaUserScript] = []
+            self._user_scripts: Iterable[FridaUserScript] = []
 
         # 初始化所有需要监听的脚本文件
         self._user_files = []
@@ -695,7 +695,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
                 self._reactor.schedule(lambda: utils.ignore_errors(self.device.resume, args=(pid,)))
         return pid
 
-    def inject_all(self, resume: bool = True) -> [int]:
+    def inject_all(self, resume: bool = True) -> Iterable[int]:
         """
         根据target_identifiers注入所有匹配的进程
         :return: 注入的进程pid
@@ -781,7 +781,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             kwargs["runtime"] = "v8"
         script = FridaScript(
             session,
-            session.create_script(self._internal_script.source, **kwargs)
+            session.create_script(self._internal_script.load(), **kwargs)
         )
         self._manager.add_script_handler(script, self)
 
