@@ -163,7 +163,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
                 info.order = obj.command.order
                 yield info
             elif isinstance(obj, ModuleType):
-                yield from iter_module_commands(obj)
+                yield from iter_module_commands(obj, onerror=onerror)
         except Exception as e:
             if callable(onerror):
                 onerror(ep.name, e)
@@ -660,6 +660,8 @@ class SubCommandMixin:
             temp_subcommand = subcommand = subcommand_list[i]
             group = [subcommand.order if sort else i]
             while temp_subcommand.has_parent:
+                if temp_subcommand.parent_id not in subcommand_maps:
+                    raise SubCommandError(f"{temp_subcommand} has no parent subparser")
                 parent_index, parent_subcommand = subcommand_maps.get(temp_subcommand.parent_id)
                 if parent_subcommand is None or not parent_subcommand.is_group:
                     raise SubCommandError(f"{temp_subcommand} has no parent subparser")
