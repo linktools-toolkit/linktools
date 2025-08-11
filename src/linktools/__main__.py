@@ -27,8 +27,7 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from .cli import commands, BaseCommandGroup, CommandParser
-from .cli import iter_module_commands, iter_entry_point_commands
+from .cli import BaseCommandGroup, CommandParser, iter_entry_point_commands
 from .metadata import __ep_scripts__
 
 

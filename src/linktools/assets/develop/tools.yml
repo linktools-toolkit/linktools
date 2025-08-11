@@ -196,11 +196,11 @@ TOOL_JADX_GUI:
 TOOL_VDEX_EXTRACTOR:
   name: 'vdexExtractor'
   version: '20240430'
-  depends_on:
-    when:
-      - system: windows
-        then: 'flinux'
-      - else: ~
+#  depends_on:
+#    when:
+#      - system: windows
+#        then: 'flinux'
+#      - else: ~
   download_url:
     when:
       - system: darwin
@@ -212,18 +212,18 @@ TOOL_VDEX_EXTRACTOR:
       - system: linux
         machine: x86_64
         then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-linux-amd64'
-      - system: windows
-        machine: amd64
-        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-windows-amd64.exe'
+#      - system: windows
+#        machine: amd64
+#        then: 'https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-windows-amd64.exe'
       - else: ~
 
 TOOL_COMPACT_DEX_CONVERTER:
   version: '20240430'
-  depends_on:
-    when:
-      - system: windows
-        then: 'flinux'
-      - else: ~
+#  depends_on:
+#    when:
+#      - system: windows
+#        then: 'flinux'
+#      - else: ~
   download_url: 'https://github.com/linktools-toolkit/archives/releases/download/compact_dex_converter-{version}/compact_dex_converter.zip'
   unpack_path: 'compact_dex_converter-{version}'
   target_path:
@@ -234,17 +234,17 @@ TOOL_COMPACT_DEX_CONVERTER:
       - system: linux
         machine: x86_64
         then: 'compact_dex_converter_linux64'
-      - system: windows
-        machine: amd64
-        then: 'compact_dex_converter_linux'
+#      - system: windows
+#        machine: amd64
+#        then: 'compact_dex_converter_linux'
       - else: ~
-  executable_cmdline:
-    when:
-      - system: windows
-        then:
-          - 'flinux'
-          - '\??\{absolute_path}'
-      - else: ~
+#  executable_cmdline:
+#    when:
+#      - system: windows
+#        then:
+#          - 'flinux'
+#          - '\??\{absolute_path}'
+#      - else: ~
 
 ############################################################################################
 # sib: https://github.com/SonicCloudOrg/sonic-ios-bridge
@@ -373,19 +373,19 @@ TOOL_HDC:
 ############################################################################################
 # flinux: https://github.com/wishstudio/flinux
 ############################################################################################
-TOOL_FLINUX:
-  version: '20240505'
-  download_url:
-    when:
-      - system: windows
-        then: 'https://github.com/linktools-toolkit/archives/releases/download/flinux-{version}/flinux.zip'
-      - else: ~
-  unpack_path: 'flinux-{version}'
-  target_path:
-    when:
-      - system: windows
-        then: 'flinux.exe'
-      - else: ~
+#TOOL_FLINUX:
+#  version: '20240505'
+#  download_url:
+#    when:
+#      - system: windows
+#        then: 'https://github.com/linktools-toolkit/archives/releases/download/flinux-{version}/flinux.zip'
+#      - else: ~
+#  unpack_path: 'flinux-{version}'
+#  target_path:
+#    when:
+#      - system: windows
+#        then: 'flinux.exe'
+#      - else: ~
 
 ############################################################################################
 # burpsuite
