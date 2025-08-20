@@ -349,9 +349,9 @@ def _filter_cache_items(d: _t.Dict[_t.Any, _t.Any]) -> _t.Dict[_t.Any, _t.Any]:
 
 class _FileCacheLock:
 
-    def __init__(self, cache: "FileCache", type: str, key: str):
+    def __init__(self, cache: "FileCache", namespace: str, key: str = None):
         from filelock import FileLock
-        path = cache.directory / type
+        path = cache.directory / namespace
         path.mkdir(parents=True, exist_ok=True)
         self._lock = FileLock(str(path / f"{key or ''}.lock"))
 
@@ -369,13 +369,73 @@ class _FileCacheLock:
         self._lock.release()
 
 
+class _FileCacheBackup:
+
+    def __init__(self, cache: "FileCache", namespace: str, key: str = None):
+        directory = cache.directory
+        if namespace:
+            directory = directory / namespace
+        if key:
+            directory = directory / key
+        self._directory = directory
+
+    def backup(self, path: "PathType", version: str = None, max_count: int = 3):
+        import os
+        import shutil
+        from datetime import datetime
+        from . import utils
+
+        if not version:
+            version = f"{datetime.now().strftime("%Y%m%d%H%M%S")}-{utils.make_uuid()[:12]}"
+
+        self._directory.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, self._directory / version)
+
+        versions = self.list_versions()
+        if len(versions) > max(max_count, 1):
+            os.remove(self._directory / versions[0])
+
+        return version
+
+    def restore(self, path: "PathType", version: str = None):
+        import os
+        import shutil
+
+        if not version:
+            versions = self.list_versions()
+            if not versions:
+                raise Exception("Not found any backup version")
+            version = versions[-1]
+
+        if not version:
+            raise Exception("Not found any backup version")
+
+        if not os.path.isfile(self._directory / version):
+            raise Exception(f"Not found backup version `{version}`")
+
+        shutil.copy2(self._directory / version, path)
+
+        return version
+
+    def list_versions(self) -> "_t.List[str]":
+        import os
+
+        if not self._directory.is_dir():
+            return []
+
+        return sorted(
+            [f for f in os.listdir(self._directory) if os.path.isfile(self._directory / f)],
+            key=lambda f: os.path.getmtime(self._directory / f)
+        )
+
+
 class _FileCacheData(_t.Generic[T]):
 
-    def __init__(self, cache: "FileCache", type: str):
+    def __init__(self, cache: "FileCache", namespace: str):
         self._cache = cache
-        self._lock = _FileCacheLock(cache, type, "data")
+        self._lock = _FileCacheLock(cache, namespace, "data")
         self._lock.acquire()
-        self._data = _shelve.open(str(cache.directory / type / "data"))
+        self._data = _shelve.open(str(cache.directory / namespace / "data"))
 
     def close(self) -> None:
         self._data.close()
@@ -483,8 +543,14 @@ class FileCache(_t.Generic[T]):
     def directory(self) -> _Path:
         return self._directory
 
-    def lock(self, key: str) -> "_FileCacheLock":
+    def lock(self, key: str = None) -> "_FileCacheLock":
         return _FileCacheLock(self, "lock", key)
+
+    def backup(self, path: "PathType", key: str = None, version: str = None, max_count: int = 3) -> str:
+        return _FileCacheBackup(self, "backup", key).backup(path, version=version, max_count=max_count)
+
+    def restore(self, path: "PathType", key: str = None, version: str = None):
+        return _FileCacheBackup(self, "backup", key).restore(path, version=version)
 
     def open(self) -> "_FileCacheData[T]":
         return _FileCacheData(self, "data")

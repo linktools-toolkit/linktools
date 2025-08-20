@@ -32,6 +32,7 @@ import configparser
 import errno
 import json
 import os
+import shutil
 import threading
 from collections import ChainMap
 from pathlib import Path
@@ -43,7 +44,7 @@ from typing import \
 from . import utils
 from .metadata import __missing__
 from .rich import choose, prompt, confirm
-from .types import PathType, get_args, ConfigError
+from .types import PathType, get_args, ConfigError, FileCache
 
 if TYPE_CHECKING:
     from typing import Literal, Self
@@ -295,18 +296,22 @@ class ConfigCacheParser:
     def __init__(self, path: PathType, namespace: str):
         self._parser = ConfigParser(default_section="ENV")  # 兼容老版本，默认ENV作为默认节
         self._path = path
+        self._cache = FileCache(f"{self._path}.cache")
         self._section = f"{namespace}.CACHE".upper()
         self.load()
 
     def load(self):
-        if self._path and os.path.exists(self._path):
-            self._parser.read(self._path)
-        if not self._parser.has_section(self._section):
-            self._parser.add_section(self._section)
+        with self._cache.lock():
+            if self._path and os.path.exists(self._path):
+                self._parser.read(self._path)
+            if not self._parser.has_section(self._section):
+                self._parser.add_section(self._section)
 
     def dump(self):
-        with open(self._path, "wt") as fd:
-            self._parser.write(fd)
+        with self._cache.lock():
+            self._cache.backup(self._path, max_count=10)
+            with open(self._path, "wt") as fd:
+                self._parser.write(fd)
 
     def get(self, key: str, default: Any) -> Any:
         if self._parser.has_option(self._section, key):
@@ -331,7 +336,13 @@ class ConfigCache(dict):
         super().__init__()
         self._environ = environ
         self._namespace = namespace if namespace is not __missing__ else "MAIN"
-        self._path = self._environ.get_data_path(f"{self._environ.name}.cfg", create_parent=True)
+        self._path = self._environ.get_data_path(".config", f"{self._environ.name}.cfg", create_parent=True)
+
+        orig_path = self._environ.get_data_path(f"{self._environ.name}.cfg")
+        if os.path.isfile(orig_path) and not os.path.isfile(self._path):
+            self._environ.logger.warning(f"Found old config file, move `{orig_path}` to `{self._path}`")
+            shutil.move(orig_path, self._path)
+
         self.load()
 
     @property
