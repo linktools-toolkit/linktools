@@ -386,7 +386,7 @@ class _FileCacheBackup:
         from . import utils
 
         if not version:
-            version = f"{datetime.now().strftime("%Y%m%d%H%M%S")}-{utils.make_uuid()[:12]}"
+            version = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{utils.make_uuid()[:12]}"
 
         self._directory.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, self._directory / version)
@@ -406,9 +406,6 @@ class _FileCacheBackup:
             if not versions:
                 raise Exception("Not found any backup version")
             version = versions[-1]
-
-        if not version:
-            raise Exception("Not found any backup version")
 
         if not os.path.isfile(self._directory / version):
             raise Exception(f"Not found backup version `{version}`")
