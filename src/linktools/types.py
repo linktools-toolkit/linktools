@@ -55,7 +55,6 @@ if _t.TYPE_CHECKING:
     P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
 
-
 _logger: "_t.Optional[_logging.Logger]" = None
 
 
@@ -378,15 +377,17 @@ class _FileCacheLock:
         self._lock.release()
 
 
+_file_cache_backup_suffix = ".backup"
+
 class _FileCacheBackup:
 
-    def __init__(self, cache: "FileCache", namespace: str, key: str = None):
-        directory = cache.directory
-        if namespace:
-            directory = directory / namespace
-        if key:
-            directory = directory / key
-        self._directory = directory
+    def __init__(self, cache: "FileCache", namespace: str):
+        self._directory = cache.directory / namespace
+        self._lock = _FileCacheLock(cache, namespace, "backup")
+        self._lock.acquire()
+
+    def close(self) -> None:
+        self._lock.release()
 
     def backup(self, path: "PathType", version: str = None, max_count: int = 3):
         import os
@@ -398,11 +399,11 @@ class _FileCacheBackup:
             version = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{utils.make_uuid()[:12]}"
 
         self._directory.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, self._directory / version)
+        shutil.copy2(path, self._get_version_path(version))
 
         versions = self.list_versions()
         if len(versions) > max(max_count, 1):
-            os.remove(self._directory / versions[0])
+            os.remove(self._get_version_path(versions[0]))
 
         return version
 
@@ -416,10 +417,10 @@ class _FileCacheBackup:
                 raise Exception("Not found any backup version")
             version = versions[-1]
 
-        if not os.path.isfile(self._directory / version):
+        if not os.path.isfile(self._get_version_path(version)):
             raise Exception(f"Not found backup version `{version}`")
 
-        shutil.copy2(self._directory / version, path)
+        shutil.copy2(self._get_version_path(version), path)
 
         return version
 
@@ -429,10 +430,27 @@ class _FileCacheBackup:
         if not self._directory.is_dir():
             return []
 
-        return sorted(
-            [f for f in os.listdir(self._directory) if os.path.isfile(self._directory / f)],
-            key=lambda f: os.path.getmtime(self._directory / f)
-        )
+        versions = {}
+        for name in os.listdir(self._directory):
+            version = self._get_version_name(name)
+            if version:
+                versions[version] = os.path.getctime(self._directory / name)
+
+        return sorted(versions.keys(), key=lambda o: versions[o])
+
+    def _get_version_name(self, name: str):
+        if name.endswith(_file_cache_backup_suffix):
+            return name[:-len(_file_cache_backup_suffix)]
+        return None
+
+    def _get_version_path(self, version: str) -> _Path:
+        return self._directory / f"{version}{_file_cache_backup_suffix}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 class _FileCacheData(_t.Generic[T]):
@@ -552,11 +570,8 @@ class FileCache(_t.Generic[T]):
     def lock(self, key: str = None) -> "_FileCacheLock":
         return _FileCacheLock(self, "lock", key)
 
-    def backup(self, path: "PathType", key: str = None, version: str = None, max_count: int = 3) -> str:
-        return _FileCacheBackup(self, "backup", key).backup(path, version=version, max_count=max_count)
-
-    def restore(self, path: "PathType", key: str = None, version: str = None):
-        return _FileCacheBackup(self, "backup", key).restore(path, version=version)
+    def backup(self) -> "_FileCacheBackup":
+        return _FileCacheBackup(self, "backup")
 
     def open(self) -> "_FileCacheData[T]":
         return _FileCacheData(self, "data")

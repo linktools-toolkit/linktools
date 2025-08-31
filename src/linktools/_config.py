@@ -302,15 +302,15 @@ class ConfigCacheParser:
         self.load()
 
     def load(self):
-        with self._cache.lock():
+        with self._cache.backup():
             if self._path and os.path.exists(self._path):
                 self._parser.read(self._path)
             if not self._parser.has_section(self._section):
                 self._parser.add_section(self._section)
 
     def dump(self):
-        with self._cache.lock():
-            self._cache.backup(self._path, max_count=10)
+        with self._cache.backup() as backup:
+            backup.backup(self._path)
             with open(self._path, "wt") as fd:
                 self._parser.write(fd)
 
