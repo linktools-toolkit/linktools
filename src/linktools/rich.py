@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     T = TypeVar("T")
 
     PromptType = TypeVar("PromptType", bound=PromptBase)
-    PromptResultType = TypeVar("PromptResultType", str, int, float, bool)
+    PromptResultType = Union[str, int, float, bool]
 
 
 class _LogHandlerMixin(metaclass=ABCMeta):
@@ -388,7 +388,7 @@ def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "
                 prefix.append(time)
                 prefix_len += time.cell_len + 1
             if handler and handler.show_level:
-                level = handler.make_level_text(logging.WARNING, "↳")
+                level = handler.make_level_text(logging.WARNING, ">")
                 prefix.append(level)
                 prefix_len += level.cell_len + 1
 
@@ -406,7 +406,7 @@ def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "
             if handler and handler.show_time:
                 prefix = prefix + handler.make_time_text() + " "
             if handler and handler.show_level:
-                prefix = prefix + handler.make_level_text(logging.ERROR, "↳") + " "
+                prefix = prefix + handler.make_level_text(logging.ERROR, ">") + " "
             self.console.print(prefix, error, sep="")
 
         def process_response(self, value: str) -> "PromptType":

@@ -38,14 +38,23 @@ import weakref as _weakref
 from pathlib import Path as _Path
 
 T = _t.TypeVar("T")
-
-if _t.TYPE_CHECKING:
-    P = _t.ParamSpec("P")
-
 PathType = _t.Union[str, _Path]
 QueryDataType = _t.Union[str, int, float]
 QueryType = _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataType]]
 TimeoutType = _t.Union["Timeout", float, int, None]
+
+if _t.TYPE_CHECKING:
+    # noinspection PyUnresolvedReferences
+    from ._config import ConfigDict, Config, ConfigLiteralType, ConfigType, ConfigTypeMap
+    # noinspection PyUnresolvedReferences
+    from ._tools import Tools, Tool, ToolExecError
+    # noinspection PyUnresolvedReferences
+    from ._url import UrlFile, UrlFileValidatorType
+    from ._environ import BaseEnviron as _BaseEnviron
+
+    P = _t.ParamSpec("P")
+    EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
+
 
 _logger: "_t.Optional[_logging.Logger]" = None
 

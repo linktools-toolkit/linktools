@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from typing import Literal
     from ._environ import BaseEnviron
 
-    ValidatorType = Union["UrlFile.Validator", Iterable["UrlFile.Validator"]]
+    UrlFileValidatorType = Union["UrlFile.Validator", Iterable["UrlFile.Validator"]]
 
 
 class UrlFile(metaclass=abc.ABCMeta):
@@ -72,7 +72,7 @@ class UrlFile(metaclass=abc.ABCMeta):
     def save(self,
              dest_dir: PathType = None, dest_name: str = None,
              timeout: TimeoutType = None, max_retries: int = 3,
-             validators: "ValidatorType" = None, **kwargs) -> str:
+             validators: "UrlFileValidatorType" = None, **kwargs) -> str:
         """
         从指定url下载文件
         :param dest_dir: 文件夹路径，如果为空，则会返回临时文件路径
@@ -128,7 +128,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @abc.abstractmethod
-    def _download(self, *, max_retries: int, timeout: Timeout, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: Timeout, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
         pass
 
     @abc.abstractmethod
@@ -196,7 +196,7 @@ class LocalFile(UrlFile):
             is_local=True,
         )
 
-    def _download(self, *, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
         src_path = self._url
         if not os.path.exists(src_path):
             raise DownloadError(f"{src_path} does not exist")
@@ -220,7 +220,7 @@ class HttpFile(UrlFile):
         self._local_path = os.path.join(self._root_path, "file")
         self._context_path = os.path.join(self._root_path, "context")
 
-    def _download(self, *, max_retries: int, timeout: Timeout, validators: "ValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: Timeout, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
         if not os.path.exists(self._root_path):
             os.makedirs(self._root_path, exist_ok=True)
 

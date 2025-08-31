@@ -33,18 +33,13 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, Type, Any
+from typing import TYPE_CHECKING, Type, Any
 
 from . import utils, metadata
 from .decorator import cached_property, cached_classproperty
 
 if TYPE_CHECKING:
-    from ._config import ConfigDict, Config
-    from ._tools import Tools, Tool
-    from ._url import UrlFile
-    from .types import PathType
-
-    T = TypeVar("T")
+    from .types import T, ConfigDict, Config, Tools, Tool, UrlFile, PathType
 
 
 class BaseEnviron(abc.ABC):
@@ -239,7 +234,7 @@ class BaseEnviron(abc.ABC):
         if not (data_path and temp_path):
             storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
             if not storage_path:
-                storage_path =os.path.join(Path.home(), f".{metadata.__name__}")
+                storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
             if not data_path:
                 data_path = os.path.join(storage_path, "data")
             if not temp_path:

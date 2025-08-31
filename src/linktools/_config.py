@@ -38,7 +38,7 @@ from collections import ChainMap
 from pathlib import Path
 from types import ModuleType
 from typing import \
-    TYPE_CHECKING, TypeVar, Type, Optional, Generator, \
+    TYPE_CHECKING, Type, Optional, Generator, \
     Any, Tuple, IO, Mapping, Union, List, Dict, Callable
 
 from . import utils
@@ -47,13 +47,14 @@ from .rich import choose, prompt, confirm
 from .types import PathType, get_args, ConfigError, FileCache
 
 if TYPE_CHECKING:
-    from typing import Literal, Self
+    from typing import Self, Literal
+    from .types import T
     from ._environ import BaseEnviron
 
-    T = TypeVar("T")
-    EnvironType = TypeVar("EnvironType", bound=BaseEnviron)
-    LiteralType = Literal["path", "json"]
-    ConfigType = Union[Type[T], LiteralType]
+    ConfigLiteralType = Literal["path", "json"]
+    ConfigType = Union[ConfigLiteralType, Callable[[Any], T], None]
+    ConfigTypeMap = Dict[ConfigType, Callable[[Any], T]]
+
 
 SUPPRESS = object()
 
@@ -103,7 +104,7 @@ def cast_json(obj: Any) -> Union[List, Dict]:
     raise TypeError(f"{type(obj)} cannot be converted to json")
 
 
-CONFIG_TYPES: "Dict[ConfigType, Callable[[Any], T]]" = dict({
+CONFIG_TYPES: "ConfigTypeMap" = dict({
     bool: cast_bool,
     str: cast_str,
     "path": cast_path,
@@ -635,12 +636,14 @@ class Config:
 
     class Prompt(CacheConfigProperty):
 
+        type: "Union[Type[Union[str, int, float]], ConfigLiteralType]"
+
         def __init__(
                 self,
                 prompt: str = None,
                 password: bool = False,
                 choices: "Union[List[str], Dict[str, str]]" = None,
-                type: "Union[Type[Union[str, int, float]], LiteralType]" = str,
+                type: "Union[Type[Union[str, int, float]], ConfigLiteralType]" = str,
                 default: Any = __missing__,
                 cached: bool = __missing__,
                 always_ask: bool = False,
