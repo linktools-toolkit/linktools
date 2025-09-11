@@ -37,10 +37,7 @@ from . import BaseCommand, CommandParser, CommandError
 from .. import utils
 
 if TYPE_CHECKING:
-    from typing import TypeVar
     from ..types import PathType
-
-    T = TypeVar("T")
 
 
 class Updater(metaclass=abc.ABCMeta):

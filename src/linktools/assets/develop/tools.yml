@@ -33,7 +33,7 @@ TOOL_SMALI:
 ############################################################################################
 TOOL_APKTOOL:
   <<: *JAR
-  version: '2.11.0'
+  version: '2.12.0'
   download_url: 'https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_{version}.jar'
 
 ############################################################################################
@@ -172,7 +172,7 @@ TOOL_APKSIGNER:
 # jadx: https://github.com/skylot/jadx
 ############################################################################################
 TOOL_JADX: &TOOL_JADX
-  version: '1.5.2'
+  version: '1.5.3'
   depends_on: 'java'
   download_url: 'https://github.com/skylot/jadx/releases/download/v{version}/jadx-{version}.zip'
   unpack_path: 'jadx-{version}'

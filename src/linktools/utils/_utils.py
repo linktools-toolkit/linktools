@@ -53,9 +53,6 @@ if TYPE_CHECKING:
 
 DEFAULT_ENCODING = "utf-8"
 
-_user_agent = None
-_system = _machine = None
-_interpreter = _interpreter_ident = None
 _is_windows_like = _is_unix_like = False
 
 try:
@@ -70,8 +67,7 @@ except ModuleNotFoundError:
 else:
     _is_windows_like = True
 
-_environ = None
-_logger = None
+_environ = _logger = None
 
 
 def get_environ() -> "Environ":
@@ -374,14 +370,14 @@ def read_file(path: "PathType", text: "Literal[False]") -> bytes: ...
 
 
 @overload
-def read_file(path: "PathType", text: "Literal[True]", encoding=DEFAULT_ENCODING) -> str: ...
+def read_file(path: "PathType", text: "Literal[True]", encoding: str = DEFAULT_ENCODING) -> str: ...
 
 
 @overload
-def read_file(path: "PathType", text: bool, encoding=DEFAULT_ENCODING) -> "Union[str, bytes]": ...
+def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]": ...
 
 
-def read_file(path: "PathType", text: bool = False, encoding=DEFAULT_ENCODING) -> "Union[str, bytes]":
+def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]":
     """
     读取文件数据
     """
@@ -393,7 +389,7 @@ def read_file(path: "PathType", text: bool = False, encoding=DEFAULT_ENCODING) -
             return fd.read()
 
 
-def write_file(path: "PathType", data: "Union[str, bytes]", encoding=DEFAULT_ENCODING) -> None:
+def write_file(path: "PathType", data: "Union[str, bytes]", encoding: str = DEFAULT_ENCODING) -> None:
     """
     写入文件数据
     """
@@ -503,6 +499,9 @@ def get_char_width(char):
         if o <= num:
             return wid
     return 1
+
+
+_user_agent = None
 
 
 def user_agent(style=None) -> str:
@@ -620,6 +619,9 @@ def parser_cookie(cookie: str) -> "Dict[str, str]":
     return cookies
 
 
+_interpreter = _interpreter_ident = None
+
+
 def get_interpreter():
     """
     获取当前python解释器的绝对路径
@@ -639,6 +641,9 @@ def get_interpreter_ident() -> str:
         import platform
         _interpreter_ident = f"{get_hash_ident(sys.exec_prefix)}_{platform.python_version()}"
     return _interpreter_ident
+
+
+_system = _machine = None
 
 
 def get_system() -> str:

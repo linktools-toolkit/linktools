@@ -51,11 +51,11 @@ from ..rich import get_log_handler, init_logging
 from ..types import Error
 
 if TYPE_CHECKING:
-    from typing import TypeVar, Union, Literal
+    from typing import Union, Literal
     from rich.tree import Tree
+    from ..types import T
     from .._environ import BaseEnviron
 
-    T = TypeVar("T")
     ERROR_HANDLER = Union[Literal["error", "ignore", "warn"], Callable[[str, Exception], None]]
 
 
@@ -1043,11 +1043,13 @@ class CommandMain:
             command: BaseCommand, *,
             show_log_time: bool = False,
             show_log_level: bool = False,
-            exit_on_return: bool = True
+            expand_user: bool = True,
+            exit_on_return: bool = False,
     ):
         self._command = command
         self.show_log_level = show_log_level
         self.show_log_time = show_log_time
+        self.expand_user = expand_user
         self.exit_on_return = exit_on_return
 
     @property
@@ -1064,14 +1066,17 @@ class CommandMain:
             show_level=self.show_log_level,
         )
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, args: List[str] = None) -> int:
         """
         main命令入口
         """
         self.init_logging()
 
         try:
-            result = self.command(*args, **kwargs)
+            if self.expand_user:
+                args = sys.argv[1:] if args is None else args
+                args = tuple(os.path.expanduser(arg) for arg in args)
+            result = self.command(args=args)
         except SystemExit as e:
             result = e.code
         except (KeyboardInterrupt, EOFError) as e:

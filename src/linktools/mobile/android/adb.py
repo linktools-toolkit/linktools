@@ -31,7 +31,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar, Iterable
+from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar, Iterable, Dict
 
 from .types import App, UnixSocket, InetSocket, Process, File, SystemService
 from .._base import BridgeError, Bridge, BaseDevice
@@ -445,7 +445,7 @@ class AdbDevice(BaseDevice):
         return utils.bool(utils.int(out, default=0), default=False)
 
     @cached_classproperty
-    def _agent_info(self) -> dict:
+    def _agent_info(self) -> Dict[str, Any]:
         agent_path = environ.get_asset_path("android-tools.json")
         agent_data = json.loads(utils.read_file(agent_path, text=True))
         return agent_data["AGENT_APK"]
@@ -783,20 +783,20 @@ class AdbDevice(BaseDevice):
         return self.call_agent("common", "--get-clipboard", **kwargs)
 
     @timeoutable
-    def set_clipboard(self, text, **kwargs) -> str:
+    def set_clipboard(self, text: str, **kwargs) -> str:
         """
         设置剪切板内容
         """
         return self.call_agent("common", "--set-clipboard", text, **kwargs)
 
     @cached_property
-    def _data_path(self):
+    def _data_path(self) -> str:
         data_path = f"/data/local/tmp/{environ.name}_{self.uid}"
         if self.uid < 10000:
             return data_path
         adb_data_path = self.shell("echo", "-n", "$ADB_DATA_PATH").strip()
-        if not adb_data_path:
-            return f"/data/local/tmp/{environ.name}"
+        if adb_data_path:
+            return adb_data_path
         return data_path
 
     def get_data_path(self, *names: str) -> str:
@@ -808,7 +808,7 @@ class AdbDevice(BaseDevice):
         return self.join_path(self._data_path, *names)
 
     @classmethod
-    def join_path(cls, *names: str):
+    def join_path(cls, *names: str) -> str:
         path = ""
         for name in names:
             path += "/" + cls.get_safe_path(name).strip("/")
