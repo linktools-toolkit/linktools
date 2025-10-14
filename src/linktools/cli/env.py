@@ -93,7 +93,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return parser
 
         def run(self, args: "argparse.Namespace"):
-            shell = environ.tools["shell"]
+            shell = environ.get_tool("shell")
             if not shell.exists:
                 raise NotImplementedError(f"Not found shell path")
 
@@ -189,7 +189,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return parser
 
         def run(self, args: "argparse.Namespace"):
-            java = environ.tools["java"]
+            java = environ.get_tool("java")
             if args.version:
                 java = java.copy(version=args.version)
 

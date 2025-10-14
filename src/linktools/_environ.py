@@ -180,23 +180,17 @@ class BaseEnviron(abc.ABC):
         class Logger(logging.Logger):
 
             def _log(self, level, msg, args, **kwargs):
-                msg = str(msg)
-                msg += ''.join([str(i) for i in args])
+                # msg = str(msg)
+                # msg += ''.join([str(i) for i in args])
 
-                kwargs["extra"] = kwargs.get("extra") or {}
-                self._move_args(
-                    kwargs, kwargs["extra"],
-                    "style", "indent", "markup", "highlighter"
-                )
+                if kwargs:
+                    extra = kwargs["extra"] = kwargs.get("extra") or {}
+                    for key in ("style", "indent", "markup", "highlighter"):
+                        value = kwargs.pop(key, None)
+                        if value is not None:
+                            extra[key] = value
 
                 return super()._log(level, msg, empty_args, **kwargs)
-
-            @classmethod
-            def _move_args(cls, from_, to_, *keys):
-                for key in keys:
-                    value = from_.pop(key, None)
-                    if value is not None:
-                        to_[key] = value
 
         class LogManager(utils.get_derived_type(logging.Manager)):
 
@@ -232,9 +226,11 @@ class BaseEnviron(abc.ABC):
         data_path = os.environ.get(f"{prefix}_DATA_PATH", None)
         temp_path = os.environ.get(f"{prefix}_TEMP_PATH", None)
         if not (data_path and temp_path):
-            storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
+            storage_path = os.environ.get(f"{prefix}_PATH", None)
             if not storage_path:
-                storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
+                storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
+                if not storage_path:
+                    storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
             if not data_path:
                 data_path = os.path.join(storage_path, "data")
             if not temp_path:
@@ -348,7 +344,7 @@ class BaseEnviron(abc.ABC):
         if not isinstance(url, str):
             url = str(url)
 
-        if url.startswith("http://") or url.startswith("https://"):
+        if url.startswith("http://") or url.startswith("https://"):  # noqa
             return HttpFile(self, url)
         elif url.startswith("file://"):
             return LocalFile(self, url[len("file://"):])

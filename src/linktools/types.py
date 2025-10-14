@@ -44,13 +44,10 @@ QueryType = _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataTy
 TimeoutType = _t.Union["Timeout", float, int, None]
 
 if _t.TYPE_CHECKING:
-    # noinspection PyUnresolvedReferences
-    from ._config import ConfigDict, Config, ConfigLiteralType, ConfigType, ConfigTypeMap
-    # noinspection PyUnresolvedReferences
-    from ._tools import Tools, Tool, ToolExecError
-    # noinspection PyUnresolvedReferences
-    from ._url import UrlFile, UrlFileValidatorType
-    from ._environ import BaseEnviron as _BaseEnviron
+    from ._config import ConfigDict, Config, ConfigLiteralType, ConfigType, ConfigTypeMap  # noqa
+    from ._tools import Tools, Tool, ToolExecError  # noqa
+    from ._url import UrlFile, UrlFileValidatorType  # noqa
+    from ._environ import BaseEnviron as _BaseEnviron  # noqa
 
     P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)

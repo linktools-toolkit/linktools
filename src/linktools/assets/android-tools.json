@@ -30,7 +30,7 @@
         }
     ],
     "SCRCPY_SERVER": {
-        "version": "3.2",
+        "version": "3.3.3",
         "name": "scrcpy-server-v{version}",
         "url": "https://github.com/Genymobile/scrcpy/releases/download/v{version}/scrcpy-server-v{version}"
     }

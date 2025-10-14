@@ -89,11 +89,10 @@ class Command(AndroidCommand):
         else:
             package = device.get_current_package()
             activity = device.get_current_activity()
-            environ.logger.info(json.dumps({
-                "package": package,
-                "activity": activity,
-                "path": device.get_apk_path(package),
-            }, ensure_ascii=False, indent=2))
+            path = device.get_apk_path(package)
+            environ.logger.info(f"package: {package}")
+            environ.logger.info(f"activity: {activity}")
+            environ.logger.info(f"path: {path}")
 
         return
 

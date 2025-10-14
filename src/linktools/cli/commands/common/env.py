@@ -45,7 +45,7 @@ class InitCommand(BaseCommandGroup):
     def on_init_android(self):
         try:
             self.logger.info("initialize adb ...")
-            self.environ.tools["adb"].prepare()
+            self.environ.get_tool("adb").prepare()
         except Exception as e:
             self.logger.warning(f"initialize adb failed: {e}")
 
@@ -60,7 +60,7 @@ class InitCommand(BaseCommandGroup):
     def on_init_ios(self):
         try:
             self.logger.info("initialize go-ios ...")
-            self.environ.tools["ios"].prepare()
+            self.environ.get_tool("ios").prepare()
         except Exception as e:
             self.logger.warning(f"initialize go-ios failed: {e}")
 
