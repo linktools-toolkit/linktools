@@ -377,12 +377,13 @@ class Environ(BaseEnviron):
         config = super()._create_config()
 
         # 初始化下载相关参数
-        config.set(
-            "DEFAULT_USER_AGENT",
+        config.update(
+            DEFAULT_USER_AGENT=
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/135.0.0.0 "
-            "Safari/537.36"
+            "Chrome/140.0.0.0 "
+            "Safari/537.36",
+            DEFAULT_WAN_IP_URL="http://ifconfig.me/ip"  # noqa
         )
 
         return config

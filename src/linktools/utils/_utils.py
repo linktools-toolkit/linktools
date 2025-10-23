@@ -103,8 +103,7 @@ def ignore_errors(
         return default
 
 
-# noinspection PyShadowingBuiltins
-def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional[T]":
+def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional[T]":  # noqa
     """
     类型转换
     :param type: 目标类型
@@ -177,8 +176,7 @@ def is_empty(obj: "Any") -> bool:
     return False
 
 
-# 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
+def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
     """
     获取子项
     :param obj: 对象
@@ -214,8 +212,7 @@ def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
     return obj
 
 
-# 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":
+def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
     """
     获取并删除子项
     :param obj: 对象
@@ -264,8 +261,7 @@ def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
     return obj
 
 
-# 1noinspection PyShadowingBuiltins, PyUnresolvedReferences
-def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":
+def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":  # noqa
     """
     获取子项（列表）
     :param obj: 对象
@@ -452,7 +448,7 @@ def get_wan_ip() -> "Optional[str]":
     """
     from urllib.request import urlopen
     try:
-        with urlopen("http://ifconfig.me/ip") as response:
+        with urlopen(get_environ().get_config("DEFAULT_WAN_IP_URL")) as response:
             return response.read().decode().strip()
     except:
         return None

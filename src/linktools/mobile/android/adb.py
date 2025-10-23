@@ -385,6 +385,7 @@ class AdbDevice(BaseDevice):
         启动app的launcher页面
         :param package_name: 包名
         :param activity_name: activity名
+        :param timeout: 超时时间
         :return: adb输出结果
         """
         if not activity_name:
@@ -399,6 +400,7 @@ class AdbDevice(BaseDevice):
             "-a", "android.intent.action.MAIN",
             "-c", "android.intent.category.LAUNCHER",
             "-n", f"{package_name}/{activity_name}",
+            timeout=timeout,
             **kwargs
         )
 

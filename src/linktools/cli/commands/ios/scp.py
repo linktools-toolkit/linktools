@@ -45,8 +45,6 @@ class Command(IOSCommand):
                             help="iOS ssh username (default: root)")
         parser.add_argument("-p", "--port", action="store", type=int, default=22,
                             help="iOS ssh port (default: 22)")
-        parser.add_argument("--password", action="store",
-                            help="iOS ssh password")
 
         parser.add_argument("source", action="store", type=SCPFile, default=None,
                             help=f"source file path, remote path needs to be prefixed with \"{_REMOTE_PATH_PREFIX}\"")
@@ -60,7 +58,7 @@ class Command(IOSCommand):
         with device.forward(local_port, args.port):
             with SSHClient() as client:
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect_with_pwd("localhost", port=local_port, username=args.username, password=args.password)
+                client.connect_with_pwd("localhost", port=local_port, username=args.username)
                 if args.source.is_remote and args.target.is_local:
                     client.get_file(args.source.path, args.target.path)
                 elif args.source.is_local and args.target.is_remote:

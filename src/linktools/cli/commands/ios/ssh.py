@@ -26,6 +26,8 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import os
+import shutil
 from typing import Optional, Type, List
 
 import paramiko
@@ -54,8 +56,6 @@ class Command(IOSCommand):
                             help="iOS ssh username (default: root)")
         parser.add_argument("-p", "--port", action="store", type=int, default=22,
                             help="iOS ssh port (default: 22)")
-        parser.add_argument("--password", action="store",
-                            help="iOS ssh password")
         parser.add_argument("ssh_args", nargs="...", help="ssh args")
 
     def run(self, args: IOSNamespace) -> Optional[int]:
@@ -63,12 +63,26 @@ class Command(IOSCommand):
 
         local_port = utils.get_free_port()
         with device.forward(local_port, args.port):
+            ssh = shutil.which("ssh")
+            if ssh:
+                option_args = [
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", f"UserKnownHostsFile={os.devnull}",
+                ]
+                process = utils.popen(
+                    ssh,
+                    *option_args,
+                    f"{args.username}@127.0.0.1", "-p", local_port,
+                    *args.ssh_args,
+                    capture_output=False,
+                )
+                return process.call()
+
             with SSHClient() as client:
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect_with_pwd("localhost", port=local_port, username=args.username, password=args.password)
+                client.connect_with_pwd("localhost", port=local_port, username=args.username)
                 client.open_shell(*args.ssh_args)
-
-        return 0
+                return 0
 
 
 command = Command()

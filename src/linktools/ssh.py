@@ -201,11 +201,11 @@ class SSHClient(paramiko.SSHClient):
 
     def get_file(self, remote_path: str, local_path: str):
         with self._open_scp() as scp:
-            return scp.get(remote_path, local_path, recursive=True)
+            return scp.get(remote_path, local_path, recursive=True, preserve_times=True)
 
     def put_file(self, local_path: str, remote_path: str):
         with self._open_scp() as scp:
-            return scp.put(local_path, remote_path, recursive=True)
+            return scp.put(local_path, remote_path, recursive=True, preserve_times=True)
 
     @contextlib.contextmanager
     def _open_scp(self):
@@ -450,7 +450,7 @@ class SSHReverse(Stoppable):
                 self._forward_thread.shutdown()
                 self._forward_thread.join()
             except Exception as e:
-                _logger.warning(f"Sutdown forward thread failed: {e}")
+                _logger.warning(f"Shutdown forward thread failed: {e}")
 
         with self._lock:
             for channel in self._channels:
