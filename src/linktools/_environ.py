@@ -294,7 +294,7 @@ class BaseEnviron(abc.ABC):
 
         config = ConfigDict()
 
-        develop_path = environ.get_path("develop", "tools.yml")
+        develop_path = environ.get_asset_path("develop", "tools.yml")
         data_path = environ.get_data_path("tools", "tools.json")
         asset_path = environ.get_asset_path("tools.json")
 

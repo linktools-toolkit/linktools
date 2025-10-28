@@ -197,7 +197,7 @@ class _EventHandler(dict):
         self._lock = _threading.RLock()
 
     @property
-    def lock(self) -> _threading.RLock():
+    def lock(self) -> _threading.RLock:
         return self._lock
 
 
@@ -429,19 +429,20 @@ class _FileCacheBackup:
 
         versions = {}
         for name in os.listdir(self._directory):
-            version = self._get_version_name(name)
+            version = self._parse_version_name(name)
             if version:
                 versions[version] = os.path.getctime(self._directory / name)
 
         return sorted(versions.keys(), key=lambda o: versions[o])
 
-    def _get_version_name(self, name: str):
+    def _get_version_path(self, version: str) -> _Path:
+        return self._directory / f"{version}{_file_cache_backup_suffix}"
+
+    @classmethod
+    def _parse_version_name(cls, name: str):
         if name.endswith(_file_cache_backup_suffix):
             return name[:-len(_file_cache_backup_suffix)]
         return None
-
-    def _get_version_path(self, version: str) -> _Path:
-        return self._directory / f"{version}{_file_cache_backup_suffix}"
 
     def __enter__(self):
         return self
@@ -464,7 +465,7 @@ class _FileCacheData(_t.Generic[T]):
 
     def set(self, key: str, value: T, ttl: int = None) -> None:
         self._data[key] = _filter_cache_items({
-            "data": self._cache.dump(value),
+            "data": self._cache.serialize(value),
             "ttl": int(ttl) if ttl else None,
             "ts": int(_time.time()),
         })
@@ -487,14 +488,14 @@ class _FileCacheData(_t.Generic[T]):
     def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
         value = self._get(key)
         if value:
-            return self._cache.load(value.get("data", None))
+            return self._cache.unserialize(value.get("data", None))
         return default
 
     def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
         value = self._get(key)
         if value:
             self._data.pop(key)
-            return self._cache.load(value.get("data", None))
+            return self._cache.unserialize(value.get("data", None))
         return default
 
     def peek(self) -> _t.Optional[str]:
@@ -508,17 +509,17 @@ class _FileCacheData(_t.Generic[T]):
         for key in list(self._data.keys()):
             value = self._get(key)
             if value:
-                return key, self._cache.load(value.get("data", None))
+                return key, self._cache.unserialize(value.get("data", None))
         return None, None
 
     def incr(self, key: str, delta: int = 1, default: int = 0) -> int:
         value = self._get(key)
         if value:
-            result = self._cache.load(value.get("data", None))
+            result = self._cache.unserialize(value.get("data", None))
             if not isinstance(result, (int, float)):
                 raise TypeError(f"the value of key `{key}` is not int")
             result = result + delta
-            value["data"] = self._cache.dump(result)
+            value["data"] = self._cache.serialize(result)
             value["ts"] = int(_time.time())
             self._data[key] = value
         else:
@@ -536,7 +537,7 @@ class _FileCacheData(_t.Generic[T]):
         for key in list(self._data.keys()):
             value = self._get(key)
             if value:
-                yield key, self._cache.load(value.get("data", None))
+                yield key, self._cache.unserialize(value.get("data", None))
 
     def __len__(self) -> int:
         count = 0
@@ -555,10 +556,14 @@ class _FileCacheData(_t.Generic[T]):
 
 class FileCache(_t.Generic[T]):
 
-    def __init__(self, directory: PathType, load: _t.Callable[[str], T] = None, dump: _t.Callable[[T], str] = None):
+    def __init__(self, directory: PathType, *,
+                 serialize: _t.Callable[[str], T] = None, unserialize: _t.Callable[[T], str] = None,
+                 dump: _t.Callable[[T], str] = None, load: _t.Callable[[str], T] = None):
+        if dump or load:
+            _get_logger().warning("deprecated dump and load, use serialize and unserialize instead")
         self._directory = _Path(directory)
-        self._load = load
-        self._dump = dump
+        self._serialize = serialize or dump
+        self._unserialize = unserialize or load
 
     @property
     def directory(self) -> _Path:
@@ -609,16 +614,16 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             yield from data.items()
 
-    def load(self, data: _t.Any) -> T:
-        if self._load:
+    def serialize(self, data: T) -> _t.Any:
+        if self._serialize:
             if not isinstance(data, _basic_cache_types):
-                return self._load(data)
+                return self._serialize(data)
         return data
 
-    def dump(self, data: T) -> _t.Any:
-        if self._dump:
+    def unserialize(self, data: _t.Any) -> T:
+        if self._unserialize:
             if not isinstance(data, _basic_cache_types):
-                return self._dump(data)
+                return self._unserialize(data)
         return data
 
     def __len__(self) -> int:

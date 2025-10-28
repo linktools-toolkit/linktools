@@ -392,7 +392,7 @@ TOOL_HDC:
 ############################################################################################
 TOOL_BURPSUITE:
   <<: *JAR
-  version: '2023.10'
+  version: '2024.10'
   depends_on: 'burpsuite-keygen'
   download_url: 'https://portswigger-cdn.net/burp/releases/download?product=pro&type=Jar&version={version}'
   target_path: 'burpsuite_pro_v{version}.jar'
@@ -406,7 +406,7 @@ TOOL_BURPSUITE:
           - '--add-opens=java.base/java.lang=ALL-UNNAMED'
           - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
           - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
-          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
+          - '-javaagent:{tools[burpsuite-keygen].absolute_path}=loader'
           - '-jar'
           - '{absolute_path}'
       - system: windows
@@ -416,13 +416,13 @@ TOOL_BURPSUITE:
           - '--add-opens=java.base/java.lang=ALL-UNNAMED'
           - '--add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED'
           - '--add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED'
-          - '-javaagent:{tools[burpsuite-keygen].absolute_path}'
+          - '-javaagent:{tools[burpsuite-keygen].absolute_path}=loader'
           - '-jar'
           - '{absolute_path}'
       - else: ~
 
 TOOL_BURPSUITE_KEYGEN:
   <<: *JAR
-  version: '2_1_06'
+  version: '20251028'
   name: 'burpsuite-keygen'
   download_url: 'https://github.com/linktools-toolkit/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar'
