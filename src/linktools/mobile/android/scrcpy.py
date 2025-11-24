@@ -406,7 +406,7 @@ class ScrcpyServer(Stoppable):
     def start(self, *args: Any):
 
         def start():
-            server_info = dict(self._server_info)
+            server_info = dict(self._server_info)  # noqa
             server_version = server_info["version"] = self._version or server_info["version"]
             server_name = server_info["name"].format(**server_info)
             server_url = server_info["url"].format(**server_info)

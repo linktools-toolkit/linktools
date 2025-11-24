@@ -251,30 +251,22 @@ class Tool(metaclass=ToolMeta):
 
         # download url
         download_url = utils.get_item(config, "download_url") or ""
-        if download_url is __missing__:
-            download_url = ""
         assert isinstance(download_url, str), \
             f"{self} download_url type error, " \
             f"str was expects, got {type(download_url)}"
         config["download_url"] = download_url.format(tools=self._tools, **config)
 
         unpack_path = utils.get_item(config, "unpack_path") or ""
-        if unpack_path is __missing__:
-            unpack_path = ""
         assert isinstance(unpack_path, str), \
             f"{self} unpack_path type error, " \
             f"str was expects, got {type(unpack_path)}"
 
         target_path = utils.get_item(config, "target_path") or ""
-        if target_path is __missing__:
-            target_path = ""
         assert isinstance(target_path, str), \
             f"{self} target_path type error, " \
             f"str was expects, got {type(target_path)}"
 
         absolute_path = utils.get_item(config, "absolute_path") or ""
-        if absolute_path is __missing__:
-            absolute_path = ""
         assert isinstance(absolute_path, str), \
             f"{self} absolute_path type error, " \
             f"str was expects, got {type(absolute_path)}"
@@ -307,8 +299,8 @@ class Tool(metaclass=ToolMeta):
             config["absolute_path"] = ""
 
         # set executable cmdline
-        cmdline = utils.get_item(config, "cmdline") or ""
-        if cmdline is __missing__:
+        cmdline = utils.get_item(config, "cmdline")
+        if cmdline in (__missing__, None):
             cmdline = config["name"]
         assert isinstance(cmdline, str), \
             f"{self} cmdline type error, " \

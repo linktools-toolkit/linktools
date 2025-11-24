@@ -214,7 +214,7 @@ class FridaAndroidServer(FridaServer):
     @classmethod
     def _get_executables(cls, abi: str, version: str):
         result = []
-        for config in cls._server_info:
+        for config in cls._server_info:  # noqa
             config = ChainMap(dict(version=version, abi=abi), config)
             min_version = config.get("min_version", "0.0.0")
             max_version = config.get("max_version", "99999.0.0")

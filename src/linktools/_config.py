@@ -310,7 +310,8 @@ class ConfigCacheParser:
 
     def dump(self):
         with self._cache.backup() as backup:
-            backup.backup(self._path)
+            if self._path and os.path.exists(self._path):
+                backup.backup(self._path)
             with open(self._path, "wt") as fd:
                 self._parser.write(fd)
 
