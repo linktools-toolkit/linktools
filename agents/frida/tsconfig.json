@@ -1,7 +1,7 @@
 {
     "compilerOptions": {
         "skipLibCheck": true,
-        "noImplicitAny": false,
+        "noImplicitAny": true,
         "noEmitOnError": true,
         "removeComments": true,
         "declaration": false,

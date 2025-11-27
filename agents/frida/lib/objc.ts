@@ -60,7 +60,7 @@ export const o = new Objects();
 export function hookMethod(
     clazz: string | ObjC.Object,
     method: string | ObjC.ObjectMethod,
-    impl: HookImpl | HookOpts = null
+    impl: HookImpl | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -90,7 +90,7 @@ export function hookMethod(
 export function hookMethods(
     clazz: string | ObjC.Object,
     name: string,
-    impl: HookImpl | HookOpts = null
+    impl: HookImpl | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -133,9 +133,9 @@ export function getEventImpl(options: HookOpts): HookImpl {
         }
     }
 
-    return function (obj, args) {
+    return function (this: any, obj, args) {
 
-        const event = {};
+        const event: {[name: string]: any} = {};
         for (const key in hookOpts.extras) {
             event[key] = hookOpts.extras[key];
         }
@@ -180,7 +180,7 @@ export function getEventImpl(options: HookOpts): HookImpl {
             throw e;
         } finally {
             if (hookOpts.stack !== false) {
-                const stack = event["stack"] = [];
+                const stack: string[] = event["stack"] = [];
                 const backtracer = hookOpts.backtracer === "accurate" ? Backtracer.ACCURATE : Backtracer.FUZZY;
                 const elements = Thread.backtrace(this.context, backtracer);
                 for (let i = 0; i < elements.length; i++) {
@@ -227,13 +227,13 @@ export function bypassSslPinning() {
     }, "int", ["pointer", "pointer"]);
 
     try {
-        c.hookFunction("libboringssl.dylib", "SSL_set_custom_verify", "void", ["pointer", "int", "pointer"], function(args) {
+        c.hookFunction("libboringssl.dylib", "SSL_set_custom_verify", "void", ["pointer", "int", "pointer"], function(this: any, args) {
             Log.d(`SSL_set_custom_verify(), setting custom callback.`);
             args[2] = customVerifyCallback;
             return this(args);
         });
     } catch (e) {
-        c.hookFunction("libboringssl.dylib", "SSL_CTX_set_custom_verify", "void", ["pointer", "int", "pointer"], function(args) {
+        c.hookFunction("libboringssl.dylib", "SSL_CTX_set_custom_verify", "void", ["pointer", "int", "pointer"], function(this: any, args) {
             Log.d(`SSL_CTX_set_custom_verify(), setting custom callback.`);
             args[2] = customVerifyCallback;
             return this(args);
@@ -252,7 +252,7 @@ export function bypassSslPinning() {
  * @param method 方法对象
  */
 function $defineMethodProperties(clazz: ObjC.Object, method: ObjC.ObjectMethod): void {
-    const implementation = method["origImplementation"] || method.implementation;
+    const implementation = (method as any)["origImplementation"] || method.implementation;
     const className = clazz.toString();
     const methodName = ObjC.selectorAsString(method.selector);
     const isClassMethod = ObjC.classes.NSThread.hasOwnProperty(methodName);
@@ -299,22 +299,22 @@ function $defineMethodProperties(clazz: ObjC.Object, method: ObjC.ObjectMethod):
  * @param method 方法对象
  * @param impl hook实现，如调用原函数： function(obj, sel, args) { return this(obj, sel, args); }
  */
-function $hookMethod(method: ObjC.ObjectMethod, impl: HookImpl | HookOpts = null): void {
-    if (impl != null) {
+function $hookMethod(method: ObjC.ObjectMethod, impl: HookImpl | HookOpts | undefined = void 0): void {
+    if (impl != void 0) {
         const hookImpl = isFunction(impl) ? impl as HookImpl : getEventImpl(impl as HookOpts);
-        method.implementation = ObjC.implement(method, function () {
+        method.implementation = ObjC.implement(method, function (this: any) {
             const self = this;
             const args = Array.prototype.slice.call(arguments);
             const obj = args.shift();
             const sel = args.shift();
             const proxy: ObjC.ObjectMethod = new Proxy(method, {
-                get: function (target, p: string | symbol, receiver: any) {
+                get: function (target: any, p: string | symbol, receiver: any) {
                     if (p in self) {
                         return self[p];
                     }
                     return target[p];
                 },
-                apply: function (target, thisArg: any, argArray: any[]) {
+                apply: function (target: any, thisArg: any, argArray: any[]) {
                     const obj = argArray[0];
                     const args = argArray[1];
                     return target["origImplementation"].apply(null, [].concat(obj, sel, args));
@@ -324,7 +324,7 @@ function $hookMethod(method: ObjC.ObjectMethod, impl: HookImpl | HookOpts = null
         });
         Log.i("Hook method: " + method);
     } else {
-        method.implementation = method["origImplementation"];
+        method.implementation = (method as any)["origImplementation"];
         Log.i("Unhook method: " + pretty2String(method));
     }
 }

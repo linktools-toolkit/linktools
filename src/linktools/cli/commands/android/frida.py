@@ -136,7 +136,8 @@ class Command(AndroidCommand):
                 user_parameters=user_parameters,
                 user_scripts=user_scripts,
                 enable_spawn_gating=args.spawn_gating,
-                enable_child_gating=args.child_gating
+                enable_child_gating=args.child_gating,
+                enable_java=True,
             )
 
             if args.spawn:

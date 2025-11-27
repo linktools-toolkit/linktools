@@ -540,6 +540,8 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             user_scripts: Union[FridaUserScript, Collection[FridaUserScript]] = None,
             enable_spawn_gating: bool = False,
             enable_child_gating: bool = False,
+            enable_java: bool = False,
+            enable_objc: bool = False,
             eternalize: str = False,
     ):
         self._device = device
@@ -586,6 +588,8 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         # 保存其余变量
         self._enable_spawn_gating = enable_spawn_gating
         self._enable_child_gating = enable_child_gating
+        self._enable_java = enable_java
+        self._enable_objc = enable_objc
         self._eternalize = eternalize
 
     @property
@@ -764,6 +768,12 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             script_files.append(FridaEvalCode("Log.setLevel(Log.WARNING);"))
         elif _logger.isEnabledFor(logging.ERROR):
             script_files.append(FridaEvalCode("Log.setLevel(Log.ERROR);"))
+
+        if utils.parse_version(frida.__version__) >= (17,):
+            if self._enable_java:
+                script_files.append(FridaScriptFile(environ.get_asset_path("frida-java-bridge.js")))
+            if self._enable_objc:
+                script_files.append(FridaScriptFile(environ.get_asset_path("frida-objc-bridge.js")))
 
         for user_script in self._user_scripts:
             script_files.append(user_script)

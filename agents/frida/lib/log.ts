@@ -49,7 +49,7 @@ export function exception(description: string, stack: string) {
 }
 
 function $send(type: string, message: any, data?: ArrayBuffer | number[] | null) {
-    const event = {};
+    const event: { [name: string]: any; } = {};
     event[type] = message;
 
     if (data == null) {

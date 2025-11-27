@@ -6,7 +6,6 @@ import * as Log from "./log"
 import * as java from "./java";
 import * as objc from "./objc";
 
-
 type HookOpts = {
     method?: boolean;
     thread?: boolean;
@@ -32,7 +31,7 @@ class Objects {
 export const o = new Objects();
 
 const $moduleMap = new ModuleMap();
-const $nativeFunctionCaches = {};
+const $nativeFunctionCaches: any = {};
 const $debugSymbolAddressCaches: { [key: string]: DebugSymbol; } = {};
 
 /**
@@ -57,8 +56,8 @@ export function getExportFunction<RetType extends NativeFunctionReturnType, ArgT
     if (ptr === null) {
         throw Error("cannot find " + exportName);
     }
-    $nativeFunctionCaches[key] = new NativeFunction(ptr, retType, argTypes);
-    return $nativeFunctionCaches[key];
+    const result = $nativeFunctionCaches[key] = new NativeFunction(ptr, retType, argTypes);
+    return result;
 }
 
 /**
@@ -85,22 +84,22 @@ export function hookFunctionWithCallbacks(moduleName: string | null, exportName:
         throw Error("cannot find " + exportName);
     }
     const proxyHandler = {
-        get: function (target, p: string | symbol, receiver: any) {
+        get: function (target: any, p: string | symbol, receiver: any) {
             switch (p) {
                 case "name": return exportName;
                 default: return target[p];
             }
         },
     }
-    const cb = {};
+    const cb: any = {};
     if ("onEnter" in callbacks) {
-        cb["onEnter"] = function (args) {
+        cb["onEnter"] = function (args: any) {
             const fn: any = callbacks.onEnter;
             fn.call(new Proxy(this, proxyHandler), args);
         }
     }
     if ("onLeave" in callbacks) {
-        cb["onLeave"] = function (ret) {
+        cb["onLeave"] = function (ret: any) {
             const fn: any = callbacks.onLeave;
             fn.call(new Proxy(this, proxyHandler), ret);
         }
@@ -135,12 +134,12 @@ export function hookFunction<RetType extends NativeFunctionReturnType, ArgTypes 
     const callbackArgTypes: any = argTypes;
     Interceptor.replace(func, new NativeCallback(function () {
         const self: any = this;
-        const targetArgs = [];
+        const targetArgs: any[] = [];
         for (let i = 0; i < argTypes.length; i++) {
             targetArgs[i] = arguments[i];
         }
         const proxy = new Proxy(func, {
-            get: function (target, p: string | symbol, receiver: any) {
+            get: function (target: any, p: string | symbol, receiver: any) {
                 switch (p) {
                     case "name": return exportName;
                     case "argumentTypes": return argTypes;
@@ -183,8 +182,8 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
         }
     }
 
-    const result = function (args) {
-        const event = {};
+    const result = function (this: any, args: any) {
+        const event: {[name: string]: any} = {};
         for (const key in hookOpts.extras) {
             event[key] = hookOpts.extras[key];
         }
@@ -219,7 +218,7 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
             throw e;
         } finally {
             if (hookOpts.stack !== false) {
-                const stack = event["stack"] = [];
+                const stack: string[] = event["stack"] = [];
                 const backtracer = hookOpts.backtracer === "accurate" ? Backtracer.ACCURATE : Backtracer.FUZZY;
                 const elements = Thread.backtrace(this.context, backtracer);
                 for (let i = 0; i < elements.length; i++) {
@@ -230,8 +229,8 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
         }
     };
 
-    result["onLeave"] = function (ret) {
-        const event = {};
+    result["onLeave"] = function (this:any, ret: any) {
+        const event: {[name: string]: any} = {};
         for (const key in hookOpts.extras) {
             event[key] = hookOpts.extras[key];
         }
@@ -248,7 +247,7 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
             event["page"] = $getCurrentPage();
         }
         if (hookOpts.stack !== false) {
-            const stack = event["stack"] = [];
+            const stack: string[] = event["stack"] = [];
             const backtracer = hookOpts.backtracer === "accurate" ? Backtracer.ACCURATE : Backtracer.FUZZY;
             const elements = Thread.backtrace(this.context, backtracer);
             for (let i = 0; i < elements.length; i++) {
@@ -263,10 +262,11 @@ export function getEventImpl(options: HookOpts): InvocationListenerCallbacks & H
 
 export function getDebugSymbolFromAddress(pointer: NativePointer): DebugSymbol {
     const key = pointer.toString();
-    if ($debugSymbolAddressCaches[key] === void 0) {
-        $debugSymbolAddressCaches[key] = DebugSymbol.fromAddress(pointer);
+    let result: DebugSymbol = $debugSymbolAddressCaches[key];
+    if (result === void 0) {
+        result = $debugSymbolAddressCaches[key] = DebugSymbol.fromAddress(pointer);
     }
-    return $debugSymbolAddressCaches[key];
+    return result;
 }
 
 export function getDescFromAddress(pointer: NativePointer, symbol: boolean) {
@@ -284,19 +284,19 @@ export function getDescFromAddress(pointer: NativePointer, symbol: boolean) {
 }
 
 function $getCurrentPage(): string | null {
-    let reseult = null;
+    let result: string | null = null;
     try {
         if (Java.available) {
             Java.perform(function () {
                 const activity = java.o.currentActivity;
-                reseult = activity ? activity.$className : null;
+                result = activity ? activity.$className : null;
             });
         } else if (ObjC.available) {
             const viewController = objc.o.currentViewController;
-            reseult = viewController ? viewController.$className : null;
+            result = viewController ? viewController.$className : null;
         }
     } catch (e) {
-        reseult = null;
+        result = null;
     }
-    return reseult;
+    return result;
 }

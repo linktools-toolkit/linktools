@@ -126,7 +126,8 @@ class Command(IOSCommand):
                 user_parameters=user_parameters,
                 user_scripts=user_scripts,
                 enable_spawn_gating=args.spawn_gating,
-                enable_child_gating=args.child_gating
+                enable_child_gating=args.child_gating,
+                enable_objc=True,
             )
 
             if args.spawn:

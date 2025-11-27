@@ -135,9 +135,9 @@ export function isSameObject<T extends Java.Members<T> = {}>(obj1: Java.Wrapper<
  * @param obj java对象
  * @returns handle
  */
-export function getObjectHandle<T extends Java.Members<T> = {}>(obj: Java.Wrapper<T>): NativePointer {
+export function getObjectHandle<T extends Java.Members<T> = {}>(obj: Java.Wrapper<T>): NativePointer | undefined {
     if (obj == null) {
-        return null;
+        return void 0;
     } else if (obj.hasOwnProperty("$h")) {
         return obj.$h;
     }
@@ -149,7 +149,7 @@ export function getObjectHandle<T extends Java.Members<T> = {}>(obj: Java.Wrappe
  * @param clazz 类对象
  * @returns 类名
  */
-export function getClassName<T extends Java.Members<T> = {}>(clazz: Java.Wrapper<T>): string {
+export function getClassName<T extends Java.Members<T> = {}>(clazz: Java.Wrapper<T>): string | undefined {
     var className = clazz.$className;
     if (className != void 0) {
         return className;
@@ -169,6 +169,7 @@ export function getClassName<T extends Java.Members<T> = {}>(clazz: Java.Wrapper
         }
     }
     Log.e("Cannot get class name: " + clazz);
+    return void 0;
 }
 
 /**
@@ -177,7 +178,7 @@ export function getClassName<T extends Java.Members<T> = {}>(clazz: Java.Wrapper
  * @param methodName 方法名
  * @returns 方法对象
  */
-export function getClassMethod<T extends Java.Members<T> = {}>(clazz: Java.Wrapper<T>, methodName: string): Java.MethodDispatcher<T> {
+export function getClassMethod<T extends Java.Members<T> = {}>(clazz: Java.Wrapper<T>, methodName: string): Java.MethodDispatcher<T> | undefined {
     var method = clazz[methodName];
     if (method !== void 0) {
         return method;
@@ -197,14 +198,14 @@ export function getClassMethod<T extends Java.Members<T> = {}>(clazz: Java.Wrapp
  * @param classloader java类所在的ClassLoader
  * @returns 类对象
  */
-export function findClass<T extends Java.Members<T> = {}>(className: string, classloader: Java.Wrapper<{}> = void 0): Java.Wrapper<T> {
+export function findClass<T extends Java.Members<T> = {}>(className: string, classloader: Java.Wrapper<{}> | undefined = void 0): Java.Wrapper<T> {
     if (classloader !== void 0 && classloader != null) {
         return Java.ClassFactory.get(classloader).use(className);
     } else {
         if (parseInt(Java.androidVersion) < 7) {
             return Java.use(className);
         }
-        var error = null;
+        var error: any = null;
         var loaders = Java.enumerateClassLoadersSync();
         for (var loader of loaders) {
             try {
@@ -212,7 +213,7 @@ export function findClass<T extends Java.Members<T> = {}>(className: string, cla
                 if (clazz != null) {
                     return clazz;
                 }
-            } catch (e) {
+            } catch (e: any) {
                 if (error == null) {
                     error = e;
                 }
@@ -233,7 +234,7 @@ export function hookMethod<T extends Java.Members<T> = {}>(
     clazz: string | Java.Wrapper<T>,
     method: string | Java.Method<T>,
     signatures: (string | Java.Wrapper<T>)[],
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
     var targetMethod: any = method;
     if (typeof (targetMethod) === "string") {
@@ -273,7 +274,7 @@ export function hookMethod<T extends Java.Members<T> = {}>(
 export function hookMethods<T extends Java.Members<T> = {}>(
     clazz: string | Java.Wrapper<T>,
     methodName: string,
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -284,12 +285,12 @@ export function hookMethods<T extends Java.Members<T> = {}>(
         throw Error("Cannot find method: " + getClassName(targetClass) + "." + methodName);
     }
     for (var i = 0; i < method.overloads.length; i++) {
-        const targetMethod = method.overloads[i];
+        const targetMethod = method.overloads[i] as any;
         /* 过滤一些不存在的方法（拿不到返回值） */
         if (targetMethod.returnType !== void 0 &&
             targetMethod.returnType.className !== void 0) {
             $defineMethodProperties(targetMethod);
-            $hookMethod(targetMethod, impl);
+            $hookMethod<T>(targetMethod, impl);
         }
     }
 }
@@ -301,7 +302,7 @@ export function hookMethods<T extends Java.Members<T> = {}>(
  */
 export function hookAllConstructors<T extends Java.Members<T> = {}>(
     clazz: string | Java.Wrapper<T>,
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -317,7 +318,7 @@ export function hookAllConstructors<T extends Java.Members<T> = {}>(
  */
 export function hookAllMethods<T extends Java.Members<T> = {}>(
     clazz: string | Java.Wrapper<T>,
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -356,7 +357,7 @@ export function hookAllMethods<T extends Java.Members<T> = {}>(
  */
 export function hookClass<T extends Java.Members<T> = {}>(
     clazz: string | Java.Wrapper<T>,
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
     var targetClass: any = clazz;
     if (typeof (targetClass) === "string") {
@@ -387,8 +388,8 @@ export function getEventImpl<T extends Java.Members<T> = {}>(options: HookOpts):
         }
     }
 
-    return function (obj, args) {
-        const event = {};
+    return function (this: any, obj, args) {
+        const event: {[name: string]: any} = {};
         for (const key in hookOpts.extras) {
             event[key] = hookOpts.extras[key];
         }
@@ -485,7 +486,7 @@ export function fromJavaArray<T extends Java.Members<T> = {}>(
     if (typeof (targetClass) === "string") {
         targetClass = findClass(targetClass);
     }
-    var result = [];
+    var result: Java.Wrapper<T>[] = [];
     var env = Java.vm.getEnv();
     for (var i = 0; i < env.getArrayLength(array.$handle); i++) {
         result.push(Java.cast(env.getObjectArrayElement(array.$handle, i), targetClass))
@@ -523,7 +524,7 @@ export function getJavaEnumValue<T extends Java.Members<T> = {}>(
  * 获取当前java栈
  * @returns java栈对象
  */
-export function getStackTrace<T extends Java.Members<T> = {}>(th: Java.Wrapper<T> = void 0): Java.Wrapper<T>[] {
+export function getStackTrace<T extends Java.Members<T> = {}>(th: Java.Wrapper<T> | undefined = void 0): Java.Wrapper<T>[] {
     const result = [];
     const elements = (th || o.throwableClass.$new()).getStackTrace();
     for (let i = 0; i < elements.length; i++) {
@@ -534,7 +535,7 @@ export function getStackTrace<T extends Java.Members<T> = {}>(th: Java.Wrapper<T
 
 type UseClassCallback = (clazz: Java.Wrapper<{}>) => void;
 type UseClassCallbackSet = Set<UseClassCallback>;
-let $useClassCallbackMap: Map<string, UseClassCallbackSet> = null;
+let $useClassCallbackMap: Map<string, UseClassCallbackSet> | null = null;
 
 function $registerUseClassCallback(map: Map<string, UseClassCallbackSet>) {
     const classLoaders = o.hashSetClass.$new();
@@ -553,7 +554,7 @@ function $registerUseClassCallback(map: Map<string, UseClassCallbackSet>) {
             }
             if (clazz != null) {
                 map.delete(name);
-                callbacks.forEach(function (callback, _sameCallback, _set) {
+                callbacks.forEach(function (callback: any, _sameCallback: any, _set: any) {
                     try {
                         callback(clazz);
                     } catch (e) {
@@ -571,7 +572,7 @@ function $registerUseClassCallback(map: Map<string, UseClassCallbackSet>) {
         classClass,
         "forName",
         ["java.lang.String", "boolean", classLoaderClass],
-        function (obj, args) {
+        function (this: any, obj, args) {
             const classLoader = args[2];
             if (classLoader != null && !classLoaders.contains(classLoader)) {
                 classLoaders.add(classLoader);
@@ -585,7 +586,7 @@ function $registerUseClassCallback(map: Map<string, UseClassCallbackSet>) {
         classLoaderClass,
         "loadClass",
         ["java.lang.String", "boolean"],
-        function (obj, args) {
+        function (this: any, obj, args) {
             const classLoader = obj;
             if (!classLoaders.contains(classLoader)) {
                 classLoaders.add(classLoader);
@@ -602,7 +603,7 @@ function $registerUseClassCallback(map: Map<string, UseClassCallbackSet>) {
  * @param callback 加载目标类时的回调
  */
 export function use(className: string, callback: UseClassCallback) {
-    let targetClass: Java.Wrapper<{}> = null;
+    let targetClass: Java.Wrapper<{}> | null = null;
     try {
         targetClass = findClass(className);
     } catch (e) {
@@ -639,12 +640,12 @@ export function setWebviewDebuggingEnabled() {
 
     ignoreError(() => {
         let WebView = findClass("android.webkit.WebView");
-        hookMethods(WebView, "setWebContentsDebuggingEnabled", function (obj, args) {
+        hookMethods(WebView, "setWebContentsDebuggingEnabled", function (this: any, obj, args) {
             Log.d(`${WebView}.setWebContentsDebuggingEnabled: ${args[0]}`);
             args[0] = true;
             return this(obj, args);
         })
-        hookMethods(WebView, "loadUrl", function (obj, args) {
+        hookMethods(WebView, "loadUrl", function (this: any, obj, args) {
             Log.d(`${WebView}.loadUrl: ${args[0]}`);
             WebView.setWebContentsDebuggingEnabled(true);
             return this(obj, args);
@@ -653,12 +654,12 @@ export function setWebviewDebuggingEnabled() {
 
     ignoreError(() => {
         let UCWebView = findClass("com.uc.webview.export.WebView");
-        hookMethods(UCWebView, "setWebContentsDebuggingEnabled", function (obj, args) {
+        hookMethods(UCWebView, "setWebContentsDebuggingEnabled", function (this: any, obj, args) {
             Log.d(`${UCWebView}.setWebContentsDebuggingEnabled: ${args[0]}`);
             args[0] = true;
             return this(obj, args);
         })
-        hookMethods(UCWebView, "loadUrl", function (obj, args) {
+        hookMethods(UCWebView, "loadUrl", function (this: any, obj, args) {
             Log.d(`${UCWebView}.loadUrl: ${args[0]}`);
             UCWebView.setWebContentsDebuggingEnabled(true);
             return this(obj, args);
@@ -678,7 +679,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.android.org.conscrypt.TrustManagerImpl",
         "checkServerTrusted",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
             if (this.returnType.type == 'void') {
                 return;
@@ -691,7 +692,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.google.android.gms.org.conscrypt.Platform",
         "checkServerTrusted",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
         })
     );
@@ -699,7 +700,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.android.org.conscrypt.Platform",
         "checkServerTrusted",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
         })
     );
@@ -707,7 +708,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "okhttp3.CertificatePinner",
         "check",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
             if (this.returnType.type == "boolean") {
                 return true;
@@ -718,7 +719,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "okhttp3.CertificatePinner",
         "check$okhttp",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
         })
     );
@@ -726,7 +727,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.android.okhttp.CertificatePinner",
         "check",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
             if (this.returnType.type == "boolean") {
                 return true;
@@ -737,7 +738,7 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.android.okhttp.CertificatePinner",
         "check$okhttp",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
             return void 0;
         })
@@ -746,14 +747,14 @@ export function bypassSslPinning() {
     ignoreError(() => hookMethods(
         "com.android.org.conscrypt.TrustManagerImpl",
         "verifyChain",
-        function (obj, args) {
+        function (this: any, obj, args) {
             Log.d('SSL bypassing ' + this);
             return args[0];
         })
     );
 }
 
-export function chooseClassLoader(className) {
+export function chooseClassLoader(className: string) {
     Log.w("choose classloder: " + className);
 
     Java.enumerateClassLoaders({
@@ -773,7 +774,7 @@ export function chooseClassLoader(className) {
     });
 }
 
-export function traceClasses(include: string, exclude: string = void 0, options: any = void 0) {
+export function traceClasses(include: string, exclude: string | undefined = void 0, options: any | undefined = void 0) {
 
     include = include != null ? include.trim().toLowerCase() : "";
     exclude = exclude != null ? exclude.trim().toLowerCase() : "";
@@ -796,7 +797,7 @@ export function traceClasses(include: string, exclude: string = void 0, options:
 }
 
 export function runOnCreateContext(fn: (context: Java.Wrapper<{}>) => any) {
-    hookMethods("android.app.ContextImpl", "createAppContext", function (obj, args) {
+    hookMethods("android.app.ContextImpl", "createAppContext", function (this: any, obj, args) {
         const context = this(obj, args);
         fn(context);
         return context;
@@ -804,7 +805,7 @@ export function runOnCreateContext(fn: (context: Java.Wrapper<{}>) => any) {
 }
 
 export function runOnCreateApplication(fn: (application: Java.Wrapper<{}>) => any) {
-    hookMethods("android.app.LoadedApk", "makeApplication", function (obj, args) {
+    hookMethods("android.app.LoadedApk", "makeApplication", function (this: any, obj, args) {
         const app = this(obj, args);
         fn(app);
         return app;
@@ -875,9 +876,9 @@ function $defineMethodProperties<T extends Java.Members<T> = {}>(method: Java.Me
  */
 function $hookMethod<T extends Java.Members<T> = {}>(
     method: Java.Method<T>,
-    impl: HookImpl<T> | HookOpts = null
+    impl: HookImpl<T> | HookOpts | undefined = void 0
 ): void {
-    if (impl != null) {
+    if (impl != void 0) {
         const proxy = new Proxy(method, {
             apply: function (target, thisArg: any, argArray: any[]) {
                 const obj = argArray[0];
@@ -886,7 +887,7 @@ function $hookMethod<T extends Java.Members<T> = {}>(
             }
         });
         const hookImpl = isFunction(impl) ? impl as HookImpl<T> : getEventImpl(impl as HookOpts);
-        method.implementation = function () {
+        method.implementation = function (this: any) {
             return hookImpl.call(proxy, this, Array.prototype.slice.call(arguments));
         };
         Log.i("Hook method: " + method);

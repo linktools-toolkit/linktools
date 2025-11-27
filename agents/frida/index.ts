@@ -29,9 +29,10 @@ console.error = logWrapper(log.e.bind(log));
 console.log = logWrapper(log.i.bind(log));
 
 
+const global: any = globalThis;
 if (global._setUnhandledExceptionCallback != void 0) {
-    global._setUnhandledExceptionCallback(error => {
-        let stack = void 0;
+    global._setUnhandledExceptionCallback(function(error: any) {
+        let stack: any = void 0;
         if (error instanceof Error) {
             const errorStack = error.stack;
             if (errorStack !== void 0) {
@@ -80,7 +81,7 @@ export class ScriptLoader {
                     `//# sourceURL=${script.filename}`
                 )
                 func(parameters);
-            } catch (e) {
+            } catch (e: any) {
                 let message = e.hasOwnProperty("stack") ? e.stack : e;
                 throw new Error(`Unable to load ${script.filename}: ${message}`);
             }
@@ -102,8 +103,8 @@ declare global {
     function isFunction(obj: any): boolean;
     function ignoreError<T>(fn: () => T): T;
     function ignoreError<T>(fn: () => T, defaultValue: T): T;
-    function parseBoolean(value: string | boolean): boolean;
-    function parseBoolean(value: string | boolean, defaultValue: boolean): boolean;
+    function parseBoolean(value: string | boolean | undefined): boolean;
+    function parseBoolean(value: string | boolean | undefined, defaultValue: boolean): boolean;
     function pretty2String(obj: any): any;
     function pretty2Json(obj: any): any;
 }
@@ -134,7 +135,7 @@ Object.defineProperties(globalThis, {
     },
     ignoreError: {
         enumerable: false,
-        value: function <T>(fn: () => T, defaultValue: T = void 0): T {
+        value: function <T>(fn: () => T, defaultValue: T | undefined = void 0): T | undefined {
             try {
                 return fn();
             } catch (e) {
@@ -145,7 +146,7 @@ Object.defineProperties(globalThis, {
     },
     parseBoolean: {
         enumerable: false,
-        value: function (value: string | boolean, defaultValue: boolean = void 0) {
+        value: function (value: string | boolean, defaultValue: boolean = false): boolean {
             if (typeof (value) === "boolean") {
                 return value;
             }
@@ -176,7 +177,7 @@ Object.defineProperties(globalThis, {
                 return obj;
             }
             if (Array.isArray(obj)) {
-                let result = [];
+                let result: any[] = [];
                 for (let i = 0; i < obj.length; i++) {
                     result.push(pretty2Json(obj[i]));
                 }
