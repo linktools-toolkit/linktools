@@ -286,7 +286,7 @@ export function getDescFromAddress(pointer: NativePointer, symbol: boolean) {
 function $getCurrentPage(): string | null {
     let result: string | null = null;
     try {
-        if (Java.available) {
+        if (globalThis.Java && Java.available) {
             Java.perform(function () {
                 const activity = java.o.currentActivity;
                 result = activity ? activity.$className : null;

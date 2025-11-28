@@ -39,7 +39,7 @@ if (global._setUnhandledExceptionCallback != void 0) {
                 stack = errorStack;
             }
         }
-        if (Java.available) {
+        if (globalThis.Java && Java.available) {
             const javaStack = java.getErrorStack(error);
             if (javaStack !== void 0) {
                 if (stack !== void 0) {
@@ -183,7 +183,7 @@ Object.defineProperties(globalThis, {
                 }
                 return result;
             }
-            if (Java.available && java.isJavaObject(obj)) {
+            if (globalThis.Java && Java.available && java.isJavaObject(obj)) {
                 return java.o.objectClass.toString.apply(obj);
             }
             return ignoreError(() => obj.toString());
