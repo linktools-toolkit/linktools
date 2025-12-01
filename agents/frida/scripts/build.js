@@ -21,13 +21,13 @@ function compile(input, output, options = void 0) {
         return defaultValue;
     }
     let cmd = `frida-compile ${input} -o ${output}`;
-    if (getOption('watch', false)) {
+    if (getOption("watch", false)) {
         cmd += " -w";
     }
     if (getOption("compress", false)) {
         cmd += " -c";
     }
-    const bundleFormat = getOption('bundleFormat');
+    const bundleFormat = getOption("bundleFormat");
     if (bundleFormat && bundleFormat.trim() !== "") {
         cmd += ` -B ${bundleFormat}`;
     }
@@ -42,15 +42,16 @@ function compileBridge() {
     const tempPath = join(sourcePath, "build");
     mkdir(tempPath, { recursive: true }, (err) => { });
     const compileOne = function (name) {
-        compile(`${sourcePath}/${name}.js`, `${tempPath}/${name}.js`, { compress: true, bundleFormat: 'iife' });
+        compile(`${sourcePath}/bridges/${name}.js`, `${tempPath}/${name}.js`, { compress: true, bundleFormat: "iife" });
         uglifyjs(`${tempPath}/${name}.js`, `${targetPath}/${name}.js`);
     }
-    compileOne('frida-java-bridge');
-    compileOne('frida-objc-bridge');
+    compileOne("frida-java-bridge");
+    compileOne("frida-objc-bridge");
+    compileOne("frida-swift-bridge");
 }
 
 function compileScript(debug) {
-    compile(`${sourcePath}/index.ts`, `${targetPath}/frida.js`, { watch: debug, compress: false, bundleFormat: 'iife' });
+    compile(`${sourcePath}/index.ts`, `${targetPath}/frida.js`, { watch: debug, compress: false, bundleFormat: "iife" });
     if (!debug) {
         uglifyjs(`${targetPath}/frida.js`, `${targetPath}/frida.min.js`);
     }
