@@ -1,0 +1,31 @@
+dependencies:
+  - rich
+  - filelock>=3.4.0
+  - importlib-metadata; python_version < '3.8'
+  - psutil
+
+dev-dependencies:
+  - pyyaml
+
+optional-dependencies:
+  # 下载时使用requests包，并且支持socks5代理
+  # Use requests package for downloading, and support socks5 proxy
+  requests:
+    - 'requests[socks]'
+
+  # 命令行自动补全
+  # Command line auto-completion
+  cli:
+    - rich
+    - argcomplete>=2.0.0
+
+  common:
+    - linktools-common[all]
+
+  mobile:
+    - linktools-mobile[all]
+
+  # 用于docker/podman容器管理
+  # Used for docker/podman container management
+  cntr:
+    - linktools-cntr

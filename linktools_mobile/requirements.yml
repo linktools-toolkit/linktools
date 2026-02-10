@@ -1,0 +1,28 @@
+dependencies:
+  - linktools
+
+dev-dependencies: []
+
+release-dependencies:
+  - linktools[cli]>=0.9.0
+
+optional-dependencies:
+  frida:
+    # 集成frida hook框架，支持android、ios hook
+    # Integrate frida hook framework, support android, ios hook
+    - frida>=15.0.0
+
+    # 集成objection框架，支持android、ios hook
+    # Integrate objection framework, support android, ios hook
+    - objection
+
+  ssh:
+    # 使用ssh连接越狱后的iphone
+    # Use ssh to connect to jailbroken iphone
+    - paramiko
+    - scp
+
+  ssl:
+    # 用于解析证书时使用
+    # Used for parsing certificates
+    - pyOpenSSL

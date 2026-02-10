@@ -1,0 +1,43 @@
+[build-system]
+requires = ["linktools-setup>=0.0.2"]
+# requires = ["linktools-setup @ git+https://github.com/linktools-toolkit/linktools-setup.git@master"]
+build-backend = "linktools_setup.build_meta"
+
+[project]
+name = "linktools"
+description = "linktools toolkit"
+requires-python = ">=3.6"
+authors = [{name = "Hu Ji", email = "669898595@qq.com"}]
+readme = {file = "README.md", content-type = "text/markdown"}
+license = {text = "Apache-2.0"}
+dynamic = ["version", "dependencies", "optional-dependencies", "scripts", "entry-points"]
+
+[project.urls]
+Homepage = "https://github.com/linktools-toolkit/linktools"
+Repository = "https://github.com/linktools-toolkit/linktools.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["linktools*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+linktools = ["assets/**"]
+
+[tool.setuptools.exclude-package-data]
+linktools = ["assets/develop/**"]
+
+[tool.linktools]
+version = {file = ".version"}
+dependencies = {file = "requirements.yml"}
+convert = [
+  {type = "jinja2", source = "metadata.jinja2", dest = "src/linktools/metadata.py"},
+  {type = "yml2json", source = "src/linktools/assets/develop/tools.yml", dest = "src/linktools/assets/tools.json"},
+]
+
+[tool.linktools.scripts]
+capability = "linktools.core:Capability"
+console = {name = "lt", module = "linktools.__main__"}
+commands = {path = "src/linktools/commands", module = "linktools.commands"}

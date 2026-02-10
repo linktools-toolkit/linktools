@@ -1,0 +1,27 @@
+services:
+  flare:
+    image: 'soulteary/flare:{{ FLARE_TAG }}'
+    user: '{{ DOCKER_UID }}:{{ DOCKER_GID }}'
+#   {% if FLARE_EXPOSE_PORT > 0 %}
+    ports:
+      - '{{ FLARE_EXPOSE_PORT }}:5005'
+#   {% endif %}
+    command: flare
+    environment:
+#   {% if FLARE_ENABLE_LOGIN %}
+      - 'FLARE_DISABLE_LOGIN=0'
+      - 'FLARE_VISIBILITY=PRIVATE'
+      - 'FLARE_USER={{ FLARE_USER }}'
+      - 'FLARE_PASS={{ FLARE_PASSWORD }}'
+#   {% else %}
+      - 'FLARE_DISABLE_LOGIN=1'
+#   {% endif %}
+      - 'FLARE_GUIDE=1'
+    volumes:
+      - '{{ (APP_PATH/"app") | mkdir | chown }}:/app'
+    networks:
+      - nginx
+
+networks:
+  nginx:
+    name: nginx

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+@author  : Hu Ji
+@file    : metadata.py
+@time    : 2018/11/25
+@site    :
+@software: PyCharm
+
+              ,----------------,              ,---------,
+         ,-----------------------,          ,"        ,"|
+       ,"                      ,"|        ,"        ,"  |
+      +-----------------------+  |      ,"        ,"    |
+      |  .-----------------.  |  |     +---------+      |
+      |  |                 |  |  |     | -==----'|      |
+      |  | $ sudo rm -rf / |  |  |     |         |      |
+      |  |                 |  |  |/----|`---=    |      |
+      |  |                 |  |  |   ,/|==== ooo |      ;
+      |  |                 |  |  |  // |(((( [33]|    ,"
+      |  `-----------------'  |," .;'| |((((     |  ,"
+      +-----------------------+  ;;  | |         |,"
+         /_)______________(_/  //'   | +---------+
+    ___________________________/___  `,
+   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
+  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
+ /_==__==========__==_ooo__ooo=_/'   /___________,"
+"""
+
+###################################################################
+# metadata
+###################################################################
+
+__name__ = "{{ config.get('project', 'name') }}"
+__version__ = "{{ version }}"
+__release__ = {{ "True" if release else "False" }}
+__develop__ = {{ "True" if develop else "False" }}
+__ep_capability__ = "{{ const.capability_entrypoint }}"
+__ep_scripts__ = "{{ const.scripts_entrypoint }}"
+__description__ = f"""\
+    ___       __   __              __
+   / (_)___  / /__/ /_____  ____  / /____
+  / / / __ \\/ //_/ __/ __ \\/ __ \\/ / ___/  {{ config.get('project', 'name') }} toolkit (v{{ version }})
+ / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: {{ config.get('project', 'authors')[0]['name'] }} <{{ config.get('project', 'authors')[0]['email'] }}>
+/_/_/_/ /_/_/|_|\\__/\\____/\\____/_/____/
+"""
+
+###################################################################
+# other
+###################################################################
+
+class __MissingType:
+    __eq__ = lambda l, r: \
+        l is r or type(l) is type(r)
+    __repr__ = lambda _: "__missing__"
+    __bool__ = lambda _: False
+
+__missing__ = __MissingType()
+
+del __MissingType

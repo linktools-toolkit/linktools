@@ -1,0 +1,35 @@
+[build-system]
+requires = ["linktools-setup>=0.0.2"]
+build-backend = "linktools_setup.build_meta"
+
+[project]
+name = "linktools-common"
+description = "linktools toolkit"
+requires-python = ">=3.6"
+authors = [{name = "Hu Ji", email = "669898595@qq.com"}]
+readme = {file = "README.md", content-type = "text/markdown"}
+license = {text = "Apache-2.0"}
+dynamic = ["version", "dependencies", "optional-dependencies", "scripts", "entry-points"]
+
+[project.urls]
+Homepage = "https://github.com/ice-black-tea/linktools"
+Repository = "https://github.com/ice-black-tea/linktools.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["linktools*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+linktools = ["**/assets/**"]
+
+[tool.linktools]
+version = {file = ".version"}
+dependencies = {file = "requirements.yml"}
+convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/common.py"}]
+
+[tool.linktools.scripts]
+capability = "linktools.capabilities.common:__capability__"
+console = {path = "src/linktools/commands", module = "linktools.commands"}

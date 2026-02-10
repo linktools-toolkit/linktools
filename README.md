@@ -28,7 +28,7 @@ python3 -m pip install -U "linktools[all]"
 # 可通过以下命令生成alias脚本添加相关命令
 # 需要注意此处python3需要替换成自己安装环境下的interpreter，比如~/projects/linktools/venv/bin/python
 # ps. 如果已安装argcomplete库，还可以生成自动补全脚本
-eval "$(python3 -m linktools.cli.env alias --shell bash)"
+eval "$(python3 -m linktools.commands.env alias --shell bash)"
 
 # 配置全局java环境，指定java版本号（如：11.0.23/17.0.11/21.0.3）
 # 可通过 https://sap.github.io/SapMachine/#download 查找LTS版本号
@@ -306,7 +306,7 @@ $ at-frida --no-serve --remote-port 27042 -p me.ele
 
 **2) 使用python方式调用**
 
-执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/cli/commands/android/frida.py) 
+执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/cli/commands/android/frida.py)
 
 ```python
 #!/usr/bin/env python3
@@ -319,7 +319,7 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser):
         pass
-    
+
     def run(self, args):
         code = """
             Java.perform(function () {
@@ -330,7 +330,7 @@ class Command(BaseCommand):
                 );
             });
             """
-        
+
         with FridaAndroidServer() as server:
             app = FridaApplication(
                 server,

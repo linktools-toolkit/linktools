@@ -1,0 +1,15 @@
+services:
+  nginx:
+    volumes:
+      - '{{ (APP_PATH/"conf.d") | mkdir | chown }}:/etc/nginx/conf.d'
+    ports:
+      - '{{ HTTP_PORT }}:{{ HTTP_PORT }}'
+#     {% if HTTPS_ENABLE %}
+      - '{{ HTTPS_PORT }}:{{ HTTPS_PORT }}'
+#     {% endif %}
+    networks:
+      - nginx
+
+networks:
+  nginx:
+    name: nginx
