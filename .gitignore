@@ -8,4 +8,6 @@
 /__pycache__/
 /venv/
 
-**/_capability/*.py
+linktools*/build/
+linktools*/dist/
+linktools*/src/linktools*/capabilities/*.py
