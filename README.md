@@ -28,7 +28,7 @@ python3 -m pip install -U "linktools[all]"
 # 可通过以下命令生成alias脚本添加相关命令
 # 需要注意此处python3需要替换成自己安装环境下的interpreter，比如~/projects/linktools/venv/bin/python
 # ps. 如果已安装argcomplete库，还可以生成自动补全脚本
-eval "$(python3 -m linktools.commands.env alias --shell bash)"
+eval "$(python3 -m linktools.cli.env alias --shell bash)"
 
 # 配置全局java环境，指定java版本号（如：11.0.23/17.0.11/21.0.3）
 # 可通过 https://sap.github.io/SapMachine/#download 查找LTS版本号
@@ -122,7 +122,7 @@ $ ct-env clean 7
 
 ##### 常用命令
 
-所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/assets/develop/tools.yml)查看，此处以apktool举例
+所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/linktools/src/linktools/assets/develop/tools.yml)查看，此处以apktool举例
 
 ```bash
 # 初始化并执行apktool命令
@@ -295,7 +295,7 @@ $ at-intent browser https://example.com
 $ at-frida -l ~/test/frida.js -p me.ele --spawn
 
 # 从远程加载frida脚本，注入到me.ele进程中，并将me.ele流量重定向到本地8080端口
-$ at-frida -c https://raw.githubusercontent.com/linktools-toolkit/linktools/master/agents/frida/test/android.js -p me.ele --redirect-port 8080
+$ at-frida -c https://raw.githubusercontent.com/linktools-toolkit/linktools/master/linktools-mobile/agents/frida/test/android.js -p me.ele --redirect-port 8080
 
 # 只启动frida-server，不注入脚本
 $ at-frida --serve --remote-port 27042 --local-port 27042 -p fake_package
@@ -306,13 +306,13 @@ $ at-frida --no-serve --remote-port 27042 -p me.ele
 
 **2) 使用python方式调用**
 
-执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/linktools-toolkit/linktools/blob/master/src/linktools/cli/commands/android/frida.py)
+执行如下python脚本即可自动开启frida-server，并将js代码注入到指定进程，参考[src/linktools/cli/commands/android/frida.py](https://github.com/linktools-toolkit/linktools/blob/master/linktools-mobile/src/linktools/cli/commands/android/frida.py)
 
 ```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from linktools.cli import BaseCommand
-from linktools.frida import FridaApplication, FridaEvalCode, FridaAndroidServer
+from linktools.mobile.frida import FridaApplication, FridaEvalCode, FridaAndroidServer
 
 
 class Command(BaseCommand):
@@ -349,7 +349,7 @@ if __name__ == "__main__":
 
 ##### 内置接口
 
-e.g. [java相关接口](https://github.com/linktools-toolkit/linktools/blob/master/agents/frida/lib/java.ts)
+e.g. [java相关接口](https://github.com/linktools-toolkit/linktools/blob/master/linktools-mobile/agents/frida/lib/java.ts)
 
 ```javascript
 Java.perform(function () {

@@ -4,18 +4,18 @@
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from typing import Callable, Dict
 from pathlib import Path
 
-import shutil
 import tomlkit
 from tomlkit.items import Table, Array
 
 MODULE_NAME = "linktools"
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
-PROJECT_PATH = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
 
 
 def get_modules():
@@ -242,6 +242,7 @@ def handle_install(args: argparse.Namespace):
 
 
 def handle_build(args: argparse.Namespace):
+    version = os.environ.get("VERSION", None)
     for name, info in get_modules().items():
         if not args.module or name in args.module:
             print(f"[+] Building project: {name}, path: {info.get('path')}")
@@ -251,6 +252,10 @@ def handle_build(args: argparse.Namespace):
                 "--outdir", os.path.join(PROJECT_PATH, "dist"),
                 info.get("path"),
             ], cwd=PROJECT_PATH)
+            if version is not None:
+                print(f"[+] Setting version for project: {name} to {version}")
+                with open(os.path.join(info.get("path"), ".version"), "wt", encoding="utf-8") as fd:
+                    fd.write(version)
 
 
 def handle_clean(args: argparse.Namespace):
@@ -263,8 +268,12 @@ def handle_clean(args: argparse.Namespace):
             paths.append(os.path.join(info.get("path"), "src", f"{info.get('module').replace('-', '_')}.egg-info"))
             for path in paths:
                 if os.path.exists(path):
-                    print(f"[-] Removing path: {path}")
-                    shutil.rmtree(path)
+                    if os.path.isdir(path):
+                        print(f"[-] Removing directory: {path}")
+                        shutil.rmtree(path)
+                    else:
+                        print(f"[-] Removing file: {path}")
+                        os.remove(path)
                 else:
                     print(f"[-] Path does not exist, skipping: {path}")
 

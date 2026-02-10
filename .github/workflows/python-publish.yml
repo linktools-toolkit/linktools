@@ -28,7 +28,7 @@ jobs:
         node-version: 20
     - name: Build frida scripts
       if: ${{ !env.ACT }}
-      run: cd linktools_mobile/agents/frida && npm install && npm run build
+      run: cd linktools-mobile/agents/frida && npm install && npm run build
 
     # build android-tools.apk
     - name: Set up JDK 17
@@ -42,7 +42,7 @@ jobs:
       uses: android-actions/setup-android@v3
     - name: Build android tools
       if: ${{ !env.ACT }}
-      run: cd linktools_mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
+      run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
 
     # build python package
     - name: Set up Python
@@ -57,10 +57,8 @@ jobs:
     - name: Get previous tag
       id: tag
       uses: WyriHaximus/github-action-get-previous-tag@v1
-    - name: Save previous tag
-      run: sh -c "echo ${{ steps.tag.outputs.tag }} > .version"
     - name: Build package
-      run: VERSION=${{ steps.tag.outputs.tag }} RELEASE=true python scripts/manage.py build
+      run: VERSION=${{ steps.tag.outputs.tag }} RELEASE=true python manage.py build
 
     # publish python package
     - name: Publish package
@@ -77,11 +75,9 @@ jobs:
       run: |
         git config user.name github-actions
         git config user.email github-actions@github.com
-        git add linktools/.version
-        git add linktools_mobile/src/linktools/assets/frida.js
-        git add linktools_mobile/src/linktools/assets/frida-*-bridge.js
-        git add linktools_mobile/src/linktools/assets/android-tools.json
-        git add linktools_mobile/src/linktools/assets/android-tools.apk
+        git add linktools*/.version
+        git add linktools-mobile/src/linktools/assets/frida*.js
+        git add linktools-mobile/src/linktools/assets/android-tools.*
         git commit -m "Auto commit artifacts (${{ steps.tag.outputs.tag }})"
         git tag -d ${{ steps.tag.outputs.tag }}
         git tag ${{ steps.tag.outputs.tag }}
