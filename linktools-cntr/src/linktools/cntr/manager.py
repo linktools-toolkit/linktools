@@ -111,6 +111,10 @@ class ContainerManager:
         )
 
     @cached_property
+    def project_name(self) -> str:
+        return self.config.get("COMPOSE_PROJECT_NAME")
+
+    @cached_property
     def root_path(self):
         return pathlib.Path(os.path.dirname(__file__))
 
@@ -425,7 +429,7 @@ class ContainerManager:
             path = container.get_docker_compose_file()
             if path and os.path.exists(path):
                 options.extend(["--file", path])
-        options.extend(["--project-name", self.config.get("COMPOSE_PROJECT_NAME")])
+        options.extend(["--project-name", self.project_name])
         return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
 
     def change_file_owner(self, path: PathType, uid: int, gid: int, force: bool = False,

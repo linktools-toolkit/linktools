@@ -144,9 +144,10 @@ class NginxMixin:
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
             self.render_template(
-                nginx.get_source_path("https.conf" if https else "http.conf"),
+                nginx.get_source_path("server.conf"),
                 conf_path,
-                DOMAIN=domain
+                DOMAIN=domain,
+                HTTPS_ENABLE=https,
             )
             self.render_template(
                 template,
@@ -254,7 +255,8 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                     for name, service in data["services"].items():
                         if not isinstance(service, dict):
                             continue
-                        service.setdefault("container_name", name)
+                        service.setdefault("container_name", f"{self.manager.project_name}-{name}")
+                        service.setdefault("hostname", name)
                         service.setdefault("restart", self.get_config("SERVICE_RESTART_POLICY"))
                         service.setdefault("logging", {
                             "driver": self.get_config("SERVICE_LOG_DRIVER"),
@@ -281,6 +283,15 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                             for container_path in container_paths.values():
                                 if container_path not in volumes:
                                     volumes.append(container_path)
+                if "networks" in data and isinstance(data["networks"], dict):
+                    networks = data["networks"]
+                    for name in list(networks.keys()):
+                        network = networks[name]
+                        if network is None:
+                            network = networks[name] = {}
+                        if not isinstance(network, dict):
+                            continue
+                        network.setdefault("name", f"{self.manager.project_name}-{name}")
                 return data
         return None
 

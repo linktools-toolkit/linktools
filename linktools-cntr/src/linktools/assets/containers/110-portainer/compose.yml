@@ -13,4 +13,3 @@ services:
 
 networks:
   nginx:
-    name: nginx

@@ -160,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install in editable mode",
     )
     install_parser.add_argument(
-        "--no-build-isolation",
+        "--no-isolation",
         action="store_true",
         help="Disable build isolation (pip compatible)",
     )
@@ -234,7 +234,7 @@ def handle_install(args: argparse.Namespace):
         if args.editable:
             pip_args.append("-e")
         pip_args.append(path)
-    if args.no_build_isolation:
+    if args.no_isolation:
         pip_args.append("--no-build-isolation")
 
     print(f"[+] Running pip install with arguments: {' '.join(pip_args)}")
