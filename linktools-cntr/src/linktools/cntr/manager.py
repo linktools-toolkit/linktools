@@ -328,6 +328,8 @@ class ContainerManager:
                 self.logger.debug(f"Generate Dockerfile for {container.name}")
             if container.docker_compose and self.debug:  # 加载每个容器的docker-compose.yml
                 self.logger.debug(f"Generate docker-compose.yml for {container.name}")
+            if container.exposes and self.debug:
+                self.logger.debug(f"Load exposes for {container.name}")
         return containers
 
     def add_installed_containers(self, *names: str) -> List[BaseContainer]:

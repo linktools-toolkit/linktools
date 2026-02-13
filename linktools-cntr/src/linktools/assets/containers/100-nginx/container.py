@@ -86,11 +86,11 @@ class Container(BaseContainer):
             )
         )
 
-    def on_starting(self):
+    def on_started(self):
+        utils.clear_directory(self.get_app_path("conf.d"))
+
         snippets_path = self.get_app_path("conf.d", "snippets")
         snippets_path.mkdir(parents=True, exist_ok=True)
-        utils.clear_directory(snippets_path)
-
         self.render_template(
             self.get_source_path("snippets", "header.conf"),
             self.get_app_path("conf.d", "snippets", "header.conf"),
@@ -100,11 +100,9 @@ class Container(BaseContainer):
             self.render_template(
                 self.get_source_path("snippets", "default.conf"),
                 self.get_app_path("conf.d", "snippets", "waf.conf"),
-                URL=f"http://safeline-tengine:{self.get_config('WAF_PORT')}",
+                PROXY_URL=f"http://safeline-tengine:{self.get_config('WAF_PORT')}",
             )
 
-    def on_started(self):
-        utils.clear_directory(self.get_app_path("conf.d"))
         for container in self.manager.get_installed_containers():
             path = self.get_app_path("temporary", container.name)
             if os.path.isdir(path):
@@ -119,14 +117,14 @@ class Container(BaseContainer):
             dns_api = self.get_config("ACME_DNS_API")
             self.logger.info("Renew nginx certificates if necessary.")
             self.manager.create_docker_process(
-                "exec", "-it", "nginx",
+                "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --renew --issue "
                             f"--domain {root_domain} --domain *.{root_domain} "
                             f"--dns {dns_api} "
                             f"1>/dev/null"
             ).call()
             self.manager.create_docker_process(
-                "exec", "-it", "nginx",
+                "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --install-cert "
                             f"--domain {root_domain} --domain *.{root_domain} "
                             f"--cert-file /etc/certs/{root_domain}_cert.pem "
@@ -136,7 +134,7 @@ class Container(BaseContainer):
             ).call()
 
         self.manager.create_docker_process(
-            "exec", "-it", "nginx",
+            "exec", "-it", self.get_service_name("nginx"),
             "sh", "-c", "killall nginx 1>/dev/null 2>&1"
         ).call()
 

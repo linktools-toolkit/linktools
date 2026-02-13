@@ -51,7 +51,7 @@ services:
     image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-tengine{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
     volumes:
       - '/etc/localtime:/etc/localtime:ro'
-      - '/etc/resolv.conf:/etc/resolv.conf:ro'
+#      - '/etc/resolv.conf:/etc/resolv.conf:ro'
       - '{{ (APP_PATH/"resources"/"nginx") | mkdir | chown }}:/etc/nginx'
       - '{{ (APP_PATH/"resources"/"detector") | mkdir | chown }}:/resources/detector'
       - '{{ (APP_PATH/"resources"/"chaos") | mkdir | chown }}:/resources/chaos'
@@ -112,4 +112,4 @@ networks:
         - gateway: '{{ SAFELINE_SUBNET_PREFIX }}.1'
           subnet: '{{ SAFELINE_SUBNET_PREFIX }}.0/24'
     driver_opts:
-      com.docker.network.bridge.name: safeline-ce
+      com.docker.network.bridge.name: {{ manager.project_name }}-safeline-ce

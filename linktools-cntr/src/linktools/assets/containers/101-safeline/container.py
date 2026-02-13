@@ -28,12 +28,17 @@
 """
 from typing import Iterable
 
+from linktools.cli import subcommand
 from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer, ExposeLink
 
 
 class Container(BaseContainer):
+
+    @property
+    def dependencies(self) -> "Iterable[str]":
+        return ["nginx"]
 
     @cached_property
     def configs(self):
@@ -54,3 +59,10 @@ class Container(BaseContainer):
                 "SAFELINE_EXPOSE_PORT", https=True
             )),
         ]
+
+    @subcommand("resetadmin", help="reset safeline admin password")
+    def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
+        self.manager.create_docker_process(
+            "exec", "-it", self.get_service_name("safeline-mgt"),
+            "resetadmin"
+        ).call()

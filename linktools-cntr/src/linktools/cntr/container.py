@@ -92,7 +92,7 @@ class ExposeMixin:
     def load_nginx_url(
             self: "BaseContainer", key: str, *path: str,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = True
+            https_enable: bool = __missing__, waf_enable: bool = __missing__
     ):
         domain = self.get_config(key, type=str, default=None)
         if domain:
@@ -102,7 +102,8 @@ class ExposeMixin:
                     proxy_name=proxy_name,
                     proxy_conf=proxy_conf,
                     proxy_url=proxy_url,
-                    https_enable=https_enable
+                    https_enable=https_enable,
+                    waf_enable=waf_enable,
                 ))
             scheme = 'https' if https_enable else 'http'
             port = self.get_config("HTTPS_PORT" if https_enable else "HTTP_PORT", type=int)
@@ -136,9 +137,6 @@ class NginxMixin:
             https_enable: bool = __missing__, waf_enable: bool = __missing__
     ):
 
-        if proxy_conf is __missing__ and proxy_url is __missing__:
-            raise ContainerError("`template` and `url` arguments may not be empty at the same time")
-
         nginx = self.manager.containers["nginx"]
         conf_path = nginx.get_app_path("temporary", self.name, f"{domain}.conf")
         sub_conf_path = nginx.get_app_path("temporary", self.name, f"{domain}_confs", f"{proxy_name or self.name}.conf")
@@ -151,30 +149,33 @@ class NginxMixin:
             if not proxy_conf:
                 if not proxy_url:
                     raise ContainerError("not found url")
-                proxy_conf = nginx.get_source_path("default.conf")
+                proxy_conf = nginx.get_source_path("snippets", "default.conf")
 
-            if https_enable is __missing__:
-                https_enable = self.get_config("HTTPS_ENABLE", type=bool)
-            if waf_enable is __missing__:
-                waf_enable = self.get_config("WAF_ENABLE", type=bool)
+            https_enable = self.get_config("HTTPS_ENABLE", type=bool) \
+                if https_enable is __missing__ \
+                else https_enable and not self.get_config("HTTPS_ENABLE", type=bool)
+            waf_enable = self.get_config("WAF_ENABLE", type=bool) \
+                if waf_enable is __missing__ \
+                else waf_enable and not self.get_config("WAF_ENABLE", type=bool)
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
             self.render_template(
-                nginx.get_source_path("server.conf"),
+                nginx.get_source_path("snippets", "server.conf"),
                 conf_path,
                 DOMAIN=domain,
                 HTTPS_ENABLE=https_enable,
                 WAF_ENABLE=waf_enable,
             )
-            self.render_template(
-                proxy_conf,
-                sub_conf_path,
-                DOMAIN=domain,
-                URL=proxy_url,
-                HTTPS_ENABLE=https_enable,
-                WAF_ENABLE=waf_enable,
-            )
+            if proxy_conf is not __missing__ or proxy_url is not __missing__:
+                self.render_template(
+                    proxy_conf,
+                    sub_conf_path,
+                    DOMAIN=domain,
+                    PROXY_URL=proxy_url,
+                    HTTPS_ENABLE=https_enable,
+                    WAF_ENABLE=waf_enable,
+                )
 
         except ContainerError as e:
             self.logger.debug(f"{self} write nginx conf: {e}, skip.")
@@ -307,11 +308,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                     networks = data["networks"]
                     for name in list(networks.keys()):
                         network = networks[name]
+                        network = networks[name]
                         if network is None:
                             network = networks[name] = {}
                         if not isinstance(network, dict):
                             continue
-                        network.setdefault("name", f"{self.manager.project_name}-{name}")
+                        network.setdefault("name", self.get_service_name(name))
                 return data
         return None
 
@@ -557,6 +559,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def get_docker_context_path(self) -> Path:
         return self.get_source_path()
+
+    def get_service_name(self, key: str) -> str:
+        return f"{self.manager.project_name}-{key}"
 
     def is_depend_on(self, name: str):
         next_items = set(self.dependencies)
