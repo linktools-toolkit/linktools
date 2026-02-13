@@ -1,0 +1,115 @@
+services:
+  safeline-pg:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-postgres{{ SAFELINE_ARCH_SUFFIX }}:15.2'
+    volumes:
+      - '{{ (APP_PATH/"resources"/"postgres"/"data") | mkdir | chown }}:/var/lib/postgresql/data'
+      - '/etc/localtime:/etc/localtime:ro'
+    environment:
+      - POSTGRES_USER=safeline-ce
+      - POSTGRES_PASSWORD={{ SAFELINE_POSTGRES_PASSWORD }}
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.2'
+    command: [postgres, -c, max_connections=600]
+    healthcheck:
+      test: pg_isready -U safeline-ce -d safeline-ce
+  safeline-mgt:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-mgt{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+      - '{{ (APP_PATH/"resources"/"mgt") | mkdir | chown }}:/app/data'
+      - '{{ (APP_PATH/"logs/nginx") | mkdir | chown }}:/app/log/nginx:z'
+      - '{{ (APP_PATH/"resources"/"sock") | mkdir | chown }}:/app/sock'
+      - '/var/run:/app/run'
+#   {% if SAFELINE_EXPOSE_PORT > 0 %}
+    ports:
+      - '{{ SAFELINE_EXPOSE_PORT }}:1443'
+#   {% endif %}
+    healthcheck:
+      test: curl -k -f https://localhost:1443/api/open/health
+    environment:
+      - MGT_PG=postgres://safeline-ce:{{ SAFELINE_POSTGRES_PASSWORD }}@safeline-pg/safeline-ce?sslmode=disable
+      - MGT_PROXY=0
+    depends_on:
+      - safeline-pg
+      - safeline-fvm
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.4'
+  safeline-detector:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-detector{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    volumes:
+      - '{{ (APP_PATH/"resources"/"detector") | mkdir | chown }}:/resources/detector'
+      - '{{ (APP_PATH/"logs"/"detector") | mkdir | chown }}:/logs/detector'
+      - '/etc/localtime:/etc/localtime:ro'
+    environment:
+      - LOG_DIR=/logs/detector
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.5'
+  safeline-tengine:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-tengine{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+      - '/etc/resolv.conf:/etc/resolv.conf:ro'
+      - '{{ (APP_PATH/"resources"/"nginx") | mkdir | chown }}:/etc/nginx'
+      - '{{ (APP_PATH/"resources"/"detector") | mkdir | chown }}:/resources/detector'
+      - '{{ (APP_PATH/"resources"/"chaos") | mkdir | chown }}:/resources/chaos'
+      - '{{ (APP_PATH/"logs"/"nginx") | mkdir | chown }}:/var/log/nginx:z'
+      - '{{ (APP_PATH/"resources"/"cache") | mkdir | chown }}:/usr/local/nginx/cache'
+      - '{{ (APP_PATH/"resources"/"sock") | mkdir | chown }}:/app/sock'
+    environment:
+      - TCD_MGT_API=https://{{ SAFELINE_SUBNET_PREFIX }}.4:1443/api/open/publish/server
+      - TCD_SNSERVER={{ SAFELINE_SUBNET_PREFIX }}.5:8000
+      # deprecated
+      - SNSERVER_ADDR={{ SAFELINE_SUBNET_PREFIX }}.5:8000
+      - CHAOS_ADDR={{ SAFELINE_SUBNET_PREFIX }}.10
+    ulimits:
+      nofile: 131072
+    networks:
+      nginx:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.254'
+  safeline-luigi:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-luigi{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    environment:
+      - MGT_IP={{ SAFELINE_SUBNET_PREFIX }}.4
+      - LUIGI_PG=postgres://safeline-ce:{{ SAFELINE_POSTGRES_PASSWORD }}@safeline-pg/safeline-ce?sslmode=disable
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+      - '{{ (APP_PATH/"resources"/"luigi") | mkdir | chown }}:/app/data'
+    depends_on:
+      - safeline-detector
+      - safeline-mgt
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.7'
+  safeline-fvm:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-fvm{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.8'
+  safeline-chaos:
+    image: '{{ SAFELINE_IMAGE_PREFIX }}/safeline-chaos{{ SAFELINE_REGION }}{{ SAFELINE_ARCH_SUFFIX }}:{{ SAFELINE_TAG }}'
+    environment:
+      - DB_ADDR=postgres://safeline-ce:{{ SAFELINE_POSTGRES_PASSWORD }}@safeline-pg/safeline-ce?sslmode=disable
+    volumes:
+      - '{{ (APP_PATH/"resources"/"sock") | mkdir | chown }}:/app/sock'
+      - '{{ (APP_PATH/"resources"/"chaos") | mkdir | chown }}:/app/chaos'
+    networks:
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.10'
+
+networks:
+  nginx:
+  safeline-ce:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - gateway: '{{ SAFELINE_SUBNET_PREFIX }}.1'
+          subnet: '{{ SAFELINE_SUBNET_PREFIX }}.0/24'
+    driver_opts:
+      com.docker.network.bridge.name: safeline-ce

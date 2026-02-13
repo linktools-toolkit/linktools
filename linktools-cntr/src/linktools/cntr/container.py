@@ -34,10 +34,9 @@ from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable, Iterable
 
 import yaml
 from jinja2 import Environment, TemplateError
-
 from linktools import utils
-from linktools.core import Config
 from linktools.cli import subcommand, subcommand_argument
+from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
 from linktools.rich import choose, confirm
@@ -90,11 +89,24 @@ class ExposeMixin:
             return utils.make_url(f"{'https' if https else 'http'}://{self.manager.host}:{port}", *path)
         return None
 
-    def load_nginx_url(self: "BaseContainer", key: str, *path: str, https: bool = True):
+    def load_nginx_url(
+            self: "BaseContainer", key: str, *path: str,
+            proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            https_enable: bool = True
+    ):
         domain = self.get_config(key, type=str, default=None)
         if domain:
-            port = self.get_config("HTTPS_PORT" if https else "HTTP_PORT", type=int)
-            return utils.make_url(f"{'https' if https else 'http'}://{domain}:{port}/", *path)
+            if proxy_conf or proxy_url:
+                self.start_hooks.append(lambda: self.write_nginx_conf(
+                    domain=domain,
+                    proxy_name=proxy_name,
+                    proxy_conf=proxy_conf,
+                    proxy_url=proxy_url,
+                    https_enable=https_enable
+                ))
+            scheme = 'https' if https_enable else 'http'
+            port = self.get_config("HTTPS_PORT" if https_enable else "HTTP_PORT", type=int)
+            return utils.make_url(f"{scheme}://{domain}:{port}/", *path)
         return None
 
 
@@ -118,28 +130,33 @@ class NginxMixin:
 
         return Config.Lazy(get_domain)
 
-    def write_nginx_conf(self: "BaseContainer", domain: str, template: PathType = __missing__, *,
-                         name: str = __missing__, url: str = __missing__, https: bool = True):
+    def write_nginx_conf(
+            self: "BaseContainer", domain: str, *,
+            proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            https_enable: bool = __missing__, waf_enable: bool = __missing__
+    ):
 
-        if template is __missing__ and url is __missing__:
+        if proxy_conf is __missing__ and proxy_url is __missing__:
             raise ContainerError("`template` and `url` arguments may not be empty at the same time")
 
         nginx = self.manager.containers["nginx"]
         conf_path = nginx.get_app_path("temporary", self.name, f"{domain}.conf")
-        sub_conf_path = nginx.get_app_path("temporary", self.name, f"{domain}_confs", f"{name or self.name}.conf")
+        sub_conf_path = nginx.get_app_path("temporary", self.name, f"{domain}_confs", f"{proxy_name or self.name}.conf")
 
         try:
             if not nginx.enable:
                 raise ContainerError("nginx is disable")
             if not domain:
                 raise ContainerError("not found domain")
-            if not template:
-                if not url:
+            if not proxy_conf:
+                if not proxy_url:
                     raise ContainerError("not found url")
-                template = nginx.get_source_path("default.conf")
+                proxy_conf = nginx.get_source_path("default.conf")
 
-            if not self.get_config("HTTPS_ENABLE", type=bool):
-                https = False
+            if https_enable is __missing__:
+                https_enable = self.get_config("HTTPS_ENABLE", type=bool)
+            if waf_enable is __missing__:
+                waf_enable = self.get_config("WAF_ENABLE", type=bool)
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,13 +164,16 @@ class NginxMixin:
                 nginx.get_source_path("server.conf"),
                 conf_path,
                 DOMAIN=domain,
-                HTTPS_ENABLE=https,
+                HTTPS_ENABLE=https_enable,
+                WAF_ENABLE=waf_enable,
             )
             self.render_template(
-                template,
+                proxy_conf,
                 sub_conf_path,
                 DOMAIN=domain,
-                URL=url,
+                URL=proxy_url,
+                HTTPS_ENABLE=https_enable,
+                WAF_ENABLE=waf_enable,
             )
 
         except ContainerError as e:
@@ -339,7 +359,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("-c", "--command", help="shell command")
     @subcommand_argument("--privileged", help="give extended privileges to the command")
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
-    @subcommand_argument("--service", dest="service_name" , help="service name")
+    @subcommand_argument("--service", dest="service_name", help="service name")
     def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
         service = self.choose_service(service_name)
 

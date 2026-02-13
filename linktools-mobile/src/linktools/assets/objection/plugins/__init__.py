@@ -33,8 +33,8 @@ import click
 from objection.state.app import app_state
 from objection.utils.plugin import Plugin
 
-from linktools.core import environ
 from linktools.capabilities.mobile import __capability__
+from linktools.core import environ
 from linktools.mobile.frida import FridaEvalCode, FridaScript, FridaScriptHandler, FridaSession
 
 __description__ = f"{environ.name} plugin"

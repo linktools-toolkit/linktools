@@ -61,6 +61,15 @@ class Container(BaseContainer):
                 if cfg.get("HTTPS_ENABLE")
                 else Config.Alias(type=int) | 0
             ),
+            WAF_ENABLE=Config.Lazy(
+                lambda cfg: self.manager.containers["safeline"].enable
+            ),
+            WAF_PORT=Config.Lazy(
+                lambda cfg:
+                Config.Prompt(type=int, cached=True) | 8000
+                if cfg.get("WAF_ENABLE")
+                else Config.Alias(type=int) | 0
+            ),
             ACME_DNS_API=Config.Lazy(
                 lambda cfg:
                 Config.Error(textwrap.dedent(
@@ -76,6 +85,23 @@ class Container(BaseContainer):
                 else Config.Property(type=str) | ""
             )
         )
+
+    def on_starting(self):
+        snippets_path = self.get_app_path("conf.d", "snippets")
+        snippets_path.mkdir(parents=True, exist_ok=True)
+        utils.clear_directory(snippets_path)
+
+        self.render_template(
+            self.get_source_path("snippets", "header.conf"),
+            self.get_app_path("conf.d", "snippets", "header.conf"),
+        )
+        waf_enable = self.get_config("WAF_ENABLE")
+        if waf_enable:
+            self.render_template(
+                self.get_source_path("snippets", "default.conf"),
+                self.get_app_path("conf.d", "snippets", "waf.conf"),
+                URL=f"http://safeline-tengine:{self.get_config('WAF_PORT')}",
+            )
 
     def on_started(self):
         utils.clear_directory(self.get_app_path("conf.d"))

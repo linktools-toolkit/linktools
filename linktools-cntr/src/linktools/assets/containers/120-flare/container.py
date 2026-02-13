@@ -125,5 +125,5 @@ class Container(BaseContainer):
 
         self.write_nginx_conf(
             domain=self.get_config("FLARE_DOAMIN"),
-            url="http://flare:5005",
+            proxy_url="http://flare:5005",
         )

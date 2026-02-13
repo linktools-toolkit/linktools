@@ -38,19 +38,19 @@ class Container(BaseContainer):
     @cached_property
     def configs(self):
         return dict(
-            PORTAINER_TAG="alpine",
-            PORTAINER_DOMAIN=self.get_nginx_domain(),
-            PORTAINER_EXPOSE_PORT=Config.Property(type=int) | 0,
+            SAFELINE_TAG="latest",
+            SAFELINE_IMAGE_PREFIX="chaitin",
+            SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
+            SAFELINE_SUBNET_PREFIX="172.22.242",
+            SAFELINE_ARCH_SUFFIX="",
+            SAFELINE_RELEASE="",
+            SAFELINE_EXPOSE_PORT=Config.Property(type=int) | 9443,
         )
 
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
-            self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
-                "PORTAINER_DOMAIN",
-                proxy_url="http://portainer:9000"
-            )),
-            self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_EXPOSE_PORT", https=False
+            self.expose_container("Safeline", "wallFire", "雷池", self.load_port_url(
+                "SAFELINE_EXPOSE_PORT", https=True
             )),
         ]

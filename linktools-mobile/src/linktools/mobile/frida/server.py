@@ -38,13 +38,13 @@ from typing import List, Dict, Optional, Mapping, Iterable
 
 import frida
 
-from ..android import AdbDevice
-from ..ios import GoIOSDevice
-from ...capabilities.mobile import __capability__
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
 from linktools.types import Timeout, Stoppable, DownloadHttpError
+from ..android import AdbDevice
+from ..ios import GoIOSDevice
+from ...capabilities.mobile import __capability__
 
 _logger = environ.get_logger("frida.server")
 

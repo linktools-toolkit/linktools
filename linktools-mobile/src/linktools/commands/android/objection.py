@@ -29,10 +29,10 @@
 from typing import Optional, List, Type
 
 from linktools import utils
-from linktools.core import environ
 from linktools.capabilities.mobile import __capability__
 from linktools.cli import CommandParser, CommandError
 from linktools.cli.argparse import range_type, BooleanOptionalAction
+from linktools.core import environ
 from linktools.mobile.cli import AndroidCommand, AndroidNamespace
 from linktools.mobile.frida import FridaAndroidServer
 from linktools.types import DownloadError
