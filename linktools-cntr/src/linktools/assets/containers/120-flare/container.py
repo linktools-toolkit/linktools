@@ -42,7 +42,7 @@ class Container(BaseContainer):
     @cached_property
     def configs(self):
         return dict(
-            WILDCARD_DOMAIN=True,
+            NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
             FLARE_DOAMIN=self.get_nginx_domain(""),
             FLARE_EXPOSE_PORT=Config.Property(type=int) | 0,
@@ -82,14 +82,13 @@ class Container(BaseContainer):
             if isinstance(value, ExposeCategory):
                 categories.setdefault(value, list())
 
-        for container in sorted(self.manager.containers.values(), key=lambda o: o.order):
-            if container.enable:
-                for expose in container.exposes:
-                    if isinstance(expose, ExposeLink) and expose.is_valid:
-                        categories[expose.category].append(expose)
-                        if expose.category is self.expose_public:
-                            apps.append(expose)
-                        bookmarks.append(expose)
+        for container in sorted(self.manager.get_installed_containers(), key=lambda o: o.order):
+            for expose in container.exposes:
+                if isinstance(expose, ExposeLink) and expose.is_valid:
+                    categories[expose.category].append(expose)
+                    if expose.category is self.expose_public:
+                        apps.append(expose)
+                    bookmarks.append(expose)
 
         data = {"links": []}
         for app in apps:

@@ -106,10 +106,10 @@ ct-cntr config
 ct-cntr config list
 
 # 修改变量
-ct-cntr config set ROOT_DOMAIN=test.com ACME_DNS_API=dns_ali Ali_Key=xxx Ali_Secret=yyy
+ct-cntr config set NGINX_ROOT_DOMAIN=test.com ACME_DNS_API=dns_ali Ali_Key=xxx Ali_Secret=yyy
 
 # 删除变量
-ct-cntr config unset ROOT_DOMAIN ACME_DNS_API Ali_Key Ali_Secret
+ct-cntr config unset NGINX_ROOT_DOMAIN ACME_DNS_API Ali_Key Ali_Secret
 
 # 使用vim编辑配置文件
 ct-cntr config edit --editor vim

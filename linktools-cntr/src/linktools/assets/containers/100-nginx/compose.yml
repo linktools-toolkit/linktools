@@ -3,9 +3,9 @@ services:
     volumes:
       - '{{ (APP_PATH/"conf.d") | mkdir | chown }}:/etc/nginx/conf.d'
     ports:
-      - '{{ HTTP_PORT }}:{{ HTTP_PORT }}'
-#     {% if HTTPS_ENABLE %}
-      - '{{ HTTPS_PORT }}:{{ HTTPS_PORT }}'
+      - '{{ NGINX_HTTP_PORT }}:{{ NGINX_HTTP_PORT }}'
+#     {% if NGINX_HTTPS_ENABLE %}
+      - '{{ NGINX_HTTPS_PORT }}:{{ NGINX_HTTPS_PORT }}'
 #     {% endif %}
     networks:
       - nginx

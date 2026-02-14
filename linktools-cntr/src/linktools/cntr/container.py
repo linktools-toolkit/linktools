@@ -100,8 +100,8 @@ class ExposeMixin:
                 https_enable = True
             if waf_enable is __missing__:
                 waf_enable = True
-            https_enable = https_enable and self.get_config("HTTPS_ENABLE", type=bool)
-            waf_enable = waf_enable and self.get_config("WAF_ENABLE", type=bool)
+            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)
+            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE", type=bool)
             if proxy_conf or proxy_url:
                 self.start_hooks.append(lambda: self.write_nginx_conf(
                     domain=domain,
@@ -112,7 +112,7 @@ class ExposeMixin:
                     waf_enable=waf_enable,
                 ))
             scheme = 'https' if https_enable else 'http'
-            port = self.get_config("HTTPS_PORT" if https_enable else "HTTP_PORT", type=int)
+            port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
             return utils.make_url(f"{scheme}://{domain}:{port}/", *path)
         return None
 
@@ -124,9 +124,9 @@ class NginxMixin:
         def get_domain(cfg: Config):
             if not self.manager.containers["nginx"].enable:
                 return ""
-            if not cfg.get("WILDCARD_DOMAIN", type=bool):
-                return cfg.get("ROOT_DOMAIN")
-            root_domain = cfg.get("ROOT_DOMAIN")
+            if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
+                return cfg.get("NGINX_ROOT_DOMAIN")
+            root_domain = cfg.get("NGINX_ROOT_DOMAIN")
             if root_domain in ("_", "0.0.0.0"):
                 return root_domain
             if name is None:
@@ -161,8 +161,8 @@ class NginxMixin:
                 https_enable = True
             if waf_enable is __missing__:
                 waf_enable = True
-            https_enable = https_enable and self.get_config("HTTPS_ENABLE", type=bool)
-            waf_enable = waf_enable and self.get_config("WAF_ENABLE", type=bool)
+            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)
+            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE", type=bool)
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
