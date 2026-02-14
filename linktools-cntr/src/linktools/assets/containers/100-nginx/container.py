@@ -91,9 +91,13 @@ class Container(BaseContainer):
 
         snippets_path = self.get_app_path("conf.d", "snippets")
         snippets_path.mkdir(parents=True, exist_ok=True)
-        self.render_template(
+        shutil.copy2(
             self.get_source_path("snippets", "header.conf"),
             self.get_app_path("conf.d", "snippets", "header.conf"),
+        )
+        shutil.copy2(
+            self.get_source_path("snippets", "x-header.conf"),
+            self.get_app_path("conf.d", "snippets", "x-header.conf"),
         )
         waf_enable = self.get_config("WAF_ENABLE")
         if waf_enable:
