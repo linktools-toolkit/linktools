@@ -7,11 +7,9 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Callable, Dict
-from pathlib import Path
 
 import tomlkit
-from tomlkit.items import Table, Array
+from tomlkit.items import Array
 
 MODULE_NAME = "linktools"
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
