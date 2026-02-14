@@ -83,12 +83,13 @@ class Container(BaseContainer):
                 categories.setdefault(value, list())
 
         for container in sorted(self.manager.containers.values(), key=lambda o: o.order):
-            for expose in container.exposes:
-                if isinstance(expose, ExposeLink) and expose.is_valid:
-                    categories[expose.category].append(expose)
-                    if expose.category is self.expose_public:
-                        apps.append(expose)
-                    bookmarks.append(expose)
+            if container.enable:
+                for expose in container.exposes:
+                    if isinstance(expose, ExposeLink) and expose.is_valid:
+                        categories[expose.category].append(expose)
+                        if expose.category is self.expose_public:
+                            apps.append(expose)
+                        bookmarks.append(expose)
 
         data = {"links": []}
         for app in apps:

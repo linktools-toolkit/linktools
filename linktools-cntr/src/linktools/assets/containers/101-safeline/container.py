@@ -55,13 +55,13 @@ class Container(BaseContainer):
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
-            self.expose_container("Safeline", "wallFire", "雷池", self.load_port_url(
+            self.expose_container("Safeline", "alienOutline", "雷池", self.load_port_url(
                 "SAFELINE_EXPOSE_PORT", https=True
             )),
         ]
 
     @subcommand("resetadmin", help="reset safeline admin password")
-    def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
+    def on_exec_shell(self):
         self.manager.create_docker_process(
             "exec", "-it", self.get_service_name("safeline-mgt"),
             "resetadmin"

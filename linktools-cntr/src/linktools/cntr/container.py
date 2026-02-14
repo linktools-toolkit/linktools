@@ -96,6 +96,12 @@ class ExposeMixin:
     ):
         domain = self.get_config(key, type=str, default=None)
         if domain:
+            if https_enable is __missing__:
+                https_enable = True
+            if waf_enable is __missing__:
+                waf_enable = True
+            https_enable = https_enable and self.get_config("HTTPS_ENABLE", type=bool)
+            waf_enable = waf_enable and self.get_config("WAF_ENABLE", type=bool)
             if proxy_conf or proxy_url:
                 self.start_hooks.append(lambda: self.write_nginx_conf(
                     domain=domain,
@@ -151,12 +157,12 @@ class NginxMixin:
                     raise ContainerError("not found url")
                 proxy_conf = nginx.get_source_path("snippets", "default.conf")
 
-            https_enable = self.get_config("HTTPS_ENABLE", type=bool) \
-                if https_enable is __missing__ \
-                else https_enable and not self.get_config("HTTPS_ENABLE", type=bool)
-            waf_enable = self.get_config("WAF_ENABLE", type=bool) \
-                if waf_enable is __missing__ \
-                else waf_enable and not self.get_config("WAF_ENABLE", type=bool)
+            if https_enable is __missing__:
+                https_enable = True
+            if waf_enable is __missing__:
+                waf_enable = True
+            https_enable = https_enable and self.get_config("HTTPS_ENABLE", type=bool)
+            waf_enable = waf_enable and self.get_config("WAF_ENABLE", type=bool)
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
             sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
