@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import typing
 
 import tomlkit
 from tomlkit.items import Array
@@ -14,6 +15,33 @@ from tomlkit.items import Array
 MODULE_NAME = "linktools"
 TEMPLATE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "templates"))
 PROJECT_PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+__missing__ = object()
+
+class LazyChoices(typing.Iterable):
+
+    def __init__(self, func: "_t.Callable[P, _t.Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs"):
+        self._data = __missing__
+        self._fn = func
+        self._args = args
+        self._kwargs = kwargs
+
+    def _load(self):
+        result = self._data
+        if result == __missing__:
+            result = self._data = self._fn(*self._args, **self._kwargs)
+        return result
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __contains__(self, item):
+        if item == argparse.SUPPRESS:
+            return True
+        if isinstance(item, (list, tuple)) and len(item) == 0:
+            return True
+        return self._load().__contains__(item)
 
 
 def get_modules():
@@ -134,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "module",
-        choices=sorted(modules.keys()),
+        choices=LazyChoices(sorted, modules.keys()),
         nargs="*",
         help="Module to init",
     )
@@ -147,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_parser.add_argument(
         "module",
-        choices=sorted(modules.keys()),
+        choices=LazyChoices(sorted, modules.keys()),
         nargs="*",
         help="Module to install",
     )
@@ -171,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_parser.add_argument(
         "module",
-        choices=sorted(modules.keys()),
+        choices=LazyChoices(sorted, modules.keys()),
         nargs="*",
         help="Module to build",
     )
@@ -184,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     clean_parser.add_argument(
         "module",
-        choices=sorted(modules.keys()),
+        choices=LazyChoices(sorted, modules.keys()),
         nargs="*",
         help="Module to clean",
     )

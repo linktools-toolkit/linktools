@@ -45,7 +45,7 @@ class Container(BaseContainer):
             NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
             FLARE_DOAMIN=self.get_nginx_domain(""),
-            FLARE_EXPOSE_PORT=Config.Property(type=int) | 0,
+            FLARE_EXPOSE_PORT=Config.Property(type=int) | 5000,
             FLARE_ENABLE_LOGIN=Config.Confirm(cached=True) | False,
             FLARE_USER=Config.Lazy(
                 lambda cfg:

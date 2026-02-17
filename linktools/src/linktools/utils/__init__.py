@@ -43,7 +43,7 @@ from ._utils import (
     get_system, get_machine, get_user, get_uid, get_gid, get_shell_path,
     is_unix_like, is_windows,
     import_module, import_module_file,
-    get_derived_type, lazy_load, lazy_iter, lazy_raise,
+    get_derived_type, lazy_load, lazy_raise,
     wait_event, wait_thread, wait_process,
     let, also,
 )

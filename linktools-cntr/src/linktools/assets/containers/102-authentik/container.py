@@ -41,10 +41,11 @@ class Container(BaseContainer):
         return dict(
             AUTHENTIK_TAG="2025.12.4",
             AUTHENTIK_IMAGE="ghcr.io/goauthentik/server",
-            AUTHENTIK_DOMAIN=self.get_nginx_domain(),
-            AUTHENTIK_EXPOSE_PORT=Config.Property(type=int) | 9100,
+            AUTHENTIK_DOMAIN=self.get_nginx_domain("sso"),
+            AUTHENTIK_EXPOSE_PORT=Config.Property(type=int) | 0,
             AUTHENTIK_SECRET_KEY=Config.Alias(default=utils.random_string(36), cached=True),
             AUTHENTIK_POSTGRES_PASSWORD=Config.Alias(default=utils.random_string(36), cached=True),
+            AUTHENTIK_BOOTSTRAP_PASSWORD=Config.Prompt(default=utils.random_string(12), cached=True),
         )
 
     @cached_property

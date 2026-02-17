@@ -34,7 +34,7 @@ import typing
 
 from .. import utils
 from ..decorator import cached_classproperty
-from linktools.metadata import __missing__
+from ..metadata import __missing__
 
 if typing.TYPE_CHECKING:
     from .command import CommandParser
@@ -67,6 +67,30 @@ def range_type(min: int, max: int):
 
     return wrapper
 
+
+class LazyChoices(typing.Iterable):
+
+    def __init__(self, func: "_t.Callable[P, _t.Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs"):
+        self._data = __missing__
+        self._fn = func
+        self._args = args
+        self._kwargs = kwargs
+
+    def _load(self):
+        result = self._data
+        if result == __missing__:
+            result = self._data = self._fn(*self._args, **self._kwargs)
+        return result
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __contains__(self, item):
+        if item == argparse.SUPPRESS:
+            return True
+        if isinstance(item, (list, tuple)) and len(item) == 0:
+            return True
+        return self._load().__contains__(item)
 
 ##############################
 # argparse actions
@@ -131,7 +155,7 @@ class ConfigAction(argparse.Action):
             help=help,
             metavar=metavar)
 
-        from ..core._config import ConfigProperty
+        from ..core import ConfigProperty
 
         if not isinstance(config, ConfigProperty):
             raise argparse.ArgumentError(self, "config must be ConfigProperty")

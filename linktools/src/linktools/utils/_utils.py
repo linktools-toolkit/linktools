@@ -34,15 +34,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, overload, Tuple, List, Set
 
 from ..decorator import timeoutable
-from linktools.metadata import __missing__
-from ..types import PathType, QueryType, Proxy, IterProxy, Error, TimeoutType
+from ..metadata import __missing__
+from ..types import PathType, QueryType, Proxy, Error, TimeoutType
 
 if TYPE_CHECKING:
     import subprocess
     import threading
     import logging
 
-    from typing import ParamSpec, Literal, Union, Callable, Optional, Type, Any, TypeVar, Dict, Iterable
+    from typing import ParamSpec, Literal, Union, Callable, Optional, Type, Any, TypeVar, Dict
     from importlib.machinery import ModuleSpec
 
     from ..core import Environ
@@ -885,15 +885,6 @@ def lazy_load(fn: "Callable[P, T]", *args: "P.args", **kwargs: "P.kwargs") -> "T
     :return: proxy
     """
     return Proxy(functools.partial(fn, *args, **kwargs))
-
-
-def lazy_iter(fn: "Callable[P, Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs") -> "Iterable[T]":
-    """
-    延迟迭代
-    :param fn: 延迟迭代的方法
-    :return: proxy
-    """
-    return IterProxy(fn, *args, **kwargs)
 
 
 def raise_error(e: BaseException):

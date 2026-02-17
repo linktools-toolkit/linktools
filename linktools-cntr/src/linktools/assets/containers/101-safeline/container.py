@@ -49,7 +49,7 @@ class Container(BaseContainer):
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
             SAFELINE_RELEASE="",
-            SAFELINE_EXPOSE_PORT=Config.Property(type=int) | 9443,
+            SAFELINE_EXPOSE_PORT=Config.Property(type=int) | 9200,
         )
 
     @cached_property
@@ -61,7 +61,7 @@ class Container(BaseContainer):
         ]
 
     @subcommand("resetadmin", help="reset safeline admin password")
-    def on_exec_shell(self):
+    def on_reset_admin(self):
         self.manager.create_docker_process(
             "exec", "-it", self.get_service_name("safeline-mgt"),
             "resetadmin"

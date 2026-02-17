@@ -35,11 +35,10 @@ from typing import Optional, List, Type, Dict, Tuple, Any
 import yaml
 from git import GitCommandError
 
-from linktools import utils
-from linktools.core import environ
 from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, \
     BaseCommandGroup, SubCommand, CommandParser
-from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete
+from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
+from linktools.core import environ
 from linktools.rich import confirm, choose
 from linktools.types import ConfigError
 from .container import ContainerError, BaseContainer
@@ -146,13 +145,19 @@ class ConfigCommand(BaseCommand):
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
     @subcommand("list", help="list container configs")
-    def on_command_list(self):
+    @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
+                         choices=LazyChoices(_iter_installed_container_names))
+    def on_command_list(self, names: List[str]):
+        containers = manager.prepare_installed_containers()
+        target_containers = [c for c in containers if c.name in names] if names else containers
+
         keys = set()
-        for container in manager.prepare_installed_containers():
+        for container in target_containers:
             keys.update(container.configs.keys())
             if hasattr(container, "keys") and isinstance(container.keys, (Tuple, List, Dict)):
                 keys.update([key for key in container.keys if key in manager.config])
-        keys.update(manager.config.cache.keys())
+        if not names:
+            keys.update(manager.config.cache.keys())
         for key in sorted(keys):
             value = manager.config.get(key)
             self.logger.info(f"{key}: {value}")
@@ -192,7 +197,7 @@ class ExecCommand(BaseCommand):
 
     def init_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("exec_name", nargs="?", metavar="CONTAINER", help="container name",
-                            choices=utils.lazy_iter(_iter_installed_container_names))
+                            choices=LazyChoices(_iter_installed_container_names))
         action = parser.add_argument("exec_args", nargs="...", metavar="ARGS", help="container exec args")
 
         class Completer(ArgParseComplete.Completer):
@@ -255,7 +260,7 @@ class Command(BaseCommandGroup):
 
     @subcommand("add", help="add containers to installed list")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
-                         choices=utils.lazy_iter(_iter_container_names))
+                         choices=LazyChoices(_iter_container_names))
     def on_command_add(self, names: List[str]):
         containers = manager.add_installed_containers(*names)
         assert containers, "No container added"
@@ -265,7 +270,7 @@ class Command(BaseCommandGroup):
     @subcommand("remove", help="remove containers from installed list")
     @subcommand_argument("-f", "--force", help="Force remove")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
-                         choices=utils.lazy_iter(_iter_container_names))
+                         choices=LazyChoices(_iter_container_names))
     def on_command_remove(self, names: List[str], force: bool = False):
         containers = manager.remove_installed_containers(*names, force=force)
         assert containers, "No container removed"
@@ -274,7 +279,7 @@ class Command(BaseCommandGroup):
 
     @subcommand("info", help="display container info")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
-                         choices=utils.lazy_iter(_iter_container_names))
+                         choices=LazyChoices(_iter_container_names))
     def on_command_info(self, names: List[str]):
         for name in names:
             container = manager.containers[name]
@@ -294,18 +299,18 @@ class Command(BaseCommandGroup):
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    @subcommand_argument("name", metavar="CONTAINER", nargs="?", help="container name",
-                         choices=utils.lazy_iter(_iter_installed_container_names))
-    def on_command_up(self, name: str = None, build: bool = True, pull: str = False):
+    @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
+                         choices=LazyChoices(_iter_installed_container_names))
+    def on_command_up(self, names: List[str] = None, build: bool = True, pull: str = False):
         containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name == name] if name else containers
+        target_containers = [c for c in containers if c.name in names] if names else containers
 
         build_options = []
         up_options = ["--detach", "--no-build"]
         if pull:
             build_options.extend(["--pull"])
             up_options.extend(["--pull", "always"])
-        if not name:
+        if not names:
             up_options.extend(["--remove-orphans"])
 
         for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
@@ -316,9 +321,10 @@ class Command(BaseCommandGroup):
                 build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
 
         services = []
-        if name:
-            services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{name}`"
+        if names:
+            for name in names:
+                services.extend(manager.containers[name].services.keys())
+            assert services, f"No service found in container `{','.join(names)}`"
 
         with self._notify_start(target_containers):
             if build:
@@ -335,24 +341,25 @@ class Command(BaseCommandGroup):
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    @subcommand_argument("name", metavar="CONTAINER", nargs="?", help="container name",
-                         choices=utils.lazy_iter(_iter_installed_container_names))
-    def on_command_restart(self, name: str = None, build: bool = True, pull: str = False):
+    @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
+                         choices=LazyChoices(_iter_installed_container_names))
+    def on_command_restart(self, names: List[str] = None, build: bool = True, pull: str = False):
         containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name == name] if name else containers
+        target_containers = [c for c in containers if c.name == names] if names else containers
 
         build_options = []
         up_options = ["--detach", "--no-build"]
         if pull:
             build_options.extend(["--pull"])
             up_options.extend(["--pull", "always"])
-        if not name:
+        if not names:
             up_options.extend(["--remove-orphans"])
 
         services = []
-        if name:
-            services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{name}`"
+        if names:
+            for name in names:
+                services.extend(manager.containers[name].services.keys())
+            assert services, f"No service found in container `{','.join(names)}`"
 
         with self._notify_stop(target_containers):
             manager.create_docker_compose_process(
@@ -372,16 +379,17 @@ class Command(BaseCommandGroup):
             ).check_call()
 
     @subcommand("down", help="stop installed containers")
-    @subcommand_argument("name", metavar="CONTAINER", nargs="?", help="container name",
-                         choices=utils.lazy_iter(_iter_installed_container_names))
-    def on_command_down(self, name: str = None):
+    @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
+                         choices=LazyChoices(_iter_installed_container_names))
+    def on_command_down(self, names: List[str] = None):
         containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name == name] if name else containers
+        target_containers = [c for c in containers if c.name == names] if names else containers
 
         services = []
-        if name:
-            services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{name}`"
+        if names:
+            for name in names:
+                services.extend(manager.containers[name].services.keys())
+            assert services, f"No service found in container `{','.join(names)}`"
 
         with self._notify_stop(target_containers):
             manager.create_docker_compose_process(

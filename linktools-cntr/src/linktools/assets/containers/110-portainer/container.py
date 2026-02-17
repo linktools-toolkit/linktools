@@ -40,7 +40,7 @@ class Container(BaseContainer):
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=self.get_nginx_domain(),
-            PORTAINER_EXPOSE_PORT=Config.Property(type=int) | 0,
+            PORTAINER_EXPOSE_PORT=Config.Property(type=int) | 9000,
         )
 
     @cached_property
