@@ -61,7 +61,9 @@ class Container(BaseContainer):
                 if cfg.get("NGINX_HTTPS_ENABLE")
                 else Config.Alias(type=int) | 0
             ),
-            NGINX_INDEX_URL="https://www.google.com/",
+            NGINX_INDEX_URL=Config.Lazy(
+                lambda cfg: self._get_default_index_url()
+            ),
             NGINX_WAF_ENABLE=Config.Lazy(
                 lambda cfg: self.manager.containers["safeline"].enable
             ),
@@ -70,6 +72,9 @@ class Container(BaseContainer):
                 Config.Prompt(type=int, cached=True) | 8000
                 if cfg.get("NGINX_WAF_ENABLE")
                 else Config.Alias(type=int) | 0
+            ),
+            NGINX_AUTH_ENABLE=Config.Lazy(
+                lambda cfg: self.manager.containers["authentik"].enable
             ),
             ACME_DNS_API=Config.Lazy(
                 lambda cfg:
@@ -87,26 +92,46 @@ class Container(BaseContainer):
             )
         )
 
+    def _get_default_index_url(self):
+        host = "www.google.com" \
+            if self.get_config("NGINX_ROOT_DOMAIN") == "_" \
+            else self.get_config("NGINX_ROOT_DOMAIN")
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            scheme = "https"
+            port = self.get_config("NGINX_HTTPS_PORT")
+        else:
+            scheme = "http"
+            port = self.get_config("NGINX_HTTP_PORT")
+        return f"{scheme}://{host}:{port}/"
+
     def on_started(self):
         utils.clear_directory(self.get_app_path("conf.d"))
 
         # 初始化snippets
         snippets_path = self.get_app_path("conf.d", "snippets")
         snippets_path.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(
-            self.get_source_path("snippets", "header.conf"),
-            self.get_app_path("conf.d", "snippets", "header.conf"),
-        )
-        shutil.copy2(
-            self.get_source_path("snippets", "x-header.conf"),
-            self.get_app_path("conf.d", "snippets", "x-header.conf"),
-        )
+
         waf_enable = self.get_config("NGINX_WAF_ENABLE")
+        auth_enable = self.get_config("NGINX_AUTH_ENABLE")
+        self.render_template(
+            self.get_source_path("templates", "header.conf"),
+            self.get_app_path("conf.d", "snippets", "header.conf"),
+            X_HEADER_ENABLE=not waf_enable
+        )
+        self.render_template(
+            self.get_source_path("templates", "default.conf"),
+            self.get_app_path("conf.d", "snippets", "default.conf"),
+            X_HEADER_ENABLE=not waf_enable
+        )
         if waf_enable:
             self.render_template(
-                self.get_source_path("snippets", "default.conf"),
+                self.get_source_path("templates", "waf.conf"),
                 self.get_app_path("conf.d", "snippets", "waf.conf"),
-                PROXY_URL=f"http://safeline-tengine:{self.get_config('NGINX_WAF_PORT')}",
+            )
+        if auth_enable:
+            self.render_template(
+                self.get_source_path("templates", "auth.conf"),
+                self.get_app_path("conf.d", "snippets", "auth.conf"),
             )
 
         # 初始化conf.d
@@ -122,16 +147,9 @@ class Container(BaseContainer):
             self.write_nginx_conf(
                 "_",
                 proxy_name="default",
-                proxy_conf=self.get_source_path("snippets", "index.conf"),
-                proxy_url=self.get_config("NGINX_INDEX_URL"),
+                proxy_conf=self.get_source_path("templates", "index.conf"),
+                temporary=False,
             )
-            path = self.get_app_path("temporary", self.name)
-            if os.path.isdir(path):
-                shutil.copytree(
-                    path,
-                    self.get_app_path("conf.d", create_parent=True),
-                    dirs_exist_ok=True,
-                )
 
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):

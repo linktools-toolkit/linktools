@@ -1,0 +1,65 @@
+services:
+  authentik-postgresql:
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: {{ AUTHENTIK_POSTGRES_PASSWORD }}
+      POSTGRES_USER: authentik
+    healthcheck:
+      interval: 30s
+      retries: 5
+      start_period: 20s
+      test:
+      - CMD-SHELL
+      - pg_isready -d authentik -U authentik
+      timeout: 5s
+    image: docker.io/library/postgres:16-alpine
+    volumes:
+    - {{ (APP_PATH/"postgres") | mkdir | chown }}:/var/lib/postgresql/data
+    networks:
+      authentik:
+  authentik-server:
+    command: server
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: {{ AUTHENTIK_POSTGRES_PASSWORD }}
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_SECRET_KEY: {{ AUTHENTIK_SECRET_KEY }}
+    image: {{ AUTHENTIK_IMAGE }}:{{ AUTHENTIK_TAG }}
+#   {% if AUTHENTIK_EXPOSE_PORT > 0 %}
+    ports:
+      - '{{ AUTHENTIK_EXPOSE_PORT }}:9000'
+#   {% endif %}
+    volumes:
+    - {{ (APP_PATH/"data") | mkdir | chown }}:/data
+    - {{ (APP_PATH/"custom-templates") | mkdir | chown }}:/templates
+    networks:
+      authentik:
+      nginx:
+  authentik-worker:
+    command: worker
+    depends_on:
+      authentik-postgresql:
+        condition: service_healthy
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: {{ AUTHENTIK_POSTGRES_PASSWORD }}
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_SECRET_KEY: {{ AUTHENTIK_SECRET_KEY }}
+    image: {{ AUTHENTIK_IMAGE }}:{{ AUTHENTIK_TAG }}
+    user: root
+    volumes:
+    - {{ manager.container_host }}:/var/run/docker.sock
+    - {{ (APP_PATH/"data") | mkdir | chown }}:/data
+    - {{ (APP_PATH/"certs") | mkdir | chown }}:/certs
+    - {{ (APP_PATH/"custom-templates") | mkdir | chown }}:/templates
+    networks:
+      authentik:
+
+networks:
+  nginx:
+  authentik:

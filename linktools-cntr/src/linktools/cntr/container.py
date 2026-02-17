@@ -33,7 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable, Iterable
 
 import yaml
-from jinja2 import Environment, TemplateError
+from jinja2 import Environment, TemplateError, FileSystemLoader
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.core import Config
@@ -92,7 +92,7 @@ class ExposeMixin:
     def load_nginx_url(
             self: "BaseContainer", key: str, *path: str,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__
+            https_enable: bool = __missing__, waf_enable: bool = __missing__, auth_enable: bool = False,
     ):
         domain = self.get_config(key, type=str, default=None)
         if domain:
@@ -110,6 +110,7 @@ class ExposeMixin:
                     proxy_url=proxy_url,
                     https_enable=https_enable,
                     waf_enable=waf_enable,
+                    auth_enable=auth_enable,
                 ))
             scheme = 'https' if https_enable else 'http'
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
@@ -140,12 +141,18 @@ class NginxMixin:
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__
+            https_enable: bool = __missing__, waf_enable: bool = __missing__, auth_enable: bool = False,
+            temporary: bool = True,
     ):
 
         nginx = self.manager.containers["nginx"]
-        conf_path = nginx.get_app_path("temporary", self.name, f"{domain}.conf")
-        sub_conf_path = nginx.get_app_path("temporary", self.name, f"{domain}_confs", f"{proxy_name or self.name}.conf")
+
+        if not temporary:
+            conf_path = nginx.get_app_path("conf.d", f"{domain}.conf")
+            sub_conf_path = nginx.get_app_path("conf.d", f"{domain}_confs", f"{proxy_name or self.name}.conf")
+        else:
+            conf_path = nginx.get_app_path("temporary", self.name, f"{domain}.conf")
+            sub_conf_path = nginx.get_app_path("temporary", self.name, f"{domain}_confs", f"{proxy_name or self.name}.conf")
 
         try:
             if not nginx.enable:
@@ -155,7 +162,7 @@ class NginxMixin:
             if not proxy_conf:
                 if not proxy_url:
                     raise ContainerError("not found url")
-                proxy_conf = nginx.get_source_path("snippets", "default.conf")
+                proxy_conf = nginx.get_source_path("templates", "default.conf")
 
             if https_enable is __missing__:
                 https_enable = True
@@ -164,23 +171,36 @@ class NginxMixin:
             https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE", type=bool)
 
-            conf_path.parent.mkdir(parents=True, exist_ok=True)
-            sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
-            self.render_template(
-                nginx.get_source_path("snippets", "server.conf"),
-                conf_path,
+            if auth_enable:
+                if not nginx.get_config("NGINX_AUTH_ENABLE", type=bool):
+                    self.logger.warning("Authentik server is disable")
+                    auth_enable = False
+
+            context = dict(
                 DOMAIN=domain,
                 HTTPS_ENABLE=https_enable,
                 WAF_ENABLE=waf_enable,
+                AUTH_ENABLE=auth_enable,
+            )
+
+            conf_path.parent.mkdir(parents=True, exist_ok=True)
+            sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
+            self.render_template(
+                nginx.get_source_path("templates", "server.conf"),
+                conf_path,
+                **context,
             )
             if proxy_conf is not __missing__ or proxy_url is not __missing__:
                 self.render_template(
                     proxy_conf,
                     sub_conf_path,
-                    DOMAIN=domain,
                     PROXY_URL=proxy_url,
-                    HTTPS_ENABLE=https_enable,
-                    WAF_ENABLE=waf_enable,
+                    **context,
+                )
+            if auth_enable:
+                self.manager.containers["authentik"].write_nginx_conf(
+                    domain=domain,
+                    proxy_conf=nginx.get_source_path("templates", "auth_location.conf"),
                 )
 
         except ContainerError as e:
@@ -631,7 +651,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
         context.update(kwargs)
 
-        environment = Environment()
+        environment = Environment(
+            loader=FileSystemLoader(Path(source).parent)
+        )
         environment.filters.update(
             mkdir=mkdir,
             chown=chown,

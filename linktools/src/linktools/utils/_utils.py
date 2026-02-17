@@ -329,6 +329,12 @@ def make_uuid() -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{uuid.uuid1()}{random.random()}")).replace("-", "")
 
 
+def random_string(length: int = 16) -> str:
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+
 def gzip_compress(data: "Union[str, bytes]") -> bytes:
     if isinstance(data, str):
         data = bytes(data, "utf8")
