@@ -48,7 +48,8 @@ class Container(BaseContainer):
         return [
             self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
                 "PORTAINER_DOMAIN",
-                proxy_url="http://portainer:9000"
+                proxy_url="http://portainer:9000",
+                auth_enable=True,
             )),
             self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
                 "PORTAINER_EXPOSE_PORT", https=False

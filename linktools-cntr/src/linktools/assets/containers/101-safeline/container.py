@@ -55,6 +55,11 @@ class Container(BaseContainer):
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
+            self.expose_public("Safeline", "alienOutline", "雷池", self.load_nginx_url(
+                "PORTAINER_DOMAIN",
+                proxy_url="https://safeline-mgt:1443",
+                auth_enable=True,
+            )),
             self.expose_container("Safeline", "alienOutline", "雷池", self.load_port_url(
                 "SAFELINE_EXPOSE_PORT", https=True
             )),

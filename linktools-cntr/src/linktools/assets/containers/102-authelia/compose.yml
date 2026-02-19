@@ -7,7 +7,7 @@ services:
       - '--config=/config/configuration.acl.yml'
       - '--config=/config/configuration.2fa.yml'
     environment:
-      - AUTHELIA_JWT_SECRET_FILE=/secret/jwt_secret
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secret/jwt_secret
       - AUTHELIA_SESSION_SECRET_FILE=/secret/session_secret
       - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secret/storage_encryption_key
     volumes:
