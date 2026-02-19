@@ -46,7 +46,7 @@ class Container(BaseContainer):
             FLARE_TAG="latest",
             FLARE_DOAMIN=self.get_nginx_domain(""),
             FLARE_EXPOSE_PORT=Config.Property(type=int) | 5000,
-            FLARE_ENABLE_LOGIN=Config.Confirm(cached=True) | False,
+            FLARE_ENABLE_LOGIN=Config.Alias(type=bool) | False,
             FLARE_USER=Config.Lazy(
                 lambda cfg:
                 Config.Prompt(cached=True) | "admin"

@@ -45,6 +45,7 @@ services:
     environment:
       - LOG_DIR=/logs/detector
     networks:
+      nginx:
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.5'
   safeline-tengine:

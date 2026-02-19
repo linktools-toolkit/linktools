@@ -45,6 +45,7 @@ class Container(BaseContainer):
         return dict(
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
+            SAFELINE_DOMAIN=self.get_nginx_domain(),
             SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
@@ -56,7 +57,7 @@ class Container(BaseContainer):
     def exposes(self) -> Iterable[ExposeLink]:
         return [
             self.expose_public("Safeline", "alienOutline", "雷池", self.load_nginx_url(
-                "PORTAINER_DOMAIN",
+                "SAFELINE_DOMAIN",
                 proxy_url="https://safeline-mgt:1443",
                 auth_enable=True,
             )),
