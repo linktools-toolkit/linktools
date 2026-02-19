@@ -74,7 +74,7 @@ class Container(BaseContainer):
                 else Config.Alias(type=int) | 0
             ),
             NGINX_AUTH_ENABLE=Config.Lazy(
-                lambda cfg: self.manager.containers["authentik"].enable
+                lambda cfg: self.manager.containers["authelia"].enable
             ),
             ACME_DNS_API=Config.Lazy(
                 lambda cfg:

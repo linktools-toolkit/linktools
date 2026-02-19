@@ -1,0 +1,9 @@
+access_control:
+  default_policy: deny
+  rules:
+    - domain:
+        - "{{ NGINX_ROOT_DOMAIN }}"
+        - "*.{{ NGINX_ROOT_DOMAIN }}"
+      subject:
+        - "group:admins"
+      policy: two_factor

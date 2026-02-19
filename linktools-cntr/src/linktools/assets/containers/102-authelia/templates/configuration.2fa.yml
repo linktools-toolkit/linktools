@@ -1,0 +1,4 @@
+totp:
+  issuer: {{ NGINX_ROOT_DOMAIN }}
+  period: 30
+  skew: 1

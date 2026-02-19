@@ -1,0 +1,20 @@
+services:
+  authelia:
+    image: 'authelia/authelia:{{ AUTHELIA_TAG }}'
+    command:
+      - 'authelia'
+      - '--config=/config/configuration.yml'
+      - '--config=/config/configuration.acl.yml'
+      - '--config=/config/configuration.2fa.yml'
+    environment:
+      - AUTHELIA_JWT_SECRET_FILE=/secret/jwt_secret
+      - AUTHELIA_SESSION_SECRET_FILE=/secret/session_secret
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secret/storage_encryption_key
+    volumes:
+      - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
+      - '{{ (APP_PATH/"secret") | mkdir | chown }}:/secret:ro'
+    networks:
+      nginx:
+
+networks:
+  nginx:

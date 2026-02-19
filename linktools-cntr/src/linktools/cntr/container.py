@@ -173,7 +173,7 @@ class NginxMixin:
 
             if auth_enable:
                 if not nginx.get_config("NGINX_AUTH_ENABLE", type=bool):
-                    self.logger.warning("Authentik server is disable")
+                    self.logger.warning("Authelia server is disable")
                     auth_enable = False
 
             context = dict(
@@ -198,7 +198,7 @@ class NginxMixin:
                     **context,
                 )
             if auth_enable:
-                self.manager.containers["authentik"].write_nginx_conf(
+                self.manager.containers["authelia"].write_nginx_conf(
                     domain=domain,
                     proxy_conf=nginx.get_source_path("templates", "auth_location.conf"),
                 )
