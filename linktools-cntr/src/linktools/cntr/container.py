@@ -112,7 +112,7 @@ class ExposeMixin:
                     waf_enable=waf_enable,
                     auth_enable=auth_enable,
                 ))
-            scheme = 'https' if https_enable else 'http'
+            scheme = "https" if https_enable else "http"
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
             return utils.make_url(f"{scheme}://{domain}:{port}/", *path)
         return None
@@ -142,12 +142,12 @@ class NginxMixin:
             self: "BaseContainer", domain: str, *,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__, auth_enable: bool = False,
-            temporary: bool = True,
+            flush: bool = False,
     ):
 
         nginx = self.manager.containers["nginx"]
 
-        if not temporary:
+        if flush:
             conf_path = nginx.get_app_path("conf.d", f"{domain}.conf")
             sub_conf_path = nginx.get_app_path("conf.d", f"{domain}_confs", f"{proxy_name or self.name}.conf")
         else:

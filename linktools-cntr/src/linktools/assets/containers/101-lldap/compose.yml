@@ -1,0 +1,23 @@
+services:
+  lldap:
+    image: 'lldap/lldap:{{ LLDAP_TAG }}'
+    environment:
+      - UID=0
+      - GID=0
+      - LLDAP_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
+      - LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret
+      - LLDAP_LDAP_USER_PASS_FILE=/secrets/ldap_user_pass
+    volumes:
+      - '{{ (APP_PATH/"data") | mkdir | chown }}:/data'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
+#   {% if LLDAP_PORT > 0 %}
+    ports:
+      - '{{ LLDAP_PORT }}:17170'
+#   {% endif %}
+    networks:
+      nginx:
+      lldap:
+
+networks:
+  nginx:
+  lldap:

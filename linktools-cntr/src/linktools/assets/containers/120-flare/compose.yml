@@ -2,9 +2,9 @@ services:
   flare:
     image: 'soulteary/flare:{{ FLARE_TAG }}'
     user: '{{ DOCKER_UID }}:{{ DOCKER_GID }}'
-#   {% if FLARE_EXPOSE_PORT > 0 %}
+#   {% if FLARE_PORT > 0 %}
     ports:
-      - '{{ FLARE_EXPOSE_PORT }}:5005'
+      - '{{ FLARE_PORT }}:5005'
 #   {% endif %}
     command: flare
     environment:

@@ -45,7 +45,7 @@ class Container(BaseContainer):
             NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
             FLARE_DOAMIN=self.get_nginx_domain(""),
-            FLARE_EXPOSE_PORT=Config.Property(type=int) | 5000,
+            FLARE_PORT=Config.Property(type=int) | 5000,
             FLARE_ENABLE_LOGIN=Config.Alias(type=bool) | False,
             FLARE_USER=Config.Lazy(
                 lambda cfg:
@@ -64,7 +64,7 @@ class Container(BaseContainer):
     @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":
         return [
-            self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_EXPOSE_PORT", https=False)),
+            self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
             self.expose_other("在线工具集合", "tools", "", "https://tool.lu/"),
             self.expose_other("在线正则表达式", "regex", "", "https://regex101.com/"),
             self.expose_other("正则表达式手册", "regex", "", "https://tool.oschina.net/uploads/apidocs/jquery/regexp.html"),
@@ -106,6 +106,8 @@ class Container(BaseContainer):
 
         data = {"categories": [], "links": []}
         for category, links in categories.items():
+            if category.name == "public":
+                continue
             if not links:
                 continue
             data["categories"].append({

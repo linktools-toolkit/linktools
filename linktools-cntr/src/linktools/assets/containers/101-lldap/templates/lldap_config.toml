@@ -1,0 +1,3 @@
+database_url = "sqlite:///data/users.db?mode=rwc"
+key_file = "/data/private_key"
+enable_password_reset = false

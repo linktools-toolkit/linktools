@@ -7,14 +7,45 @@ services:
       - '--config=/config/configuration.acl.yml'
       - '--config=/config/configuration.2fa.yml'
     environment:
-      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secret/jwt_secret
-      - AUTHELIA_SESSION_SECRET_FILE=/secret/session_secret
-      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secret/storage_encryption_key
+      - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/storage_encryption_key
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/jwt_secret
+      - AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/secrets/oidc_hmac_secret
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS=ldap://lldap:3890
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,{{ LLDAP_BASE_DN }}
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
-      - '{{ (APP_PATH/"secret") | mkdir | chown }}:/secret:ro'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
     networks:
       nginx:
+      lldap:
+
+  authelia-admin:
+    image: 'ghcr.io/asalimonov/authelia-admin:latest'
+    volumes:
+      - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
+    environment:
+      - AAD_LOGLEVEL=DEBUG
+      - AAD_AUTHELIA_DOMAIN={{ NGINX_ROOT_DOMAIN }}
+      - AAD_DIRECTORY_TYPE=lldap-graphql
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_ENDPOINT=http://lldap:17170/api/graphql
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_USER=admin
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_PASSWORD={{ LLDAP_ADMIN_PASSWORD }}
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST=lldap
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT=3890
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
+      - TRUSTED_ORIGINS=https://{{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
+    networks:
+      nginx:
+      lldap:
+#   {% if AUTHELIA_ADMIN_PORT > 0 %}
+    ports:
+      - '{{ AUTHELIA_ADMIN_PORT }}:9093'
+#   {% endif %}
+    depends_on:
+     - authelia
 
 networks:
   nginx:

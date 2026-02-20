@@ -50,19 +50,20 @@ class Container(BaseContainer):
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
             SAFELINE_RELEASE="",
-            SAFELINE_EXPOSE_PORT=Config.Property(type=int) | 9200,
+            SAFELINE_PORT=Config.Property(type=int) | 9200,
         )
 
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
-            self.expose_public("Safeline", "alienOutline", "雷池", self.load_nginx_url(
+            self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url(
                 "SAFELINE_DOMAIN",
                 proxy_url="https://safeline-mgt:1443",
                 auth_enable=True,
             )),
-            self.expose_container("Safeline", "alienOutline", "雷池", self.load_port_url(
-                "SAFELINE_EXPOSE_PORT", https=True
+            self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
+                "SAFELINE_PORT",
+                https=True
             )),
         ]
 

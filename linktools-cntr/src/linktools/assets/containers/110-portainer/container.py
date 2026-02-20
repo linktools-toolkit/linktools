@@ -40,7 +40,7 @@ class Container(BaseContainer):
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=self.get_nginx_domain(),
-            PORTAINER_EXPOSE_PORT=Config.Property(type=int) | 9000,
+            PORTAINER_PORT=Config.Property(type=int) | 9000,
         )
 
     @cached_property
@@ -52,6 +52,6 @@ class Container(BaseContainer):
                 auth_enable=True,
             )),
             self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_EXPOSE_PORT", https=False
+                "PORTAINER_PORT", https=False
             )),
         ]

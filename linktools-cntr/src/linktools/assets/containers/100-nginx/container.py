@@ -143,7 +143,7 @@ class Container(BaseContainer):
                 "_",
                 proxy_name="default",
                 proxy_conf=self.get_source_path("templates", "index.conf"),
-                temporary=False,
+                flush=True,
             )
 
         # 更新证书（如果启用HTTPS）
