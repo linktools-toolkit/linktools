@@ -6,4 +6,5 @@ access_control:
         - "*.{{ NGINX_ROOT_DOMAIN }}"
       subject:
         - "group:admins"
+        - "group:lldap_admin"
       policy: two_factor

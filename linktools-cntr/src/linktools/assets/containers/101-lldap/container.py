@@ -67,6 +67,7 @@ class Container(BaseContainer):
             )),
             self.expose_container("LDAP", "account", "账号管理", self.load_port_url(
                 "LLDAP_PORT",
+                https=False,
             )),
         ]
 

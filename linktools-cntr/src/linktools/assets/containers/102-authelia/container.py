@@ -42,38 +42,26 @@ class Container(BaseContainer):
 
     @property
     def dependencies(self) -> "Iterable[str]":
-        return ["nginx"]
+        return ["nginx", "lldap"]
 
     @cached_property
     def configs(self):
         return dict(
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
-            AUTHELIA_ADMIN_PORT=Config.Property(type=int) | 9093,
-            AUTHELIA_ADMIN_DOMAIN=self.get_nginx_domain("authelia"),
         )
 
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
             self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url(
-                "AUTHELIA_ADMIN_DOMAIN",
-                proxy_url="http://authelia-admin:9093",
-                auth_enable=True,
-            )),
-            self.expose_container("Authelia", "account", "单点登录", self.load_port_url(
-                "AUTHELIA_ADMIN_PORT",
-                https=False
+                "AUTHELIA_DOMAIN", "auth-admin",
+                proxy_conf=self.get_source_path("templates", "nginx.conf"),
             )),
         ]
 
     def on_starting(self):
         # TODO: 校验环境
-        self.write_nginx_conf(
-            domain=self.get_config("AUTHELIA_DOMAIN"),
-            proxy_url="http://authelia:9091",
-        )
-
         template_path = self.get_source_path("templates")
 
         secret_path = self.get_app_path("secrets")
@@ -82,6 +70,7 @@ class Container(BaseContainer):
         self._create_secret_file(secret_path / "session_secret")
         self._create_secret_file(secret_path / "storage_encryption_key")
         self._create_secret_file(secret_path / "oidc_hmac_secret")
+        utils.write_file(secret_path / "authentication_backend_ldap_password", self.get_config("LLDAP_ADMIN_PASSWORD"))
 
         config_path = self.get_app_path("config")
         config_path.mkdir(parents=True, exist_ok=True)

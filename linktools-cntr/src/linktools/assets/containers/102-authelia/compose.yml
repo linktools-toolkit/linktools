@@ -14,6 +14,7 @@ services:
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS=ldap://lldap:3890
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,{{ LLDAP_BASE_DN }}
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets/authentication_backend_ldap_password
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
@@ -40,10 +41,6 @@ services:
     networks:
       nginx:
       lldap:
-#   {% if AUTHELIA_ADMIN_PORT > 0 %}
-    ports:
-      - '{{ AUTHELIA_ADMIN_PORT }}:9093'
-#   {% endif %}
     depends_on:
      - authelia
 
