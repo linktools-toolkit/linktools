@@ -15,6 +15,7 @@ services:
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,{{ LLDAP_BASE_DN }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets/authentication_backend_ldap_password
+      - X_AUTHELIA_CONFIG_FILTERS=template
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
@@ -30,6 +31,8 @@ services:
     environment:
       - AAD_LOGLEVEL=DEBUG
       - AAD_AUTHELIA_DOMAIN={{ NGINX_ROOT_DOMAIN }}
+      - AAD_AUTHELIA_COOKIE_NAME={{ manager.project_name }}-auth-session
+      - AAD_AUTHELIA_MIN_AUTH_LEVEL=1
       - AAD_DIRECTORY_TYPE=lldap-graphql
       - AAD_DIRECTORY_LLDAP_GRAPHQL_ENDPOINT=http://lldap:17170/api/graphql
       - AAD_DIRECTORY_LLDAP_GRAPHQL_USER=admin
@@ -46,3 +49,4 @@ services:
 
 networks:
   nginx:
+  lldap:

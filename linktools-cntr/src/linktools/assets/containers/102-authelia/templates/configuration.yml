@@ -25,8 +25,8 @@ authentication_backend:
     groups_filter: "(member={dn})"
 
 session:
-  name: main_session
-  inactivity: 5m
+  name: {{ manager.project_name }}-auth-session
+  inactivity: 20m
   expiration: 1h
   remember_me: 1M
   cookies:

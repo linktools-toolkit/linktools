@@ -2,3 +2,18 @@ totp:
   issuer: {{ NGINX_ROOT_DOMAIN }}
   period: 30
   skew: 1
+  algorithm: sha1
+  digits: 6
+  secret_size: 32
+
+webauthn:
+  enable_passkey_login: true
+  attestation_conveyance_preference: 'direct'
+  filtering:
+    prohibit_backup_eligibility: true
+  metadata:
+    enabled: true
+    validate_trust_anchor: true
+    validate_entry: true
+    validate_status: true
+    validate_entry_permit_zero_aaguid: false

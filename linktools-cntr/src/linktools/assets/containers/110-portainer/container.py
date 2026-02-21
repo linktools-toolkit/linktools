@@ -50,6 +50,9 @@ class Container(BaseContainer):
                 "PORTAINER_DOMAIN",
                 proxy_url="http://portainer:9000",
                 auth_enable=True,
+                auth_extra={
+                    "oidc_redirect_uris": [""]
+                }
             )),
             self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
                 "PORTAINER_PORT", https=False

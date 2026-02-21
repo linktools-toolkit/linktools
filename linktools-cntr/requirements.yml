@@ -4,6 +4,7 @@ dependencies:
   - jinja2
   - pyyaml
   - dotenv
+  - cryptography
 
 dev-dependencies: []
 

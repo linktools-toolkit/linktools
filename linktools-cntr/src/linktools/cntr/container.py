@@ -92,7 +92,8 @@ class ExposeMixin:
     def load_nginx_url(
             self: "BaseContainer", key: str, *path: str,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__, auth_enable: bool = False,
+            https_enable: bool = __missing__, waf_enable: bool = __missing__,
+            auth_enable: bool = False, auth_extra: Dict[str, Any] = None,
     ):
         domain = self.get_config(key, type=str, default=None)
         if domain:
@@ -103,7 +104,7 @@ class ExposeMixin:
             https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE", type=bool)
             if proxy_conf or proxy_url:
-                self.start_hooks.append(lambda: self.write_nginx_conf(
+                self.prepare_hooks.append(lambda: self.write_nginx_conf(
                     domain=domain,
                     proxy_name=proxy_name,
                     proxy_conf=proxy_conf,
@@ -111,6 +112,7 @@ class ExposeMixin:
                     https_enable=https_enable,
                     waf_enable=waf_enable,
                     auth_enable=auth_enable,
+                    auth_extra=auth_extra,
                 ))
             scheme = "https" if https_enable else "http"
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
@@ -141,7 +143,8 @@ class NginxMixin:
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,
             proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__, auth_enable: bool = False,
+            https_enable: bool = __missing__, waf_enable: bool = __missing__,
+            auth_enable: bool = False, auth_extra: Dict[str, Any] = __missing__,
             flush: bool = False,
     ):
 
@@ -173,7 +176,7 @@ class NginxMixin:
 
             if auth_enable:
                 if not nginx.get_config("NGINX_AUTH_ENABLE", type=bool):
-                    self.logger.warning("Authelia server is disable")
+                    self.logger.warning(f"NGINX_AUTH_ENABLE is false, disable auth in {self}")
                     auth_enable = False
 
             context = dict(
@@ -181,6 +184,7 @@ class NginxMixin:
                 HTTPS_ENABLE=https_enable,
                 WAF_ENABLE=waf_enable,
                 AUTH_ENABLE=auth_enable,
+                AUTH_HEADERS=auth_extra.get("headers", {}) if auth_extra else None,
             )
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,10 +202,23 @@ class NginxMixin:
                     **context,
                 )
             if auth_enable:
-                self.manager.containers["authelia"].write_nginx_conf(
+                authelia = self.manager.containers["authelia"]
+                authelia.write_nginx_conf(
                     domain=domain,
+                    proxy_name="auth_location",
                     proxy_conf=nginx.get_source_path("templates", "auth_location.conf"),
                 )
+                if auth_extra:
+                    uris = auth_extra.get("oidc_redirect_uris", None)
+                    if uris:
+                        scheme = "https" if https_enable else "http"
+                        port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
+                        url = f"{scheme}://{domain}" \
+                            if (scheme == "http" and port == 80) or (scheme == "https" and port == 443) \
+                            else f"{scheme}://{domain}:{port}"
+                        oidc_redirect_uris = authelia.data.get("oidc_redirect_uris")
+                        for uri in uris:
+                            oidc_redirect_uris.add(utils.make_url(url, uri))
 
         except ContainerError as e:
             self.logger.debug(f"{self} write nginx conf: {e}, skip.")
@@ -334,7 +351,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                     networks = data["networks"]
                     for name in list(networks.keys()):
                         network = networks[name]
-                        network = networks[name]
                         if network is None:
                             network = networks[name] = {}
                         if not isinstance(network, dict):
@@ -358,6 +374,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return services
 
     @cached_property
+    def prepare_hooks(self) -> List[Callable[[], Any]]:
+        return []
+
+    @cached_property
     def start_hooks(self) -> List[Callable[[], Any]]:
         return []
 
@@ -366,6 +386,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     def on_init(self):
+        pass
+
+    def on_check(self):
         pass
 
     def on_starting(self):
@@ -517,6 +540,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def get_config(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
         return self.manager.config.get(key, type=type, default=default)
 
+    def get_config_later(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
+        return utils.lazy_load(self.manager.config.get, key, type=type, default=default)
+
     def get_source_path(self, *paths: str) -> Path:
         return utils.join_path(self.root_path, *paths)
 
@@ -609,23 +635,23 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
         def mkdir(path: PathType) -> str:
             path = config.cast(path, type="path")
-            self.start_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
+            self.prepare_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
             return path
 
         def chown(path: PathType, user: str = None) -> str:
             path = config.cast(path, type="path")
             if user:
                 uid, gid = utils.get_uid(user), utils.get_gid(user)
-                self.start_hooks.append(lambda: self.manager.change_file_owner(path, uid, gid))
+                self.prepare_hooks.append(lambda: self.manager.change_file_owner(path, uid, gid))
             return path
 
         def chmod(path: PathType, mode: int = 0o755) -> str:
             path = config.cast(path, type="path")
-            self.start_hooks.append(lambda: os.chmod(path, mode))
+            self.prepare_hooks.append(lambda: os.chmod(path, mode))
             return path
 
         context = {
-            key: utils.lazy_load(config.get, key)
+            key: config.get(key)
             for key in config.keys()
         }
 
@@ -642,7 +668,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             container=self,
             config=config,
             user=self.manager.user,
-            docker_user=utils.lazy_load(self.get_config, "DOCKER_USER"),
+            docker_user=self.get_config("DOCKER_USER"),
 
             mkdir=mkdir,
             chown=chown,

@@ -548,7 +548,8 @@ def make_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
     result = url
 
     for path in paths:
-        result = result.rstrip("/") + "/" + path.lstrip("/")
+        if path:
+            result = result.rstrip("/") + "/" + path.lstrip("/")
 
     if len(kwargs) > 0:
         queries = []

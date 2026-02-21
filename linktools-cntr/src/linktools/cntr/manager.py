@@ -273,6 +273,7 @@ class ContainerManager:
                         if not value.__abstract__:
                             container = value(self, path)
                             self.logger.debug(f"Load container {container.name} in {path}")
+                            container.on_init()
                             yield container
                             return
             except Exception as e:
@@ -284,6 +285,7 @@ class ContainerManager:
             if os.path.exists(compose_path):
                 container = SimpleContainer(self, path)
                 self.logger.debug(f"Load container {container.name} in {path}")
+                container.on_init()
                 yield container
                 return
 
@@ -321,8 +323,6 @@ class ContainerManager:
             container.enable = container in containers
         for container in reversed(containers):
             self.config.update_defaults(**container.configs)
-        for container in containers:
-            container.on_init()
         for container in containers:
             if container.docker_file and self.debug:  # 加载每个容器的dockerfile
                 self.logger.debug(f"Generate Dockerfile for {container.name}")

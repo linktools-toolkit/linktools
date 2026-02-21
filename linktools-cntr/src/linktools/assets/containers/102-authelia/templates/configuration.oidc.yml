@@ -1,0 +1,32 @@
+identity_providers:
+  oidc:
+    jwks:
+#     {% raw %}
+      - key: {{ secret "/secrets/identity_providers_oidc_jwks" | mindent 10 "|" | msquote }}
+#     {% endraw %}
+    clients:
+      - client_id: '{{ manager.project_name }}-default-client'
+        client_name: '{{ manager.project_name }} Default Client'
+        client_secret: '{{ AUTHELIA_OIDC_CLIENT_SECRET }}'
+        public: false
+        authorization_policy: 'two_factor'
+        consent_mode: 'implicit'
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+        redirect_uris:
+          - 'https://{{ NGINX_ROOT_DOMAIN }}:{{ NGINX_HTTPS_PORT }}'
+#         {% for uri in container.data.get("oidc_redirect_uris") %}
+          - '{{ uri }}'
+#         {% endfor %}
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+          - 'groups'
+        response_types:
+          - 'code'
+        grant_types:
+          - 'authorization_code'
+        access_token_signed_response_alg: 'none'
+        userinfo_signed_response_alg: 'none'
+        token_endpoint_auth_method: 'client_secret_basic'

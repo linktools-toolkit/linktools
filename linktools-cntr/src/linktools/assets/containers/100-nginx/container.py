@@ -34,7 +34,7 @@ import textwrap
 from linktools import utils
 from linktools.core import Config
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer
+from linktools.cntr import BaseContainer, ContainerError
 
 
 class Container(BaseContainer):
@@ -104,7 +104,16 @@ class Container(BaseContainer):
             port = self.get_config("NGINX_HTTP_PORT")
         return f"{scheme}://{host}:{port}/"
 
-    def on_started(self):
+    def on_init(self):
+        self.start_hooks.append(self._update_files)
+
+    def on_check(self):
+        if self.get_config("NGINX_WAF_ENABLE") and not self.manager.containers["safeline"].enable:
+            raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
+        if self.get_config("NGINX_AUTH_ENABLE") and not self.manager.containers["authelia"].enable:
+            raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
+
+    def _update_files(self):
         utils.clear_directory(self.get_app_path("conf.d"))
 
         # 初始化snippets
@@ -113,11 +122,6 @@ class Container(BaseContainer):
 
         waf_enable = self.get_config("NGINX_WAF_ENABLE")
         auth_enable = self.get_config("NGINX_AUTH_ENABLE")
-        self.render_template(
-            self.get_source_path("templates", "header.conf"),
-            self.get_app_path("conf.d", "snippets", "header.conf"),
-            X_HEADER_ENABLE=not waf_enable
-        )
         self.render_template(
             self.get_source_path("templates", "header.conf"),
             self.get_app_path("conf.d", "snippets", "header.conf"),
@@ -151,6 +155,7 @@ class Container(BaseContainer):
                 flush=True,
             )
 
+    def on_started(self):
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
             root_domain = self.get_config("NGINX_ROOT_DOMAIN")

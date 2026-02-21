@@ -31,7 +31,7 @@ from typing import Iterable
 
 from linktools import utils
 from linktools.cli import CommandError
-from linktools.cntr import BaseContainer, ExposeLink
+from linktools.cntr import BaseContainer, ExposeLink, ContainerError
 from linktools.core import Config
 from linktools.decorator import cached_property
 
@@ -52,7 +52,8 @@ class Container(BaseContainer):
         return dict(
             LLDAP_TAG="stable",
             LLDAP_DOMAIN=self.get_nginx_domain("ldap"),
-            LLDAP_PORT=Config.Alias(type=int) | 17170,
+            LLDAP_PORT=Config.Alias(type=int) | 0,
+            LLDAP_WEB_PORT=Config.Alias(type=int) | 17170,
             LLDAP_BASE_DN=Config.Lazy(lambda cfg: get_base_dn(cfg)),
             LLDAP_ADMIN_PASSWORD=Config.Prompt(cached=True, type=str) | utils.random_string(20),
         )
@@ -60,16 +61,17 @@ class Container(BaseContainer):
     @cached_property
     def exposes(self) -> Iterable[ExposeLink]:
         return [
-            self.expose_public("LDAP", "account", "账号管理", self.load_nginx_url(
-                "LLDAP_DOMAIN",
-                proxy_url="http://lldap:17170",
-                auth_enable=True,
-            )),
             self.expose_container("LDAP", "account", "账号管理", self.load_port_url(
-                "LLDAP_PORT",
+                "LLDAP_WEB_PORT",
                 https=False,
             )),
         ]
+
+    def on_check(self):
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if not domain or "." not in domain:
+            raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
+                                 f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
     def on_starting(self):
         template_path = self.get_source_path("templates")
@@ -86,8 +88,8 @@ class Container(BaseContainer):
     @classmethod
     def _create_secret_file(cls, path, length=48):
         if os.path.exists(path):
-            if os.path.isfile(path):
-                return
-            raise CommandError(f"Path {path} exists and is not a file.")
+            if not os.path.isfile(path):
+                raise CommandError(f"Path {path} exists and is not a file.")
+            return
 
         utils.write_file(path, utils.random_string(length))

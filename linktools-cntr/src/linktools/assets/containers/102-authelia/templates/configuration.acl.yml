@@ -7,4 +7,4 @@ access_control:
       subject:
         - "group:admins"
         - "group:lldap_admin"
-      policy: two_factor
+      policy: {{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}

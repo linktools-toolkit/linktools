@@ -10,14 +10,17 @@ services:
     volumes:
       - '{{ (APP_PATH/"data") | mkdir | chown }}:/data'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
-#   {% if LLDAP_PORT > 0 %}
+#   {% if LLDAP_PORT > 0 or LLDAP_WEB_PORT > 0 %}
     ports:
-      - '{{ LLDAP_PORT }}:17170'
+#     {% if LLDAP_PORT > 0 %}
+      - '{{ LLDAP_PORT }}:3890'
+#     {% endif %}
+#     {% if LLDAP_WEB_PORT > 0 %}
+      - '{{ LLDAP_WEB_PORT }}:17170'
+#     {% endif %}
 #   {% endif %}
     networks:
-      nginx:
       lldap:
 
 networks:
-  nginx:
   lldap:

@@ -67,7 +67,7 @@ class Container(BaseContainer):
             )),
         ]
 
-    @subcommand("resetadmin", help="reset safeline admin password")
+    @subcommand("reset-admin", help="reset safeline admin password")
     def on_reset_admin(self):
         self.manager.create_docker_process(
             "exec", "-it", self.get_service_name("safeline-mgt"),
