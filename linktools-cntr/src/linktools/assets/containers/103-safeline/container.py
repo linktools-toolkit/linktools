@@ -46,6 +46,7 @@ class Container(BaseContainer):
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
             SAFELINE_DOMAIN=self.get_nginx_domain(),
+            SAFELINE_AUTH_ENABLE=Config.Property(type=bool) | True,
             SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
@@ -59,7 +60,7 @@ class Container(BaseContainer):
             self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url(
                 "SAFELINE_DOMAIN",
                 proxy_url="https://safeline-mgt:1443",
-                auth_enable=True,
+                auth_enable=self.get_config("SAFELINE_AUTH_ENABLE"),
             )),
             self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
                 "SAFELINE_PORT",

@@ -38,7 +38,7 @@ from ._utils import (
     is_sub_path, join_path, read_file, write_file, remove_file, clear_directory,
     get_lan_ip, get_wan_ip,
     parse_version, get_char_width,
-    make_url, parse_header, parser_cookie, guess_file_name, user_agent,
+    make_url, join_url, parse_header, parser_cookie, guess_file_name, user_agent,
     get_interpreter, get_interpreter_ident,
     get_system, get_machine, get_user, get_uid, get_gid, get_shell_path,
     is_unix_like, is_windows,

@@ -46,17 +46,18 @@ class Container(BaseContainer):
             FLARE_TAG="latest",
             FLARE_DOAMIN=self.get_nginx_domain(""),
             FLARE_PORT=Config.Property(type=int) | 5000,
-            FLARE_ENABLE_LOGIN=Config.Alias(type=bool) | False,
+            FLARE_AUTH_ENABLE=Config.Property(type=bool) | True,
+            FLARE_LOGIN_ENABLE=Config.Alias(type=bool) | False,
             FLARE_USER=Config.Lazy(
                 lambda cfg:
                 Config.Prompt(cached=True) | "admin"
-                if cfg.get("FLARE_ENABLE_LOGIN")
+                if cfg.get("FLARE_LOGIN_ENABLE")
                 else ""
             ),
             FLARE_PASSWORD=Config.Lazy(
                 lambda cfg:
                 Config.Prompt(cached=True)
-                if cfg.get("FLARE_ENABLE_LOGIN")
+                if cfg.get("FLARE_LOGIN_ENABLE")
                 else ""
             )
         )
@@ -129,5 +130,5 @@ class Container(BaseContainer):
         self.write_nginx_conf(
             domain=self.get_config("FLARE_DOAMIN"),
             proxy_url="http://flare:5005",
-            auth_enable=True,
+            auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
         )

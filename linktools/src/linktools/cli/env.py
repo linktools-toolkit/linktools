@@ -295,6 +295,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 if args.no_build_isolation:
                     pip_args.append("--no-build-isolation")
 
+                remove_cache_files()
                 return utils.popen(utils.get_interpreter(), "-m", *pip_args).check_call()
 
     @register_command(name="clean", description="clean temporary files")
@@ -306,6 +307,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             return parser
 
         def run(self, args: "argparse.Namespace"):
+            remove_cache_files()
             environ.clean_temp_files(expire_days=args.days)
 
     return commands

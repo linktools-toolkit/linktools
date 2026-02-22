@@ -127,10 +127,8 @@ class Capability(BaseCapability):
 
     @property
     def updater(self) -> "Updater":
-        from . import environ
-
         return next(filter(None, (   # noqa
-            self.develop and DevelopUpdater(environ.root_path),
+            self.develop and DevelopUpdater(self.root_path),
             not self.release and GitUpdater(),
             PypiUpdater()
         )))

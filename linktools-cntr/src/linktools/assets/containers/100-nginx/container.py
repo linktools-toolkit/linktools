@@ -50,7 +50,7 @@ class Container(BaseContainer):
     @cached_property
     def configs(self):
         return dict(
-            NGINX_TAG="1.29.1-alpine",
+            NGINX_TAG="stable-alpine",
             NGINX_WILDCARD_DOMAIN=Config.Alias("WILDCARD_DOMAIN") | False,
             NGINX_ROOT_DOMAIN=Config.Alias("ROOT_DOMAIN") | Config.Prompt(cached=True) | "_",
             NGINX_HTTP_PORT=Config.Alias("HTTP_PORT", type=int) | Config.Prompt(cached=True) | 80,
@@ -102,7 +102,7 @@ class Container(BaseContainer):
         else:
             scheme = "http"
             port = self.get_config("NGINX_HTTP_PORT")
-        return f"{scheme}://{host}:{port}/"
+        return utils.make_url(scheme, host, port)
 
     def on_init(self):
         self.start_hooks.append(self._update_files)

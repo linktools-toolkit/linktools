@@ -30,6 +30,8 @@
 import os
 from typing import Iterable
 
+import yaml
+
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ExposeLink, ContainerError
@@ -50,6 +52,7 @@ class Container(BaseContainer):
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
             AUTHELIA_MIN_AUTH_LEVEL=Config.Alias(type=int) | 2,
             AUTHELIA_OIDC_CLIENT_SECRET=Config.Alias(cached=True) | utils.random_string(20),
+            AUTHELIA_ADMIN_AUTH_ENABLE=Config.Property(type=bool) | True,
         )
 
     @cached_property
@@ -58,15 +61,28 @@ class Container(BaseContainer):
             self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url(
                 "AUTHELIA_DOMAIN", "auth-admin",
                 proxy_conf=self.get_source_path("templates", "nginx.conf"),
-                auth_enable=True,
+                auth_enable=self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE"),
             )),
         ]
 
     @cached_property
-    def data(self):
-        return {
-            "oidc_redirect_uris": set()
-        }
+    def oidc_clients(self):
+        https_port = self.get_config("NGINX_HTTPS_PORT", type=int)
+        auth_url = utils.make_url("https", self.get_config('AUTHELIA_DOMAIN'), https_port)
+
+        client = dict()
+        client["ClientID"] = f"{self.manager.project_name}-web-client"
+        client["ClientName"] = f"Web Client ({self.manager.project_name})"
+        client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
+        client["IssuerURL"] = auth_url
+        client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorize"
+        client["AccessTokenURL"] = f"{auth_url}/api/oidc/token"
+        client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
+        client["RedirectURLs"] = {auth_url}
+        client["UserIdentifier"] = "preferred_username"
+        client["Scopes"] = "openid profile groups email"
+
+        return [client]
 
     def on_init(self):
         self.start_hooks.append(self._update_files)
@@ -101,6 +117,12 @@ class Container(BaseContainer):
             self.logger.info(utils.read_file(path, text=True))
         else:
             self.logger.warning("No notification.")
+
+    @subcommand("list-oidc-clients", help="list OIDC clients")
+    def on_list_oidc_clients(self):
+        self.logger.info(
+            yaml.dump(self.oidc_clients)
+        )
 
     @classmethod
     def _create_secret_file(cls, path, length=48):

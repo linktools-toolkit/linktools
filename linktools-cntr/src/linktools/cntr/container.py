@@ -64,7 +64,13 @@ class ExposeLink:
         self.name = name
         self.icon = icon
         self.desc = desc
-        self.url = url
+        self._url = url
+
+    @property
+    def url(self) -> Optional[str]:
+        if self._url is None:
+            return None
+        return str(self._url)
 
     @property
     def is_valid(self) -> bool:
@@ -78,16 +84,22 @@ class ExposeMixin:
     expose_other = ExposeCategory("other", "Other")
 
     def load_config_url(self: "BaseContainer", key: str, *path: str):
-        url = self.get_config(key, type=str, default=None)
-        if url:
-            return utils.make_url(url, *path)
-        return None
+        def make_url():
+            url = self.get_config(key, type=str, default=None)
+            if url:
+                return utils.join_url(url, *path)
+            return None
+
+        return utils.lazy_load(make_url)
 
     def load_port_url(self: "BaseContainer", key: str, *path: str, https: bool = True):
-        port = self.get_config(key, type=int, default=0)
-        if 0 < port < 65535:
-            return utils.make_url(f"{'https' if https else 'http'}://{self.manager.host}:{port}", *path)
-        return None
+        def make_url():
+            port = self.get_config(key, type=int, default=0)
+            if 0 < port < 65535:
+                return utils.make_url("https" if https else "http", self.manager.host, port, *path)
+            return None
+
+        return utils.lazy_load(make_url)
 
     def load_nginx_url(
             self: "BaseContainer", key: str, *path: str,
@@ -116,7 +128,7 @@ class ExposeMixin:
                 ))
             scheme = "https" if https_enable else "http"
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
-            return utils.make_url(f"{scheme}://{domain}:{port}/", *path)
+            return utils.make_url(scheme, domain, port, *path)
         return None
 
 
@@ -213,12 +225,9 @@ class NginxMixin:
                     if uris:
                         scheme = "https" if https_enable else "http"
                         port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
-                        url = f"{scheme}://{domain}" \
-                            if (scheme == "http" and port == 80) or (scheme == "https" and port == 443) \
-                            else f"{scheme}://{domain}:{port}"
-                        oidc_redirect_uris = authelia.data.get("oidc_redirect_uris")
+                        oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
                         for uri in uris:
-                            oidc_redirect_uris.add(utils.make_url(url, uri))
+                            oidc_redirect_uris.add(utils.make_url(scheme, domain, port, uri))
 
         except ContainerError as e:
             self.logger.debug(f"{self} write nginx conf: {e}, skip.")
@@ -651,7 +660,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             return path
 
         context = {
-            key: config.get(key)
+            key: self.get_config_later(key)
             for key in config.keys()
         }
 

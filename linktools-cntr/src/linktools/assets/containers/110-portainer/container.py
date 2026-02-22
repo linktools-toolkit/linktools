@@ -40,6 +40,7 @@ class Container(BaseContainer):
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=self.get_nginx_domain(),
+            PORTAINER_AUTH_ENABLE=Config.Property(type=bool) | True,
             PORTAINER_PORT=Config.Property(type=int) | 9000,
         )
 
@@ -49,12 +50,13 @@ class Container(BaseContainer):
             self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
                 "PORTAINER_DOMAIN",
                 proxy_url="http://portainer:9000",
-                auth_enable=True,
+                auth_enable=self.get_config("PORTAINER_AUTH_ENABLE"),
                 auth_extra={
                     "oidc_redirect_uris": [""]
                 }
             )),
             self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_PORT", https=False
+                "PORTAINER_PORT",
+                https=False
             )),
         ]

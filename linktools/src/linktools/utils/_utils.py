@@ -539,7 +539,18 @@ def user_agent(style=None) -> str:
     return _user_agent.fallback
 
 
-def make_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
+def make_url(scheme: str, host: str, port: int, *paths: str, **kwargs: "QueryType") -> str:
+    """
+    构建URL
+    """
+    url = f"{scheme}://{host}"
+    if port is not None:
+        if (scheme == "http" and port != 80) or (scheme == "https" and port != 443):
+            url += f":{port}"
+    return join_url(url, *paths, **kwargs)
+
+
+def join_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
     """
     拼接URL
     """
