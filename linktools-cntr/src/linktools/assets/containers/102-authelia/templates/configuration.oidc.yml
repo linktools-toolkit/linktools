@@ -5,14 +5,14 @@ identity_providers:
       - key: {{ secret "/secrets/identity_providers_oidc_jwks" | mindent 10 "|" | msquote }}
 #     {% endraw %}
     clients:
-      - client_id: '{{ manager.project_name }}-default-client'
-        client_name: '{{ manager.project_name }} Default Client'
+      - client_id: '{{ manager.project_name }}-web-client'
+        client_name: 'Web Client ({{ manager.project_name }})'
         client_secret: '{{ AUTHELIA_OIDC_CLIENT_SECRET }}'
         public: false
         authorization_policy: 'two_factor'
         consent_mode: 'implicit'
-        require_pkce: true
-        pkce_challenge_method: 'S256'
+        require_pkce: false
+        pkce_challenge_method: ''
         redirect_uris:
           - 'https://{{ NGINX_ROOT_DOMAIN }}:{{ NGINX_HTTPS_PORT }}'
 #         {% for uri in container.data.get("oidc_redirect_uris") %}

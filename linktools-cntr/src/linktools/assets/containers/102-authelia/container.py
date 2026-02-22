@@ -49,7 +49,7 @@ class Container(BaseContainer):
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
             AUTHELIA_MIN_AUTH_LEVEL=Config.Alias(type=int) | 2,
-            AUTHELIA_OIDC_CLIENT_SECRET=Config.Alias(type=str, default=utils.random_string(20)),
+            AUTHELIA_OIDC_CLIENT_SECRET=Config.Alias(cached=True) | utils.random_string(20),
         )
 
     @cached_property
@@ -58,6 +58,7 @@ class Container(BaseContainer):
             self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url(
                 "AUTHELIA_DOMAIN", "auth-admin",
                 proxy_conf=self.get_source_path("templates", "nginx.conf"),
+                auth_enable=True,
             )),
         ]
 
@@ -97,7 +98,7 @@ class Container(BaseContainer):
     def on_show_notification(self):
         path = self.get_app_path("config", "notification.txt")
         if path.exists():
-            self.logger.info(utils.read_file(path))
+            self.logger.info(utils.read_file(path, text=True))
         else:
             self.logger.warning("No notification.")
 

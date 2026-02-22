@@ -6,6 +6,7 @@ services:
       - '--config=/config/configuration.yml'
       - '--config=/config/configuration.acl.yml'
       - '--config=/config/configuration.2fa.yml'
+      - '--config=/config/configuration.oidc.yml'
     environment:
       - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
       - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/storage_encryption_key
@@ -25,12 +26,13 @@ services:
 
   authelia-admin:
     image: 'ghcr.io/asalimonov/authelia-admin:latest'
+    user: root
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
     environment:
       - AAD_LOGLEVEL=DEBUG
-      - AAD_AUTHELIA_DOMAIN={{ NGINX_ROOT_DOMAIN }}
+      - AAD_AUTHELIA_DOMAIN={{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
       - AAD_AUTHELIA_COOKIE_NAME={{ manager.project_name }}-auth-session
       - AAD_AUTHELIA_MIN_AUTH_LEVEL=1
       - AAD_DIRECTORY_TYPE=lldap-graphql
@@ -41,6 +43,7 @@ services:
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT=3890
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
       - TRUSTED_ORIGINS=https://{{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
     networks:
       nginx:
       lldap:
