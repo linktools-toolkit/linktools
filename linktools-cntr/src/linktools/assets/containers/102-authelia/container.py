@@ -75,7 +75,7 @@ class Container(BaseContainer):
         client["ClientName"] = f"Web Client ({self.manager.project_name})"
         client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
         client["IssuerURL"] = auth_url
-        client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorize"
+        client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorization"
         client["AccessTokenURL"] = f"{auth_url}/api/oidc/token"
         client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
         client["RedirectURLs"] = {auth_url}
