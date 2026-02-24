@@ -92,10 +92,17 @@ class Container(BaseContainer):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
     def _update_files(self):
-        template_path = self.get_source_path("templates")
-
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
+        config_path = self.get_app_path("config")
+        config_path.mkdir(parents=True, exist_ok=True)
+        template_path = self.get_source_path("templates")
+
+        self.manager.change_file_owner(secret_path, self.manager.user, recursive=True)
+        self.manager.change_file_mode(secret_path, 0o700, recursive=True)
+        self.manager.change_file_owner(config_path, self.manager.user, recursive=True)
+        self.manager.change_file_mode(config_path, 0o700, recursive=True)
+
         self._create_secret_file(secret_path / "jwt_secret")
         self._create_secret_file(secret_path / "session_secret")
         self._create_secret_file(secret_path / "storage_encryption_key")
@@ -103,12 +110,13 @@ class Container(BaseContainer):
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
         utils.write_file(secret_path / "authentication_backend_ldap_password", self.get_config("LLDAP_ADMIN_PASSWORD"))
 
-        config_path = self.get_app_path("config")
-        config_path.mkdir(parents=True, exist_ok=True)
         self.render_template(template_path / "configuration.yml", config_path / "configuration.yml")
         self.render_template(template_path / "configuration.acl.yml", config_path / "configuration.acl.yml")
         self.render_template(template_path / "configuration.2fa.yml", config_path / "configuration.2fa.yml")
         self.render_template(template_path / "configuration.oidc.yml", config_path / "configuration.oidc.yml")
+
+        self.manager.change_file_owner(secret_path, "root", recursive=True)
+        self.manager.change_file_owner(config_path, "root", recursive=True)
 
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self):

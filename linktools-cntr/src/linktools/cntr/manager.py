@@ -434,24 +434,47 @@ class ContainerManager:
         options.extend(["--project-name", self.project_name])
         return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
 
-    def change_file_owner(self, path: PathType, uid: int, gid: int, force: bool = False,
-                          privilege: bool = False) -> None:
+    def change_file_owner(self, path: PathType, user: str, recursive: bool = False) -> None:
+        path = self.config.cast(path, type="path")
         if not os.path.exists(path):
-            self.logger.debug(f"Path not found: {path}")
-            return
+            raise FileNotFoundError(f"Path not found: {path}")
         if not shutil.which("chown"):
             self.logger.debug("Command `chown` not found")
             return
-        stat = os.stat(path)
-        if force or stat.st_uid != uid or stat.st_gid != gid:
-            try:
-                self.create_process(
-                    "chown", "-R", f"{uid}:{gid}", path,
-                    privilege=privilege or self.uid != stat.st_uid or self.uid != uid
-                ).check_call()
-            except Exception as e:
-                self.logger.warning(f"Failed to change owner of {path}")
-                raise e
+        args = ["chown"]
+        if recursive:
+            args.append("-R")
+        uid, gid = utils.get_uid(user), utils.get_gid(user)
+        args.extend([f"{uid}:{gid}", str(path)])
+        try:
+            stat = os.stat(path)
+            self.create_process(
+                *args,
+                privilege=self.uid != stat.st_uid or self.uid != uid
+            ).check_call()
+        except Exception as e:
+            self.logger.warning(f"Failed to chown of {path}")
+            raise e
+
+    def change_file_mode(self, path: PathType, mode: int = 0o755, recursive: bool = False) -> None:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Path not found: {path}")
+        if not shutil.which("chown"):
+            self.logger.debug("Command `chmod` not found")
+            return
+        args = ["chmod"]
+        if recursive:
+            args.append("-R")
+        args.extend([oct(mode)[2:], str(path)])
+        try:
+            stat = os.stat(path)
+            self.create_process(
+                *args,
+                privilege=self.uid != stat.st_uid
+            ).check_call()
+        except Exception as e:
+            self.logger.warning(f"Failed to chmod of {path}")
+            raise e
 
     def get_all_repos(self) -> Dict[str, Dict[str, str]]:
         return self._load_setting("INSTALLED_REPOS", default={})

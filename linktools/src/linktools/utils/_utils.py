@@ -784,28 +784,28 @@ elif is_unix_like():
 
 else:
 
-    def get_user(uid: int = None):
+    def get_user(uid: int = None) -> str:
         """
         获取用户名，如果没有指定uid则返回当前用户名，windows固定为当前用户名
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
-    def get_uid(user: str = None):
+    def get_uid(user: str = None) -> int:
         """
         获取用户ID，如果没有指定用户则返回当前用户ID，windows固定为0
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
-    def get_gid(user: str = None):
+    def get_gid(user: str = None) -> int:
         """
         获取用户组ID，如果没有指定用户则返回当前用户组ID，windows固定为0
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
-    def get_shell_path():
+    def get_shell_path() -> str:
         """
         获取当前用户shell路径
         """

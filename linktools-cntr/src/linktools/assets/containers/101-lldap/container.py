@@ -74,16 +74,25 @@ class Container(BaseContainer):
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
     def on_starting(self):
-        template_path = self.get_source_path("templates")
-
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
-        self._create_secret_file(secret_path / "jwt_secret", length=64)
-        utils.write_file(secret_path / "ldap_user_pass", self.get_config("LLDAP_ADMIN_PASSWORD"))
 
         data_path = self.get_app_path("data")
         data_path.mkdir(parents=True, exist_ok=True)
+
+        template_path = self.get_source_path("templates")
+
+        self.manager.change_file_owner(secret_path, self.manager.user, recursive=True)
+        self.manager.change_file_mode(secret_path, 0o700, recursive=True)
+        self.manager.change_file_owner(data_path, self.manager.user, recursive=True)
+        self.manager.change_file_mode(data_path, 0o700, recursive=True)
+
+        self._create_secret_file(secret_path / "jwt_secret", length=64)
+        utils.write_file(secret_path / "ldap_user_pass", self.get_config("LLDAP_ADMIN_PASSWORD"))
         self.render_template(template_path / "lldap_config.toml", data_path / "lldap_config.toml")
+
+        self.manager.change_file_owner(secret_path, "root", recursive=True)
+        self.manager.change_file_owner(data_path, "root", recursive=True)
 
     @classmethod
     def _create_secret_file(cls, path, length=48):

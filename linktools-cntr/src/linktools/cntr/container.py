@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable, Iterable
 
 import yaml
 from jinja2 import Environment, TemplateError, FileSystemLoader
+
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.core import Config
@@ -647,16 +648,15 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             self.prepare_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
             return path
 
-        def chown(path: PathType, user: str = None) -> str:
+        def chown(path: PathType, user: str = None, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
             if user:
-                uid, gid = utils.get_uid(user), utils.get_gid(user)
-                self.prepare_hooks.append(lambda: self.manager.change_file_owner(path, uid, gid))
+                self.prepare_hooks.append(lambda: self.manager.change_file_owner(path, user, recursive=recursive))
             return path
 
-        def chmod(path: PathType, mode: int = 0o755) -> str:
+        def chmod(path: PathType, mode: int = 0o755, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
-            self.prepare_hooks.append(lambda: os.chmod(path, mode))
+            self.prepare_hooks.append(lambda: self.manager.change_file_mode(path, mode, recursive=recursive))
             return path
 
         context = {
@@ -679,6 +679,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             user=self.manager.user,
             docker_user=self.get_config("DOCKER_USER"),
 
+            utils=utils,
             mkdir=mkdir,
             chown=chown,
             chmod=chmod,
