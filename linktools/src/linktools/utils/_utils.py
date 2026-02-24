@@ -139,7 +139,7 @@ def cast_bool(obj: "Any", default: "Any" = __missing__) -> bool:
     return cast(bool, obj, default)
 
 
-def coalesce(*args: "T") -> "T":
+def coalesce(*args: "Any") -> "Any":
     """
     从参数列表中返回第一个不为None的值
     """

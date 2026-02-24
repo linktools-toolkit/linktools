@@ -160,7 +160,7 @@ class ConfigCommand(BaseCommand):
             keys.update(manager.config.cache.keys())
         for key in sorted(keys):
             value = manager.config.get(key)
-            self.logger.info(f"{key}: {value}")
+            self.logger.info(f"{key}={value}")
 
     @subcommand("edit", help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
@@ -247,16 +247,29 @@ class Command(BaseCommandGroup):
         ]
 
     @subcommand("list", help="list all containers")
-    def on_command_list(self):
+    @subcommand_argument("--detail", action="store_true", help="show container detail info")
+    @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
+                         choices=LazyChoices(_iter_container_names))
+    def on_command_list(self, names: List[str] = None, detail: bool = False):
         install_containers = manager.get_installed_containers(resolve=False)
         all_install_containers = manager.resolve_depend_containers(install_containers)
         for container in sorted(manager.containers.values(), key=lambda o: o.order):
+            if names and container.name not in names:
+                continue
             if container not in all_install_containers:
-                self.logger.info(f"[ ] {container.name}", extra={"style": "dim"})
+                message = f"[dim][ ] {container.name}[/]"
             elif container in install_containers:
-                self.logger.info(f"[*] {container.name} [added]", extra={"style": "red bold"})
+                message = f"[red bold][*] {container.name} \\[added][/]"
             else:
-                self.logger.info(f"[-] {container.name} [dependency]", extra={"style": "red dim"})
+                message = f"[red dim][-] {container.name} \\[dependency][/]"
+            if detail:
+                message += f"{os.linesep}    [dim]Enable: {container.enable}[/]"
+                message += f"{os.linesep}    [dim]Order: {container.order}[/]"
+                message += f"{os.linesep}    [dim]Path: {container.root_path}[/]"
+                message += f"{os.linesep}    [dim]Description: {container.description}[/]"
+                message += f"{os.linesep}    [dim]Dependencies: \\[{', '.join(container.dependencies)}][/]"
+                message += f"{os.linesep}    [dim]Configs: \\[{', '.join(container.configs.keys())}][/]"
+            self.logger.info(message, extra={"markup": True})
 
     @subcommand("add", help="add containers to installed list")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
@@ -276,24 +289,6 @@ class Command(BaseCommandGroup):
         assert containers, "No container removed"
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Remove {', '.join(result)} success")
-
-    @subcommand("info", help="display container info")
-    @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
-                         choices=LazyChoices(_iter_container_names))
-    def on_command_info(self, names: List[str]):
-        for name in names:
-            container = manager.containers[name]
-            data = {
-                name: {
-                    "path": container.root_path,
-                    "order": container.order,
-                    "enable": container.enable,
-                    "dependencies": container.dependencies,
-                    "configs": list(set(container.configs.keys())),
-                    "exposes": list(set([o.name for o in container.exposes])),
-                }
-            }
-            self.logger.info(yaml.dump(data, sort_keys=False).strip())
 
     @subcommand("up", help="deploy installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
