@@ -230,6 +230,11 @@ class NginxMixin:
                         for uri in uris:
                             oidc_redirect_uris.add(utils.make_url(scheme, domain, port, uri))
 
+                    subjects = auth_extra.get("acl_subjects", None)
+                    if subjects:
+                        acl_rule = authelia.acl_rules.setdefault(domain, {})
+                        acl_rule["Subjects"] = subjects
+
         except ContainerError as e:
             self.logger.debug(f"{self} write nginx conf: {e}, skip.")
 

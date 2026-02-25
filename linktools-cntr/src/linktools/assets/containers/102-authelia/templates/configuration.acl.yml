@@ -1,10 +1,19 @@
 access_control:
   default_policy: deny
   rules:
+#   {% for domain, rule in container.acl_rules.items() %}
+    - domain:
+        - "{{ domain }}"
+      subject:
+        - "group:admins"
+#       {% for subject in rule["Subjects"] %}
+        - "{{ subject }}"
+#       {% endfor %}
+      policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'
+#   {% endfor %}
     - domain:
         - "{{ NGINX_ROOT_DOMAIN }}"
         - "*.{{ NGINX_ROOT_DOMAIN }}"
       subject:
         - "group:admins"
-        - "group:lldap_admin"
       policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'

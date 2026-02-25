@@ -53,7 +53,7 @@ class Container(BaseContainer):
             LLDAP_TAG="stable",
             LLDAP_DOMAIN=self.get_nginx_domain("ldap"),
             LLDAP_PORT=Config.Alias(type=int) | 0,
-            LLDAP_WEB_PORT=Config.Alias(type=int) | 17170,
+            LLDAP_WEB_PORT=Config.Alias(type=int) | 0,
             LLDAP_BASE_DN=Config.Lazy(lambda cfg: get_base_dn(cfg)),
             LLDAP_ADMIN_PASSWORD=Config.Prompt(cached=True) | utils.random_string(20),
         )

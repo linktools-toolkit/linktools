@@ -34,6 +34,8 @@ import pathlib
 import shutil
 from typing import TYPE_CHECKING, Dict, Any, List, Union, Callable, Tuple, Set
 
+from git import InvalidGitRepositoryError
+
 from linktools import utils
 from linktools.core import Config
 from linktools.decorator import cached_property
@@ -514,8 +516,9 @@ class ContainerManager:
 
             self._dump_setting("INSTALLED_REPOS", repos)
 
-    def update_repos(self, force: bool = False):
+    def update_repos(self, branch: str = None, reset: bool = False):
         for url, meta in self.get_all_repos().items():
+            repo = None
             repo_type = meta.get("type", None)
             repo_path = meta.get("repo_path", None)
             if repo_type == "git" and repo_path:
@@ -524,12 +527,39 @@ class ContainerManager:
                     Repository.clone_with_progress(url, repo_path)
                     continue
                 repo = Repository(repo_path)
-                if repo.is_dirty():
-                    if not force:
-                        raise ContainerError(f"Repository `{repo_path}` is dirty")
-                    self.logger.warning(f"Repository `{repo_path}` is dirty, reset to HEAD")
-                    repo.git.reset(hard=True)
-                repo.update_with_progress()
+            else:
+                try:
+                    if os.path.exists(repo_path):
+                        repo = Repository(repo_path)
+                except InvalidGitRepositoryError:
+                    self.logger.debug(f"Invalid git repository, skip: {url}")
+                    repo = None
+
+            if repo:
+                is_stash = False
+                try:
+                    if repo.is_dirty():
+                        if not reset:
+                            self.logger.info(f"Repository `{repo_path}` is dirty, stash changes before pull")
+                            is_stash = True
+                            repo.git.stash()
+                        else:
+                            self.logger.warning(f"Repository `{repo_path}` is dirty, reset to HEAD")
+                            repo.git.reset(hard=True)
+
+                    if branch:
+                        if branch in repo.heads:
+                            repo.git.checkout(branch)
+                        else:
+                            new_branch = repo.create_head(branch)
+                            new_branch.checkout()
+
+                    repo.update_with_progress()
+
+                finally:
+                    if is_stash:
+                        self.logger.info(f"Repository `{repo_path}` is updated, pop stashed changes")
+                        repo.git.stash("pop")
 
     def remove_repo(self, url: str):
         with self._settings.lock("repo"):
@@ -542,14 +572,14 @@ class ContainerManager:
     def _choose_repo_path(self, name: str):
         index = 0
         path = os.path.join(self._repo_path, name)
-        while os.path.exists(path):
+        while os.path.lexists(path):
             path = os.path.join(self._repo_path, f"{name}_{index}")
             index += 1
         return path
 
     def _remove_repo_file(self, repo: Dict[str, str]):
         repo_path = repo.get("repo_path", None)
-        if repo_path and os.path.exists(repo_path):
+        if repo_path and os.path.lexists(repo_path):
             if os.path.islink(repo_path):
                 self.logger.info(f"Remove link {repo_path}")
                 os.unlink(repo_path)

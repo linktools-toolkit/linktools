@@ -62,8 +62,15 @@ class Container(BaseContainer):
                 "AUTHELIA_DOMAIN", "auth-admin",
                 proxy_conf=self.get_source_path("templates", "nginx.conf"),
                 auth_enable=self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE"),
+                auth_extra={
+                    "acl_subjects": ["group:lldap_admin"]
+                }
             )),
         ]
+
+    @cached_property
+    def acl_rules(self):
+        return {}
 
     @cached_property
     def oidc_clients(self):
