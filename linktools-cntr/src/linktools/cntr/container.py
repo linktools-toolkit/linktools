@@ -69,7 +69,7 @@ class ExposeLink:
 
     @property
     def url(self) -> Optional[str]:
-        if self._url is None:
+        if not self._url:
             return None
         return str(self._url)
 
@@ -89,7 +89,7 @@ class ExposeMixin:
             url = self.get_config(key, type=str, default=None)
             if url:
                 return utils.join_url(url, *path)
-            return None
+            return ""
 
         return utils.lazy_load(make_url)
 
@@ -98,7 +98,7 @@ class ExposeMixin:
             port = self.get_config(key, type=int, default=0)
             if 0 < port < 65535:
                 return utils.make_url("https" if https else "http", self.manager.host, port, *path)
-            return None
+            return ""
 
         return utils.lazy_load(make_url)
 
@@ -130,7 +130,7 @@ class ExposeMixin:
             scheme = "https" if https_enable else "http"
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
             return utils.make_url(scheme, domain, port, *path)
-        return None
+        return ""
 
 
 class NginxMixin:
