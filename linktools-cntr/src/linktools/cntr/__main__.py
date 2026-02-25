@@ -81,9 +81,10 @@ class RepoCommand(BaseCommandGroup):
         manager.add_repo(url, branch=branch, force=force)
 
     @subcommand("update", help="update repositories")
+    @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force update")
-    def on_command_update(self, force: bool = False):
-        manager.update_repos(force=force)
+    def on_command_update(self, branch: str = None, force: bool = False):
+        manager.update_repos(branch=branch, reset=force)
 
     @subcommand("remove", help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")

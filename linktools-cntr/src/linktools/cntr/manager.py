@@ -549,8 +549,10 @@ class ContainerManager:
 
                     if branch:
                         if branch in repo.heads:
+                            self.logger.info(f"Checkout branch `{branch}` in repository `{repo_path}`")
                             repo.git.checkout(branch)
                         else:
+                            self.logger.info(f"Branch `{branch}` not found in repository `{repo_path}`, create and checkout")
                             new_branch = repo.create_head(branch)
                             new_branch.checkout()
 
