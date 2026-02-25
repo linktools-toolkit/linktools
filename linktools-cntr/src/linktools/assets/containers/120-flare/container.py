@@ -131,4 +131,7 @@ class Container(BaseContainer):
             domain=self.get_config("FLARE_DOAMIN"),
             proxy_url="http://flare:5005",
             auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
+            auth_extra={
+                "acl_all_subjects": True,
+            }
         )

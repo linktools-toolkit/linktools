@@ -230,6 +230,11 @@ class NginxMixin:
                         for uri in uris:
                             oidc_redirect_uris.add(utils.make_url(scheme, domain, port, uri))
 
+                    all_subjects = auth_extra.get("acl_all_subjects", False)
+                    if all_subjects:
+                        acl_rule = authelia.acl_rules.setdefault(domain, {})
+                        acl_rule["AllSubjects"] = True
+
                     subjects = auth_extra.get("acl_subjects", None)
                     if subjects:
                         acl_rule = authelia.acl_rules.setdefault(domain, {})

@@ -4,11 +4,13 @@ access_control:
 #   {% for domain, rule in container.acl_rules.items() %}
     - domain:
         - "{{ domain }}"
+#     {% if not rule.get("AllSubjects", False) %}
       subject:
         - "group:admins"
 #       {% for subject in rule["Subjects"] %}
         - "{{ subject }}"
 #       {% endfor %}
+#     {% endif %}
       policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'
 #   {% endfor %}
     - domain:

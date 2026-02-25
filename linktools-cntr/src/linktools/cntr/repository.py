@@ -71,6 +71,7 @@ class Repository(Repo):
                     )
 
                 self.remote().pull(
+                    self.active_branch.name,
                     progress=CallableRemoteProgress(update_progress),
                     allow_unsafe_protocols=True,
                     rebase=True,
