@@ -78,7 +78,7 @@ class Container(BaseContainer):
 
     @cached_property
     def _key_prefix(self):
-        return f"{self.get_config("AUTHELIA_DOMAIN")}_{self.get_config("NGINX_HTTPS_PORT")}"
+        return f"{self.get_config('AUTHELIA_DOMAIN')}_{self.get_config('NGINX_HTTPS_PORT')}"
 
     @cached_property
     def acl_rules(self):
@@ -114,7 +114,7 @@ class Container(BaseContainer):
                 client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
                 client["RedirectURLs"] = {auth_url}
                 client["UserIdentifier"] = "preferred_username"
-                client["Scopes"] = "openid profile groups email"
+                client["Scopes"] = "openid profile groups email phone"
                 result = [client]
                 settings.set(f"{self._key_prefix}_oidc_clients", result)
 
