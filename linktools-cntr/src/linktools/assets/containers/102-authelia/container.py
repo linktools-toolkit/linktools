@@ -54,7 +54,7 @@ class Container(BaseContainer):
             AUTHELIA_LDAP_HOST="lldap",
             AUTHELIA_LDAP_PORT=Config.Alias(type=int) | 3890,
             AUTHELIA_LDAP_ADDRESS=Config.Lazy(lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_PORT')}"),
-            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:17170"),
+            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(lambda cfg: f"http://{cfg.get('AUTHELIA_LDAP_HOST')}:17170"),
             AUTHELIA_LDAP_USER="admin",
             AUTHELIA_LDAP_PASSWORD=Config.Alias("LLDAP_ADMIN_PASSWORD") | Config.Prompt(cached=True),
             AUTHELIA_LDAP_BASE_DN=Config.Alias("LLDAP_BASE_DN") | "dc=example,dc=org",
