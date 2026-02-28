@@ -17,12 +17,13 @@ from typing import TYPE_CHECKING, Optional, Union, Dict, Collection, Callable, A
 import frida
 from frida.core import Session, Script
 
-from .script import FridaUserScript, FridaEvalCode, FridaScriptFile
-from .server import FridaServer
 from linktools import utils, metadata
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
 from linktools.types import TimeoutType, Stoppable, Reactor
+from .script import FridaUserScript, FridaEvalCode, FridaScriptFile
+from .server import FridaServer
+from ...capabilities.mobile import __cap_mobile__
 
 if TYPE_CHECKING:
     import _frida
@@ -554,9 +555,9 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         self._manager = FridaManager(self._reactor)
 
         # 初始化内置脚本
-        script_path = __capability__.get_asset_path("frida.min.js")
+        script_path = __cap_mobile__.get_asset_path("frida.min.js")
         if metadata.__develop__ or environ.debug or not os.path.exists(script_path):
-            script_path = __capability__.get_asset_path("frida.js")
+            script_path = __cap_mobile__.get_asset_path("frida.js")
         self._internal_script = FridaScriptFile(script_path)
 
         # 初始化需要注入进程的匹配规则
@@ -773,11 +774,11 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
 
         if utils.parse_version(frida.__version__) >= (17,):
             if self._enable_java:
-                script_files.append(FridaScriptFile(__capability__.get_asset_path("frida-java-bridge.js")))
+                script_files.append(FridaScriptFile(__cap_mobile__.get_asset_path("frida-java-bridge.js")))
             if self._enable_objc:
-                script_files.append(FridaScriptFile(__capability__.get_asset_path("frida-objc-bridge.js")))
+                script_files.append(FridaScriptFile(__cap_mobile__.get_asset_path("frida-objc-bridge.js")))
             if self._enable_swift:
-                script_files.append(FridaScriptFile(__capability__.get_asset_path("frida-swift-bridge.js")))
+                script_files.append(FridaScriptFile(__cap_mobile__.get_asset_path("frida-swift-bridge.js")))
 
         for user_script in self._user_scripts:
             script_files.append(user_script)

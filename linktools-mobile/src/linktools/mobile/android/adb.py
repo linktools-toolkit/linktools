@@ -33,12 +33,13 @@ import re
 import time
 from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar, Iterable, Dict
 
-from .types import App, UnixSocket, InetSocket, Process, File, SystemService
-from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
 from linktools.types import TimeoutType, Stoppable
+from .types import App, UnixSocket, InetSocket, Process, File, SystemService
+from .._base import BridgeError, Bridge, BaseDevice
+from ...capabilities.mobile import __cap_mobile__
 
 if TYPE_CHECKING:
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="AdbDevice")
@@ -449,7 +450,7 @@ class AdbDevice(BaseDevice):
 
     @cached_classproperty
     def _agent_info(self) -> Dict[str, Any]:
-        agent_path = __capability__.get_asset_path("android-tools.json")
+        agent_path = __cap_mobile__.get_asset_path("android-tools.json")
         agent_data = json.loads(utils.read_file(agent_path, text=True))
         return agent_data["AGENT_APK"]
 
@@ -462,7 +463,7 @@ class AdbDevice(BaseDevice):
         apk_name = self._agent_info["name"]
         apk_md5 = self._agent_info["md5"]
 
-        apk_path = __capability__.get_asset_path(apk_name)
+        apk_path = __cap_mobile__.get_asset_path(apk_name)
         target_dir = self.get_data_path("android", "agent", apk_md5)
         target_path = self.push_file(apk_path, target_dir, apk_name, skip_exist=True)
         if not self.is_file_exist(target_path):

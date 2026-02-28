@@ -29,7 +29,7 @@
 from typing import Optional, List, Type
 
 from linktools import utils
-from linktools.capabilities.mobile import __capability__
+from linktools.capabilities.mobile import __cap_mobile__
 from linktools.cli import CommandParser, CommandError
 from linktools.cli.argparse import range_type, BooleanOptionalAction
 from linktools.core import environ
@@ -57,7 +57,7 @@ class Command(AndroidCommand):
                                  "newline, that will run before the repl polls the device for information.")
         parser.add_argument("-S", "--startup-script", action="store",
                             help="A script to import and run before the repl polls the device for information.")
-        parser.add_argument("-P", "--plugin-folder", action="store", default=__capability__.get_asset_path("objection"),
+        parser.add_argument("-P", "--plugin-folder", action="store", default=__cap_mobile__.get_asset_path("objection"),
                             help="The folder to load plugins from.")
 
         parser.add_argument("--serve", action=BooleanOptionalAction, default=True,

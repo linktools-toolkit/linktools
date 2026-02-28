@@ -10,4 +10,8 @@
 
 linktools*/build/
 linktools*/dist/
-linktools*/src/linktools*/capabilities/*.py
+linktools*/src/linktools/__init__.py
+linktools*/src/linktools/assets/__init__.py
+linktools*/src/linktools/commands/__init__.py
+linktools*/src/linktools/references/__init__.py
+linktools*/src/linktools/capabilities/*.py

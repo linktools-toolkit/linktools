@@ -33,7 +33,7 @@ import click
 from objection.state.app import app_state
 from objection.utils.plugin import Plugin
 
-from linktools.capabilities.mobile import __capability__
+from linktools.capabilities.mobile import __cap_mobile__
 from linktools.core import environ
 from linktools.mobile.frida import FridaEvalCode, FridaScript, FridaScriptHandler, FridaSession
 
@@ -43,7 +43,7 @@ __description__ = f"{environ.name} plugin"
 class LinktoolsPlugin(Plugin, FridaScriptHandler):
 
     def __init__(self, ns):
-        self.script_path = __capability__.get_asset_path("frida.js")
+        self.script_path = __cap_mobile__.get_asset_path("frida.js")
 
         super().__init__(__file__, ns, {
             'meta': f'{environ.name}',

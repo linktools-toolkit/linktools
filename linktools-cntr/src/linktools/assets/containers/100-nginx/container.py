@@ -54,8 +54,8 @@ class Container(BaseContainer):
             NGINX_WILDCARD_DOMAIN=Config.Alias("WILDCARD_DOMAIN") | False,
             NGINX_ROOT_DOMAIN=Config.Alias("ROOT_DOMAIN") | Config.Prompt(cached=True) | "_",
             NGINX_HTTP_PORT=Config.Alias("HTTP_PORT", type=int) | Config.Prompt(cached=True) | 80,
-            NGINX_HTTPS_ENABLE=Config.Alias("HTTPS_ENABLE") | Config.Confirm(cached=True) | True,
-            NGINX_HTTPS_PORT=Config.Alias("HTTPS_PORT") | Config.Lazy(
+            NGINX_HTTPS_ENABLE=Config.Alias("HTTPS_ENABLE", type=bool) | Config.Confirm(cached=True) | True,
+            NGINX_HTTPS_PORT=Config.Alias("HTTPS_PORT", type=int) | Config.Lazy(
                 lambda cfg:
                 Config.Prompt(type=int, cached=True) | 443
                 if cfg.get("NGINX_HTTPS_ENABLE")
@@ -64,16 +64,16 @@ class Container(BaseContainer):
             NGINX_INDEX_URL=Config.Lazy(
                 lambda cfg: self._get_default_index_url()
             ),
-            NGINX_WAF_ENABLE=Config.Lazy(
+            NGINX_WAF_ENABLE=Config.Alias("WAF_ENABLE", type=bool) | Config.Lazy(
                 lambda cfg: self.manager.containers["safeline"].enable
             ),
-            NGINX_WAF_PORT=Config.Lazy(
+            NGINX_WAF_PORT=Config.Alias("WAF_PORT", type=int) | Config.Lazy(
                 lambda cfg:
                 Config.Prompt(type=int, cached=True) | 8000
                 if cfg.get("NGINX_WAF_ENABLE")
                 else Config.Alias(type=int) | 0
             ),
-            NGINX_AUTH_ENABLE=Config.Lazy(
+            NGINX_AUTH_ENABLE=Config.Alias("AUTH_ENABLE", type=bool) | Config.Lazy(
                 lambda cfg: self.manager.containers["authelia"].enable
             ),
             ACME_DNS_API=Config.Lazy(
@@ -94,7 +94,7 @@ class Container(BaseContainer):
 
     def _get_default_index_url(self):
         host = "www.google.com" \
-            if self.get_config("NGINX_ROOT_DOMAIN") == "_" \
+            if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
             else self.get_config("NGINX_ROOT_DOMAIN")
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             scheme = "https"
@@ -108,6 +108,8 @@ class Container(BaseContainer):
         self.start_hooks.append(self._update_files)
 
     def on_check(self):
+        if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
+            raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.manager.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.manager.containers["authelia"].enable:

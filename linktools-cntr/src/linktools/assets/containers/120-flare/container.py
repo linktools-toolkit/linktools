@@ -132,6 +132,7 @@ class Container(BaseContainer):
             proxy_url="http://flare:5005",
             auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
             auth_extra={
+                "acl_bypass": ["\\.(css|js)$"],
                 "acl_all_subjects": True,
             }
         )

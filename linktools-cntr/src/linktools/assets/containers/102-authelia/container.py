@@ -30,6 +30,7 @@
 import os
 from typing import Iterable
 
+import rsa
 import yaml
 
 from linktools import utils
@@ -50,6 +51,13 @@ class Container(BaseContainer):
         return dict(
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
+            AUTHELIA_LDAP_HOST="lldap",
+            AUTHELIA_LDAP_PORT=Config.Alias(type=int) | 3890,
+            AUTHELIA_LDAP_ADDRESS=Config.Lazy(lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_PORT')}"),
+            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:17170"),
+            AUTHELIA_LDAP_USER="admin",
+            AUTHELIA_LDAP_PASSWORD=Config.Alias("LLDAP_ADMIN_PASSWORD") | Config.Prompt(cached=True),
+            AUTHELIA_LDAP_BASE_DN=Config.Alias("LLDAP_BASE_DN") | "dc=example,dc=org",
             AUTHELIA_MIN_AUTH_LEVEL=Config.Alias(type=int) | 2,
             AUTHELIA_OIDC_CLIENT_SECRET=Config.Alias(cached=True) | utils.random_string(20),
             AUTHELIA_ADMIN_AUTH_ENABLE=Config.Property(type=bool) | True,
@@ -69,27 +77,53 @@ class Container(BaseContainer):
         ]
 
     @cached_property
+    def _key_prefix(self):
+        return f"{self.get_config("AUTHELIA_DOMAIN")}_{self.get_config("NGINX_HTTPS_PORT")}"
+
+    @cached_property
     def acl_rules(self):
-        return {}
+        result = None
+
+        with self.settings.open() as settings:
+            result = settings.get(f"{self._key_prefix}_acl_rules", default=None)
+            if result is None:
+                result = {}
+                settings.set(f"{self._key_prefix}_acl_rules", result)
+
+        return result
 
     @cached_property
     def oidc_clients(self):
-        https_port = self.get_config("NGINX_HTTPS_PORT", type=int)
-        auth_url = utils.make_url("https", self.get_config('AUTHELIA_DOMAIN'), https_port)
+        result = None
 
-        client = dict()
-        client["ClientID"] = f"{self.manager.project_name}-web-client"
-        client["ClientName"] = f"Web Client ({self.manager.project_name})"
-        client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
-        client["IssuerURL"] = auth_url
-        client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorization"
-        client["AccessTokenURL"] = f"{auth_url}/api/oidc/token"
-        client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
-        client["RedirectURLs"] = {auth_url}
-        client["UserIdentifier"] = "preferred_username"
-        client["Scopes"] = "openid profile groups email"
+        with self.settings.open() as settings:
 
-        return [client]
+            result = settings.get(f"{self._key_prefix}_oidc_clients", default=None)
+            if result is None:
+                port = self.get_config("NGINX_HTTPS_PORT")
+                domain = self.get_config("AUTHELIA_DOMAIN")
+                auth_url = utils.make_url("https", domain, port)
+
+                client = dict()
+                client["ClientID"] = f"{self.manager.project_name}-web-client"
+                client["ClientName"] = f"Web Client ({self.manager.project_name})"
+                client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
+                client["IssuerURL"] = auth_url
+                client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorization"
+                client["AccessTokenURL"] = f"{auth_url}/api/oidc/token"
+                client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
+                client["RedirectURLs"] = {auth_url}
+                client["UserIdentifier"] = "preferred_username"
+                client["Scopes"] = "openid profile groups email"
+                result = [client]
+                settings.set(f"{self._key_prefix}_oidc_clients", result)
+
+            client = result[0]
+            client["ClientID"] = f"{self.manager.project_name}-web-client"
+            client["ClientName"] = f"Web Client ({self.manager.project_name})"
+            client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
+
+        return result
 
     def on_init(self):
         self.start_hooks.append(self._update_files)
@@ -125,6 +159,15 @@ class Container(BaseContainer):
         self.manager.change_file_owner(secret_path, "root", recursive=True)
         self.manager.change_file_owner(config_path, "root", recursive=True)
 
+        with self.settings.open() as settings:
+            settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
+            settings.set(f"{self._key_prefix}_oidc_clients", self.oidc_clients)
+
+    def on_removed(self):
+        with self.settings.open() as settings:
+            settings.pop(f"{self._key_prefix}_acl_rules", None)
+            settings.pop(f"{self._key_prefix}_oidc_clients", None)
+
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self):
         path = self.get_app_path("config", "notification.txt")
@@ -136,7 +179,13 @@ class Container(BaseContainer):
     @subcommand("list-oidc-clients", help="list OIDC clients")
     def on_list_oidc_clients(self):
         self.logger.info(
-            yaml.dump(self.oidc_clients)
+            yaml.dump(self.oidc_clients, sort_keys=False)
+        )
+
+    @subcommand("list-acl-rules", help="list acl rules")
+    def on_list_acl_rules(self):
+        self.logger.info(
+            yaml.dump(self.acl_rules, sort_keys=False)
         )
 
     @classmethod
@@ -155,18 +204,11 @@ class Container(BaseContainer):
                 raise CommandError(f"Path {path} exists and is not a file.")
             return
 
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
+        public_key, private_key = rsa.newkeys(
+            nbits=2048,
+            exponent=65537
         )
-
-        # 转换为 PEM 格式（与 openssl 默认一致）
-        from cryptography.hazmat.primitives import serialization
-        pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,  # 等价 openssl genrsa
-            encryption_algorithm=serialization.NoEncryption()
+        private_pem = private_key.save_pkcs1(
+            format="PEM",
         )
-
-        utils.write_file(path, pem)
+        utils.write_file(path, private_pem)

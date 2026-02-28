@@ -34,4 +34,4 @@ class Capability(_Capability):
         return self._root_path
 
 
-__capability__ = Capability()
+__cap_{{ config.get('tool', 'linktools', 'name') }}__ = Capability()

@@ -36,11 +36,12 @@ import threading
 import time
 from typing import List, Dict, Any, Optional, Callable
 
-from .adb import AdbDevice, AdbError
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
 from linktools.types import Stoppable
+from .adb import AdbDevice, AdbError
+from ...capabilities.mobile import __cap_mobile__
 
 logger = environ.get_logger("android.scrcpy")
 
@@ -400,7 +401,7 @@ class ScrcpyServer(Stoppable):
 
     @cached_classproperty
     def _server_info(self) -> "List[Dict[str, str]]":
-        server_path = __capability__.get_asset_path("android-tools.json")
+        server_path = __cap_mobile__.get_asset_path("android-tools.json")
         server_data = json.loads(utils.read_file(server_path, text=True))
         return server_data["SCRCPY_SERVER"]
 
@@ -1022,8 +1023,8 @@ if __name__ == '__main__':
     import av
     import cv2
 
-    from ...rich import init_logging
-    from ...types import SlidingQueue
+    from linktools.rich import init_logging
+    from linktools.types import SlidingQueue
 
     init_logging(level=logging.DEBUG, show_level=True)
 

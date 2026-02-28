@@ -26,10 +26,11 @@ include-package-data = true
 linktools = ["**/assets/**"]
 
 [tool.linktools]
+name = "common"
 version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/common.py"}]
 
 [tool.linktools.scripts]
-capability = "linktools.capabilities.common:__capability__"
+capability = "linktools.capabilities.common:__cap_common__"
 console = {path = "src/linktools/commands", module = "linktools.commands"}

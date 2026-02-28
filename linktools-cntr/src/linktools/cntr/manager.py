@@ -42,7 +42,7 @@ from linktools.decorator import cached_property
 from linktools.types import PathType, FileCache
 from .container import BaseContainer, SimpleContainer, ContainerError
 from .repository import Repository
-from ..capabilities.cntr import __capability__
+from ..capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
     from linktools.core import Environ
@@ -237,7 +237,7 @@ class ContainerManager:
         containers: List[BaseContainer] = []
 
         self.logger.debug(f"Load containers from assets")
-        asset_path = __capability__.get_asset_path("containers")
+        asset_path = __cap_cntr__.get_asset_path("containers")
         for container in self._walk_containers(asset_path, max_level=1):
             containers.append(container)
 

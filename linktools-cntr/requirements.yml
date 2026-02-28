@@ -4,7 +4,7 @@ dependencies:
   - jinja2
   - pyyaml
   - dotenv
-  - cryptography
+  - rsa
 
 dev-dependencies: []
 

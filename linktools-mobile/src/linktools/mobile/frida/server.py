@@ -44,7 +44,7 @@ from linktools.decorator import cached_classproperty
 from linktools.types import Timeout, Stoppable, DownloadHttpError
 from ..android import AdbDevice
 from ..ios import GoIOSDevice
-from ...capabilities.mobile import __capability__
+from ...capabilities.mobile import __cap_mobile__
 
 _logger = environ.get_logger("frida.server")
 
@@ -209,7 +209,7 @@ class FridaAndroidServer(FridaServer):
 
     @cached_classproperty
     def _server_info(self) -> "List[Dict[str, str]]":
-        server_path = __capability__.get_asset_path("android-tools.json")
+        server_path = __cap_mobile__.get_asset_path("android-tools.json")
         server_data = json.loads(utils.read_file(server_path, text=True))
         return server_data["FRIDA_SERVER"]
 

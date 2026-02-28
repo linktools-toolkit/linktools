@@ -26,10 +26,11 @@ include-package-data = true
 linktools = ["**/assets/**"]
 
 [tool.linktools]
+name = "mobile"
 version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/mobile.py"}]
 
 [tool.linktools.scripts]
-capability = "linktools.capabilities.mobile:__capability__"
+capability = "linktools.capabilities.mobile:__cap_mobile__"
 console = {path = "src/linktools/commands", module = "linktools.commands"}

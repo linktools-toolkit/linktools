@@ -143,7 +143,7 @@ class NginxMixin:
             if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
                 return cfg.get("NGINX_ROOT_DOMAIN")
             root_domain = cfg.get("NGINX_ROOT_DOMAIN")
-            if root_domain in ("_", "0.0.0.0"):
+            if root_domain in ("_", "localhost"):
                 return root_domain
             if name is None:
                 return f"{self.name}.{root_domain}"
@@ -184,8 +184,8 @@ class NginxMixin:
                 https_enable = True
             if waf_enable is __missing__:
                 waf_enable = True
-            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE", type=bool)
-            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE", type=bool)
+            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
 
             if auth_enable:
                 if not nginx.get_config("NGINX_AUTH_ENABLE", type=bool):
@@ -197,7 +197,8 @@ class NginxMixin:
                 HTTPS_ENABLE=https_enable,
                 WAF_ENABLE=waf_enable,
                 AUTH_ENABLE=auth_enable,
-                AUTH_HEADERS=auth_extra.get("headers", {}) if auth_extra else None,
+                AUTH_HEADERS=auth_extra.get("auth_headers", {}) if auth_extra else None,
+                AUTH_BYPASS=auth_extra.get("acl_bypass", []) if auth_extra else None,
             )
 
             conf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,11 +225,19 @@ class NginxMixin:
                 if auth_extra:
                     uris = auth_extra.get("oidc_redirect_uris", None)
                     if uris:
-                        scheme = "https" if https_enable else "http"
-                        port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT", type=int)
                         oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
                         for uri in uris:
-                            oidc_redirect_uris.add(utils.make_url(scheme, domain, port, uri))
+                            if not uri:
+                                self.logger.info("invalid oidc redirect uri: None, skip.")
+                                continue
+                            scheme = "https" if https_enable else "http"
+                            port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
+                            base_url = utils.make_url(scheme, domain, port)
+                            redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
+                            if not redirect_uri:
+                                self.logger.info(f"invalid oidc redirect uri: {uri}, skip.")
+                                continue
+                            oidc_redirect_uris.add(redirect_uri)
 
                     all_subjects = auth_extra.get("acl_all_subjects", False)
                     if all_subjects:

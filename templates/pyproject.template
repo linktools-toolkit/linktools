@@ -26,9 +26,10 @@ include-package-data = true
 linktools = ["**/assets/**"]
 
 [tool.linktools]
+name = "{name}"
 version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/{name}.py"}]
 
 [tool.linktools.scripts]
-capability = "linktools.capabilities.{name}:__capability__"
+capability = "linktools.capabilities.{name}:__cap_{name}__"

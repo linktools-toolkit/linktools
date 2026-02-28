@@ -61,6 +61,9 @@ class Container(BaseContainer):
                 "SAFELINE_DOMAIN",
                 proxy_url="https://safeline-mgt:1443",
                 auth_enable=self.get_config("SAFELINE_AUTH_ENABLE"),
+                auth_extra={
+                    "acl_bypass": ["\\.(css|js)$"],
+                },
             )),
             self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
                 "SAFELINE_PORT",

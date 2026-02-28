@@ -26,10 +26,11 @@ include-package-data = true
 linktools = ["**/assets/**"]
 
 [tool.linktools]
+name = "cntr"
 version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/cntr.py"}]
 
 [tool.linktools.scripts]
-capability = "linktools.capabilities.cntr:__capability__"
+capability = "linktools.capabilities.cntr:__cap_cntr__"
 commands = {name = "ct-cntr", module = "linktools.cntr.__main__"}
