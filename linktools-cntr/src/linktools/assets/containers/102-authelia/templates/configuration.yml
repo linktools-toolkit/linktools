@@ -9,9 +9,6 @@ server:
         authn_strategies:
           - name: 'CookieSession'
 
-log:
-  level: debug
-
 authentication_backend:
   password_reset:
     disable: false
@@ -39,6 +36,9 @@ session:
     - domain: {{ NGINX_ROOT_DOMAIN }}
       authelia_url: https://{{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
       default_redirection_url: https://{{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}/settings
+  redis:
+    host: authelia-redis
+    port: 6379
 
 regulation:
   max_retries: 3

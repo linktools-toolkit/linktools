@@ -8,6 +8,7 @@ services:
       - '--config=/config/configuration.2fa.yml'
       - '--config=/config/configuration.oidc.yml'
     environment:
+      - AUTHELIA_LOG_LEVEL=debug
       - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
       - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/storage_encryption_key
       - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/jwt_secret
@@ -21,8 +22,18 @@ services:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
     networks:
+      authelia:
       nginx:
       lldap:
+    depends_on:
+     - authelia-redis
+
+  authelia-redis:
+    image: redis:alpine
+    volumes:
+      - '{{ (APP_PATH/"redis"/"data") | mkdir | chown }}:/data'
+    networks:
+      authelia:
 
   authelia-admin:
     image: 'ghcr.io/asalimonov/authelia-admin:latest'
@@ -45,11 +56,13 @@ services:
       - TRUSTED_ORIGINS={{ utils.make_url("https", AUTHELIA_DOMAIN, NGINX_HTTPS_PORT) }}
       - NODE_TLS_REJECT_UNAUTHORIZED=0
     networks:
+      authelia:
       nginx:
       lldap:
     depends_on:
      - authelia
 
 networks:
+  authelia:
   nginx:
   lldap:
