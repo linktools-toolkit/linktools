@@ -27,16 +27,13 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 from typing import TYPE_CHECKING
-from urllib import parse
-
-from ..core import BaseEnviron
 
 if TYPE_CHECKING:
     import argparse
     import pathlib
     from typing import Optional, Callable, List, Iterable
 
-    from .. import BaseEnviron, metadata
+    from ..core import BaseEnviron
     from .command import SubCommand, CommandParser
 
 
@@ -134,7 +131,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             from ..cli.argparse import ArgParseComplete
             from ..cli.command import iter_entry_point_commands
-            from ..core._tools import ToolStub
+            from ..core import ToolStub
 
             stub_path = get_stub_path()
             stub_path.mkdir(parents=True, exist_ok=True)
@@ -159,10 +156,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     executables.append(executable)
 
             lines = []
-            completion = ArgParseComplete.shellcode(executables, shell=shell)
-            if completion:
-                environ.logger.info("Generate completion script ...")
-                lines.append(completion)
 
             tools_path = environ.tools.stub_path
             if shell in ("bash", "zsh"):
@@ -173,6 +166,11 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 lines.append(f"setenv PATH \"$PATH:{stub_path}:{tools_path}\"")
             elif shell in ("powershell",):
                 lines.append(f"$env:PATH=\"$env:PATH;{stub_path}:{tools_path}\"")
+
+            completion = ArgParseComplete.shellcode(executables, shell=shell)
+            if completion:
+                environ.logger.info("Generate completion script ...")
+                lines.append(completion)
 
             result = os.linesep.join(lines)
             utils.write_file(alias_path, result)
@@ -277,6 +275,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         index_urls = updater.get_index_urls()
                         if index_urls:
                             for index_url in updater.get_index_urls():
+                                from urllib import parse
                                 pip_index_urls.add(index_url)
                                 url = parse.urlparse(index_url)
                                 if url.scheme == "http":

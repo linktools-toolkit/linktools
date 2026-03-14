@@ -5,8 +5,8 @@
 @author  : Hu Ji
 @file    : logging.py
 @time    : 2020/03/22
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -26,8 +26,11 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import getpass
 import logging
 import os
+import re
+import sys
 from abc import ABCMeta, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional, Union, List, Dict, Type, TypeVar, TextIO, Iterable, Any
@@ -43,6 +46,56 @@ if TYPE_CHECKING:
 
     PromptType = TypeVar("PromptType", bound=PromptBase)
     PromptResultType = Union[str, int, float, bool]
+
+_rich_available: "Optional[bool]" = None
+
+
+def _is_rich_available() -> bool:
+    global _rich_available
+    if _rich_available is None:
+        try:
+            import rich  # noqa
+            _rich_available = True
+        except ImportError:
+            _rich_available = False
+    return _rich_available
+
+
+class _FakeText:
+    """Minimal Text substitute for when rich is not installed."""
+
+    def __init__(self, text="", style=None):
+        self._text = str(text)
+
+    def __len__(self):
+        return len(self._text)
+
+    def __str__(self):
+        return self._text
+
+    def __add__(self, other):
+        return _FakeText(self._text + str(other))
+
+    @property
+    def cell_len(self):
+        return len(self._text)
+
+    @classmethod
+    def from_markup(cls, text, style=None):
+        clean = re.sub(r'\[/?[^\]]*\]', '', str(text))
+        return cls(clean)
+
+    def append(self, text, style=None):
+        self._text += str(text)
+        return self
+
+    def split(self, separator=None, include_separator=False, allow_blank=False):
+        parts = self._text.split('\n')
+        return [_FakeText(p) for p in parts]
+
+    def pad_left(self, n):
+        self._text = " " * n + self._text
+        return self
 
 
 class _LogHandlerMixin(metaclass=ABCMeta):
@@ -221,19 +274,61 @@ def _get_fake_log_handler_class():
         def show_time(self, value: bool):
             self._show_time = value
 
-        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
-            from rich.text import Text
-            return Text("")
+        def emit(self, record: logging.LogRecord):
+            pass
 
-        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
-            from rich.text import Text
-            return Text("")
+        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None):
+            return _FakeText("")
+
+        def make_level_text(self, level_no: int, level_name: str = None, style: str = None):
+            return _FakeText("")
+
+    return LogHandler
+
+
+def _get_plain_log_handler_class():
+    class LogHandler(logging.StreamHandler, _LogHandlerMixin):
+
+        def __init__(self, show_level: bool, show_time: bool):
+            super().__init__()
+            self._show_level = show_level
+            self._show_time = show_time
+
+        @property
+        def show_level(self):
+            return self._show_level
+
+        @show_level.setter
+        def show_level(self, value: bool):
+            self._show_level = value
+
+        @property
+        def show_time(self):
+            return self._show_time
+
+        @show_time.setter
+        def show_time(self, value: bool):
+            self._show_time = value
+
+        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None):
+            if not time:
+                time = datetime.now()
+            elif isinstance(time, (int, float)):
+                time = datetime.fromtimestamp(time)
+            if not format:
+                format = "[%x %X]"
+            return _FakeText(time.strftime(format))
+
+        def make_level_text(self, level_no: int, level_name: str = None, style: str = None):
+            if not level_name:
+                level_name = logging.getLevelName(level_no)
+            return _FakeText(f" {level_name[:1].upper()} ")
 
     return LogHandler
 
 
 def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
-    from .cli.argparse import ArgParseComplete
+    from linktools.cli.argparse import ArgParseComplete
 
     if ArgParseComplete.is_invocation():
         log_handler_class = _get_fake_log_handler_class()
@@ -246,31 +341,32 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
         )
         return
 
-    from rich import get_console
+    if _is_rich_available():
+        from rich import get_console
 
-    if get_console().is_terminal:
-        log_handler_class = _get_rich_log_handler_class()
-        logging.basicConfig(
-            level=level,
-            format="%(message)s",
-            datefmt="[%X]",
-            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-            force=force,
-        )
+        if get_console().is_terminal:
+            log_handler_class = _get_rich_log_handler_class()
+            logging.basicConfig(
+                level=level,
+                format="%(message)s",
+                datefmt="[%X]",
+                handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
+                force=force,
+            )
+            return
 
-    else:
-        items = []
-        if show_time:
-            items.append("[%(asctime)s]")
-        if show_level:
-            items.append("%(levelname)s")
-        items.extend(["%(module)s", "%(funcName)s", "%(message)s"])
-        logging.basicConfig(
-            level=level,
-            format=" ".join(items),
-            datefmt="%H:%M:%S",
-            force=force,
-        )
+    items = []
+    if show_time:
+        items.append("[%(asctime)s]")
+    if show_level:
+        items.append("%(levelname)s")
+    items.extend(["%(module)s", "%(funcName)s", "%(message)s"])
+    logging.basicConfig(
+        level=level,
+        format=" ".join(items),
+        datefmt="%H:%M:%S",
+        force=force,
+    )
 
 
 def get_log_handler() -> "Optional[_LogHandlerMixin]":
@@ -285,6 +381,120 @@ def get_log_handler() -> "Optional[_LogHandlerMixin]":
         else:
             c = c.parent
     return None
+
+
+class _FakeProgress:
+    """Text-based progress bar for when rich is not installed."""
+
+    _BAR_WIDTH = 20
+
+    def __init__(self):
+        self._tasks: Dict[int, dict] = {}
+        self._next_id = 0
+        self._is_tty = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+        self._last_line_len = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._finish()
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self._finish()
+
+    def _finish(self):
+        if self._is_tty and self._last_line_len > 0:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            self._last_line_len = 0
+
+    def add_task(self, description: str = "", total=None, **kwargs) -> int:
+        task_id = self._next_id
+        self._next_id += 1
+        self._tasks[task_id] = {
+            "description": description,
+            "total": total,
+            "completed": 0,
+            "fields": {k: v for k, v in kwargs.items()},
+        }
+        self._render(task_id)
+        return task_id
+
+    def update(self, task_id: int, **kwargs):
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        if "description" in kwargs:
+            task["description"] = kwargs.pop("description")
+        if "total" in kwargs:
+            task["total"] = kwargs.pop("total")
+        if "completed" in kwargs:
+            task["completed"] = kwargs.pop("completed") or 0
+        if "advance" in kwargs:
+            task["completed"] = (task["completed"] or 0) + kwargs.pop("advance")
+        # remaining kwargs are custom fields
+        task["fields"].update(kwargs)
+        self._render(task_id)
+
+    def advance(self, task_id: int, advance: float = 1):
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        task["completed"] = (task["completed"] or 0) + advance
+        self._render(task_id)
+
+    def _render(self, task_id: int):
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+
+        description = task["description"] or ""
+        completed = task["completed"] or 0
+        total = task["total"]
+
+        parts = []
+        if description:
+            parts.append(description)
+
+        if total:
+            filled = int(self._BAR_WIDTH * completed / total)
+            bar = "=" * filled + "-" * (self._BAR_WIDTH - filled)
+            pct = f"{100 * completed / total:.1f}%"
+            parts.append(f"[{bar}]")
+            parts.append(pct)
+            parts.append(f"({self._fmt_size(completed)}/{self._fmt_size(total)})")
+        else:
+            parts.append(f"({self._fmt_size(completed)})")
+
+        for v in task["fields"].values():
+            if v:
+                # strip rich markup tags
+                parts.append(re.sub(r"\[[^\]]*\]", "", str(v)).strip())
+
+        line = " ".join(p for p in parts if p)
+
+        if self._is_tty:
+            # overwrite current line
+            clear = " " * max(0, self._last_line_len - len(line))
+            sys.stderr.write(f"\r{line}{clear}")
+            sys.stderr.flush()
+            self._last_line_len = len(line)
+        else:
+            sys.stderr.write(f"{line}\n")
+            sys.stderr.flush()
+
+    @staticmethod
+    def _fmt_size(n: float) -> str:
+        n = float(n)
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.1f}{unit}"
+            n /= 1024
+        return f"{n:.1f}TB"
 
 
 def _get_log_column():
@@ -317,6 +527,9 @@ def _get_log_column():
 
 
 def create_simple_progress(*fields: str):
+    if not _is_rich_available():
+        return _FakeProgress()
+
     from rich.progress import Progress, TextColumn, BarColumn
 
     columns = []
@@ -337,6 +550,9 @@ def create_simple_progress(*fields: str):
 
 
 def create_progress():
+    if not _is_rich_available():
+        return _FakeProgress()
+
     from rich.progress import Progress, TextColumn, BarColumn, DownloadColumn, \
         TransferSpeedColumn, TaskProgressColumn, TimeRemainingColumn
 
@@ -418,6 +634,126 @@ def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "
     return RichPrompt
 
 
+def _plain_prompt(
+        prompt_text: str,
+        type: "Type" = str,
+        default=__missing__,
+        allow_empty: bool = False,
+        choices: Optional[List[str]] = None,
+        password: bool = False,
+        show_default: bool = True,
+        show_choices: bool = True,
+):
+    suffix_parts = []
+    if choices and show_choices:
+        suffix_parts.append(f"[{'/'.join(choices)}]")
+    if default is not __missing__ and show_default:
+        suffix_parts.append(f"(default: {default})")
+    full_prompt = prompt_text
+    if suffix_parts:
+        full_prompt += " " + " ".join(suffix_parts)
+    full_prompt += ": "
+
+    while True:
+        try:
+            value = getpass.getpass(full_prompt) if password else input(full_prompt)
+        except (EOFError, KeyboardInterrupt):
+            raise
+
+        value = value.strip()
+
+        if not value:
+            if default is not __missing__:
+                return default
+            if allow_empty:
+                return type()
+            print("Please enter a value.")
+            continue
+
+        if choices and value not in choices:
+            print(f"Invalid choice. Choose from: {', '.join(choices)}")
+            continue
+
+        try:
+            return type(value)
+        except (ValueError, TypeError):
+            print(f"Invalid value.")
+            continue
+
+
+def _plain_confirm(
+        prompt_text: str,
+        default=__missing__,
+        show_default: bool = True,
+) -> bool:
+    while True:
+        if default is not __missing__ and show_default:
+            hint = " [Y/n]" if default else " [y/N]"
+        else:
+            hint = " [y/n]"
+        try:
+            value = input(prompt_text + hint + ": ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            raise
+        if not value:
+            if default is not __missing__:
+                return bool(default)
+            continue
+        if value in ('y', 'yes'):
+            return True
+        if value in ('n', 'no'):
+            return False
+        print("Please enter 'y' or 'n'.")
+
+
+def _plain_choose(
+        prompt_text: str,
+        choices: "Union[Iterable, Dict]",
+        title: str = None,
+        default=__missing__,
+        show_default: bool = True,
+        show_choices: bool = True,
+):
+    if isinstance(choices, dict):
+        keys = tuple(choices.keys())
+        texts = [str(choices[key]) for key in keys]
+    else:
+        keys = tuple(choices)
+        texts = [str(c) for c in choices]
+
+    begin_id = 1
+    tip_id = 0
+    default_id = None
+    if default is not __missing__ and default in keys:
+        tip_id = default_id = keys.index(default)
+
+    if title:
+        print(title)
+    for i, text in enumerate(texts):
+        prefix = ">> " if i == tip_id else "   "
+        print(f"{prefix}{i + begin_id}: {text}")
+
+    range_str = f"[{begin_id}~{len(texts) + begin_id - 1}]" if len(texts) > 1 else f"[{begin_id}]"
+    full_prompt = prompt_text
+    if show_choices:
+        full_prompt += f" {range_str}"
+    if default_id is not None and show_default:
+        full_prompt += f" (default: {default_id + begin_id})"
+    full_prompt += ": "
+
+    valid = [str(i) for i in range(begin_id, len(texts) + begin_id)]
+    while True:
+        try:
+            value = input(full_prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            raise
+        if not value and default_id is not None:
+            return keys[default_id]
+        if value in valid:
+            return keys[int(value) - begin_id]
+        print(f"Please enter a number between {begin_id} and {len(texts) + begin_id - 1}.")
+
+
 def prompt(
         prompt: str,
         type: "Type[PromptResultType]" = str,
@@ -428,6 +764,12 @@ def prompt(
         show_default: bool = True,
         show_choices: bool = True
 ) -> "PromptResultType":
+    if not _is_rich_available():
+        return _plain_prompt(
+            prompt, type=type, default=default, allow_empty=allow_empty,
+            choices=choices, password=password, show_default=show_default,
+            show_choices=show_choices,
+        )
     return _create_prompt_class(type, allow_empty=allow_empty).ask(
         prompt,
         password=password,
@@ -446,6 +788,12 @@ def choose(
         show_default: bool = True,
         show_choices: bool = True
 ) -> "T":
+    if not _is_rich_available():
+        return _plain_choose(
+            prompt, choices, title=title, default=default,
+            show_default=show_default, show_choices=show_choices,
+        )
+
     from rich.text import Text
 
     if isinstance(choices, dict):
@@ -490,6 +838,8 @@ def confirm(
         default: "PromptResultType" = __missing__,
         show_default: bool = True,
 ) -> bool:
+    if not _is_rich_available():
+        return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(
         prompt,
         default=default if default is not __missing__ else ...,

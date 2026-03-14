@@ -665,18 +665,18 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
         def mkdir(path: PathType) -> str:
             path = config.cast(path, type="path")
-            self.prepare_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
+            self.start_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
             return path
 
         def chown(path: PathType, user: str = None, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
             if user:
-                self.prepare_hooks.append(lambda: self.manager.change_file_owner(path, user, recursive=recursive))
+                self.start_hooks.append(lambda: self.manager.change_file_owner(path, user, recursive=recursive))
             return path
 
         def chmod(path: PathType, mode: int = 0o755, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
-            self.prepare_hooks.append(lambda: self.manager.change_file_mode(path, mode, recursive=recursive))
+            self.start_hooks.append(lambda: self.manager.change_file_mode(path, mode, recursive=recursive))
             return path
 
         context = {
