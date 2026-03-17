@@ -15,11 +15,11 @@ import paramiko
 from paramiko.ssh_exception import AuthenticationException, SSHException
 from scp import SCPClient
 
-from . import utils
-from .core import environ
-from .rich import prompt, create_progress
-from .types import Stoppable
-from .utils import list2cmdline, ignore_errors, is_unix_like
+from linktools import utils
+from linktools.core import environ
+from linktools.rich import prompt, create_progress
+from linktools.types import Stoppable
+from linktools.utils import list2cmdline, ignore_errors, is_unix_like
 
 try:
     import SocketServer

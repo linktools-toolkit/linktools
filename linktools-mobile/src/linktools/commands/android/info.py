@@ -82,25 +82,25 @@ class Command(AndroidCommand):
     def run(self, args: AndroidNamespace) -> Optional[int]:
         device = args.device_selector.select()
 
-        environ.logger.info(f"Property", style="red")
+        environ.logger.info(f"Property", extra=dict(style="red"))
         for prop in props:
             environ.logger.info(
                 f"{prop}: {device.get_prop(prop)}",
-                indent=2
+                extra=dict(indent=2)
             )
 
-        environ.logger.info(f"File", style="red")
+        environ.logger.info(f"File", extra=dict(style="red"))
         for file in files:
             environ.logger.info(
                 f"{file}: {device.shell('cat', file, ignore_errors=True).strip()}",
-                indent=2
+                extra=dict(indent=2)
             )
 
-        environ.logger.info(f"Cmdline", style="red")
+        environ.logger.info(f"Cmdline", extra=dict(style="red"))
         for cmd in cmds:
             environ.logger.info(
                 f"{cmd[0]}: {device.shell(*cmd[1], ignore_errors=True).strip()}",
-                indent=2
+                extra=dict(indent=2)
             )
 
         return

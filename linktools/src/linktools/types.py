@@ -127,6 +127,8 @@ def get_args(tp):
 
 
 class Timeout:
+    _timeout: "_t.Optional[float]"
+    _deadline: "_t.Optional[float]"
 
     def __new__(cls, timeout: TimeoutType = None):
         if isinstance(timeout, cls):

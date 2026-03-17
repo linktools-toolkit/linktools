@@ -172,50 +172,19 @@ class BaseEnviron(abc.ABC):
                         self.logger.info(f"Remove empty temp directory: {path}")
                         shutil.rmtree(path, ignore_errors=True)
 
-    @cached_classproperty(lock=True)
-    def _log_manager(self) -> "logging.Manager":
-
-        empty_args = tuple()
-
-        class Logger(logging.Logger):
-
-            def _log(self, level, msg, args, **kwargs):
-                # msg = str(msg)
-                # msg += ''.join([str(i) for i in args])
-
-                if kwargs:
-                    extra = kwargs["extra"] = kwargs.get("extra") or {}
-                    for key in ("style", "indent", "markup", "highlighter"):
-                        value = kwargs.pop(key, None)
-                        if value is not None:
-                            extra[key] = value
-
-                return super()._log(level, msg, empty_args, **kwargs)
-
-        class LogManager(utils.get_derived_type(logging.Manager)):
-
-            def __init__(self, manager):
-                super().__init__(manager)
-                object.__setattr__(self, "loggerClass", Logger)
-
-            def getLogger(self, name):
-                return logging.Manager.getLogger(self, name)
-
-        return LogManager(logging.root.manager)
-
     @cached_property
     def logger(self) -> "logging.Logger":
         """
         模块根logger
         """
-        return self._log_manager.getLogger(self.name)
+        return logging.getLogger(self.name)
 
     def get_logger(self, name: str = None) -> "logging.Logger":
         """
         获取模块名作为前缀的logger
         """
         name = f"{self.name}.{name}" if name else self.name
-        return self._log_manager.getLogger(name)
+        return logging.getLogger(name)
 
     @cached_classproperty(lock=True)
     def global_config(self) -> "ConfigDict":
