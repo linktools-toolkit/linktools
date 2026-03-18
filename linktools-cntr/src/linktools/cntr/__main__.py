@@ -341,7 +341,7 @@ class Command(BaseCommandGroup):
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_restart(self, names: List[str] = None, build: bool = True, pull: str = False):
         containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name == names] if names else containers
+        target_containers = [c for c in containers if c.name in names] if names else containers
 
         build_options = []
         up_options = ["--detach", "--no-build"]
@@ -379,7 +379,7 @@ class Command(BaseCommandGroup):
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_down(self, names: List[str] = None):
         containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name == names] if names else containers
+        target_containers = [c for c in containers if c.name in names] if names else containers
 
         services = []
         if names:

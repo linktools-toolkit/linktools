@@ -133,6 +133,8 @@ class Container(BaseContainer):
             auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
             auth_extra={
                 "acl_bypass": ["\\.(css|js)$"],
-                "acl_all_subjects": True,
+                "acl_rule": {
+                    "policy": "one_factor",
+                }
             }
         )

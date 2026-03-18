@@ -240,15 +240,11 @@ class NginxMixin:
                                 continue
                             oidc_redirect_uris.add(redirect_uri)
 
-                    all_subjects = auth_extra.get("acl_all_subjects", False)
-                    if all_subjects:
-                        acl_rule = authelia.acl_rules.setdefault(domain, {})
-                        acl_rule["AllSubjects"] = True
-
-                    subjects = auth_extra.get("acl_subjects", None)
-                    if subjects:
-                        acl_rule = authelia.acl_rules.setdefault(domain, {})
-                        acl_rule["Subjects"] = subjects
+                    acl_rule = auth_extra.get("acl_rule", None)
+                    if acl_rule:
+                        target_acl_rule = authelia.acl_rules.setdefault(domain, {})
+                        target_acl_rule["Subject"] = acl_rule.get("subject", None)
+                        target_acl_rule["Policy"] = acl_rule.get("policy", None)
 
         except ContainerError as e:
             self.logger.debug(f"{self} write nginx conf: {e}, skip.")

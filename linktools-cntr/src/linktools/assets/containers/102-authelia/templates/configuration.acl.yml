@@ -1,21 +1,26 @@
 access_control:
   default_policy: deny
   rules:
-#   {% for domain, rule in container.acl_rules.items() %}
+    {%- for domain, rule in container.acl_rules.items() %}
     - domain:
         - "{{ domain }}"
-#     {% if not rule.get("AllSubjects", False) %}
+      {% if rule["Subject"] -%}
       subject:
-        - "group:admins"
-#       {% for subject in rule["Subjects"] %}
+        {% for subject in rule["Subject"] -%}
         - "{{ subject }}"
-#       {% endfor %}
-#     {% endif %}
+        {%- endfor %}
+      {%- endif %}
+      {% if rule["Policy"] -%}
+      policy: '{{ rule["Policy"] }}'
+      {%- else -%}
       policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'
-#   {% endfor %}
+      {%- endif %}
+    {%- endfor %}
     - domain:
         - "{{ NGINX_ROOT_DOMAIN }}"
         - "*.{{ NGINX_ROOT_DOMAIN }}"
       subject:
+        - "group:admin"
         - "group:admins"
+        - "group:super-admin"
       policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'

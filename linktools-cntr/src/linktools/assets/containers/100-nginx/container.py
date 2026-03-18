@@ -96,7 +96,7 @@ class Container(BaseContainer):
         host = "www.google.com" \
             if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
             else self.get_config("NGINX_ROOT_DOMAIN")
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+        if self.get_config("NGINX_HTTPS_ENABLE"):
             scheme = "https"
             port = self.get_config("NGINX_HTTPS_PORT")
         else:

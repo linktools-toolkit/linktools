@@ -53,9 +53,11 @@ class Container(BaseContainer):
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
             AUTHELIA_LDAP_HOST="lldap",
             AUTHELIA_LDAP_PORT=Config.Alias(type=int) | 3890,
-            AUTHELIA_LDAP_ADDRESS=Config.Lazy(lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_PORT')}"),
+            AUTHELIA_LDAP_ADDRESS=Config.Lazy(
+                lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_PORT')}"),
             AUTHELIA_LDAP_WEB_PORT=Config.Alias(type=int) | 17170,
-            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(lambda cfg: f"http://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_WEB_PORT')}"),
+            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(
+                lambda cfg: f"http://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_WEB_PORT')}"),
             AUTHELIA_LDAP_USER="admin",
             AUTHELIA_LDAP_PASSWORD=Config.Alias("LLDAP_ADMIN_PASSWORD") | Config.Prompt(cached=True),
             AUTHELIA_LDAP_BASE_DN=Config.Alias("LLDAP_BASE_DN") | "dc=example,dc=org",
@@ -72,7 +74,10 @@ class Container(BaseContainer):
                 proxy_conf=self.get_source_path("templates", "nginx.conf"),
                 auth_enable=self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE"),
                 auth_extra={
-                    "acl_subjects": ["group:lldap_admin"]
+                    "acl_bypass": ["\\.(css|js)$"],
+                    "acl_rule": {
+                        "subject": ["group:lldap_admin"],
+                    }
                 }
             )),
         ]
@@ -98,7 +103,6 @@ class Container(BaseContainer):
         result = None
 
         with self.settings.open() as settings:
-
             result = settings.get(f"{self._key_prefix}_oidc_clients", default=None)
             if result is None:
                 port = self.get_config("NGINX_HTTPS_PORT")
@@ -130,7 +134,7 @@ class Container(BaseContainer):
         self.start_hooks.append(self._update_files)
 
     def on_check(self):
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+        if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
     def _update_files(self):
@@ -205,11 +209,6 @@ class Container(BaseContainer):
                 raise CommandError(f"Path {path} exists and is not a file.")
             return
 
-        public_key, private_key = rsa.newkeys(
-            nbits=2048,
-            exponent=65537
-        )
-        private_pem = private_key.save_pkcs1(
-            format="PEM",
-        )
+        public_key, private_key = rsa.newkeys(nbits=2048, exponent=65537)
+        private_pem = private_key.save_pkcs1(format="PEM")
         utils.write_file(path, private_pem)
