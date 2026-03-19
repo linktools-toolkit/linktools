@@ -351,7 +351,7 @@ def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
 
 
 def join_path(root_path: PathType, *paths: str) -> Path:
-    target_path = Path(root_path)
+    target_path = Path(str(root_path))
     for path in paths:
         parent_path = str(target_path)
         target_path = target_path.joinpath(path)

@@ -1,0 +1,21 @@
+# {% if DOCKER_UID != 0 %}
+RUN set -eux; \
+    if getent group {{ DOCKER_GID }} >/dev/null; then \
+        GROUP_NAME=$(getent group {{ DOCKER_GID }} | cut -d: -f1); \
+    else \
+        groupadd -g {{ DOCKER_GID }} {{ DOCKER_USER }}; \
+        GROUP_NAME={{ DOCKER_USER }}; \
+    fi; \
+    \
+    if getent passwd {{ DOCKER_UID }} >/dev/null; then \
+        EXISTING_USER=$(getent passwd {{ DOCKER_UID }} | cut -d: -f1); \
+        usermod -l {{ DOCKER_USER }} ${EXISTING_USER}; \
+        usermod -d "${USER_DIR:-/home/{{ DOCKER_USER }}}" -m {{ DOCKER_USER }}; \
+        usermod -s "${USER_SHELL:-/bin/bash}" {{ DOCKER_USER }}; \
+    else \
+        useradd -m -d "${USER_DIR:-/home/{{ DOCKER_USER }}}" -u {{ DOCKER_UID }} -g {{ DOCKER_GID }} -s ${USER_SHELL:-/bin/bash} {{ DOCKER_USER }}; \
+    fi
+# {% else %}
+RUN usermod -d "${USER_DIR:-/root}}" -m root; \
+    usermod -s "${USER_SHELL:-/bin/bash}" root;
+# {% endif %}

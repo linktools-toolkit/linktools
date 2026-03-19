@@ -42,6 +42,8 @@ from linktools.decorator import cached_property
 from linktools.metadata import __missing__
 from linktools.rich import choose, confirm
 from linktools.types import PathType, Error, FileCache
+from ..capabilities.cntr import __cap_cntr__
+
 
 if TYPE_CHECKING:
     from linktools.types import T, ConfigType
@@ -704,7 +706,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         context.update(kwargs)
 
         environment = Environment(
-            loader=FileSystemLoader(Path(source).parent)
+            loader=FileSystemLoader([
+                Path(source).parent,
+                __cap_cntr__.get_asset_path("containers-snippets")
+            ])
         )
         environment.filters.update(
             mkdir=mkdir,
