@@ -272,7 +272,7 @@ class ArgParseComplete:
 
     @classmethod
     def is_invocation(cls):
-        return cls._argcomplete and "_ARGCOMPLETE" in os.environ
+        return "_ARGCOMPLETE" in os.environ # and cls._argcomplete
 
     @classmethod
     def autocomplete(cls, argument_parser: argparse.ArgumentParser, **kwargs) -> argparse.ArgumentParser:

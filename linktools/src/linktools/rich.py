@@ -53,6 +53,9 @@ _rich_available: "Optional[bool]" = None
 def _is_rich_available() -> bool:
     global _rich_available
     if _rich_available is None:
+        from linktools.cli.argparse import ArgParseComplete
+        if ArgParseComplete.is_invocation():
+            _rich_available = False
         try:
             import rich  # noqa
             _rich_available = True
@@ -250,42 +253,6 @@ def _get_rich_log_handler_class():
     return LogHandler
 
 
-def _get_fake_log_handler_class():
-    class LogHandler(logging.Handler, _LogHandlerMixin):
-
-        def __init__(self, show_level: bool, show_time: bool):
-            super().__init__()
-            self._show_level = show_level
-            self._show_time = show_time
-
-        @property
-        def show_level(self):
-            return self._show_level
-
-        @show_level.setter
-        def show_level(self, value: bool):
-            self._show_level = value
-
-        @property
-        def show_time(self):
-            return self._show_time
-
-        @show_time.setter
-        def show_time(self, value: bool):
-            self._show_time = value
-
-        def emit(self, record: logging.LogRecord):
-            pass
-
-        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None):
-            return _FakeText("")
-
-        def make_level_text(self, level_no: int, level_name: str = None, style: str = None):
-            return _FakeText("")
-
-    return LogHandler
-
-
 def _get_plain_log_handler_class():
     class LogHandler(logging.StreamHandler, _LogHandlerMixin):
 
@@ -328,10 +295,28 @@ def _get_plain_log_handler_class():
 
 
 def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
-    from linktools.cli.argparse import ArgParseComplete
+    if not _is_rich_available():
+        items = []
+        if show_time:
+            items.append("[%(asctime)s]")
+        if show_level:
+            items.append("%(levelname)s")
+        items.extend(["%(module)s", "%(funcName)s", "%(message)s"])
+        log_handler_class = _get_plain_log_handler_class()
+        logging.basicConfig(
+            level=level,
+            format=" ".join(items),
+            datefmt="%H:%M:%S",
+            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
+            force=force,
+        )
 
-    if ArgParseComplete.is_invocation():
-        log_handler_class = _get_fake_log_handler_class()
+        return
+
+    from rich import get_console
+
+    if get_console().is_terminal:
+        log_handler_class = _get_rich_log_handler_class()
         logging.basicConfig(
             level=level,
             format="%(message)s",
@@ -339,34 +324,6 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
             handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
             force=force,
         )
-        return
-
-    if _is_rich_available():
-        from rich import get_console
-
-        if get_console().is_terminal:
-            log_handler_class = _get_rich_log_handler_class()
-            logging.basicConfig(
-                level=level,
-                format="%(message)s",
-                datefmt="[%X]",
-                handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-                force=force,
-            )
-            return
-
-    items = []
-    if show_time:
-        items.append("[%(asctime)s]")
-    if show_level:
-        items.append("%(levelname)s")
-    items.extend(["%(module)s", "%(funcName)s", "%(message)s"])
-    logging.basicConfig(
-        level=level,
-        format=" ".join(items),
-        datefmt="%H:%M:%S",
-        force=force,
-    )
 
 
 def get_log_handler() -> "Optional[_LogHandlerMixin]":
