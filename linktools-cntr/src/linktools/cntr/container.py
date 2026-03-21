@@ -693,6 +693,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
             manager=self.manager,
             container=self,
+            containers=self.manager.containers,
             config=config,
             user=self.manager.user,
             docker_user=self.get_config("DOCKER_USER"),

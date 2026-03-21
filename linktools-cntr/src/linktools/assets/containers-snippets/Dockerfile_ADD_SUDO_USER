@@ -1,6 +1,7 @@
 {% include "Dockerfile_ADD_USER" %}
-# {% if DOCKER_UID != 0 %}
-RUN echo "{{ DOCKER_USER }} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
-    echo {{ DOCKER_USER }} > /root/username && \
-    echo "{{ DOCKER_USER }}:{{ DOCKER_USER }}" | chpasswd && adduser {{ DOCKER_USER }} sudo
-# {% endif %}
+
+RUN set -eux; \
+    if [ "$ARG_USER_UID" -ne 0 ]; then \
+        echo "$ARG_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers; \
+        adduser "$ARG_USER" sudo; \
+    fi

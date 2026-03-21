@@ -12,17 +12,17 @@ from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Gener
 
 from . import _utils as utils
 from ..decorator import cached_property, timeoutable
-from ..types import TimeoutType, PathType, Timeout
+from ..types import TimeoutType, PathType, Timeout, ExecError
 
 STDOUT = 1
 STDERR = 2
 
 
-def list2cmdline(args: Iterable[str]) -> str:
+def list2cmdline(args: "Iterable[str]") -> str:
     return subprocess.list2cmdline(args)
 
 
-def cmdline2list(cmdline: str) -> List[str]:
+def cmdline2list(cmdline: str) -> "List[str]":
     import shlex
     return shlex.split(cmdline)
 
@@ -31,7 +31,7 @@ if utils.is_unix_like():
 
     class Output:
 
-        def __init__(self, stdout: IO[AnyStr], stderr: IO[AnyStr]):
+        def __init__(self, stdout: "IO[AnyStr]", stderr: "IO[AnyStr]"):
             self._stdout = stdout
             self._stderr = stderr
 
@@ -66,7 +66,7 @@ if utils.is_unix_like():
 
         class IOWrapper:
 
-            def __init__(self, io: IO[AnyStr], code: int):
+            def __init__(self, io: "IO[AnyStr]", code: int):
                 self.io = io
                 self.fd = io.fileno()
                 self.code = code
@@ -110,7 +110,7 @@ else:
 
     class Output:
 
-        def __init__(self, stdout: IO[AnyStr], stderr: IO[AnyStr]):
+        def __init__(self, stdout: "IO[AnyStr]", stderr: "IO[AnyStr]"):
             self._queue = queue.Queue()
             self._stdout_finished = None
             self._stdout_thread = None
@@ -141,7 +141,7 @@ else:
                 return True
             return False
 
-        def _iter_lines(self, io: IO[AnyStr], code: int, event: threading.Event):
+        def _iter_lines(self, io: "IO[AnyStr]", code: int, event: "threading.Event"):
             try:
                 while True:
                     data = io.readline()
@@ -218,6 +218,63 @@ class Process(subprocess.Popen):
                 yield out, err
         utils.wait_process(self, timeout)
 
+    @timeoutable
+    def exec(
+            self,
+            timeout: TimeoutType = None,
+            ignore_errors: bool = False,
+            on_stdout: "Callable[[str], None]" = None,
+            on_stderr: "Callable[[str], None]" = None,
+            error_type: "Callable[[str], Exception]" = ExecError
+    ) -> str:
+        """
+        执行命令直至完成
+        :param args: 命令
+        :param timeout: 超时时间
+        :param ignore_errors: 忽略错误，报错不会抛异常
+        :param on_stdout: stdout输出回调
+        :param on_stderr: stderr输出回调
+        :param error_type: 抛出异常类型
+        :return: 返回stdout输出内容
+        """
+        try:
+            out = err = None
+            for _out, _err in self.fetch(timeout=timeout):
+                if _out is not None:
+                    out = _out if out is None else out + _out
+                    if on_stdout:
+                        data: str = _out.decode(errors="ignore") if isinstance(_out, bytes) else _out
+                        data = data.rstrip()
+                        if data:
+                            on_stdout(data)
+                if _err is not None:
+                    err = _err if err is None else err + _err
+                    if on_stderr:
+                        data: str = _err.decode(errors="ignore") if isinstance(_err, bytes) else _err
+                        data = data.rstrip()
+                        if data:
+                            on_stderr(data)
+
+            if not ignore_errors and self.poll() not in (0, None):
+                if isinstance(err, bytes):
+                    err = err.decode(errors="ignore")
+                    err = err.strip()
+                elif isinstance(err, str):
+                    err = err.strip()
+                if err:
+                    raise error_type(err)
+
+            if isinstance(out, bytes):
+                out = out.decode(errors="ignore")
+                out = out.strip()
+            elif isinstance(out, str):
+                out = out.strip()
+
+            return out or ""
+
+        finally:
+            self.recursive_kill()
+
     def recursive_kill(self) -> None:
         import psutil
         try:
@@ -243,9 +300,9 @@ class Process(subprocess.Popen):
 def popen(
         *args: Any,
         capture_output: bool = False,
-        stdin: Union[int, IO] = None, stdout: Union[int, IO] = None, stderr: Union[int, IO] = None,
+        stdin: "Union[int, IO]" = None, stdout: "Union[int, IO]" = None, stderr: "Union[int, IO]" = None,
         shell: bool = False, cwd: PathType = None,
-        env: Dict[str, str] = None, append_env: Dict[str, str] = None, default_env: Dict[str, str] = None,
+        env: "Dict[str, str]" = None, append_env: "Dict[str, str]" = None, default_env: "Dict[str, str]" = None,
         **kwargs
 ) -> Process:
     args = [str(arg) for arg in args]

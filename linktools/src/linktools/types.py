@@ -75,6 +75,10 @@ class DownloadError(Error):
     pass
 
 
+class ExecError(Error):
+    pass
+
+
 class DownloadHttpError(DownloadError):
 
     def __init__(self, code, e):

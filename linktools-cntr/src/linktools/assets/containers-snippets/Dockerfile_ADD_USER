@@ -1,21 +1,30 @@
-# {% if DOCKER_UID != 0 %}
+# ARG ARG_USER={{ DOCKER_USER }}
+# ARG ARG_USER_UID={{ DOCKER_UID }}
+# ARG ARG_USER_GID={{ DOCKER_GID }}
+# ARG ARG_USER_DIR=/workspace
+# ARG ARG_USER_SHELL
+
 RUN set -eux; \
-    if getent group {{ DOCKER_GID }} >/dev/null; then \
-        GROUP_NAME=$(getent group {{ DOCKER_GID }} | cut -d: -f1); \
+    if [ "$ARG_USER_UID" -ne 0 ]; then \
+        _USER_DIR="${ARG_USER_DIR:-/home/$ARG_USER}"; \
+        _USER_SHELL="${ARG_USER_SHELL:-/bin/bash}"; \
+        if getent group "$ARG_USER_GID" >/dev/null; then \
+            _USER_GROUP_NAME="$(getent group "$ARG_USER_GID" | cut -d: -f1)"; \
+        else \
+            groupadd -g "$ARG_USER_GID" "$ARG_USER"; \
+            _USER_GROUP_NAME="$ARG_USER"; \
+        fi; \
+        \
+        if getent passwd "$ARG_USER_UID" >/dev/null; then \
+            usermod -l "$ARG_USER" "$(getent passwd "$ARG_USER_UID" | cut -d: -f1)"; \
+            usermod -d "$_USER_DIR" -m "$ARG_USER"; \
+            usermod -s "$_USER_SHELL" "$ARG_USER"; \
+            usermod -g "$_USER_GROUP_NAME" "$ARG_USER"; \
+        else \
+            useradd -m -d "$_USER_DIR" -u "$ARG_USER_UID" -g "$_USER_GROUP_NAME" -s "$_USER_SHELL" "$ARG_USER"; \
+        fi; \
+        mkdir -p "$_USER_DIR" && chown -R "$ARG_USER_UID:$ARG_USER_GID" "$_USER_DIR"; \
     else \
-        groupadd -g {{ DOCKER_GID }} {{ DOCKER_USER }}; \
-        GROUP_NAME={{ DOCKER_USER }}; \
-    fi; \
-    \
-    if getent passwd {{ DOCKER_UID }} >/dev/null; then \
-        EXISTING_USER=$(getent passwd {{ DOCKER_UID }} | cut -d: -f1); \
-        usermod -l {{ DOCKER_USER }} ${EXISTING_USER}; \
-        usermod -d "${USER_DIR:-/home/{{ DOCKER_USER }}}" -m {{ DOCKER_USER }}; \
-        usermod -s "${USER_SHELL:-/bin/bash}" {{ DOCKER_USER }}; \
-    else \
-        useradd -m -d "${USER_DIR:-/home/{{ DOCKER_USER }}}" -u {{ DOCKER_UID }} -g {{ DOCKER_GID }} -s ${USER_SHELL:-/bin/bash} {{ DOCKER_USER }}; \
+        usermod -d "${ARG_USER_DIR:-/root}" -m root; \
+        usermod -s "${ARG_USER_SHELL:-/bin/bash}" root; \
     fi
-# {% else %}
-RUN usermod -d "${USER_DIR:-/root}}" -m root; \
-    usermod -s "${USER_SHELL:-/bin/bash}" root;
-# {% endif %}

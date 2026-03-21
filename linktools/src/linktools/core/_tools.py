@@ -488,44 +488,13 @@ class Tool(metaclass=ToolMeta):
         :return: 返回stdout输出内容
         """
         process = self.popen(*args, capture_output=True)
-
-        try:
-            out = err = None
-            for _out, _err in process.fetch(timeout=timeout):
-                if _out is not None:
-                    out = _out if out is None else out + _out
-                    if on_stdout:
-                        data: str = _out.decode(errors="ignore") if isinstance(_out, bytes) else _out
-                        data = data.rstrip()
-                        if data:
-                            on_stdout(data)
-                if _err is not None:
-                    err = _err if err is None else err + _err
-                    if on_stderr:
-                        data: str = _err.decode(errors="ignore") if isinstance(_err, bytes) else _err
-                        data = data.rstrip()
-                        if data:
-                            on_stderr(data)
-
-            if not ignore_errors and process.poll() not in (0, None):
-                if isinstance(err, bytes):
-                    err = err.decode(errors="ignore")
-                    err = err.strip()
-                elif isinstance(err, str):
-                    err = err.strip()
-                if err:
-                    raise error_type(err)
-
-            if isinstance(out, bytes):
-                out = out.decode(errors="ignore")
-                out = out.strip()
-            elif isinstance(out, str):
-                out = out.strip()
-
-            return out or ""
-
-        finally:
-            process.recursive_kill()
+        return process.exec(
+            timeout=timeout,
+            ignore_errors=ignore_errors,
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+            error_type=error_type
+        )
 
     def __repr__(self):
         return f"Tool<{self.name}>"
