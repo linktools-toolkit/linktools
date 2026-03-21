@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     ConfigType = Union[ConfigLiteralType, Callable[[Any], T], None]
     ConfigTypeMap = Dict[ConfigType, Callable[[Any], T]]
 
-
 SUPPRESS = object()
 
 
@@ -86,9 +85,9 @@ def cast_str(obj: Any) -> str:
     return str(obj)
 
 
-def cast_path(obj: Any) -> str:
+def cast_path(obj: Any) -> Path:
     if isinstance(obj, get_args(PathType)):
-        return os.path.abspath(
+        return Path(
             os.path.expanduser(
                 str(obj)  # support Proxy object
             )

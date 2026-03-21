@@ -351,16 +351,16 @@ def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
 
 
 def join_path(root_path: PathType, *paths: str) -> Path:
-    target_path = Path(str(root_path))
+    target_path = str(root_path)
     for path in paths:
-        parent_path = str(target_path)
-        target_path = target_path.joinpath(path)
+        parent_path = target_path
+        target_path = os.path.abspath(os.path.join(target_path, path))
         try:
             if os.path.commonpath([target_path, parent_path]) != parent_path:
                 raise Error(f"Unsafe path \"{path}\"")
         except ValueError:
             raise Error(f"Unsafe path \"{path}\"")
-    return target_path
+    return Path(target_path)
 
 
 @overload

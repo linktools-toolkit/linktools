@@ -127,7 +127,7 @@ class ContainerManager:
             type="path",
             default=Config.Prompt(
                 default=Config.Lazy(
-                    lambda cfg: self.environ.get_data_path("container", "app", create_parent=True)
+                    lambda cfg: self.data_path.joinpath("app")
                 ),
                 cached=True,
             )
@@ -140,33 +140,7 @@ class ContainerManager:
             type="path",
             default=Config.Prompt(
                 default=Config.Lazy(
-                    lambda cfg: self.environ.get_data_path("container", "app_data", create_parent=True)
-                ),
-                cached=True,
-            )
-        )
-
-    @cached_property
-    def user_data_path(self):
-        return self.config.get(
-            "DOCKER_USER_DATA_PATH",
-            type="path",
-            default=Config.Prompt(
-                default=Config.Lazy(
-                    lambda cfg: self.environ.get_data_path("container", "user_data", create_parent=True)
-                ),
-                cached=True,
-            )
-        )
-
-    @cached_property
-    def download_path(self):
-        return self.config.get(
-            "DOCKER_DOWNLOAD_PATH",
-            type="path",
-            default=Config.Prompt(
-                default=Config.Lazy(
-                    lambda cfg: self.environ.get_data_path("container", "download", create_parent=True)
+                    lambda cfg: self.data_path.joinpath("app_data")
                 ),
                 cached=True,
             )
@@ -174,11 +148,11 @@ class ContainerManager:
 
     @cached_property
     def data_path(self):
-        return self.environ.get_data_path("container", create_parent=True)
+        return self.environ.get_data_path("container")
 
     @cached_property
     def temp_path(self):
-        return self.environ.get_temp_path("container", create_parent=True)
+        return self.environ.get_temp_path("container")
 
     @cached_property
     def setting_path(self):
@@ -190,9 +164,9 @@ class ContainerManager:
     def _settings(self):
         settings = FileCache(self.setting_path / "manager")
 
-        config_path = self.environ.get_data_path("container", "config", "containers.yml")
-        repo_path = self.environ.get_data_path("container", "repo", "repo.json")
-        repo_lock = self.environ.get_data_path("container", "repo", "repo.lock")
+        config_path = self.data_path.joinpath("config", "containers.yml")
+        repo_path = self.data_path.joinpath("repo", "repo.json")
+        repo_lock = self.data_path.joinpath("repo", "repo.lock")
 
         if os.path.isfile(config_path) or os.path.isfile(repo_path):
             with settings.open() as data:
@@ -219,7 +193,9 @@ class ContainerManager:
 
     @cached_property
     def _repo_path(self):
-        return self.environ.get_data_path("container", "repo", create_parent=True)
+        path = self.data_path.joinpath("repo")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     @cached_property
     def containers(self) -> Dict[str, BaseContainer]:

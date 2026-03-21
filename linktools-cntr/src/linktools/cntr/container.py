@@ -586,18 +586,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def get_user_data_path(self, *paths: str, create_parent: bool = False) -> Path:
-        path = utils.join_path(self.manager.user_data_path, *paths)
-        if create_parent:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def get_download_path(self, *paths: str, create_parent: bool = False) -> Path:
-        path = utils.join_path(self.manager.download_path, *paths)
-        if create_parent:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
     def get_temp_path(self, *paths: str, create_parent: bool = False) -> Path:
         path = utils.join_path(self.manager.temp_path, "container", self.name, *paths)
         if create_parent:
@@ -688,15 +676,13 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             SOURCE_PATH=utils.lazy_load(self.get_source_path),
             APP_PATH=utils.lazy_load(self.get_app_path),
             APP_DATA_PATH=utils.lazy_load(self.get_app_data_path),
-            USER_DATA_PATH=utils.lazy_load(self.get_user_data_path),
-            DOWNLOAD_PATH=utils.lazy_load(self.get_download_path),
 
             manager=self.manager,
             container=self,
             containers=self.manager.containers,
             config=config,
             user=self.manager.user,
-            docker_user=self.get_config("DOCKER_USER"),
+            docker_user=self.get_config_later("DOCKER_USER"),
 
             utils=utils,
             mkdir=mkdir,
