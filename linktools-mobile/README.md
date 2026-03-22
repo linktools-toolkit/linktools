@@ -1,170 +1,55 @@
-# Linktools Toolkit
+# Linktools Mobile
 
-Linktools 是一套面向移动安全研究、逆向分析及 homelab 运维的工具集，采用 monorepo 结构拆分为多个独立子包，按需安装。
+Linktools 移动设备工具包，提供 Android 和 iOS 设备管理、动态分析及安全测试等功能。Android 命令前缀 `at-`，iOS 命令前缀 `it-`。
 
-## 子包
-
-| 子包 | 说明 | 文档 |
-|------|------|------|
-| [linktools](linktools/) | 核心框架：CLI 基础设施、环境管理、配置、工具管理 | [README](linktools/README.md) |
-| [linktools-common](linktools-common/) | 通用工具：`ct-env`、`ct-grep`、`ct-tools` | [README](linktools-common/README.md) |
-| [linktools-mobile](linktools-mobile/) | 移动设备：Android（`at-*`）和 iOS（`it-*`）工具 | [README](linktools-mobile/README.md) |
-| [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Podman 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
-
-## 快速开始
-
-### 依赖项
-
-Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
+## 开始使用
 
 ### 安装
 
 ```bash
-# 安装方式一：安装所有包
-python3 -m pip install -U "linktools[all]"
+python3 -m pip install -U linktools-mobile
 
-# 安装方式二：按需安装子包
-python3 -m pip install -U "linktools-common[all]"
+# 安装完整功能（包含 frida、objection、paramiko 等可选依赖）
 python3 -m pip install -U "linktools-mobile[all]"
-python3 -m pip install -U "linktools-cntr"
 
-# 安装方式三：安装 GitHub 最新开发版
+# 安装 GitHub 最新开发版
 python3 -m pip install --ignore-installed \
   "linktools@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools" \
-  "linktools-common@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-common" \
-  "linktools-mobile@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-mobile" \
-  "linktools-cntr@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-cntr"
+  "linktools-mobile@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-mobile"
 ```
 
 ### 配置 alias（推荐）
 
-在 `~/.bashrc` 或 `~/.zshrc` 中添加：
-
 ```bash
-# 自动注册所有 linktools 命令及自动补全
-eval "$(python3 -m linktools.cli.env alias --shell bash)"
-
-# 配置全局 Java 环境（可通过 https://sap.github.io/SapMachine/#download 查找 LTS 版本号）
-eval "$(ct-env --silent java 17.0.11 --shell bash)"
-
-# 常用 alias
 alias adb="at-adb"
 alias sib="it-sib"
 alias pidcat="at-pidcat"
-
-alias apktool="ct-tools apktool"
-alias burpsuite="ct-tools burpsuite"
-alias jadx="ct-tools --set version=1.5.0 jadx-gui"
 ```
 
-## 命令总览
+## 命令列表
 
 ```
-$ python3 -m linktools
-    ___       __   __              __
-   / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.9.0)
- / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
-/_/_/_/ /_/_/|_|\__/\____/\____/_/____/
-📎 All commands
-├── 📖 ct: Common scripts
-│   ├── 📘 cntr: Deploy and manage Docker/Podman containers with ease
-│   ├── 📘 env: Manage and configure the Linktools environment
-│   ├── 👉 grep: Search and match files using regular expressions
-│   └── 👉 tools: Execute tools directly from remote URLs
-├── 📖 at: Android scripts
-│   ├── 👉 adb: Manage multiple Android devices effortlessly with adb commands
-│   ├── 👉 agent: Debug and interact with android-tools.apk for troubleshooting
-│   ├── 👉 app: Retrieve detailed information about installed applications on Android devices
-│   ├── 📘 cert: Display detailed X.509 certificate information for secure communication
-│   ├── 👉 debug: Debug Android apps effectively using the Java Debugger (jdb)
-│   ├── 👉 frida: Use Frida for dynamic analysis on rooted Android devices
-│   ├── 👉 info: Collect detailed device information
-│   ├── 📘 intent: Execute common Android intent actions for automation and testing
-│   ├── 👉 objection: Simplify security testing with Objection on rooted Android devices
-│   ├── 👉 pidcat: Filter logcat by package name
-│   └── 👉 top: Fetch basic information about the currently running application
-└── 📖 it: iOS scripts
-    ├── 👉 frida: Use Frida for dynamic analysis on jailbroken iOS devices
-    ├── 👉 ios: Manage multiple iOS devices effortlessly with go-ios commands
-    ├── 👉 ipa: Parse and extract detailed information from IPA files
-    ├── 👉 objection: Simplify security testing with Objection on jailbroken devices
-    ├── 👉 scp: Securely copy files to/from a jailbroken iOS device using OpenSSH
-    └── 👉 ssh: Remotely login to jailbroken iOS devices using the OpenSSH client
+at (Android)
+├── adb        — 多设备 ADB 管理
+├── agent      — 与 android-tools.apk 交互调试
+├── app        — 获取 Android 应用详细信息
+├── cert       — 显示 X.509 证书信息
+├── debug      — 使用 jdb 调试 Android 应用
+├── frida      — 基于 Frida 的动态分析（需要 root）
+├── info       — 获取设备详细信息
+├── intent     — 执行常用 Android Intent 操作
+├── objection  — 使用 Objection 进行安全测试（需要 root）
+├── pidcat     — 按包名过滤 logcat 日志
+└── top        — 获取当前运行应用信息
+
+it (iOS)
+├── frida      — 基于 Frida 的动态分析（需要越狱）
+├── ios        — 多设备 go-ios 管理
+├── ipa        — 解析 IPA 文件信息
+├── objection  — 使用 Objection 进行安全测试（需要越狱）
+├── scp        — 与越狱设备进行 SCP 文件传输
+└── ssh        — SSH 登录越狱设备
 ```
-
----
-
-## 通用功能（ct-）
-
-### 👉 ct-env
-
-环境配置管理命令，用于生成 alias 脚本、配置 Java 环境变量等。
-
-<details>
-<summary>常用命令</summary>
-
-```bash
-# 生成 alias 脚本，常配合 ~/.bashrc 等文件使用
-$ ct-env --silent alias --shell bash
-
-# 生成配置 Java 环境变量脚本
-$ ct-env --silent java 17.0.11 --shell bash
-
-# 进入已初始化相关环境变量的 shell
-$ ct-env shell
-
-# 清除项目中 7 天以上未使用的缓存文件
-$ ct-env clean 7
-```
-
-</details>
-
----
-
-### 👉 ct-grep
-
-类似 Linux 中的 `grep`，使用正则表达式匹配文件内容，额外支持解析 ZIP、ELF 等格式。
-
-<details>
-<summary>效果预览</summary>
-
-![ct-grep](https://raw.githubusercontent.com/linktools-toolkit/linktools/master/images/ct-grep.png)
-
-</details>
-
----
-
-### 👉 ct-tools
-
-读取配置文件，自动下载并执行对应工具，内置声明了 adb、jadx、apktool、baksmali 等常用工具。
-
-<details>
-<summary>常用命令</summary>
-
-所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/linktools/src/linktools/assets/develop/tools.yml)查看，以下以 apktool 为例：
-
-```bash
-# 初始化并执行 apktool 命令
-$ ct-tools apktool -h
-
-# 查看 apktool 相关配置
-$ ct-tools --config apktool
-
-# 只下载不执行
-$ ct-tools --download apktool
-
-# 清除 apktool 相关缓存文件
-$ ct-tools --clear apktool
-
-# 后台运行 apktool
-$ ct-tools --daemon apktool
-
-# 修改工具版本号
-$ ct-tools --set version=2.5.0 apktool
-```
-
-</details>
 
 ---
 
@@ -329,7 +214,7 @@ $ at-intent browser https://example.com
 $ at-frida -l ~/test/frida.js -p me.ele --spawn
 
 # 加载远程脚本，并将流量重定向到本地 8080 端口
-$ at-frida -c https://raw.githubusercontent.com/linktools-toolkit/linktools/master/linktools-mobile/agents/frida/test/android.js -p me.ele --redirect-port 8080
+$ at-frida -c https://raw.githubusercontent.com/.../android.js -p me.ele --redirect-port 8080
 
 # 只启动 frida-server，不注入脚本
 $ at-frida --serve --remote-port 27042 --local-port 27042 -p fake_package
@@ -417,22 +302,19 @@ Java.perform(function () {
             stack: true,   // 打印调用栈
             args: true,    // 打印参数和返回值
             thread: false,
-            extras: { customKey1: "自定义参数" }
+            extras: { customKey: "自定义参数" }
         })
     );
 
     // 等待动态加载的 class（持续监听 ClassLoader）
     JavaHelper.use("p.r.o.x.y.PrivacyApi", function(clazz) {
-        JavaHelper.hookAllMethods(
-            clazz,
-            JavaHelper.getEventImpl({ stack: true, args: true })
-        );
+        JavaHelper.hookAllMethods(clazz, JavaHelper.getEventImpl({ stack: true, args: true }));
     });
 
-    // 禁用 SSL Pinning
+    // 绕过 SSL Pinning
     JavaHelper.bypassSslPinning();
 
-    // 开启 WebView 调试模式
+    // 开启 WebView 远程调试
     JavaHelper.setWebviewDebuggingEnabled();
 });
 ```
@@ -583,35 +465,24 @@ $ it-frida -e "console.log('hello')" -b com.example.app
 
 使用 [Objection](https://github.com/sensepost/objection) 对越狱 iOS 设备进行安全测试。
 
----
-
-## 容器管理（ct-cntr）
-
-### 👉 ct-cntr
-
-Docker / Podman 容器部署和管理工具，详见 [linktools-cntr README](linktools-cntr/README.md)。
-
 <details>
 <summary>常用命令</summary>
 
 ```bash
-# 添加容器仓库
-ct-cntr repo add https://github.com/linktools-toolkit/linktools-homelab
+# 注入到当前前台应用
+$ it-objection explore
 
-# 添加要部署的容器
-ct-cntr add nginx lldap authelia portainer
+# 注入到指定 Bundle ID
+$ it-objection explore -b com.example.app
 
-# 启动容器
-ct-cntr up
-
-# 重启 / 停止容器
-ct-cntr restart
-ct-cntr down
-
-# 查看 / 修改配置
-ct-cntr config list
-ct-cntr config set NGINX_ROOT_DOMAIN=example.com
-ct-cntr config edit --editor vim
+# 以 spawn 模式注入
+$ it-objection explore -b com.example.app --startup-command "ios sslpinning disable"
 ```
 
 </details>
+
+---
+
+## 相关链接
+
+- GitHub: <https://github.com/linktools-toolkit/linktools/tree/master/linktools-mobile>
