@@ -405,12 +405,17 @@ $ it-ssh sh -c "id"
 <details>
 <summary>常用命令</summary>
 
+远程路径需加 `:` 前缀与本地路径区分：
+
 ```bash
 # 从设备下载文件到本地
-$ it-scp pull /var/mobile/Documents/data.db ./data.db
+$ it-scp :/var/mobile/Documents/data.db ./data.db
 
 # 上传本地文件到设备
-$ it-scp push ./payload.dylib /usr/lib/payload.dylib
+$ it-scp ./payload.dylib :/usr/lib/payload.dylib
+
+# 指定用户名和端口（默认 root:22）
+$ it-scp -u mobile -p 2222 :/var/mobile/test.txt ./test.txt
 ```
 
 </details>
@@ -425,14 +430,8 @@ $ it-scp push ./payload.dylib /usr/lib/payload.dylib
 <summary>常用命令</summary>
 
 ```bash
-# 显示 IPA 基本信息
+# 解析并展示 IPA 信息
 $ it-ipa app.ipa
-
-# 显示详细信息（权限、URL Scheme 等）
-$ it-ipa app.ipa --detail
-
-# 提取 IPA 中的内容到指定目录
-$ it-ipa app.ipa --extract ./output
 ```
 
 </details>
@@ -470,13 +469,16 @@ $ it-frida -e "console.log('hello')" -b com.example.app
 
 ```bash
 # 注入到当前前台应用
-$ it-objection explore
+$ it-objection
 
 # 注入到指定 Bundle ID
-$ it-objection explore -b com.example.app
+$ it-objection -b com.example.app
 
-# 以 spawn 模式注入
-$ it-objection explore -b com.example.app --startup-command "ios sslpinning disable"
+# 注入时执行启动命令（可多次指定 -s）
+$ it-objection -b com.example.app -s "ios sslpinning disable"
+
+# 注入时执行启动脚本
+$ it-objection -b com.example.app -S ./startup.js
 ```
 
 </details>

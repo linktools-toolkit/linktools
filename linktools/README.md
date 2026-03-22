@@ -1,6 +1,6 @@
 # Linktools
 
-Linktools 核心框架，提供命令行工具基础设施、设备抽象层及通用工具集。
+Linktools 核心框架，提供命令行工具基础设施、环境管理及通用工具集。
 
 ## 开始使用
 
@@ -29,6 +29,31 @@ python3 -m pip install --ignore-installed \
 ```bash
 # 生成 alias 脚本，简化命令调用（如果 PATH 未正确配置，或使用 venv 安装时特别有用）
 eval "$(python3 -m linktools.cli.env alias --shell bash)"
+```
+
+## 目录结构
+
+linktools 核心包目录：
+
+```
+linktools/src/linktools/
+├── core/           — 核心模块：environ、Config、Tool、Capability
+├── cli/            — 命令行框架：BaseCommand、BaseCommandGroup、CommandParser
+├── utils/          — 通用工具函数：类型转换、文件、网络、进程、端口等
+├── assets/         — 静态资源：工具定义（tools.yml）等
+├── references/     — 内联的第三方库，避免引入额外依赖（如 fake_useragent）
+├── decorator.py    — 常用装饰器：@singleton、@cached_property、@try_except 等
+├── types.py        — 公共类型与异常体系：Timeout、Stoppable、Error 等
+└── rich.py         — 终端 UI：日志、进度条、prompt/confirm/choose
+```
+
+各子包在此基础上扩展以下目录：
+
+```
+{subpackage}/src/linktools/
+├── assets/         — 子包静态资源：配置模板、内置脚本、Agent 等
+├── commands/       — CLI 命令实现，按功能分子目录（common / android / ios 等）
+└── capabilities/   — 子包能力声明，向核心框架注册 root_path 和版本信息
 ```
 
 ## 主要功能
@@ -106,9 +131,10 @@ config.update_from_file("config.yml")
 `Config.Property` 系列描述符用于在 `configs` 字典中声明配置项，支持 `|` 运算符链式设置后备值：
 
 ```python
-from linktools.core import Config
+from linktools.core import environ, Config
 
-configs = dict(
+config = environ.config
+config.update(
     # 基础属性：直接从配置中读取，支持类型转换
     MY_KEY=Config.Property(type=str) | "default_value",
 
@@ -205,7 +231,7 @@ class MyClass:
     def expensive(self):
         return 1 # compute()
 
-@try_except(errors=Exception, default=None)
+@try_except(errors=(Exception,), default=None)
 def risky():
     ...
 ```
@@ -234,7 +260,8 @@ class MyResource(Stoppable):
 
 ## 相关链接
 
-- GitHub: <https://github.com/linktools-toolkit/linktools>- 子包文档:
+- GitHub: <https://github.com/linktools-toolkit/linktools>
+- 子包文档:
   - [linktools-common](https://github.com/linktools-toolkit/linktools/tree/master/linktools-common) — 通用工具
   - [linktools-mobile](https://github.com/linktools-toolkit/linktools/tree/master/linktools-mobile) — 移动设备工具
   - [linktools-cntr](https://github.com/linktools-toolkit/linktools/tree/master/linktools-cntr) — 容器管理工具
