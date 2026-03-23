@@ -1,6 +1,6 @@
 # Linktools Toolkit
 
-Linktools 是一套面向移动安全研究、逆向分析及 homelab 运维的工具集，采用 monorepo 结构拆分为多个独立子包，按需安装。
+Linktools 是一套面向移动安全研究、逆向分析、合规检测工具集，采用 monorepo 结构拆分为多个独立子包，按需安装。
 
 ## 子包
 
@@ -99,7 +99,7 @@ $ python3 -m linktools
 
 ### 👉 ct-env
 
-环境配置管理命令，用于生成 alias 脚本、配置 Java 环境变量等。
+环境配置管理命令，用于生成 alias 脚本、配置 Java 环境变量等。（**依赖：** `linktools-common`）
 
 <details>
 <summary>常用命令</summary>
@@ -124,7 +124,7 @@ $ ct-env clean 7
 
 ### 👉 ct-grep
 
-类似 Linux 中的 `grep`，使用正则表达式匹配文件内容，额外支持解析 ZIP、ELF 等格式。
+类似 Linux 中的 `grep`，使用正则表达式匹配文件内容，额外支持解析 ZIP、ELF 等格式。（**依赖：** `linktools-common[lief]`，macOS需要使用以下命令安装libmagic: brew install libmagic）
 
 <details>
 <summary>效果预览</summary>
@@ -137,7 +137,7 @@ $ ct-env clean 7
 
 ### 👉 ct-tools
 
-读取配置文件，自动下载并执行对应工具，内置声明了 adb、jadx、apktool、baksmali 等常用工具。
+读取配置文件，自动下载并执行对应工具，内置声明了 adb、jadx、apktool、baksmali 等常用工具。（**依赖：** `linktools-common`）
 
 <details>
 <summary>常用命令</summary>
@@ -168,11 +168,42 @@ $ ct-tools --set version=2.5.0 apktool
 
 ---
 
+### 👉 ct-cntr
+
+Docker / Podman 容器部署和管理工具，详见 [linktools-cntr README](linktools-cntr/README.md)。（**依赖：** `linktools-cntr`）
+
+<details>
+<summary>常用命令</summary>
+
+```bash
+# 添加容器仓库
+ct-cntr repo add https://github.com/linktools-toolkit/linktools-homelab
+
+# 添加要部署的容器
+ct-cntr add nginx lldap authelia portainer
+
+# 启动容器
+ct-cntr up
+
+# 重启 / 停止容器
+ct-cntr restart
+ct-cntr down
+
+# 查看 / 修改配置
+ct-cntr config list
+ct-cntr config set NGINX_ROOT_DOMAIN=example.com
+ct-cntr config edit --editor vim
+```
+
+</details>
+
+---
+
 ## Android 功能（at-）
 
 ### 👉 at-adb
 
-自动检测并使用环境变量中的 adb，不存在时自动下载最新版本，支持同时管理多台设备。
+自动检测并使用环境变量中的 adb，不存在时自动下载最新版本，支持同时管理多台设备。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -203,7 +234,7 @@ Choose device [1~2] (1): 1
 
 ### 👉 at-pidcat
 
-集成并增强了 [pidcat](https://github.com/JakeWharton/pidcat)，修复了中文字符宽度显示问题。
+集成并增强了 [pidcat](https://github.com/JakeWharton/pidcat)，修复了中文字符宽度显示问题。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -225,7 +256,7 @@ $ at-pidcat -t XcdnEngine
 
 ### 👉 at-top
 
-显示当前顶层应用信息，支持导出 APK、截屏等操作。
+显示当前顶层应用信息，支持导出 APK、截屏等操作。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -247,7 +278,7 @@ $ at-top --screen
 
 ### 👉 at-app
 
-通过 agent 调用 PackageManagerService 获取应用信息，组件、权限等信息比静态分析更为准确。
+通过 agent 调用 PackageManagerService 获取应用信息，组件、权限等信息比静态分析更为准确。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -276,7 +307,7 @@ $ at-app --non-system
 
 ### 👉 at-intent
 
-封装常用 Intent 操作，支持跳转设置界面、安装证书、打开浏览器链接等。
+封装常用 Intent 操作，支持跳转设置界面、安装证书、打开浏览器链接等。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -307,7 +338,7 @@ $ at-intent browser https://example.com
 
 ### 👉 at-frida
 
-便捷使用 Frida 的工具，可自动下载、推送、运行 frida-server，支持加载远程脚本，内置常用功能（需要 root 权限）。
+便捷使用 Frida 的工具，可自动下载、推送、运行 frida-server，支持加载远程脚本，内置常用功能（需要 root 权限）。（**依赖：** `linktools-mobile[frida]`）
 
 <details>
 <summary>主要特性</summary>
@@ -443,7 +474,7 @@ Java.perform(function () {
 
 ### 👉 at-agent
 
-与 `android-tools.apk` 交互，支持剪贴板操作、系统服务信息获取等，也支持加载插件 APK。
+与 `android-tools.apk` 交互，支持剪贴板操作、系统服务信息获取等，也支持加载插件 APK。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -470,7 +501,7 @@ $ at-agent --plugin app-release.apk
 
 ### 👉 it-ios
 
-自动检测或下载 [go-ios](https://github.com/danielpaulus/go-ios)，支持同时管理多台 iOS 设备。
+自动检测或下载 [go-ios](https://github.com/danielpaulus/go-ios)，支持同时管理多台 iOS 设备。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -499,7 +530,7 @@ Choose device [1~2] (1): 1
 
 ### 👉 it-ssh
 
-通过 SSH 连接已越狱设备（需要设备已安装 OpenSSH）。
+通过 SSH 连接已越狱设备（需要设备已安装 OpenSSH）。（**依赖：** `linktools-mobile[ssh]`）
 
 <details>
 <summary>常用命令</summary>
@@ -518,7 +549,7 @@ $ it-ssh sh -c "id"
 
 ### 👉 it-scp
 
-通过 SCP 与已越狱设备进行文件传输（需要设备已安装 OpenSSH）。
+通过 SCP 与已越狱设备进行文件传输（需要设备已安装 OpenSSH）。（**依赖：** `linktools-mobile[ssh]`）
 
 <details>
 <summary>常用命令</summary>
@@ -542,7 +573,7 @@ $ it-scp -u mobile -p 2222 :/var/mobile/test.txt ./test.txt
 
 ### 👉 it-ipa
 
-解析 IPA 文件，提取应用元数据、权限、组件等信息。
+解析 IPA 文件，提取应用元数据、权限、组件等信息。（**依赖：** `linktools-mobile`）
 
 <details>
 <summary>常用命令</summary>
@@ -558,7 +589,7 @@ $ it-ipa app.ipa
 
 ### 👉 it-frida
 
-便捷使用 Frida 进行 iOS 动态分析（需要设备已越狱并安装 frida）。
+便捷使用 Frida 进行 iOS 动态分析（需要设备已越狱并安装 frida）。（**依赖：** `linktools-mobile[frida,ssh]`）
 
 <details>
 <summary>常用命令</summary>
@@ -580,7 +611,7 @@ $ it-frida -e "console.log('hello')" -b com.example.app
 
 ### 👉 it-objection
 
-使用 [Objection](https://github.com/sensepost/objection) 对越狱 iOS 设备进行安全测试。
+使用 [Objection](https://github.com/sensepost/objection) 对越狱 iOS 设备进行安全测试。（**依赖：** `linktools-mobile[frida,ssh]`）
 
 <details>
 <summary>常用命令</summary>
@@ -597,39 +628,6 @@ $ it-objection -b com.example.app -s "ios sslpinning disable"
 
 # 注入时执行启动脚本
 $ it-objection -b com.example.app -S ./startup.js
-```
-
-</details>
-
----
-
-## 容器管理（ct-cntr）
-
-### 👉 ct-cntr
-
-Docker / Podman 容器部署和管理工具，详见 [linktools-cntr README](linktools-cntr/README.md)。
-
-<details>
-<summary>常用命令</summary>
-
-```bash
-# 添加容器仓库
-ct-cntr repo add https://github.com/linktools-toolkit/linktools-homelab
-
-# 添加要部署的容器
-ct-cntr add nginx lldap authelia portainer
-
-# 启动容器
-ct-cntr up
-
-# 重启 / 停止容器
-ct-cntr restart
-ct-cntr down
-
-# 查看 / 修改配置
-ct-cntr config list
-ct-cntr config set NGINX_ROOT_DOMAIN=example.com
-ct-cntr config edit --editor vim
 ```
 
 </details>

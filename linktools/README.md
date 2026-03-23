@@ -109,7 +109,7 @@ environ.clean_temp_files(days=7)
 
 ### config — 配置管理
 
-多层配置系统，优先级：环境变量 > 缓存 > 配置文件 > 默认值：
+多层配置系统，优先级：环境变量 > 缓存 > 默认值：
 
 ```python
 from linktools.core import environ
@@ -133,8 +133,8 @@ config.update_from_file("config.yml")
 ```python
 from linktools.core import environ, Config
 
-config = environ.config
-config.update(
+environ.config.update(
+
     # 基础属性：直接从配置中读取，支持类型转换
     MY_KEY=Config.Property(type=str) | "default_value",
 
