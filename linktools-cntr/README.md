@@ -26,17 +26,23 @@ python3 -m pip install --ignore-installed \
 
 ## 容器部署示例
 
-### Nas（主页、Nextcloud 等）环境
+### All in one 环境
 
-👉 [搭建文档](https://github.com/linktools-toolkit/linktools-homelab/blob/master/2xx-homelab/222-omv/README.md)
+PVE、OpenWRT、飞牛 OS、WAF、SSO、导航页等等
 
-### Xray Server（WebSocket + SSL + VLESS）
+👉 [搭建文档](https://github.com/linktools-toolkit/linktools-homelab/blob/master/2xx-homelab/221-fnos/README.md)
+
+### Xray Server
+
+gRPC + SSL + VLESS
 
 👉 [搭建文档](https://github.com/linktools-toolkit/linktools-homelab/blob/master/3xx-proxy/320-xray-server/README.md)
 
-### Redroid（Android 模拟器）
+### Redroid
 
-👉 [搭建文档](https://github.com/redroid-rockchip)
+Docker 版 Android 容器，以及编译环境
+
+👉 [搭建文档](https://github.com/linktools-toolkit/linktools-homelab/blob/master/4xx-mobile/400-redroid/README.md)
 
 ## 内置容器
 
