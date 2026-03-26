@@ -1,0 +1,4 @@
+1. 首先curl https://raw.githubusercontent.com/wiki/acmesh-official/acme.sh/dnsapi.md 将acme的dns配置作文缓存保存到本地
+2. 提取--dns和相应环境变量的关系，比如dns_ali对应的就是Ali_Key和Ali_Secret。另外还需要为环境变量标记为必须字段的和非必需字段
+3. 写入到dnsapi.json中
+4. 删除缓存文件

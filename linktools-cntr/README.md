@@ -62,7 +62,7 @@ linktools-cntr 内置了常用容器定义，开箱即用：
 | `DOCKER_USER` | str | 当前用户 | 部分 rootless 容器使用此用户权限运行 |
 | `DOCKER_HOST` | str | `/var/run/docker.sock` | Docker Daemon 地址 |
 | `DOCKER_APP_PATH` | str | `~/.linktools/data/container/app` | 容器数据持久化目录（建议置于 SSD） |
-| `DOCKER_APP_DATA_PATH` | str | `~/.linktools/data/container/app_data` | 不频繁读写的持久化目录（可置于 HDD） |
+| `DOCKER_APP_DATA_PATH` | str | 默认同`DOCKER_APP_PATH` | 不频繁读写的持久化目录（可置于 HDD） |
 | `HOST` | str | 当前局域网 IP | 宿主机 IP 地址 |
 
 ## 常用命令

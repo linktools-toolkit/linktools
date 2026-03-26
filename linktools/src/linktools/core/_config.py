@@ -483,6 +483,8 @@ class Config:
             if default is __missing__:
                 raise
         except Exception as e:
+            if self._environ.debug:
+                self._environ.logger.debug(f"Failed to get config \"{key}\"", exc_info=True)
             if default is __missing__:
                 raise ConfigError(f"Failed to get config \"{key}\"") from e
 
@@ -494,6 +496,8 @@ class Config:
             except ConfigError:
                 raise
             except Exception as e:
+                if self._environ.debug:
+                    self._environ.logger.debug(f"Failed to get default config \"{key}\"", exc_info=True)
                 raise ConfigError(f"Failed to get default config \"{key}\"") from e
 
         return default
@@ -622,6 +626,8 @@ class Config:
                     type=type or self.type,
                     default=cache
                 )
+            if self.key is __missing__:  # 避免递归
+                return cache if cache is not __missing__ else self.default
             return config.get(
                 self.key or key,
                 type=type or self.type,
@@ -661,10 +667,11 @@ class Config:
                  choices: "Union[List[str], Dict[str, str]]" = None,
                  **kwargs):
 
-            default = cache
-            if default is not __missing__ and not self.always_ask:
-                return default
+            if cache is not __missing__ and not self.always_ask:
+                if key in config.cache:
+                    return cache
 
+            default = cache
             if default is __missing__:
                 default = self.default
                 if isinstance(default, ConfigProperty):
@@ -709,10 +716,11 @@ class Config:
 
         def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
 
-            default = cache
-            if default is not __missing__ and not self.always_ask:
-                return default
+            if cache is not __missing__ and not self.always_ask:
+                if key in config.cache:
+                    return cache
 
+            default = cache
             if default is __missing__:
                 default = self.default
                 if isinstance(default, ConfigProperty):

@@ -155,8 +155,8 @@ class ConfigCommand(BaseCommand):
         keys = set()
         for container in target_containers:
             keys.update(container.configs.keys())
-            if hasattr(container, "keys") and isinstance(container.keys, (Tuple, List, Dict)):
-                keys.update([key for key in container.keys if key in manager.config])
+        for container in target_containers:
+            keys.update(container.extend_configs.keys())
         if not names:
             keys.update(manager.config.cache.keys())
         for key in sorted(keys):

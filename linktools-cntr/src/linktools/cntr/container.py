@@ -326,6 +326,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return {}
 
     @property
+    def extend_configs(self) -> Dict[str, Any]:
+        return {}
+
+    @property
     def exposes(self) -> "Iterable[ExposeLink]":
         return []
 

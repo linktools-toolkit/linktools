@@ -26,6 +26,7 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import json
 import os
 import re
 import shutil
@@ -40,12 +41,9 @@ from linktools.cntr import BaseContainer, ContainerError
 class Container(BaseContainer):
 
     @cached_property
-    def keys(self):
-        # dnsapi.txt 内容从 https://github.com/acmesh-official/acme.sh/wiki/dnsapi 拷贝
-        path = os.path.join(os.path.dirname(__file__), "dnsapi.txt")
-        data = utils.read_file(path, text=True)
-        pattern = re.compile(r'export +(\w+)="?')
-        return sorted(list(set(pattern.findall(data))))
+    def dnsapi(self):
+        with open(self.get_source_path("dnsapi.json"), "rt") as fd:
+            return json.load(fd)
 
     @cached_property
     def configs(self):
@@ -78,19 +76,23 @@ class Container(BaseContainer):
             ),
             ACME_DNS_API=Config.Lazy(
                 lambda cfg:
-                Config.Error(textwrap.dedent(
-                    """
-                    Ensure ACME_DNS_API config matches --dns parameter in acme command is set.
-                    · Also, set corresponding environment variables.
-                    · For details, see: https://github.com/acmesh-official/acme.sh/wiki/dnsapi.
-                    · Example command:
-                      $ ct-cntr config set ACME_DNS_API=dns_ali Ali_Key=xxx Ali_Secret=yyy
-                    """
-                ))
+                Config.Prompt(choices=self.dnsapi.keys(), cached=True)
                 if cfg.get("NGINX_HTTPS_ENABLE")
                 else Config.Property(type=str) | ""
             )
         )
+
+    @cached_property
+    def extend_configs(self):
+        configs = {}
+        if self.get_config("NGINX_HTTPS_ENABLE"):
+            dns_api = self.get_config("ACME_DNS_API")
+            if dns_api not in self.dnsapi:
+                raise ContainerError(f"Not supported dns_api: {dns_api}")
+            env_vars = self.dnsapi.get(dns_api).get("env", {})
+            for env_var, meta in env_vars.items():
+                configs[env_var] = Config.Prompt(cached=True, allow_empty=meta.get("required", True))
+        return configs
 
     def _get_default_index_url(self):
         host = "www.google.com" \

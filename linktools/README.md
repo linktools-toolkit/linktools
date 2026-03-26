@@ -109,7 +109,7 @@ environ.clean_temp_files(days=7)
 
 ### config — 配置管理
 
-多层配置系统，优先级：环境变量 > 缓存 > 默认值：
+多层配置系统，优先级：环境变量 > 缓存 > 私有配置 > 全局配置 > 默认值：
 
 ```python
 from linktools.core import environ

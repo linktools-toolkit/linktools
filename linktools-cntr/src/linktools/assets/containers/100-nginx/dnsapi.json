@@ -1,0 +1,486 @@
+{
+  "dns_cf": {
+    "name": "Cloudflare",
+    "env": {
+      "CF_Token": { "required": false },
+      "CF_Account_ID": { "required": false },
+      "CF_Zone_ID": { "required": false },
+      "CF_Key": { "required": false },
+      "CF_Email": { "required": false }
+    }
+  },
+  "dns_dp": {
+    "name": "DNSPod.cn",
+    "env": {
+      "DP_Id": { "required": true },
+      "DP_Key": { "required": true }
+    }
+  },
+  "dns_gd": {
+    "name": "GoDaddy",
+    "env": {
+      "GD_Key": { "required": true },
+      "GD_Secret": { "required": true }
+    }
+  },
+  "dns_pdns": {
+    "name": "PowerDNS",
+    "env": {
+      "PDNS_Url": { "required": true },
+      "PDNS_ServerId": { "required": true },
+      "PDNS_Token": { "required": true },
+      "PDNS_Ttl": { "required": true }
+    }
+  },
+  "dns_nsupdate": {
+    "name": "nsupdate (RFC 2136)",
+    "env": {
+      "NSUPDATE_SERVER": { "required": true },
+      "NSUPDATE_KEY": { "required": true },
+      "NSUPDATE_ZONE": { "required": false }
+    }
+  },
+  "dns_lua": {
+    "name": "LuaDNS",
+    "env": {
+      "LUA_Key": { "required": true },
+      "LUA_Email": { "required": true }
+    }
+  },
+  "dns_me": {
+    "name": "DNSMadeEasy",
+    "env": {
+      "ME_Key": { "required": true },
+      "ME_Secret": { "required": true }
+    }
+  },
+  "dns_aws": {
+    "name": "Amazon Route53",
+    "env": {
+      "AWS_ACCESS_KEY_ID": { "required": true },
+      "AWS_SECRET_ACCESS_KEY": { "required": true },
+      "AWS_DNS_SLOWRATE": { "required": false }
+    }
+  },
+  "dns_ali": {
+    "name": "Alibaba Cloud DNS (Aliyun)",
+    "env": {
+      "Ali_Key": { "required": true },
+      "Ali_Secret": { "required": true }
+    }
+  },
+  "dns_ispconfig": {
+    "name": "ISPConfig 3.1",
+    "env": {
+      "ISPC_User": { "required": true },
+      "ISPC_Password": { "required": true },
+      "ISPC_Api": { "required": true },
+      "ISPC_Api_Insecure": { "required": true }
+    }
+  },
+  "dns_ad": {
+    "name": "Alwaysdata",
+    "env": {
+      "AD_API_KEY": { "required": true }
+    }
+  },
+  "dns_linode_v4": {
+    "name": "Linode",
+    "env": {
+      "LINODE_V4_API_KEY": { "required": true }
+    }
+  },
+  "dns_freedns": {
+    "name": "FreeDNS",
+    "env": {
+      "FREEDNS_User": { "required": true },
+      "FREEDNS_Password": { "required": true }
+    }
+  },
+  "dns_cyon": {
+    "name": "cyon.ch",
+    "env": {
+      "CY_Username": { "required": true },
+      "CY_Password": { "required": true },
+      "CY_OTP_Secret": { "required": false }
+    }
+  },
+  "dns_gandi_livedns": {
+    "name": "Gandi LiveDNS",
+    "env": {
+      "GANDI_LIVEDNS_TOKEN": { "required": false },
+      "GANDI_LIVEDNS_KEY": { "required": false }
+    }
+  },
+  "dns_knot": {
+    "name": "Knot DNS (knsupdate)",
+    "env": {
+      "KNOT_SERVER": { "required": true },
+      "KNOT_KEY": { "required": true }
+    }
+  },
+  "dns_dgon": {
+    "name": "DigitalOcean",
+    "env": {
+      "DO_API_KEY": { "required": true }
+    }
+  },
+  "dns_cloudns": {
+    "name": "ClouDNS",
+    "env": {
+      "CLOUDNS_SUB_AUTH_ID": { "required": false },
+      "CLOUDNS_AUTH_ID": { "required": false },
+      "CLOUDNS_AUTH_PASSWORD": { "required": true }
+    }
+  },
+  "dns_infoblox": {
+    "name": "Infoblox",
+    "env": {
+      "Infoblox_Creds": { "required": true },
+      "Infoblox_Server": { "required": true }
+    }
+  },
+  "dns_vscale": {
+    "name": "VSCALE",
+    "env": {
+      "VSCALE_API_KEY": { "required": true }
+    }
+  },
+  "dns_dynu": {
+    "name": "Dynu",
+    "env": {
+      "Dynu_ClientId": { "required": true },
+      "Dynu_Secret": { "required": true }
+    }
+  },
+  "dns_dnsimple": {
+    "name": "DNSimple",
+    "env": {
+      "DNSimple_OAUTH_TOKEN": { "required": true }
+    }
+  },
+  "dns_nsone": {
+    "name": "NS1.com",
+    "env": {
+      "NS1_Key": { "required": true }
+    }
+  },
+  "dns_duckdns": {
+    "name": "DuckDNS",
+    "env": {
+      "DuckDNS_Token": { "required": true }
+    }
+  },
+  "dns_namecom": {
+    "name": "Name.com",
+    "env": {
+      "Namecom_Username": { "required": true },
+      "Namecom_Token": { "required": true }
+    }
+  },
+  "dns_dyn": {
+    "name": "Dyn Managed DNS",
+    "env": {
+      "DYN_Customer": { "required": true },
+      "DYN_Username": { "required": true },
+      "DYN_Password": { "required": true }
+    }
+  },
+  "dns_he": {
+    "name": "Hurricane Electric",
+    "env": {
+      "HE_Username": { "required": true },
+      "HE_Password": { "required": true }
+    }
+  },
+  "dns_inwx": {
+    "name": "INWX",
+    "env": {
+      "INWX_User": { "required": true },
+      "INWX_Password": { "required": true },
+      "INWX_Shared_Secret": { "required": false }
+    }
+  },
+  "dns_servercow": {
+    "name": "Servercow",
+    "env": {
+      "SERVERCOW_API_Username": { "required": true },
+      "SERVERCOW_API_Password": { "required": true }
+    }
+  },
+  "dns_namesilo": {
+    "name": "Namesilo",
+    "env": {
+      "Namesilo_Key": { "required": true }
+    }
+  },
+  "dns_autodns": {
+    "name": "autoDNS (InternetX)",
+    "env": {
+      "AUTODNS_USER": { "required": true },
+      "AUTODNS_PASSWORD": { "required": true },
+      "AUTODNS_CONTEXT": { "required": true }
+    }
+  },
+  "dns_azure": {
+    "name": "Azure DNS",
+    "env": {
+      "AZUREDNS_SUBSCRIPTIONID": { "required": true },
+      "AZUREDNS_TENANTID": { "required": false },
+      "AZUREDNS_APPID": { "required": false },
+      "AZUREDNS_CLIENTSECRET": { "required": false },
+      "AZUREDNS_MANAGEDIDENTITY": { "required": false },
+      "AZUREDNS_BEARERTOKEN": { "required": false }
+    }
+  },
+  "dns_selectel": {
+    "name": "Selectel",
+    "env": {
+      "SL_Key": { "required": false },
+      "SL_Ver": { "required": false },
+      "SL_Expire": { "required": false },
+      "SL_Login_ID": { "required": false },
+      "SL_Project_Name": { "required": false },
+      "SL_Login_Name": { "required": false },
+      "SL_Pswd": { "required": false }
+    }
+  },
+  "dns_zonomi": {
+    "name": "Zonomi",
+    "env": {
+      "ZM_Key": { "required": true }
+    }
+  },
+  "dns_dreamhost": {
+    "name": "DreamHost",
+    "env": {
+      "DH_API_KEY": { "required": true }
+    }
+  },
+  "dns_da": {
+    "name": "DirectAdmin",
+    "env": {
+      "DA_Api": { "required": true },
+      "DA_Api_Insecure": { "required": true }
+    }
+  },
+  "dns_kinghost": {
+    "name": "KingHost",
+    "env": {
+      "KINGHOST_Username": { "required": true },
+      "KINGHOST_Password": { "required": true }
+    }
+  },
+  "dns_zilore": {
+    "name": "Zilore",
+    "env": {
+      "Zilore_Key": { "required": true }
+    }
+  },
+  "dns_loopia": {
+    "name": "Loopia",
+    "env": {
+      "LOOPIA_User": { "required": true },
+      "LOOPIA_Password": { "required": true },
+      "LOOPIA_Api": { "required": false }
+    }
+  },
+  "dns_acmedns": {
+    "name": "ACME DNS",
+    "env": {
+      "ACMEDNS_BASE_URL": { "required": true },
+      "ACMEDNS_USERNAME": { "required": false },
+      "ACMEDNS_PASSWORD": { "required": false },
+      "ACMEDNS_SUBDOMAIN": { "required": false }
+    }
+  },
+  "dns_tele3": {
+    "name": "TELE3",
+    "env": {
+      "TELE3_Key": { "required": true },
+      "TELE3_Secret": { "required": true }
+    }
+  },
+  "dns_euserv": {
+    "name": "EUserv",
+    "env": {
+      "EUSERV_Username": { "required": true },
+      "EUSERV_Password": { "required": true }
+    }
+  },
+  "dns_dpi": {
+    "name": "DNSPod.com",
+    "env": {
+      "DPI_Id": { "required": true },
+      "DPI_Key": { "required": true }
+    }
+  },
+  "dns_gcloud": {
+    "name": "Google Cloud DNS",
+    "env": {
+      "CLOUDSDK_ACTIVE_CONFIG_NAME": { "required": false }
+    }
+  },
+  "dns_conoha": {
+    "name": "ConoHa",
+    "env": {
+      "CONOHA_Username": { "required": true },
+      "CONOHA_Password": { "required": true },
+      "CONOHA_TenantId": { "required": true },
+      "CONOHA_IdentityServiceApi": { "required": true }
+    }
+  },
+  "dns_netcup": {
+    "name": "Netcup",
+    "env": {
+      "NC_Apikey": { "required": true },
+      "NC_Apipw": { "required": true },
+      "NC_CID": { "required": true }
+    }
+  },
+  "dns_namecheap": {
+    "name": "Namecheap",
+    "env": {
+      "NAMECHEAP_USERNAME": { "required": true },
+      "NAMECHEAP_API_KEY": { "required": true },
+      "NAMECHEAP_SOURCEIP": { "required": true }
+    }
+  },
+  "dns_mydnsjp": {
+    "name": "MyDNS.JP",
+    "env": {
+      "MYDNSJP_MasterID": { "required": true },
+      "MYDNSJP_Password": { "required": true }
+    }
+  },
+  "dns_hostingde": {
+    "name": "hosting.de",
+    "env": {
+      "HOSTINGDE_APIKEY": { "required": true },
+      "HOSTINGDE_ENDPOINT": { "required": true }
+    }
+  },
+  "dns_neodigit": {
+    "name": "Neodigit.net",
+    "env": {
+      "NEODIGIT_API_TOKEN": { "required": true }
+    }
+  },
+  "dns_exoscale": {
+    "name": "Exoscale",
+    "env": {
+      "EXOSCALE_API_KEY": { "required": true },
+      "EXOSCALE_SECRET_KEY": { "required": true }
+    }
+  },
+  "dns_pointhq": {
+    "name": "PointHQ",
+    "env": {
+      "PointHQ_Key": { "required": true },
+      "PointHQ_Email": { "required": true }
+    }
+  },
+  "dns_active24": {
+    "name": "Active24",
+    "env": {
+      "Active24_ApiKey": { "required": true },
+      "Active24_ApiSecret": { "required": true }
+    }
+  },
+  "dns_doapi": {
+    "name": "do.de",
+    "env": {
+      "DO_LETOKEN": { "required": true }
+    }
+  },
+  "dns_nw": {
+    "name": "Nexcess / Thermo.io / Futurehosting",
+    "env": {
+      "NW_API_TOKEN": { "required": true },
+      "NW_API_ENDPOINT": { "required": true }
+    }
+  },
+  "dns_rackspace": {
+    "name": "Rackspace",
+    "env": {
+      "RACKSPACE_Username": { "required": true },
+      "RACKSPACE_Apikey": { "required": true }
+    }
+  },
+  "dns_online": {
+    "name": "Online.net / Scaleway",
+    "env": {
+      "ONLINE_API_KEY": { "required": true }
+    }
+  },
+  "dns_mydevil": {
+    "name": "MyDevil.net",
+    "env": {}
+  },
+  "dns_cn": {
+    "name": "Core-Networks",
+    "env": {
+      "CN_User": { "required": true },
+      "CN_Password": { "required": true }
+    }
+  },
+  "dns_nederhost": {
+    "name": "NederHost",
+    "env": {
+      "NederHost_Key": { "required": true }
+    }
+  },
+  "dns_zone": {
+    "name": "Zone.ee",
+    "env": {
+      "ZONE_Username": { "required": true },
+      "ZONE_Key": { "required": true }
+    }
+  },
+  "dns_ultra": {
+    "name": "UltraDNS",
+    "env": {
+      "ULTRA_USR": { "required": true },
+      "ULTRA_PWD": { "required": true }
+    }
+  },
+  "dns_desec": {
+    "name": "deSEC.io",
+    "env": {
+      "DEDYN_TOKEN": { "required": true }
+    }
+  },
+  "dns_openprovider": {
+    "name": "OpenProvider",
+    "env": {
+      "OPENPROVIDER_USER": { "required": true },
+      "OPENPROVIDER_PASSWORDHASH": { "required": true }
+    }
+  },
+  "dns_maradns": {
+    "name": "MaraDNS",
+    "env": {
+      "MARA_ZONE_FILE": { "required": true },
+      "MARA_DUENDE_PID_PATH": { "required": true }
+    }
+  },
+  "dns_hetzner": {
+    "name": "Hetzner DNS",
+    "env": {
+      "HETZNER_Token": { "required": true }
+    }
+  },
+  "dns_ddnss": {
+    "name": "DDNSS.de",
+    "env": {
+      "DDNSS_Token": { "required": true }
+    }
+  },
+  "dns_nsd": {
+    "name": "NLnetLabs NSD",
+    "env": {
+      "Nsd_ZoneFile": { "required": true },
+      "Nsd_Command": { "required": true }
+    }
+  }
+}

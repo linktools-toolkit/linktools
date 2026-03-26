@@ -138,12 +138,7 @@ class ContainerManager:
         return self.config.get(
             "DOCKER_APP_DATA_PATH",
             type="path",
-            default=Config.Prompt(
-                default=Config.Lazy(
-                    lambda cfg: self.data_path.joinpath("app_data")
-                ),
-                cached=True,
-            )
+            default=self.app_path
         )
 
     @cached_property

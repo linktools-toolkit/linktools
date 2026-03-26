@@ -12,13 +12,9 @@ RUN mkdir -p /etc/certs && \
     echo "crond" >> /docker-entrypoint.d/99-start-crond.sh && \
     chmod +x /docker-entrypoint.d/99-start-crond.sh
 
-{% for key in container.keys -%}
-    {% with value = config.get(key, default=None) -%}
-        {% if value %}
-ENV {{ key }} {{ value }}
-        {% endif %}
-    {%- endwith %}
-{%- endfor %}
+# {% for key, value in container.extend_configs.items() %}
+ENV {{ key }} {{ config.get(key, default=value) }}
+# {%- endfor %}
 
 RUN acme.sh --issue --domain {{ NGINX_ROOT_DOMAIN }} --domain *.{{ NGINX_ROOT_DOMAIN }} --dns {{ ACME_DNS_API }} --debug 2
 RUN acme.sh --install-cert --domain {{ NGINX_ROOT_DOMAIN }} --domain *.{{ NGINX_ROOT_DOMAIN }} \
