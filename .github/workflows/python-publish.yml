@@ -72,11 +72,12 @@ jobs:
     - name: Commit files
       if: ${{ !env.ACT }}
       run: |
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git add linktools*/.version
-        git add linktools-mobile/src/linktools/assets/frida*.js
-        git add linktools-mobile/src/linktools/assets/android-tools.*
+        git config user.name github-actions[bot]
+        git config user.email github-actions[bot]@users.noreply.github.com
+        git add linktools*/.version \
+                linktools-mobile/src/linktools/assets/frida.js \
+                linktools-mobile/src/linktools/assets/frida-*.js \
+                linktools-mobile/src/linktools/assets/android-tools.*
         git commit -m "Auto commit artifacts (${{ steps.tag.outputs.tag }})"
         git tag -d ${{ steps.tag.outputs.tag }}
         git tag ${{ steps.tag.outputs.tag }}
