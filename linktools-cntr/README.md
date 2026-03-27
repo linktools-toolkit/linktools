@@ -136,6 +136,54 @@ ct-cntr config edit --editor vim
 ct-cntr config reload
 ```
 
+## 容器事件时序
+
+linktools-cntr 通过一套生命周期事件系统统一管理所有容器的启动、停止和删除流程。Manager 按依赖顺序对**所有容器**依次触发各阶段事件，再驱动 Docker Compose 执行。
+
+```
+[初始化]
+  ContainerManager
+    ├─ 扫描 container.py / docker-compose.yml
+    └─ 逐个实例化 → container.on_init()
+
+
+[ct-cntr up]
+  ContainerManager
+    ├─ 依赖解析，得到有序列表：[nginx, lldap, authelia, ...]
+    │
+    ├─ 正序遍历所有容器
+    │    ├─ container.on_check()          # 配置校验，失败则中止
+    │    ├─ container.on_starting()       # 启动前事件
+    │    └─ container.start_hooks[i]()   # 启动阶段钩子
+    ├─ manager.start_hooks[i]()           # Manager 级启动钩子
+    │
+    ├─ >>> docker compose build / up <<<
+    │
+    └─ 逆序遍历所有容器
+         └─ container.on_started()        # 启动后事件（逆序保证依赖安全）
+
+
+[ct-cntr down]
+  ContainerManager
+    ├─ 逆序遍历所有容器
+    │    └─ container.on_stopping()       # 停止前事件（逆序）
+    │
+    ├─ >>> docker compose stop / down <<<
+    │
+    ├─ 正序遍历所有容器
+    │    ├─ container.on_stopped()        # 停止后事件
+    │    └─ container.stop_hooks[i]()    # 停止阶段钩子
+    └─ manager.stop_hooks[i]()            # Manager 级停止钩子
+
+
+[ct-cntr remove]
+  ContainerManager
+    ├─ >>> docker compose down --volumes <<<
+    │
+    └─ 正序遍历所有容器
+         └─ container.on_removed()        # 删除后事件
+```
+
 ## 相关链接
 
 - GitHub: <https://github.com/linktools-toolkit/linktools/tree/master/linktools-cntr>

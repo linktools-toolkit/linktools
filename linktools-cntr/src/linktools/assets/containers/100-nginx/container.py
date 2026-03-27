@@ -107,7 +107,7 @@ class Container(BaseContainer):
         return utils.make_url(scheme, host, port)
 
     def on_init(self):
-        self.start_hooks.append(self._update_files)
+        self.manager.start_hooks.append(self._update_files)
 
     def on_check(self):
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):

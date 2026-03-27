@@ -403,17 +403,16 @@ class Command(BaseCommandGroup):
             container.on_check()
 
         for container in containers:
-            if container.prepare_hooks:
-                for hook in container.prepare_hooks:
-                    hook()
-
-        for container in containers:
             container.on_starting()
 
         for container in containers:
             if container.start_hooks:
                 for hook in container.start_hooks:
                     hook()
+
+        if manager.start_hooks:
+            for hook in manager.start_hooks:
+                hook()
 
         yield
 
@@ -433,6 +432,10 @@ class Command(BaseCommandGroup):
             if container.stop_hooks:
                 for hook in container.stop_hooks:
                     hook()
+
+        if manager.stop_hooks:
+            for hook in manager.stop_hooks:
+                hook()
 
     @classmethod
     @contextlib.contextmanager

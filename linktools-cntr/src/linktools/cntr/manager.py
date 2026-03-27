@@ -204,6 +204,14 @@ class ContainerManager:
                 self.logger.warning(f"Not found installed container `{name}`, skip.")
         return result
 
+    @cached_property
+    def start_hooks(self) -> List[Callable[[], Any]]:
+        return []
+
+    @cached_property
+    def stop_hooks(self) -> List[Callable[[], Any]]:
+        return []
+
     def _load_containers(self) -> List[BaseContainer]:
         containers: List[BaseContainer] = []
 

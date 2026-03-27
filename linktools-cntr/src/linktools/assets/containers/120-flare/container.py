@@ -66,12 +66,6 @@ class Container(BaseContainer):
     def exposes(self) -> "Iterable[ExposeLink]":
         return [
             self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
-            self.expose_other("在线工具集合", "tools", "", "https://tool.lu/"),
-            self.expose_other("在线正则表达式", "regex", "", "https://regex101.com/"),
-            self.expose_other("正则表达式手册", "regex", "", "https://tool.oschina.net/uploads/apidocs/jquery/regexp.html"),
-            self.expose_other("在线json解析", "codeJson", "", "https://www.json.cn/"),
-            self.expose_other("DNS查询", "dns", "", "https://tool.chinaz.com/dns/"),
-            self.expose_other("图标下载", "progressDownload", "", "https://materialdesignicons.com/"),
         ]
 
     def on_starting(self):

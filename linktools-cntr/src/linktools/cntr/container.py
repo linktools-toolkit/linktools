@@ -83,8 +83,8 @@ class ExposeLink:
 class ExposeMixin:
     expose_public = ExposeCategory("public", "Public")
     expose_private = ExposeCategory("private", "Private")
-    expose_container = ExposeCategory("container", "Container")
-    expose_other = ExposeCategory("other", "Other")
+    expose_container = ExposeCategory("container", "Internal")
+    expose_other = ExposeCategory("other", "Tools")
 
     def load_config_url(self: "BaseContainer", key: str, *path: str):
         def make_url():
@@ -120,7 +120,7 @@ class ExposeMixin:
                 waf_enable = True
             https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
-            self.prepare_hooks.append(lambda: self.write_nginx_conf(
+            self.start_hooks.append(lambda: self.write_nginx_conf(
                 domain=domain,
                 proxy_name=proxy_name,
                 proxy_conf=proxy_conf,
@@ -134,6 +134,19 @@ class ExposeMixin:
             port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
             return utils.make_url(scheme, domain, port, *path)
         return ""
+
+    def load_exist_nginx_url(self: "BaseContainer", key: str, *path: str, https: bool = True):
+        def make_url():
+            nonlocal https
+            domain = self.get_config(key, type=str, default=None)
+            if domain:
+                https = https and self.get_config("NGINX_HTTPS_ENABLE")
+                scheme = "https" if https else "http"
+                port = self.get_config("NGINX_HTTPS_PORT" if https else "NGINX_HTTP_PORT")
+                return utils.make_url(scheme, domain, port, *path)
+            return ""
+
+        return utils.lazy_load(make_url)
 
 
 class NginxMixin:
@@ -404,10 +417,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         if not services or not isinstance(services, dict):
             return {}
         return services
-
-    @cached_property
-    def prepare_hooks(self) -> List[Callable[[], Any]]:
-        return []
 
     @cached_property
     def start_hooks(self) -> List[Callable[[], Any]]:
