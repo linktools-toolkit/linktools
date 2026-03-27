@@ -32,7 +32,7 @@ import os
 import os.path
 import pathlib
 import shutil
-from typing import TYPE_CHECKING, Dict, Any, List, Union, Callable, Tuple, Set
+from typing import TYPE_CHECKING, Dict, Any, List, Union, Callable, Tuple, Set, Iterable
 
 from git import InvalidGitRepositoryError
 
@@ -277,7 +277,7 @@ class ContainerManager:
             containers = self.resolve_depend_containers(containers)
         return containers
 
-    def resolve_depend_containers(self, containers: List[BaseContainer]) -> List[BaseContainer]:
+    def resolve_depend_containers(self, containers: Iterable[BaseContainer]) -> List[BaseContainer]:
         order = lambda o: o() if callable(o) else o
         result: Dict[BaseContainer, Union[int, Callable[[], int]]] = dict()
         container_queue: Set[BaseContainer] = set(containers)
@@ -364,8 +364,20 @@ class ContainerManager:
                 result.add(self.containers[name])
         return list(result)
 
-    def _dump_installed_containers(self, containers: List[BaseContainer]) -> None:
+    def _dump_installed_containers(self, containers: Iterable[BaseContainer]) -> None:
         self._dump_setting("INSTALLED_CONTAINERS", list(set([container.name for container in containers])))
+
+    def get_running_containers(self):
+        with self._settings.lock():
+            result = set()
+            for name in self._load_setting("RUNNING_CONTAINERS", reload=True, default=[]):
+                if name in self.containers:
+                    result.add(self.containers[name])
+        return list(result)
+
+    def update_running_containers(self, containers: Iterable[BaseContainer]) -> None:
+        with self._settings.lock():
+            self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
 
     def create_process(
             self,
@@ -402,7 +414,7 @@ class ContainerManager:
 
     def create_docker_compose_process(
             self,
-            containers: List[BaseContainer],
+            containers: Iterable[BaseContainer],
             *args: str,
             privilege: bool = None,
             **kwargs: Any

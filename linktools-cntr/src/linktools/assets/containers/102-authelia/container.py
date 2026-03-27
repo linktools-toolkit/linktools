@@ -35,7 +35,7 @@ import yaml
 
 from linktools import utils
 from linktools.cli import CommandError, subcommand
-from linktools.cntr import BaseContainer, ExposeLink, ContainerError
+from linktools.cntr import BaseContainer, ExposeLink, ContainerError, EventContext
 from linktools.core import Config
 from linktools.decorator import cached_property
 
@@ -167,6 +167,10 @@ class Container(BaseContainer):
         with self.settings.open() as settings:
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
             settings.set(f"{self._key_prefix}_oidc_clients", self.oidc_clients)
+
+    def on_stopped(self, context: EventContext):
+        if context.is_full_containers:
+            self.on_removed()
 
     def on_removed(self):
         with self.settings.open() as settings:

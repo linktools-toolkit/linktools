@@ -29,3 +29,4 @@
 
 from .container import ContainerError, BaseContainer, ExposeLink, ExposeCategory
 from .manager import ContainerManager
+from .context import EventContext

@@ -409,6 +409,8 @@ def remove_file(path: "PathType") -> None:
     """
     if not os.path.exists(path):
         return
+    if get_environ().debug:
+        get_logger().debug(f"Remove File: {path}")
     if os.path.isdir(path):
         import shutil
         shutil.rmtree(path, ignore_errors=True)
@@ -422,6 +424,8 @@ def clear_directory(path: "PathType") -> None:
     """
     if not os.path.isdir(path):
         return
+    if get_environ().debug:
+        get_logger().debug(f"Clear Directory: {path}")
     for name in os.listdir(path):
         target_path = os.path.join(path, name)
         if os.path.isdir(target_path):

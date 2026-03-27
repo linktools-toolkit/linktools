@@ -138,50 +138,67 @@ ct-cntr config reload
 
 ## 容器事件时序
 
-linktools-cntr 通过一套生命周期事件系统统一管理所有容器的启动、停止和删除流程。Manager 按依赖顺序对**所有容器**依次触发各阶段事件，再驱动 Docker Compose 执行。
+linktools-cntr 通过一套生命周期事件系统统一管理容器的启动、停止流程。Manager 按依赖顺序对目标容器依次触发各阶段事件，再驱动 Docker Compose 执行。
+
+> **target_containers**：默认为全部已安装容器；指定容器名（如 `ct-cntr up nginx`）时仅为指定的子集。
 
 ```
-[初始化]
+[初始化]  ← 每次执行任意 ct-cntr 命令时触发
   ContainerManager
-    ├─ 扫描 container.py / docker-compose.yml
+    ├─ 扫描 container.py / docker-compose.yml，依赖解析
     └─ 逐个实例化 → container.on_init()
 
 
 [ct-cntr up]
   ContainerManager
-    ├─ 依赖解析，得到有序列表：[nginx, lldap, authelia, ...]
+    ├─ 正序遍历 target_containers
+    │    ├─ container.on_check(ctx)        # 配置校验，失败则中止
+    │    ├─ container.on_starting(ctx)     # 启动前事件
+    │    └─ container.start_hooks[i]()    # 容器级启动钩子
+    ├─ manager.start_hooks[i]()            # Manager 级启动钩子
     │
-    ├─ 正序遍历所有容器
-    │    ├─ container.on_check()          # 配置校验，失败则中止
-    │    ├─ container.on_starting()       # 启动前事件
-    │    └─ container.start_hooks[i]()   # 启动阶段钩子
-    ├─ manager.start_hooks[i]()           # Manager 级启动钩子
+    ├─ >>> docker compose build / up --detach <<<
     │
-    ├─ >>> docker compose build / up <<<
+    ├─ 逆序遍历 target_containers
+    │    └─ container.on_started(ctx)      # 启动后事件（逆序保证依赖安全）
     │
-    └─ 逆序遍历所有容器
-         └─ container.on_started()        # 启动后事件（逆序保证依赖安全）
+    └─ [孤立容器清理] is_full_containers=True 时
+         └─ 已运行但不在安装列表中的容器 → container.on_removed(ctx)
+
+
+[ct-cntr restart]
+  ContainerManager
+    ├─ 逆序遍历 target_containers
+    │    └─ container.on_stopping(ctx)     # 停止前事件（逆序）
+    │
+    ├─ >>> docker compose stop <<<
+    │
+    ├─ 正序遍历 target_containers
+    │    ├─ container.on_stopped(ctx)      # 停止后事件
+    │    └─ container.stop_hooks[i]()     # 容器级停止钩子
+    ├─ manager.stop_hooks[i]()             # Manager 级停止钩子
+    │
+    ├─ （同 up 流程继续执行）
+    │    ├─ on_check / on_starting / start_hooks
+    │    ├─ >>> docker compose build / up --detach <<<
+    │    └─ on_started
+    │
+    └─ [孤立容器清理] 同 up
 
 
 [ct-cntr down]
   ContainerManager
-    ├─ 逆序遍历所有容器
-    │    └─ container.on_stopping()       # 停止前事件（逆序）
+    ├─ 逆序遍历 target_containers
+    │    └─ container.on_stopping(ctx)     # 停止前事件（逆序）
     │
-    ├─ >>> docker compose stop / down <<<
+    ├─ >>> docker compose down <<<
     │
-    ├─ 正序遍历所有容器
-    │    ├─ container.on_stopped()        # 停止后事件
-    │    └─ container.stop_hooks[i]()    # 停止阶段钩子
-    └─ manager.stop_hooks[i]()            # Manager 级停止钩子
-
-
-[ct-cntr remove]
-  ContainerManager
-    ├─ >>> docker compose down --volumes <<<
+    ├─ 正序遍历 target_containers
+    │    ├─ container.on_stopped(ctx)      # 停止后事件
+    │    └─ container.stop_hooks[i]()     # 容器级停止钩子
+    ├─ manager.stop_hooks[i]()             # Manager 级停止钩子
     │
-    └─ 正序遍历所有容器
-         └─ container.on_removed()        # 删除后事件
+    └─ [孤立容器清理] 同 up
 ```
 
 ## 相关链接

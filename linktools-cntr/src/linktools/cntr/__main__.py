@@ -27,6 +27,7 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import contextlib
+import inspect
 import os
 from argparse import Namespace
 from subprocess import SubprocessError
@@ -42,6 +43,7 @@ from linktools.core import environ
 from linktools.rich import confirm, choose
 from linktools.types import ConfigError
 from .container import ContainerError, BaseContainer
+from .context import EventContext
 from .manager import ContainerManager
 
 manager = ContainerManager(environ)
@@ -298,15 +300,14 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_up(self, names: List[str] = None, build: bool = True, pull: str = False):
-        containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name in names] if names else containers
+        context = self._make_context("up", names)
 
         build_options = []
         up_options = ["--detach", "--no-build"]
         if pull:
             build_options.extend(["--pull"])
             up_options.extend(["--pull", "always"])
-        if not names:
+        if context.is_full_containers:
             up_options.extend(["--remove-orphans"])
 
         for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
@@ -317,21 +318,28 @@ class Command(BaseCommandGroup):
                 build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
 
         services = []
-        if names:
-            for name in names:
-                services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{','.join(names)}`"
+        if not context.is_full_containers:
+            for container in context.target_containers:
+                services.extend(container.services.keys())
+            if not services:
+                raise ContainerError(
+                    f"No service found in container "
+                    f"`{','.join([c.name for c in context.target_containers])}`"
+                )
 
-        with self._notify_start(target_containers):
+        with self._notify_start(context):
             if build:
                 manager.create_docker_compose_process(
-                    containers,
+                    context.containers,
                     "build", *build_options, *services,
                 ).check_call()
             manager.create_docker_compose_process(
-                containers,
+                context.containers,
                 "up", *up_options, *services
             ).check_call()
+
+        with self._notify_remove(context):
+            pass
 
     @subcommand("restart", help="restart installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
@@ -340,72 +348,80 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_restart(self, names: List[str] = None, build: bool = True, pull: str = False):
-        containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name in names] if names else containers
+        context = self._make_context("restart", names)
 
         build_options = []
         up_options = ["--detach", "--no-build"]
         if pull:
             build_options.extend(["--pull"])
             up_options.extend(["--pull", "always"])
-        if not names:
+        if context.is_full_containers:
             up_options.extend(["--remove-orphans"])
 
         services = []
-        if names:
-            for name in names:
-                services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{','.join(names)}`"
+        if not context.is_full_containers:
+            for container in context.target_containers:
+                services.extend(container.services.keys())
+            if not services:
+                raise ContainerError(
+                    f"No service found in container "
+                    f"`{','.join([c.name for c in context.target_containers])}`"
+                )
 
-        with self._notify_stop(target_containers):
+        with self._notify_stop(context):
             manager.create_docker_compose_process(
-                containers,
+                context.containers,
                 "stop", *services
             ).check_call()
 
-        with self._notify_start(target_containers):
+        with self._notify_start(context):
             if build:
                 manager.create_docker_compose_process(
-                    containers,
+                    context.containers,
                     "build", *build_options, *services,
                 ).check_call()
             manager.create_docker_compose_process(
-                containers,
+                context.containers,
                 "up", *up_options, *services
             ).check_call()
+
+        with self._notify_remove(context):
+            pass
 
     @subcommand("down", help="stop installed containers")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_down(self, names: List[str] = None):
-        containers = manager.prepare_installed_containers()
-        target_containers = [c for c in containers if c.name in names] if names else containers
+        context = self._make_context("down", names)
 
         services = []
-        if names:
-            for name in names:
-                services.extend(manager.containers[name].services.keys())
-            assert services, f"No service found in container `{','.join(names)}`"
+        if not context.is_full_containers:
+            for container in context.target_containers:
+                services.extend(container.services.keys())
+            if not services:
+                raise ContainerError(
+                    f"No service found in container "
+                    f"`{','.join([c.name for c in context.target_containers])}`"
+                )
 
-        with self._notify_stop(target_containers):
+        with self._notify_stop(context):
             manager.create_docker_compose_process(
-                containers,
+                context.containers,
                 "down", *services
             ).check_call()
 
-        with self._notify_remove(target_containers):
+        with self._notify_remove(context):
             pass
 
-    @classmethod
     @contextlib.contextmanager
-    def _notify_start(cls, containers: List[BaseContainer]):
-        for container in containers:
-            container.on_check()
+    def _notify_start(self, context: EventContext):
+        for container in context.target_containers:
+            self._callback(container.on_check, context)
 
-        for container in containers:
-            container.on_starting()
+        for container in context.target_containers:
+            self._callback(container.on_starting, context)
 
-        for container in containers:
+        for container in context.target_containers:
             if container.start_hooks:
                 for hook in container.start_hooks:
                     hook()
@@ -416,19 +432,18 @@ class Command(BaseCommandGroup):
 
         yield
 
-        for container in reversed(containers):
-            container.on_started()
+        for container in reversed(context.target_containers):
+            self._callback(container.on_started, context)
 
-    @classmethod
     @contextlib.contextmanager
-    def _notify_stop(cls, containers: List[BaseContainer]):
-        for container in reversed(containers):
-            container.on_stopping()
+    def _notify_stop(self, context: EventContext):
+        for container in reversed(context.target_containers):
+            self._callback(container.on_stopping, context)
 
         yield
 
-        for container in containers:
-            container.on_stopped()
+        for container in context.target_containers:
+            self._callback(container.on_stopped, context)
             if container.stop_hooks:
                 for hook in container.stop_hooks:
                     hook()
@@ -437,13 +452,38 @@ class Command(BaseCommandGroup):
             for hook in manager.stop_hooks:
                 hook()
 
-    @classmethod
     @contextlib.contextmanager
-    def _notify_remove(cls, containers: List[BaseContainer]):
+    def _notify_remove(self, context: EventContext):
         yield
 
-        for container in containers:
-            container.on_removed()
+        if context.is_full_containers:
+            running_containers = manager.get_running_containers()
+            all_containers = {*context.containers, *running_containers}
+            for container in running_containers:
+                if container not in context.containers:
+                    self._callback(container.on_removed, context)
+                    all_containers.remove(container)
+            manager.update_running_containers(all_containers)
+
+    def _make_context(self, command, names):
+        context = EventContext()
+        context.command = command
+        context.containers = manager.prepare_installed_containers()
+        if not names:
+            context.target_containers = context.containers
+            context.is_full_containers = True
+        else:
+            context.target_containers = [c for c in context.containers if c.name in names]
+            context.is_full_containers = False
+        return context
+
+    def _callback(self, func, context):
+        sig = inspect.signature(func)
+        self.logger.debug(f"Callback {func}")
+        if len(sig.parameters) == 0:
+            return func()
+        else:
+            return func(context)
 
 
 command = Command()
