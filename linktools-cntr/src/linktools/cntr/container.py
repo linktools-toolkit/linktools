@@ -48,6 +48,7 @@ from ..capabilities.cntr import __cap_cntr__
 if TYPE_CHECKING:
     from linktools.types import T, ConfigType
     from .manager import ContainerManager
+    from .context import EventContext
 
 
 class ExposeCategory:
@@ -351,7 +352,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_prepare(self):
         pass
 
-    def on_check(self, context: EventContext):
+    def on_check(self, context: "EventContext"):
         pass
 
     def on_starting(self, context: "EventContext"):
@@ -665,7 +666,7 @@ class SourceContainer(BaseContainer):
     def _source_path(self):
         raise NotImplementedError()
 
-    def _handle_source(self, source: PathType, destination: PathType):
+    def _handle_source_file(self, source: PathType, destination: PathType):
         import zipfile
         with zipfile.ZipFile(source) as f:
             for names in f.namelist():
@@ -683,7 +684,7 @@ class SourceContainer(BaseContainer):
                 file.save(source_path.parent, source_path.name)
                 os.makedirs(dest_path, exist_ok=True)
                 try:
-                    self._handle_source(source_path, dest_path)
+                    self._handle_source_file(source_path, dest_path)
                 except:
                     utils.remove_file(source_path)
                     utils.remove_file(dest_path)

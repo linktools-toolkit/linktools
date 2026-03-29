@@ -191,7 +191,7 @@ class Container(BaseContainer):
 
     def on_stopped(self, context: EventContext):
         if context.is_full_containers:
-            self.on_removed()
+            self.on_removed(context)
             return
         for container in context.target_containers:
             path = self.get_app_path("temporary", container.name)

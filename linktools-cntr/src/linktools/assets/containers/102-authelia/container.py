@@ -170,7 +170,7 @@ class Container(BaseContainer):
 
     def on_stopped(self, context: EventContext):
         if context.is_full_containers:
-            self.on_removed()
+            self.on_removed(context)
 
     def on_removed(self, context: EventContext):
         with self.settings.open() as settings:
