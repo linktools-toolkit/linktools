@@ -1,4 +1,4 @@
-# Linktools Mobile
+# linktools-mobile
 
 Linktools 移动设备工具包，提供 Android 和 iOS 设备管理、动态分析及安全测试等功能。Android 命令前缀 `at-`，iOS 命令前缀 `it-`。
 

@@ -1,7 +1,7 @@
 {% include "Dockerfile_ADD_USER" %}
 
 RUN set -eux; \
-    if [ "$ARG_USER_UID" -ne 0 ]; then \
-        echo "$ARG_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers; \
-        adduser "$ARG_USER" sudo; \
+    if [ "$LT_USER_UID" -ne 0 ]; then \
+        echo "$LT_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers; \
+        adduser "$LT_USER" sudo; \
     fi

@@ -31,7 +31,7 @@ from typing import Iterable
 
 from linktools import utils
 from linktools.cli import CommandError
-from linktools.cntr import BaseContainer, ExposeLink, ContainerError
+from linktools.cntr import BaseContainer, ExposeLink, ContainerError, EventContext
 from linktools.core import Config
 from linktools.decorator import cached_property
 
@@ -67,13 +67,13 @@ class Container(BaseContainer):
             )),
         ]
 
-    def on_check(self):
+    def on_check(self, context: EventContext):
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
-    def on_starting(self):
+    def on_starting(self, context: EventContext):
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
 

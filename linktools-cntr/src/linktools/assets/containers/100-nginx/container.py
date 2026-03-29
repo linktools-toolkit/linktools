@@ -110,7 +110,7 @@ class Container(BaseContainer):
     def on_init(self):
         self.manager.start_hooks.append(self._update_files)
 
-    def on_check(self):
+    def on_check(self, context: EventContext):
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.manager.containers["safeline"].enable:
@@ -160,7 +160,7 @@ class Container(BaseContainer):
                 flush=True,
             )
 
-    def on_started(self):
+    def on_started(self, context: EventContext):
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
             root_domain = self.get_config("NGINX_ROOT_DOMAIN")
@@ -198,7 +198,7 @@ class Container(BaseContainer):
             if path.exists():
                 utils.remove_file(path)
 
-    def on_removed(self):
+    def on_removed(self, context: EventContext):
         utils.clear_directory(self.get_app_path("temporary"))
         utils.clear_directory(self.get_app_path("conf.d"))
 

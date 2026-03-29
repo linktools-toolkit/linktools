@@ -1,30 +1,30 @@
-# ARG ARG_USER={{ DOCKER_USER }}
-# ARG ARG_USER_UID={{ DOCKER_UID }}
-# ARG ARG_USER_GID={{ DOCKER_GID }}
-# ARG ARG_USER_DIR=/workspace
-# ARG ARG_USER_SHELL
+# ARG LT_USER={{ DOCKER_USER }}
+# ARG LT_USER_UID={{ DOCKER_UID }}
+# ARG LT_USER_GID={{ DOCKER_GID }}
+# ARG LT_USER_DIR=/workspace
+# ARG LT_USER_SHELL
 
 RUN set -eux; \
-    if [ "$ARG_USER_UID" -ne 0 ]; then \
-        _USER_DIR="${ARG_USER_DIR:-/home/$ARG_USER}"; \
-        _USER_SHELL="${ARG_USER_SHELL:-/bin/bash}"; \
-        if getent group "$ARG_USER_GID" >/dev/null; then \
-            _USER_GROUP_NAME="$(getent group "$ARG_USER_GID" | cut -d: -f1)"; \
+    if [ "$LT_USER_UID" -ne 0 ]; then \
+        _USER_DIR="${LT_USER_DIR:-/home/$LT_USER}"; \
+        _USER_SHELL="${LT_USER_SHELL:-/bin/bash}"; \
+        if getent group "$LT_USER_GID" >/dev/null; then \
+            _USER_GROUP_NAME="$(getent group "$LT_USER_GID" | cut -d: -f1)"; \
         else \
-            groupadd -g "$ARG_USER_GID" "$ARG_USER"; \
-            _USER_GROUP_NAME="$ARG_USER"; \
+            groupadd -g "$LT_USER_GID" "$LT_USER"; \
+            _USER_GROUP_NAME="$LT_USER"; \
         fi; \
         \
-        if getent passwd "$ARG_USER_UID" >/dev/null; then \
-            usermod -l "$ARG_USER" "$(getent passwd "$ARG_USER_UID" | cut -d: -f1)"; \
-            usermod -d "$_USER_DIR" -m "$ARG_USER"; \
-            usermod -s "$_USER_SHELL" "$ARG_USER"; \
-            usermod -g "$_USER_GROUP_NAME" "$ARG_USER"; \
+        if getent passwd "$LT_USER_UID" >/dev/null; then \
+            usermod -l "$LT_USER" "$(getent passwd "$LT_USER_UID" | cut -d: -f1)"; \
+            usermod -d "$_USER_DIR" -m "$LT_USER"; \
+            usermod -s "$_USER_SHELL" "$LT_USER"; \
+            usermod -g "$_USER_GROUP_NAME" "$LT_USER"; \
         else \
-            useradd -m -d "$_USER_DIR" -u "$ARG_USER_UID" -g "$_USER_GROUP_NAME" -s "$_USER_SHELL" "$ARG_USER"; \
+            useradd -m -d "$_USER_DIR" -u "$LT_USER_UID" -g "$_USER_GROUP_NAME" -s "$_USER_SHELL" "$LT_USER"; \
         fi; \
-        mkdir -p "$_USER_DIR" && chown -R "$ARG_USER_UID:$ARG_USER_GID" "$_USER_DIR"; \
+        mkdir -p "$_USER_DIR" && chown -R "$LT_USER_UID:$LT_USER_GID" "$_USER_DIR"; \
     else \
-        usermod -d "${ARG_USER_DIR:-/root}" -m root; \
-        usermod -s "${ARG_USER_SHELL:-/bin/bash}" root; \
+        usermod -d "${LT_USER_DIR:-/root}" -m root; \
+        usermod -s "${LT_USER_SHELL:-/bin/bash}" root; \
     fi

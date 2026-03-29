@@ -300,7 +300,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_up(self, names: List[str] = None, build: bool = True, pull: str = False):
-        context = self._make_context("up", names)
+        context = self._make_context(["up", pull and "pull", build and "build"], names)
 
         build_options = []
         up_options = ["--detach", "--no-build"]
@@ -348,7 +348,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_restart(self, names: List[str] = None, build: bool = True, pull: str = False):
-        context = self._make_context("restart", names)
+        context = self._make_context(["restart", pull and "pull", build and "build"], names)
 
         build_options = []
         up_options = ["--detach", "--no-build"]
@@ -465,9 +465,9 @@ class Command(BaseCommandGroup):
                     all_containers.remove(container)
             manager.update_running_containers(all_containers)
 
-    def _make_context(self, command, names):
+    def _make_context(self, commands, names):
         context = EventContext()
-        context.command = command
+        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
         context.containers = manager.prepare_installed_containers()
         if not names:
             context.target_containers = context.containers

@@ -133,7 +133,7 @@ class Container(BaseContainer):
     def on_init(self):
         self.manager.start_hooks.append(self._update_files)
 
-    def on_check(self):
+    def on_check(self, context: EventContext):
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
@@ -172,7 +172,7 @@ class Container(BaseContainer):
         if context.is_full_containers:
             self.on_removed()
 
-    def on_removed(self):
+    def on_removed(self, context: EventContext):
         with self.settings.open() as settings:
             settings.pop(f"{self._key_prefix}_acl_rules", None)
             settings.pop(f"{self._key_prefix}_oidc_clients", None)

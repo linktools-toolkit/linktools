@@ -1,19 +1,19 @@
 RUN set -ex; \
-    if [ -n "$ARG_GIT_NAME" ]; then \
-        git config --global user.name "$ARG_GIT_NAME"; \
+    if [ -n "$LT_GIT_NAME" ]; then \
+        git config --global user.name "$LT_GIT_NAME"; \
     fi; \
-    if [ -n "$ARG_GIT_EMAIL" ]; then \
-        git config --global user.email "$ARG_GIT_EMAIL"; \
+    if [ -n "$LT_GIT_EMAIL" ]; then \
+        git config --global user.email "$LT_GIT_EMAIL"; \
     fi; \
-    if [ -n "$ARG_GIT_PULL_REBASE" ]; then \
-        git config --global pull.rebase "$ARG_GIT_PULL_REBASE"; \
+    if [ -n "$LT_GIT_PULL_REBASE" ]; then \
+        git config --global pull.rebase "$LT_GIT_PULL_REBASE"; \
     fi; \
-    if [ -n "$ARG_GIT_PULL_FF" ]; then \
-        git config --global pull.ff "$ARG_GIT_PULL_FF"; \
+    if [ -n "$LT_GIT_PULL_FF" ]; then \
+        git config --global pull.ff "$LT_GIT_PULL_FF"; \
     fi; \
-    if [ -n "$ARG_GIT_HTTP_SSLVERIFY" ]; then \
-        git config --global http.sslverify "$ARG_GIT_HTTP_SSLVERIFY"; \
+    if [ -n "$LT_GIT_HTTP_SSLVERIFY" ]; then \
+        git config --global http.sslverify "$LT_GIT_HTTP_SSLVERIFY"; \
     fi; \
-    if [ -n "$ARG_GIT_CORE_EDITOR" ]; then \
-        git config --global core.editor "$ARG_GIT_CORE_EDITOR"; \
+    if [ -n "$LT_GIT_CORE_EDITOR" ]; then \
+        git config --global core.editor "$LT_GIT_CORE_EDITOR"; \
     fi

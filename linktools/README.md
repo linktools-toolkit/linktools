@@ -1,4 +1,4 @@
-# Linktools
+# linktools
 
 Linktools 核心框架，提供命令行工具基础设施、环境管理及通用工具集。
 

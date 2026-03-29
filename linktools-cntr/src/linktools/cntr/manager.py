@@ -304,6 +304,8 @@ class ContainerManager:
             container.enable = container in containers
         for container in reversed(containers):
             self.config.update_defaults(**container.configs)
+        for container in self.containers.values():
+            container.on_prepare()
         for container in containers:
             if container.docker_file and self.debug:  # 加载每个容器的dockerfile
                 self.logger.debug(f"Generate Dockerfile for {container.name}")

@@ -27,6 +27,6 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from .container import ContainerError, BaseContainer, ExposeLink, ExposeCategory
+from .container import ContainerError, BaseContainer, SourceContainer, ExposeLink, ExposeCategory
 from .manager import ContainerManager
 from .context import EventContext

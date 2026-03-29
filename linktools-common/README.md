@@ -1,4 +1,4 @@
-# Linktools Common
+# linktools-common
 
 Linktools 通用工具包，提供环境管理、文件搜索及远程工具下载执行等功能（命令前缀 `ct-`）。
 

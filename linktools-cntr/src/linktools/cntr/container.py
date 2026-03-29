@@ -348,22 +348,25 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_init(self):
         pass
 
-    def on_check(self):
+    def on_prepare(self):
         pass
 
-    def on_starting(self):
+    def on_check(self, context: EventContext):
         pass
 
-    def on_started(self):
+    def on_starting(self, context: "EventContext"):
         pass
 
-    def on_stopping(self):
+    def on_started(self, context: "EventContext"):
         pass
 
-    def on_stopped(self):
+    def on_stopping(self, context: "EventContext"):
         pass
 
-    def on_removed(self):
+    def on_stopped(self, context: "EventContext"):
+        pass
+
+    def on_removed(self, context: "EventContext"):
         pass
 
     @subcommand("shell", help="exec into container using command sh")
@@ -649,6 +652,55 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def __repr__(self):
         return f"Container<{self.name}>"
+
+
+class SourceContainer(BaseContainer):
+    __abstract__ = True
+
+    @property
+    def _source_url(self):
+        raise NotImplementedError()
+
+    @property
+    def _source_path(self):
+        raise NotImplementedError()
+
+    def _handle_source(self, source: PathType, destination: PathType):
+        import zipfile
+        with zipfile.ZipFile(source) as f:
+            for names in f.namelist():
+                f.extract(names, destination)
+
+    @cached_property
+    def _context_path(self):
+        name = utils.get_md5(self._source_url)
+        source_path = self.get_app_path("source", f"{name}.in")
+        dest_path = self.get_app_path("source", f"{name}.out")
+
+        def init_source_code():
+            if not os.path.isdir(dest_path):
+                file = self.manager.environ.get_url_file(self._source_url)
+                file.save(source_path.parent, source_path.name)
+                os.makedirs(dest_path, exist_ok=True)
+                try:
+                    self._handle_source(source_path, dest_path)
+                except:
+                    utils.remove_file(source_path)
+                    utils.remove_file(dest_path)
+                    raise
+
+        self.start_hooks.append(init_source_code)
+        return os.path.join(dest_path, self._source_path)
+
+    def get_docker_context_path(self):
+        return self._context_path
+
+    def on_starting(self, context: "EventContext"):
+        if "pull" in context.commands:
+            utils.remove_file(self.get_app_path("source"))
+
+    def on_removed(self, context: "EventContext"):
+        utils.remove_file(self.get_app_path("source"))
 
 
 class SimpleContainer(BaseContainer):
