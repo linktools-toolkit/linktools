@@ -131,7 +131,7 @@ class Container(BaseContainer):
         return result
 
     def on_init(self):
-        self.manager.start_hooks.append(self._update_files)
+        self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
     def on_check(self, context: EventContext):
         if not self.get_config("NGINX_HTTPS_ENABLE"):
