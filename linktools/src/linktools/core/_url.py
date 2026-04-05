@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
 from linktools.decorator import cached_property, timeoutable
 from linktools.rich import create_progress
 from linktools.types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError, FileCache
-from linktools.utils import get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent, get_hash_ident
+from linktools.utils import get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent, get_hash_ident, remove_file
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -306,6 +306,7 @@ class HttpContext:
     file_size: Optional[int] = HttpContextVar("FileSize")
     file_name: Optional[str] = HttpContextVar("FileName")
     completed: bool = HttpContextVar("IsCompleted", False)
+    content_encoding: str = HttpContextVar("ContentEncoding", "")
 
     def __init__(self, environ: "BaseEnviron", path: str):
         self._environ = environ
@@ -369,6 +370,24 @@ class HttpContext:
             if os.path.getsize(self.file_path) == 0:
                 raise DownloadError(f"download {self.url} error")
 
+            self._decompress_if_needed()
+
+    def _decompress_if_needed(self):
+        if self.content_encoding.lower() == "gzip":
+            import gzip
+            import shutil
+            self._environ.logger.debug(f"Decompressing gzip file {self.file_path}")
+            tmp_path = self.file_path + ".tmp"
+            remove_file(tmp_path)
+            try:
+                with gzip.open(self.file_path, "rb") as gz, open(tmp_path, "wb") as out:
+                    shutil.copyfileobj(gz, out)
+            except:
+                remove_file(self.file_path)
+                remove_file(tmp_path)
+                raise
+            os.replace(tmp_path, self.file_path)
+
     def _download_with_requests(self, timeout: float):
         import requests
         from requests import HTTPError
@@ -388,7 +407,9 @@ class HttpContext:
                 _, params = parse_header(resp.headers["Content-Disposition"])
                 if "filename" in params:
                     self.file_name = params["filename"]
+            self.content_encoding = resp.headers.get("Content-Encoding", "")
 
+            resp.raw.decode_content = False
             for chunk in resp.iter_content(bs):
                 if chunk:
                     yield chunk
@@ -415,6 +436,7 @@ class HttpContext:
                 _, params = parse_header(headers["Content-Disposition"])
                 if "filename" in params:
                     self.file_name = params["filename"]
+            self.content_encoding = headers.get("Content-Encoding", "")
 
             while True:
                 chunk = fp.read(bs)

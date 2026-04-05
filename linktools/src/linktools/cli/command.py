@@ -857,6 +857,13 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return environ
 
     @property
+    def config(self) -> dict:
+        """
+        配置信息
+        """
+        return self.environ.config
+
+    @property
     def logger(self) -> logging.Logger:
         """
         日志记录器

@@ -107,7 +107,8 @@ class ExposeMixin:
 
     def load_nginx_url(
             self: "BaseContainer", key: str, *path: str,
-            proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
+            proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__,
             auth_enable: bool = False, auth_extra: Dict[str, Any] = None,
     ):
@@ -124,6 +125,7 @@ class ExposeMixin:
             self.start_hooks.append(lambda: self.write_nginx_conf(
                 domain=domain,
                 proxy_name=proxy_name,
+                proxy_domain_name=proxy_domain_name,
                 proxy_conf=proxy_conf,
                 proxy_url=proxy_url,
                 https_enable=https_enable,
@@ -172,10 +174,10 @@ class NginxMixin:
 
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,
-            proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
+            proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__,
             auth_enable: bool = False, auth_extra: Dict[str, Any] = __missing__,
-            flush: bool = False,
     ):
 
         nginx = self.manager.containers["nginx"]
@@ -184,6 +186,7 @@ class NginxMixin:
                 container=self,
                 domain=domain,
                 proxy_name=proxy_name,
+                proxy_domain_name=proxy_domain_name,
                 proxy_conf=proxy_conf,
                 proxy_url=proxy_url,
                 https_enable=https_enable,

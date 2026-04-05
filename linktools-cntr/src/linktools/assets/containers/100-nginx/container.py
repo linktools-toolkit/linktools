@@ -95,6 +95,29 @@ class Container(BaseContainer):
                 configs[env_var] = Config.Prompt(cached=True, allow_empty=meta.get("required", True))
         return configs
 
+    @cached_property
+    def ssl_domains(self):
+        result = list()
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if domain:
+            result.extend([domain, f"*.{domain}"])
+        return result
+
+    @cached_property
+    def ssl_domains_acme_args(self):
+        return " ".join([f"--domain {domain}" for domain in self.ssl_domains if domain])
+
+    @cached_property
+    def ssl_certificate_acme_args(self):
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if domain:
+            return " ".join([
+                "--cert-file", f"/etc/certs/{domain}_cert.pem",
+                "--key-file", f"/etc/certs/{domain}_key.pem",
+                "--fullchain-file", f"/etc/certs/{domain}_fullchain.pem",
+            ])
+        return ""
+
     def _get_default_index_url(self):
         host = "www.google.com" \
             if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
@@ -163,23 +186,19 @@ class Container(BaseContainer):
     def on_started(self, context: EventContext):
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
-            root_domain = self.get_config("NGINX_ROOT_DOMAIN")
-            dns_api = self.get_config("ACME_DNS_API")
             self.logger.info("Renew nginx certificates if necessary.")
             self.manager.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --renew --issue "
-                            f"--domain {root_domain} --domain *.{root_domain} "
-                            f"--dns {dns_api} "
+                            f"{self.ssl_domains_acme_args} "
+                            f"--dns {self.get_config('ACME_DNS_API')} "
                             f"1>/dev/null"
             ).call()
             self.manager.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --install-cert "
-                            f"--domain {root_domain} --domain *.{root_domain} "
-                            f"--cert-file /etc/certs/{root_domain}_cert.pem "
-                            f"--key-file /etc/certs/{root_domain}_key.pem "
-                            f"--fullchain-file /etc/certs/{root_domain}_fullchain.pem "
+                            f"{self.ssl_domains_acme_args} "
+                            f"{self.ssl_certificate_acme_args} "
                             f"1>/dev/null"
             ).call()
 
@@ -204,18 +223,21 @@ class Container(BaseContainer):
 
     def write_conf(
         self, container: BaseContainer, domain: str, *,
-        proxy_name: str = __missing__, proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+        proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
+        proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
         https_enable: bool = __missing__, waf_enable: bool = __missing__,
         auth_enable: bool = False, auth_extra: "Dict[str, Any]" = __missing__,
         flush: bool = False,
     ):
 
+        proxy_name = proxy_name or container.name
+        proxy_domain_name = proxy_domain_name or domain
         if flush:
-            conf_path = self.get_app_path("conf.d", f"{domain}.conf")
-            sub_conf_path = self.get_app_path("conf.d", f"{domain}_confs", f"{proxy_name or container.name}.conf")
+            conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}.conf")
+            sub_conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
         else:
-            conf_path = self.get_app_path("temporary", container.name, f"{domain}.conf")
-            sub_conf_path = self.get_app_path("temporary", container.name, f"{domain}_confs", f"{proxy_name or container.name}.conf")
+            conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}.conf")
+            sub_conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
 
         try:
             if not domain:
@@ -239,6 +261,7 @@ class Container(BaseContainer):
 
             context = dict(
                 DOMAIN=domain,
+                DOMAIN_NAME=proxy_domain_name,
                 HTTPS_ENABLE=https_enable,
                 WAF_ENABLE=waf_enable,
                 AUTH_ENABLE=auth_enable,
@@ -265,6 +288,7 @@ class Container(BaseContainer):
                 authelia.write_nginx_conf(
                     domain=domain,
                     proxy_name="auth_location",
+                    proxy_domain_name=proxy_domain_name,
                     proxy_conf=self.get_source_path("templates", "auth_location.conf"),
                 )
                 if auth_extra:

@@ -112,7 +112,7 @@ class ConfigLoader:
         elif action.metavar:
             item = action.metavar
 
-        config = parser.command.environ.config
+        config = parser.command.config
         key = f"`{item}` for `{parser.prog}`"
         if value is __missing__ or isinstance(value, ConfigLoader):
             value = action.property.get(

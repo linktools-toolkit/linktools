@@ -186,6 +186,10 @@ class ExecCommand(BaseCommand):
         return "exec"
 
     @property
+    def config(self):
+        return manager.config
+
+    @property
     def _subparser(self) -> CommandParser:
         parser = CommandParser()
 
