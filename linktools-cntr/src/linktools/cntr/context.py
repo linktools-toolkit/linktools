@@ -11,5 +11,5 @@ class EventContext:
     def __init__(self):
         self.commands: Optional[List[str]] = None
         self.containers: Optional[List[BaseContainer]] = None
-        self.target_containers: Optional[List[str]] = None
+        self.target_containers: Optional[List[BaseContainer]] = None
         self.is_full_containers: bool = True

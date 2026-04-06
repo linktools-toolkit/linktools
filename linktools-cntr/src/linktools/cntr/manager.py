@@ -26,7 +26,9 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+import contextlib
 import functools
+import inspect
 import json
 import os
 import os.path
@@ -39,6 +41,7 @@ from git import InvalidGitRepositoryError
 from linktools import utils
 from linktools.core import Config
 from linktools.decorator import cached_property
+from linktools.metadata import __missing__
 from linktools.types import PathType, FileCache
 from .container import BaseContainer, SimpleContainer, ContainerError
 from .repository import Repository
@@ -46,6 +49,7 @@ from ..capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
     from linktools.core import Environ
+    from .context import EventContext
 
 
 class ContainerManager:
@@ -254,7 +258,7 @@ class ContainerManager:
                         if not value.__abstract__:
                             container = value(self, path)
                             self.logger.debug(f"Load container {container.name} in {path}")
-                            container.on_init()
+                            self._callback(container.on_init)
                             yield container
                             return
             except Exception as e:
@@ -266,7 +270,7 @@ class ContainerManager:
             if os.path.exists(compose_path):
                 container = SimpleContainer(self, path)
                 self.logger.debug(f"Load container {container.name} in {path}")
-                container.on_init()
+                self._callback(container.on_init)
                 yield container
                 return
 
@@ -305,7 +309,7 @@ class ContainerManager:
         for container in reversed(containers):
             self.config.update_defaults(**container.configs)
         for container in self.containers.values():
-            container.on_prepare()
+            self._callback(func=container.on_prepare)
         for container in containers:
             if container.docker_file and self.debug:  # 加载每个容器的dockerfile
                 self.logger.debug(f"Generate Dockerfile for {container.name}")
@@ -380,6 +384,69 @@ class ContainerManager:
     def update_running_containers(self, containers: Iterable[BaseContainer]) -> None:
         with self._settings.lock():
             self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
+
+    @contextlib.contextmanager
+    def notify_start(self, context: "EventContext"):
+        for container in context.target_containers:
+            self._callback(container.on_check, context)
+
+        for container in context.target_containers:
+            self._callback(container.on_starting, context)
+
+        for container in context.target_containers:
+            if container.start_hooks:
+                for hook in container.start_hooks:
+                    hook()
+
+        if self.start_hooks:
+            for hook in self.start_hooks:
+                hook()
+
+        yield
+
+        for container in reversed(context.target_containers):
+            self._callback(container.on_started, context)
+
+    @contextlib.contextmanager
+    def notify_stop(self, context: "EventContext"):
+        for container in reversed(context.target_containers):
+            self._callback(container.on_stopping, context)
+
+        yield
+
+        for container in context.target_containers:
+            self._callback(container.on_stopped, context)
+            if container.stop_hooks:
+                for hook in container.stop_hooks:
+                    hook()
+
+        if self.stop_hooks:
+            for hook in self.stop_hooks:
+                hook()
+
+    @contextlib.contextmanager
+    def notify_remove(self, context: "EventContext"):
+        yield
+
+        if context.is_full_containers:
+            running_containers = self.get_running_containers()
+            all_containers = {*context.containers, *running_containers}
+            for container in running_containers:
+                if container not in context.containers:
+                    self._callback(container.on_removed, context)
+                    all_containers.remove(container)
+            self.update_running_containers(all_containers)
+
+    def _callback(self, func, context: "EventContext" = __missing__):
+        if self.environ.debug:
+            self.logger.debug(f"Callback {func}")
+        if context is __missing__:
+            return func()
+        sig = inspect.signature(func)
+        if len(sig.parameters) == 0:
+            return func()
+        else:
+            return func(context)
 
     def create_process(
             self,

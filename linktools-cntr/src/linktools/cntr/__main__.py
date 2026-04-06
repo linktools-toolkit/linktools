@@ -331,7 +331,7 @@ class Command(BaseCommandGroup):
                     f"`{','.join([c.name for c in context.target_containers])}`"
                 )
 
-        with self._notify_start(context):
+        with manager.notify_start(context):
             if build:
                 manager.create_docker_compose_process(
                     context.containers,
@@ -342,7 +342,7 @@ class Command(BaseCommandGroup):
                 "up", *up_options, *services
             ).check_call()
 
-        with self._notify_remove(context):
+        with manager.notify_remove(context):
             pass
 
     @subcommand("restart", help="restart installed containers")
@@ -372,13 +372,13 @@ class Command(BaseCommandGroup):
                     f"`{','.join([c.name for c in context.target_containers])}`"
                 )
 
-        with self._notify_stop(context):
+        with manager.notify_stop(context):
             manager.create_docker_compose_process(
                 context.containers,
                 "stop", *services
             ).check_call()
 
-        with self._notify_start(context):
+        with manager.notify_start(context):
             if build:
                 manager.create_docker_compose_process(
                     context.containers,
@@ -389,7 +389,7 @@ class Command(BaseCommandGroup):
                 "up", *up_options, *services
             ).check_call()
 
-        with self._notify_remove(context):
+        with manager.notify_remove(context):
             pass
 
     @subcommand("down", help="stop installed containers")
@@ -408,66 +408,14 @@ class Command(BaseCommandGroup):
                     f"`{','.join([c.name for c in context.target_containers])}`"
                 )
 
-        with self._notify_stop(context):
+        with manager.notify_stop(context):
             manager.create_docker_compose_process(
                 context.containers,
                 "down", *services
             ).check_call()
 
-        with self._notify_remove(context):
+        with manager.notify_remove(context):
             pass
-
-    @contextlib.contextmanager
-    def _notify_start(self, context: EventContext):
-        for container in context.target_containers:
-            self._callback(container.on_check, context)
-
-        for container in context.target_containers:
-            self._callback(container.on_starting, context)
-
-        for container in context.target_containers:
-            if container.start_hooks:
-                for hook in container.start_hooks:
-                    hook()
-
-        if manager.start_hooks:
-            for hook in manager.start_hooks:
-                hook()
-
-        yield
-
-        for container in reversed(context.target_containers):
-            self._callback(container.on_started, context)
-
-    @contextlib.contextmanager
-    def _notify_stop(self, context: EventContext):
-        for container in reversed(context.target_containers):
-            self._callback(container.on_stopping, context)
-
-        yield
-
-        for container in context.target_containers:
-            self._callback(container.on_stopped, context)
-            if container.stop_hooks:
-                for hook in container.stop_hooks:
-                    hook()
-
-        if manager.stop_hooks:
-            for hook in manager.stop_hooks:
-                hook()
-
-    @contextlib.contextmanager
-    def _notify_remove(self, context: EventContext):
-        yield
-
-        if context.is_full_containers:
-            running_containers = manager.get_running_containers()
-            all_containers = {*context.containers, *running_containers}
-            for container in running_containers:
-                if container not in context.containers:
-                    self._callback(container.on_removed, context)
-                    all_containers.remove(container)
-            manager.update_running_containers(all_containers)
 
     def _make_context(self, commands, names):
         context = EventContext()
@@ -480,14 +428,6 @@ class Command(BaseCommandGroup):
             context.target_containers = [c for c in context.containers if c.name in names]
             context.is_full_containers = False
         return context
-
-    def _callback(self, func, context):
-        sig = inspect.signature(func)
-        self.logger.debug(f"Callback {func}")
-        if len(sig.parameters) == 0:
-            return func()
-        else:
-            return func(context)
 
 
 command = Command()
