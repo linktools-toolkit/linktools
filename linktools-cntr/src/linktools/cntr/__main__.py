@@ -26,12 +26,10 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-import contextlib
-import inspect
 import os
 from argparse import Namespace
 from subprocess import SubprocessError
-from typing import Optional, List, Type, Dict, Tuple, Any
+from typing import Optional, List, Type, Dict, Any
 
 import yaml
 from git import GitCommandError
@@ -260,15 +258,27 @@ class Command(BaseCommandGroup):
     def on_command_list(self, names: List[str] = None, detail: bool = False):
         install_containers = manager.get_installed_containers(resolve=False)
         all_install_containers = manager.resolve_depend_containers(install_containers)
+        running_containers = manager.get_running_containers()
         for container in sorted(manager.containers.values(), key=lambda o: o.order):
             if names and container.name not in names:
                 continue
-            if container not in all_install_containers:
-                message = f"[dim][ ] {container.name}[/]"
-            elif container in install_containers:
-                message = f"[red bold][*] {container.name} \\[added][/]"
+            installed = container in all_install_containers
+            added = container in install_containers
+            running = container in running_containers
+            if not installed and running:
+                style, symbol, label = "yellow bold", "[-]", "pending remove"
+            elif not installed:
+                style, symbol, label = "dim", "[ ]", None
+            elif added and running:
+                style, symbol, label = "green bold", "[*]", "added"
+            elif added:
+                style, symbol, label = "cyan bold", "[+]", "pending install"
+            elif running:
+                style, symbol, label = "green dim", "[-]", "dependency"
             else:
-                message = f"[red dim][-] {container.name} \\[dependency][/]"
+                style, symbol, label = "cyan dim", "[+]", "pending install, dependency"
+            suffix = f" \\[{label}]" if label else ""
+            message = f"[{style}]{symbol} {container.name}{suffix}[/]"
             if detail:
                 message += f"{os.linesep}    [dim]Enable: {container.enable}[/]"
                 message += f"{os.linesep}    [dim]Order: {container.order}[/]"

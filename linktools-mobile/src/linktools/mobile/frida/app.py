@@ -504,8 +504,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         #!/usr/bin/env python3
         # -*- coding: utf-8 -*-
 
-        from linktools.frida import FridaApplication, FridaEvalCode
-        from linktools.frida.android import AndroidFridaServer
+        from linktools.mobile.frida import FridaApplication, FridaEvalCode, AndroidFridaServer
 
 
         jscode = \"\"\"
@@ -544,7 +543,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             enable_java: bool = False,
             enable_objc: bool = False,
             enable_swift: bool = False,
-            eternalize: str = False,
+            eternalize: bool = False,
     ):
         self._device = device
 

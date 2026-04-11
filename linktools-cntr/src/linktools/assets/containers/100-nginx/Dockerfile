@@ -16,7 +16,7 @@ RUN mkdir -p /etc/certs && \
 ENV {{ key }} {{ config.get(key, default=value) }}
 {%- endfor %}
 
-RUN acme.sh --issue {{ container.ssl_domains_acme_args }} --dns {{ ACME_DNS_API }} --debug 2
-RUN acme.sh --install-cert {{ container.ssl_domains_acme_args }} {{ container.ssl_certificate_acme_args }} \
+RUN acme.sh --issue {{ container.acme_ssl_domains_args }} --dns {{ ACME_DNS_API }} --debug 2
+RUN acme.sh --install-cert {{ container.acme_ssl_domains_args }} {{ container.acme_ssl_certificate_args }} \
     --reloadcmd "killall nginx 2>/dev/null || true"
 # {% endif %}

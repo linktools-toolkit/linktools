@@ -7,6 +7,11 @@ services:
 #     {% if NGINX_HTTPS_ENABLE %}
       - '{{ NGINX_HTTPS_PORT }}:{{ NGINX_HTTPS_PORT }}'
 #     {% endif %}
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:{{ NGINX_HTTP_PORT }}/" ]
+      interval: 5s
+      start_period: 1s
+      start_interval: 1s
     networks:
       - nginx
 

@@ -50,7 +50,7 @@ class InitCommand(BaseCommandGroup):
             self.logger.warning(f"initialize adb failed: {e}")
 
         try:
-            from linktools.frida import FridaAndroidServer
+            from linktools.mobile.frida import FridaAndroidServer
             self.logger.info("initialize android frida server ...")
             FridaAndroidServer.setup(abis=["arm", "arm64"])
         except Exception as e:

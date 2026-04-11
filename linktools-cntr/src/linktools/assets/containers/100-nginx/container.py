@@ -96,7 +96,7 @@ class Container(BaseContainer):
         return configs
 
     @cached_property
-    def ssl_domains(self):
+    def _acme_ssl_domains(self):
         result = list()
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
@@ -104,11 +104,11 @@ class Container(BaseContainer):
         return result
 
     @cached_property
-    def ssl_domains_acme_args(self):
-        return " ".join([f"--domain {domain}" for domain in self.ssl_domains if domain])
+    def acme_ssl_domains_args(self):
+        return " ".join([f"--domain {domain}" for domain in self._acme_ssl_domains if domain])
 
     @cached_property
-    def ssl_certificate_acme_args(self):
+    def acme_ssl_certificate_args(self):
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
             return " ".join([
@@ -117,6 +117,11 @@ class Container(BaseContainer):
                 "--fullchain-file", f"/etc/certs/{domain}_fullchain.pem",
             ])
         return ""
+
+    def append_ssl_domains(self, *domians: str):
+        for domain in domians:
+            if domain and domain not in self._acme_ssl_domains:
+                self._acme_ssl_domains.append(domain)
 
     def _get_default_index_url(self):
         host = "www.google.com" \
@@ -190,15 +195,15 @@ class Container(BaseContainer):
             self.manager.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --renew --issue "
-                            f"{self.ssl_domains_acme_args} "
+                            f"{self.acme_ssl_domains_args} "
                             f"--dns {self.get_config('ACME_DNS_API')} "
                             f"1>/dev/null"
             ).call()
             self.manager.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --install-cert "
-                            f"{self.ssl_domains_acme_args} "
-                            f"{self.ssl_certificate_acme_args} "
+                            f"{self.acme_ssl_domains_args} "
+                            f"{self.acme_ssl_certificate_args} "
                             f"1>/dev/null"
             ).call()
 

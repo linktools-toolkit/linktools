@@ -66,6 +66,11 @@ services:
       # deprecated
       - SNSERVER_ADDR={{ SAFELINE_SUBNET_PREFIX }}.5:8000
       - CHAOS_ADDR={{ SAFELINE_SUBNET_PREFIX }}.10
+#   {% if containers["nginx"].enable %}
+    depends_on:
+      nginx:
+        condition: service_healthy
+#   {% endif %}
     ulimits:
       nofile: 131072
     networks:

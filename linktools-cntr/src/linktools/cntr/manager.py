@@ -308,7 +308,7 @@ class ContainerManager:
             container.enable = container in containers
         for container in reversed(containers):
             self.config.update_defaults(**container.configs)
-        for container in self.containers.values():
+        for container in containers:
             self._callback(func=container.on_prepare)
         for container in containers:
             if container.docker_file and self.debug:  # 加载每个容器的dockerfile
@@ -375,15 +375,17 @@ class ContainerManager:
 
     def get_running_containers(self):
         with self._settings.lock():
-            result = set()
-            for name in self._load_setting("RUNNING_CONTAINERS", reload=True, default=[]):
-                if name in self.containers:
-                    result.add(self.containers[name])
+            return self._load_running_containers()
+
+    def _load_running_containers(self):
+        result = set()
+        for name in self._load_setting("RUNNING_CONTAINERS", reload=True, default=[]):
+            if name in self.containers:
+                result.add(self.containers[name])
         return list(result)
 
-    def update_running_containers(self, containers: Iterable[BaseContainer]) -> None:
-        with self._settings.lock():
-            self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
+    def _dump_running_containers(self, containers: Iterable[BaseContainer]) -> None:
+        self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
 
     @contextlib.contextmanager
     def notify_start(self, context: "EventContext"):
@@ -396,11 +398,11 @@ class ContainerManager:
         for container in context.target_containers:
             if container.start_hooks:
                 for hook in container.start_hooks:
-                    hook()
+                    self._callback(hook)
 
         if self.start_hooks:
             for hook in self.start_hooks:
-                hook()
+                self._callback(hook)
 
         yield
 
@@ -418,24 +420,25 @@ class ContainerManager:
             self._callback(container.on_stopped, context)
             if container.stop_hooks:
                 for hook in container.stop_hooks:
-                    hook()
+                    self._callback(hook)
 
         if self.stop_hooks:
             for hook in self.stop_hooks:
-                hook()
+                self._callback(hook)
 
     @contextlib.contextmanager
     def notify_remove(self, context: "EventContext"):
         yield
 
         if context.is_full_containers:
-            running_containers = self.get_running_containers()
-            all_containers = {*context.containers, *running_containers}
-            for container in running_containers:
-                if container not in context.containers:
-                    self._callback(container.on_removed, context)
-                    all_containers.remove(container)
-            self.update_running_containers(all_containers)
+            with self._settings.lock():
+                running_containers = self._load_running_containers()
+                all_containers = {*context.containers, *running_containers}
+                for container in running_containers:
+                    if container not in context.containers:
+                        self._callback(container.on_removed, context)
+                        all_containers.remove(container)
+                self._dump_running_containers(all_containers)
 
     def _callback(self, func, context: "EventContext" = __missing__):
         if self.environ.debug:

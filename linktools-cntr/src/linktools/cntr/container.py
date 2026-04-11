@@ -296,19 +296,16 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                                 "max-size": self.get_config("SERVICE_LOG_MAX_SIZE"),
                             }
                         })
-                        if "image" not in service and "build" not in service:
+                        if "image" not in service:
                             path = self.get_docker_file_path()
                             if path and os.path.exists(path):
-                                service["build"] = {
-                                    "context": str(self.get_docker_context_path()),
-                                    "dockerfile": str(path)
-                                }
+                                build = service.setdefault("build", {})
+                                build.setdefault("context", str(self.get_docker_context_path()))
+                                build.setdefault("dockerfile", str(path))
                         if "env_file" not in service:
                             path = self.get_source_path(".env")
                             if path and os.path.exists(path):
-                                service["env_file"] = [
-                                    str(path)
-                                ]
+                                service["env_file"] = [str(path)]
                         container_paths = mount_paths.get(service.get("container_name"), {})
                         if container_paths:
                             volumes = service.setdefault("volumes", [])
@@ -336,7 +333,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     @cached_property
     def services(self) -> Dict[str, Dict[str, Any]]:
-        services: dict = utils.get_item(self.docker_compose, "services")
+        services = utils.get_item(self.docker_compose, "services")
         if not services or not isinstance(services, dict):
             return {}
         return services
