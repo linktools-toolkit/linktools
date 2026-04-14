@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : _download.py 
+@file    : _download.py
 @time    : 2022/05/28
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -46,9 +46,7 @@ if TYPE_CHECKING:
 
 
 class UrlFile(metaclass=abc.ABCMeta):
-    """
-    从指定url下载的文件
-    """
+    """UrlFile."""
 
     def __init__(self, environ: "BaseEnviron", url: str, is_local: bool):
         self._url = url
@@ -63,8 +61,10 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @property
     def is_local(self):
-        """
-        是否是本地文件
+        """Return whether the file is local.
+
+        Returns:
+            Any: The property value.
         """
         return self._is_local
 
@@ -73,14 +73,21 @@ class UrlFile(metaclass=abc.ABCMeta):
              dest_dir: PathType = None, dest_name: str = None,
              timeout: TimeoutType = None, max_retries: int = 3,
              validators: "UrlFileValidatorType" = None, **kwargs) -> str:
-        """
-        从指定url下载文件
-        :param dest_dir: 文件夹路径，如果为空，则会返回临时文件路径
-        :param dest_name: 文件名，如果为空，则默认为下载的文件名
-        :param timeout: 超时时间
-        :param max_retries: 重试次数
-        :param validators: 校验文件完整性
-        :return: 文件路径
+        """Save or download data to a target path.
+
+        Args:
+            dest_dir (PathType): Destination directory path.
+            dest_name (str): Destination file name.
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+            max_retries (int): Maximum number of retry attempts.
+            validators (UrlFileValidatorType): Validators used to check downloaded files.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            str: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         try:
             self._acquire(timeout=timeout.remain)
@@ -94,17 +101,17 @@ class UrlFile(metaclass=abc.ABCMeta):
             if not dest_dir:
                 return temp_path
 
-            # 先创建文件夹
+            # Create the destination directory first.
             if not os.path.exists(dest_dir):
                 self._environ.logger.debug(f"{dest_dir} does not exist, create")
                 os.makedirs(dest_dir, exist_ok=True)
 
-            # 然后把文件保存到指定路径下
+            # Copy the downloaded file to the target path.
             dest_path = os.path.join(dest_dir, dest_name or temp_name)
             self._environ.logger.debug(f"Copy {temp_path} to {dest_path}")
             shutil.copy(temp_path, dest_path)
 
-            # 把文件移动到指定目录之后，就可以清理缓存文件了
+            # The cache can be cleared after the file is moved into place.
             self.clear(timeout=timeout.remain)
 
             return dest_path
@@ -118,8 +125,10 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @timeoutable
     def clear(self, timeout: TimeoutType = None):
-        """
-        清空缓存文件
+        """Clear cached or generated data.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
         """
         try:
             self._acquire(timeout=timeout.remain)
@@ -153,18 +162,14 @@ class UrlFile(metaclass=abc.ABCMeta):
         return f"{self.__class__.__name__}({self._url})"
 
     class Validator(abc.ABC):
-        """
-        文件完整性校验
-        """
+        """Validate downloaded file content."""
 
         @abc.abstractmethod
         def validate(self, file: "UrlFile", path: str):
             pass
 
     class HashValidator(Validator):
-        """
-        文件哈希校验
-        """
+        """Validate a downloaded file hash."""
 
         def __init__(self, algorithm: "Literal['md5', 'sha1', 'sha256']", hash: str):
             self._algorithm = algorithm
@@ -175,9 +180,7 @@ class UrlFile(metaclass=abc.ABCMeta):
                 raise DownloadError(f"{file} {self._algorithm} hash does not match {self._hash}")
 
     class SizeValidator(Validator):
-        """
-        文件大小校验
-        """
+        """Validate a downloaded file size."""
 
         def __init__(self, size: int):
             self._size = size
@@ -189,6 +192,7 @@ class UrlFile(metaclass=abc.ABCMeta):
 
 class LocalFile(UrlFile):
 
+    """UrlFile implementation for local filesystem paths."""
     def __init__(self, environ: "BaseEnviron", url: str):
         super().__init__(
             environ,
@@ -200,7 +204,7 @@ class LocalFile(UrlFile):
         src_path = self._url
         if not os.path.exists(src_path):
             raise DownloadError(f"{src_path} does not exist")
-        # 校验文件完整性
+        # Validate file integrity.
         if isinstance(validators, UrlFile.Validator):
             validators.validate(self, src_path)
         elif isinstance(validators, Iterable):
@@ -214,6 +218,7 @@ class LocalFile(UrlFile):
 
 class HttpFile(UrlFile):
 
+    """UrlFile implementation for HTTP and HTTPS resources."""
     def __init__(self, environ: "BaseEnviron", url: str):
         super().__init__(environ, url, is_local=False)
         self._root_path = self._environ.get_temp_path("download", "data", self._ident)
@@ -226,11 +231,11 @@ class HttpFile(UrlFile):
 
         with HttpContext(self._environ, self._context_path) as context:
             if os.path.exists(self._local_path) and context.completed:
-                # 下载完成了，那就不用再下载了
+                # The file is already downloaded, so skip downloading it again.
                 self._environ.logger.debug(f"{self._local_path} downloaded, skip")
 
             else:
-                # 初始化环境信息
+                # Initialize context metadata.
                 context.url = self._url
                 context.file_path = self._local_path
                 context.file_size = None
@@ -241,7 +246,7 @@ class HttpFile(UrlFile):
                 if not context.user_agent:
                     context.user_agent = kwargs.pop("user_agent", None) or user_agent("chrome")
 
-                # 开始下载
+                # Start downloading.
                 last_error = None
                 max_retries = max(max_retries or 1, 1)
                 for i in range(max_retries, 0, -1):
@@ -250,9 +255,9 @@ class HttpFile(UrlFile):
                             self._environ.logger.warning(
                                 f"Download retry {max_retries - i}, "
                                 f"{last_error.__class__.__name__}: {last_error}")
-                        # 正式下载文件
+                        # Download the file.
                         context.download(timeout)
-                        # 校验文件完整性
+                        # Validate file integrity.
                         try:
                             if isinstance(validators, UrlFile.Validator):
                                 validators.validate(self, self._local_path)
@@ -260,12 +265,12 @@ class HttpFile(UrlFile):
                                 for validator in validators:
                                     validator.validate(self, self._local_path)
                         except Exception:
-                            # 完整性校验有问题，得把文件删了重新下载
+                            # Remove the file so a failed integrity check can be retried.
                             self._environ.logger.debug(
                                 f"Validate failed, remove {self._local_path}")
                             os.remove(self._local_path)
                             raise
-                        # 下载完成打标结束
+                        # Mark the download as completed.
                         context.completed = True
                         break
                     except Exception as e:
@@ -291,6 +296,7 @@ class HttpFile(UrlFile):
 
 class HttpContextVar(property):
 
+    """Context variable descriptor for HTTP download options."""
     def __init__(self, key, default=None):
         super().__init__(
             fget=lambda o: o._db.get(key, default),
@@ -299,6 +305,7 @@ class HttpContextVar(property):
 
 
 class HttpContext:
+    """Context manager for temporary HTTP download options."""
     url: Optional[str] = HttpContextVar("Url")
     user_agent: Optional[str] = HttpContextVar("UserAgent")
     headers: Optional[dict] = HttpContextVar("Headers")
@@ -320,10 +327,18 @@ class HttpContext:
         self._db.__exit__(*args, **kwargs)
 
     def download(self, timeout: TimeoutType):
+        """Download the configured URL into the temporary file path.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         self._environ.logger.debug(f"Download file to temp path {self.file_path}")
 
         initial = 0
-        # 如果文件存在，则继续上一次下载
+        # Resume the previous download if the file already exists.
         if os.path.exists(self.file_path):
             size = os.path.getsize(self.file_path)
             self._environ.logger.debug(f"{size} bytes downloaded, continue")

@@ -5,8 +5,8 @@
 @author  : Hu Ji
 @file    : decorator.py
 @time    : 2019/01/15
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 
 
 def singleton(cls: "Type[T]") -> "Callable[P, T]":
+    """Decorate a class so construction returns a single shared instance.
+
+    Returns:
+        Callable[P, T]: The operation result.
+    """
     instance = __missing__
     lock = threading.RLock()
 
@@ -59,6 +64,15 @@ def singleton(cls: "Type[T]") -> "Callable[P, T]":
 
 
 def try_except(errors: "Tuple[Type[BaseException]]" = (Exception,), default: "Any" = None):
+    """Decorate a function to return a default value for selected exceptions.
+
+    Args:
+        errors (Tuple[Type[BaseException]]): The errors value.
+        default (Any): Value returned when no explicit value is available.
+
+    Returns:
+        Any: The operation result.
+    """
     def decorator(fn: "Callable[P, T]") -> "Callable[P, T]":
         @functools.wraps(fn)
         def wrapper(*args: "P.args", **kwargs: "P.kwargs") -> "T":
@@ -136,6 +150,15 @@ class _CachedProperty:
 
 
 def cached_property(fn: "Callable[P, T]" = None, *, lock: bool = False):
+    """Create a property that caches its computed value on the instance.
+
+    Args:
+        fn (Callable[P, T]): Callable to invoke.
+        lock (bool): The lock value.
+
+    Returns:
+        Any: The operation result.
+    """
     if fn is not None:
         return _CachedProperty(fn, threading.RLock() if lock else None)
 
@@ -146,10 +169,7 @@ def cached_property(fn: "Callable[P, T]" = None, *, lock: bool = False):
 
 
 class classproperty:
-    """
-    Decorator that converts a method with a single cls argument into a property
-    that can be accessed directly from the class.
-    """
+    """Decorator that converts a method with a single cls argument into a property"""
 
     def __init__(self, func=None):
         self.func = func
@@ -182,6 +202,15 @@ class _CachedClassproperty:
 def cached_classproperty(
         fn: "Callable[P, T]" = None, *, lock: bool = False
 ) -> "Union[_CachedClassproperty, Callable[[Callable[P, T]], _CachedClassproperty]]":
+    """Create a class property that caches its computed value.
+
+    Args:
+        fn (Callable[P, T]): Callable to invoke.
+        lock (bool): The lock value.
+
+    Returns:
+        Union[_CachedClassproperty, Callable[[Callable[P, T]], _CachedClassproperty]]: The operation result.
+    """
     if fn is not None:
         return _CachedClassproperty(fn, threading.RLock() if lock else None)
 
@@ -213,7 +242,7 @@ def _timeoutable(fn: "Callable[P, T]") -> "Callable[P, T]":
         raise RuntimeError(f"Not found timeout parameter in {fn}")
 
     if 0 <= positional_index < timeout_index:
-        # 如果timeout在*args参数后面，那就只能通过**kwargs访问了
+        # If timeout appears after *args, it can only be accessed through **kwargs.
         timeout_index = -1
 
     @functools.wraps(fn)

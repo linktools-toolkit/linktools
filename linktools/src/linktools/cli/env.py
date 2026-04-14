@@ -4,7 +4,7 @@
 """
 @author  : Hu Ji
 @file    : stub.py
-@time    : 2024/8/6 16:34 
+@time    : 2024/8/6 16:34
 @site    : https://github.com/ice-black-tea
 @software: PyCharm
 
@@ -38,6 +38,17 @@ if TYPE_CHECKING:
 
 
 def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
+    """Build environment management subcommands for an environment.
+
+    Args:
+        environ (BaseEnviron): The environ value.
+
+    Returns:
+        Iterable[SubCommand]: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     import argparse
     import os
     import re
@@ -247,7 +258,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
                 def get_package(name):
                     name = unify_name(name)
-                    if not args.packages:  # 如果参数没指定，则默认更新所有包
+                    if not args.packages:  # Update all packages when no package arguments are provided.
                         return name, name, ""
                     if name in packages:
                         deps = f"[{','.join(packages[name])}]"

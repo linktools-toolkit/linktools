@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : __init__.py.py 
+@file    : __init__.py.py
 @time    : 2022/11/19
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|

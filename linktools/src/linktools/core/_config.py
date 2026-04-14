@@ -59,10 +59,29 @@ SUPPRESS = object()
 
 
 def is_type(obj: Any) -> bool:
+    """Return whether a value already matches the requested config type.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        bool: The operation result.
+    """
     return isinstance(obj, type)
 
 
 def cast_bool(obj: Any) -> bool:
+    """Cast a config value to bool.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        bool: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     if isinstance(obj, bool):
         return obj
     if isinstance(obj, str):
@@ -76,6 +95,14 @@ def cast_bool(obj: Any) -> bool:
 
 
 def cast_str(obj: Any) -> str:
+    """Cast a config value to str.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        str: The operation result.
+    """
     if isinstance(obj, str):
         return obj
     if isinstance(obj, (Tuple, List, Dict)):
@@ -86,6 +113,17 @@ def cast_str(obj: Any) -> str:
 
 
 def cast_path(obj: Any) -> Path:
+    """Cast a config value to an expanded filesystem path.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        Path: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     if isinstance(obj, get_args(PathType)):
         return Path(
             os.path.expanduser(
@@ -96,6 +134,17 @@ def cast_path(obj: Any) -> Path:
 
 
 def cast_json(obj: Any) -> Union[List, Dict]:
+    """Cast a config value to JSON-compatible data.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        Union[List, Dict]: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     if isinstance(obj, str):
         return json.loads(obj)
     if isinstance(obj, (Tuple, List, Dict)):
@@ -113,6 +162,7 @@ CONFIG_TYPES: "ConfigTypeMap" = dict({
 
 class ConfigProperty(metaclass=abc.ABCMeta):
 
+    """Descriptor for reading and writing typed config values."""
     def __init__(self, *, type: "ConfigType" = None, default: Any = __missing__):
         self._type = type
         self._default = default
@@ -124,17 +174,51 @@ class ConfigProperty(metaclass=abc.ABCMeta):
 
     @property
     def type(self) -> "ConfigType":
+        """Type.
+
+        Returns:
+            ConfigType: The property value.
+        """
         return self._type
 
     @property
     def default(self) -> Any:
+        """Default.
+
+        Returns:
+            Any: The property value.
+        """
         return self._default
 
     @abc.abstractmethod
     def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+        """Return a resolved config value.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         pass
 
     def set_default(self, value: Any, ignore_errors: bool = False) -> "Self":
+        """Set the default value for this config property chain.
+
+        Args:
+            value (Any): Value to store or process.
+            ignore_errors (bool): Whether command errors should be suppressed.
+
+        Returns:
+            Self: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         if self._tail is None:
             if not ignore_errors:
                 raise ValueError("config default value has been set, cannot use \"|\" operator")
@@ -174,7 +258,20 @@ class ConfigProperty(metaclass=abc.ABCMeta):
 
 class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
+    """Config property whose default value is computed lazily."""
     def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+        """Resolve a lazy config value.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         result = self.load(config, key, type=type, default=default, **kwargs)
         if isinstance(result, ConfigProperty):
             result = result.get(config, key, type=type, default=default, **kwargs)
@@ -182,17 +279,42 @@ class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def load(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+        """Load the lazy config value.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         pass
 
 
 class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
+    """Config property that can persist prompted values."""
     def __init__(self, *, type: "ConfigType" = None, default: Any, cached: bool = __missing__):
         super().__init__(type=type, default=default)
         self._data = __missing__
         self._cached = cached
 
     def get(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+        """Resolve a cached config value.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         if self._data is not __missing__:
             return self._data
 
@@ -227,16 +349,48 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
+        """Load a config value using cached data.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            cache (Any): The cache value.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         pass
 
     def save(self, config: "Config", key: str, value: Any) -> None:
+        """Save a config value into the cache when enabled.
+
+        Args:
+            config (Config): The config value.
+            key (str): Configuration or item key.
+            value (Any): Value to store or process.
+        """
         if self._cached:
             config.cache.save(**{key: value})
 
 
 class ConfigDict(dict):
 
+    """Dictionary wrapper that applies typed config property access."""
     def update_from_pyfile(self, filename: PathType, silent: bool = False) -> bool:
+        """Load uppercase config keys from a Python file.
+
+        Args:
+            filename (PathType): File path to load.
+            silent (bool): Whether missing files should be ignored.
+
+        Returns:
+            bool: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         d = ModuleType("config")
         d.__file__ = filename
         d.prompt = Config.Prompt
@@ -257,6 +411,19 @@ class ConfigDict(dict):
         return True
 
     def update_from_file(self, filename: PathType, load: Callable[[IO[Any]], Mapping], silent: bool = False) -> bool:
+        """Load config keys from a file with a custom loader.
+
+        Args:
+            filename (PathType): File path to load.
+            load (Callable[[IO[Any]], Mapping]): The load value.
+            silent (bool): Whether missing files should be ignored.
+
+        Returns:
+            bool: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         try:
             with open(filename, "rb") as f:
                 obj = load(f)
@@ -270,11 +437,25 @@ class ConfigDict(dict):
         return self.update_from_mapping(obj)
 
     def update_from_object(self, obj: Union[object, str]) -> None:
+        """Load uppercase config keys from an object.
+
+        Args:
+            obj (Union[object, str]): Object to inspect or convert.
+        """
         for key in dir(obj):
             if key[0].isupper():
                 self[key] = getattr(obj, key)
 
     def update_from_mapping(self, mapping: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> bool:
+        """Load uppercase config keys from a mapping.
+
+        Args:
+            mapping (Optional[Mapping[str, Any]]): Mapping containing values to load.
+            kwargs (Any): Keyword arguments passed to the operation.
+
+        Returns:
+            bool: The operation result.
+        """
         mappings: Dict[str, Any] = {}
         if mapping is not None:
             mappings.update(mapping)
@@ -287,20 +468,31 @@ class ConfigDict(dict):
 
 class ConfigParser(configparser.ConfigParser):
 
+    """Parser for loading config data from a Python file."""
     def optionxform(self, optionstr: str):
+        """Keep config option names unchanged.
+
+        Args:
+            optionstr (str): The optionstr value.
+
+        Returns:
+            Any: The operation result.
+        """
         return optionstr
 
 
 class ConfigCacheParser:
 
+    """Parser for loading cached config data."""
     def __init__(self, path: PathType, namespace: str):
-        self._parser = ConfigParser(default_section="ENV")  # 兼容老版本，默认ENV作为默认节
+        self._parser = ConfigParser(default_section="ENV")  # Keep ENV as the legacy default section.
         self._path = path
         self._cache = FileCache(f"{self._path}.cache")
         self._section = f"{namespace}.CACHE".upper()
         self.load()
 
     def load(self):
+        """Load cache data from disk."""
         with self._cache.backup():
             if self._path and os.path.exists(self._path):
                 self._parser.read(self._path)
@@ -308,6 +500,7 @@ class ConfigCacheParser:
                 self._parser.add_section(self._section)
 
     def dump(self):
+        """Write cache data to disk."""
         with self._cache.backup() as backup:
             if self._path and os.path.exists(self._path):
                 backup.backup(self._path)
@@ -315,22 +508,51 @@ class ConfigCacheParser:
                 self._parser.write(fd)
 
     def get(self, key: str, default: Any) -> Any:
+        """Return a cached option value.
+
+        Args:
+            key (str): Configuration or item key.
+            default (Any): Value returned when no explicit value is available.
+
+        Returns:
+            Any: The operation result.
+        """
         if self._parser.has_option(self._section, key):
             return self._parser.get(self._section, key)
         return default
 
     def set(self, key: str, value: str) -> None:
+        """Set a cached option value.
+
+        Args:
+            key (str): Configuration or item key.
+            value (str): Value to store or process.
+        """
         self._parser.set(self._section, key, value)
 
     def remove(self, key: str) -> bool:
+        """Remove a cached option value.
+
+        Args:
+            key (str): Configuration or item key.
+
+        Returns:
+            bool: The operation result.
+        """
         return self._parser.remove_option(self._section, key)
 
     def items(self) -> Generator[Tuple[str, Any], None, None]:
+        """Yield cached option items.
+
+        Returns:
+            Generator[Tuple[str, Any], None, None]: The operation result.
+        """
         for key, value in self._parser.items(self._section):
             yield key, value
 
 
 class ConfigCache(dict):
+    """Persistent key-value cache for configuration data."""
     __lock__ = threading.RLock()
 
     def __init__(self, environ: "BaseEnviron", namespace: str = __missing__):
@@ -348,21 +570,27 @@ class ConfigCache(dict):
 
     @property
     def path(self) -> Path:
-        """
-        缓存文件路径
+        """Return the cache file path.
+
+        Returns:
+            Path: The property value.
         """
         return self._path
 
     @property
     def namespace(self) -> str:
-        """
-        缓存命名空间
+        """Return the cache namespace.
+
+        Returns:
+            str: The property value.
         """
         return self._namespace
 
     def load(self) -> "ConfigCache":
-        """
-        从缓存中加载配置
+        """Load.
+
+        Returns:
+            ConfigCache: The operation result.
         """
         parser = ConfigCacheParser(self._path, self._namespace)
         with self.__lock__:
@@ -371,9 +599,13 @@ class ConfigCache(dict):
         return self
 
     def save(self, **kwargs: Any) -> "ConfigCache":
-        """
-        保存配置到缓存
-        :param kwargs: 需要保存的配置
+        """Save or download data to a target path.
+
+        Args:
+            kwargs (Any): Keyword arguments passed to the operation.
+
+        Returns:
+            ConfigCache: The operation result.
         """
         parser = ConfigCacheParser(self._path, self._namespace)
         with self.__lock__:
@@ -384,9 +616,13 @@ class ConfigCache(dict):
         return self
 
     def remove(self, *keys: str) -> "ConfigCache":
-        """
-        删除缓存
-        :param keys: 需要删除的缓存键
+        """Remove.
+
+        Args:
+            keys (str): Keys to inspect or update.
+
+        Returns:
+            ConfigCache: The operation result.
         """
         parser = ConfigCacheParser(self._path, self._namespace)
         with self.__lock__:
@@ -399,6 +635,7 @@ class ConfigCache(dict):
 
 class Config:
 
+    """Configuration container backed by defaults, files, and cache."""
     def __init__(
             self,
             environ: "BaseEnviron",
@@ -406,12 +643,13 @@ class Config:
             namespace: str = __missing__,
             env_prefix: str = __missing__,
     ):
-        """
-        初始化配置对象
-        :param environ: 环境对象
-        :param data: 配置相关数据
-        :param namespace: 缓存对应的命名空间
-        :param env_prefix: 环境变量前缀
+        """Init.
+
+        Args:
+            environ (BaseEnviron): The environ value.
+            data (ConfigDict): The data value.
+            namespace (str): Argparse namespace to update.
+            env_prefix (str): The env_prefix value.
         """
         self._environ = environ
         self._env_prefix = env_prefix.upper() if env_prefix is not __missing__ else ""
@@ -430,15 +668,15 @@ class Config:
 
     @property
     def cache(self):
-        """
-        缓存对象
+        """Return the configuration cache.
+
+        Returns:
+            Any: The property value.
         """
         return self._cache
 
     def reload(self) -> None:
-        """
-        重新加载配置，包括：清空缓存、刷新环境变量
-        """
+        """Reload."""
         self._map.maps[0].clear()
         self._map.maps[0].update({
             key[len(self._env_prefix):]: value
@@ -448,8 +686,18 @@ class Config:
         self._cache.clear()
 
     def cast(self, obj: Any, type: "ConfigType", default: Any = __missing__) -> "T":
-        """
-        类型转换
+        """Cast a value to the requested type.
+
+        Args:
+            obj (Any): Object to inspect or convert.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+
+        Returns:
+            T: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         if type not in (None, __missing__):
             cast = CONFIG_TYPES.get(type, type)
@@ -462,8 +710,18 @@ class Config:
         return obj
 
     def get(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
-        """
-        获取指定配置，优先会从环境变量中获取
+        """Get.
+
+        Args:
+            key (str): Configuration or item key.
+            type (ConfigType): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+
+        Returns:
+            T: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         if type in (None, __missing__):
             value = self._data.get(key, __missing__)
@@ -503,50 +761,82 @@ class Config:
         return default
 
     def keys(self) -> Generator[str, None, None]:
-        """
-        遍历配置名，默认不遍历内置配置
+        """Keys.
+
+        Returns:
+            Generator[str, None, None]: The operation result.
         """
         for key in sorted(self._map.keys()):
             yield key
 
     def items(self) -> Generator[Tuple[str, Any], None, None]:
-        """
-        遍历配置项，默认不遍历内置配置
+        """Items.
+
+        Returns:
+            Generator[Tuple[str, Any], None, None]: The operation result.
         """
         for key in self.keys():
             yield key, self.get(key)
 
     def set(self, key: str, value: Any) -> "Config":
-        """
-        更新配置
+        """Set.
+
+        Args:
+            key (str): Configuration or item key.
+            value (Any): Value to store or process.
+
+        Returns:
+            Config: The operation result.
         """
         self._data[key] = value
         return self
 
     def set_default(self, key: str, value: Any) -> Any:
-        """
-        设置默认配置
+        """Set the default.
+
+        Args:
+            key (str): Configuration or item key.
+            value (Any): Value to store or process.
+
+        Returns:
+            Any: The operation result.
         """
         return self._data.setdefault(key, value)
 
     def update(self, **kwargs) -> "Config":
-        """
-        更新配置
+        """Update.
+
+        Args:
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Config: The operation result.
         """
         self._data.update(**kwargs)
         return self
 
     def update_defaults(self, **kwargs) -> "Config":
-        """
-        更新默认配置
+        """Update defaults.
+
+        Args:
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Config: The operation result.
         """
         for key, value in kwargs.items():
             self._data.setdefault(key, value)
         return self
 
     def update_from_file(self, path: str, load: Callable[[IO[Any]], Mapping] = None) -> bool:
-        """
-        加载配置文件，按照扩展名来匹配相应的加载规则
+        """Update from file.
+
+        Args:
+            path (str): Filesystem path to process.
+            load (Callable[[IO[Any]], Mapping]): The load value.
+
+        Returns:
+            bool: The operation result.
         """
         if load is not None:
             return self._data.update_from_file(path, load=load)
@@ -558,38 +848,54 @@ class Config:
         return False
 
     def update_from_dir(self, path: str, recursion: bool = False) -> bool:
+        """Update from dir.
+
+        Args:
+            path (str): Filesystem path to process.
+            recursion (bool): The recursion value.
+
+        Returns:
+            bool: The operation result.
         """
-        加载配置文件目录，按照扩展名来匹配相应的加载规则
-        """
-        # 路径不存在
+        # Path does not exist.
         if not os.path.exists(path):
             return False
-        # 如果不是目录
+        # Non-directory paths are loaded as a single file.
         if not os.path.isdir(path):
             return self.update_from_file(path)
-        # 如果不需要递归，那只要取一级目录就好了
+        # Without recursion, only load files directly inside the directory.
         if not recursion:
             for name in os.listdir(path):
                 config_path = os.path.join(path, name)
                 if not os.path.isdir(config_path):
                     self.update_from_file(config_path)
             return True
-        # 剩下的就是需要递归读取所有文件的情况了
+        # Recursively load all files under the directory.
         for root, dirs, files in os.walk(path, topdown=False):
             for name in files:
                 self.update_from_file(os.path.join(root, name))
         return True
 
     def update_cache(self, **kwargs: Any) -> "Config":
-        """
-        更新缓存
+        """Update cache.
+
+        Args:
+            kwargs (Any): Keyword arguments passed to the operation.
+
+        Returns:
+            Config: The operation result.
         """
         self._cache.save(**kwargs)
         return self
 
     def remove_cache(self, *keys: str) -> "Config":
-        """
-        删除缓存
+        """Remove cache.
+
+        Args:
+            keys (str): Keys to inspect or update.
+
+        Returns:
+            Config: The operation result.
         """
         self._cache.remove(*keys)
         return self
@@ -626,7 +932,7 @@ class Config:
                     type=type or self.type,
                     default=cache
                 )
-            if self.key is __missing__:  # 避免递归
+            if self.key is __missing__:  # Avoid recursion.
                 return cache if cache is not __missing__ else self.default
             return config.get(
                 self.key or key,
@@ -795,6 +1101,7 @@ class Config:
 
 class ConfigWrapper(Config):
 
+    """Proxy wrapper that exposes a scoped configuration view."""
     def __init__(
             self,
             config: "Config",

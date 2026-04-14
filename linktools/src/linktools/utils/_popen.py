@@ -19,10 +19,26 @@ STDERR = 2
 
 
 def list2cmdline(args: "Iterable[str]") -> str:
+    """Convert an argv list into a shell command line string.
+
+    Args:
+        args (Iterable[str]): Arguments passed to the operation.
+
+    Returns:
+        str: The operation result.
+    """
     return subprocess.list2cmdline(args)
 
 
 def cmdline2list(cmdline: str) -> "List[str]":
+    """Split a shell command line string into an argv list.
+
+    Args:
+        cmdline (str): Command line string to write or execute.
+
+    Returns:
+        List[str]: The operation result.
+    """
     import shlex
     return shlex.split(cmdline)
 
@@ -49,7 +65,7 @@ if utils.is_unix_like():
 
             while len(fds) > 0:
                 remain = utils.coalesce(timeout.remain, 1)
-                if remain <= 0:  # 超时
+                if remain <= 0:  # Timed out.
                     break
                 rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
                 if stdout.fd is not None and stdout.fd in rlist:
@@ -158,10 +174,10 @@ else:
         def get(self, timeout: Timeout):
             while self.is_alive:
                 remain = utils.coalesce(timeout.remain, 1)
-                if remain <= 0:  # 超时
+                if remain <= 0:  # Timed out.
                     break
                 try:
-                    # 给个1秒超时时间防止有多个线程消费的时候死锁
+                    # Use a one-second timeout to avoid deadlock with multiple consumers.
                     code, data = self._queue.get(timeout=min(remain, 1))
                     if code is not None:
                         yield code, data
@@ -170,7 +186,7 @@ else:
 
             while True:
                 try:
-                    # 需要把剩余可消费的数据消费完
+                    # Drain any remaining consumable data.
                     code, data = self._queue.get_nowait()
                     if code is not None:
                         yield code, data
@@ -179,9 +195,21 @@ else:
 
 
 class Process(subprocess.Popen):
+    """Wrapper around subprocess.Popen with timeout-aware helpers."""
 
     @timeoutable
     def call(self, timeout: TimeoutType = None) -> int:
+        """Wait for the process and kill descendants on failure.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+        Returns:
+            int: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         with self:
             try:
                 return self.wait(timeout.remain)
@@ -191,6 +219,17 @@ class Process(subprocess.Popen):
 
     @timeoutable
     def check_call(self, timeout: TimeoutType = None) -> int:
+        """Wait for the process and raise on a nonzero exit code.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+        Returns:
+            int: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         with self:
             try:
                 retcode = self.wait(timeout.remain)
@@ -203,10 +242,13 @@ class Process(subprocess.Popen):
 
     @timeoutable
     def fetch(self, timeout: TimeoutType = None) -> "Generator[Tuple[Optional[AnyStr], Optional[AnyStr]], Any, Any]":
-        """
-        获取进程的输出内容
-        :param timeout: 超时时间
-        :return: 返回stdout输出内容和stderr错误内容
+        """Collect stdout and stderr from the process.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+        Returns:
+            Generator[Tuple[Optional[AnyStr], Optional[AnyStr]], Any, Any]: The operation result.
         """
         if self.stdout or self.stderr:
             for code, data in self._output.get(timeout):
@@ -227,15 +269,20 @@ class Process(subprocess.Popen):
             on_stderr: "Callable[[str], None]" = None,
             error_type: "Callable[[str], Exception]" = ExecError
     ) -> str:
-        """
-        执行命令直至完成
-        :param args: 命令
-        :param timeout: 超时时间
-        :param ignore_errors: 忽略错误，报错不会抛异常
-        :param on_stdout: stdout输出回调
-        :param on_stderr: stderr输出回调
-        :param error_type: 抛出异常类型
-        :return: 返回stdout输出内容
+        """Run a process command until completion.
+
+        Args:
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+            ignore_errors (bool): Whether command errors should be suppressed.
+            on_stdout (Callable[[str], None]): Callback invoked for stdout output.
+            on_stderr (Callable[[str], None]): Callback invoked for stderr output.
+            error_type (Callable[[str], Exception]): Exception type raised for command failures.
+
+        Returns:
+            str: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         try:
             out = err = None
@@ -276,6 +323,7 @@ class Process(subprocess.Popen):
             self.recursive_kill()
 
     def recursive_kill(self) -> None:
+        """Terminate the process and all child processes."""
         import psutil
         try:
             for p in reversed(psutil.Process(self.pid).children(recursive=True)):
@@ -305,6 +353,27 @@ def popen(
         env: "Dict[str, str]" = None, append_env: "Dict[str, str]" = None, default_env: "Dict[str, str]" = None,
         **kwargs
 ) -> Process:
+    """Create a Process for the supplied command.
+
+    Args:
+        args (Any): Arguments passed to the operation.
+        capture_output (bool): The capture_output value.
+        stdin (Union[int, IO]): The stdin value.
+        stdout (Union[int, IO]): The stdout value.
+        stderr (Union[int, IO]): The stderr value.
+        shell (bool): The shell value.
+        cwd (PathType): The cwd value.
+        env (Dict[str, str]): The env value.
+        append_env (Dict[str, str]): The append_env value.
+        default_env (Dict[str, str]): The default_env value.
+        kwargs: Keyword arguments passed to the operation.
+
+    Returns:
+        Process: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     args = [str(arg) for arg in args]
 
     if capture_output is True:

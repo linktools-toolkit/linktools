@@ -5,8 +5,8 @@
 @author  : Hu Ji
 @file    : tools.py
 @time    : 2018/12/11
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -123,6 +123,7 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
 
 class ToolStub(object):
 
+    """Lightweight descriptor for a tool definition."""
     def __init__(self, path: "PathType", name: str, environ: "BaseEnviron" = None):
         self.system = environ.system if environ else utils.get_system()
         self.name = f"{name}.bat" if self.system == "windows" else name
@@ -130,9 +131,22 @@ class ToolStub(object):
 
     @property
     def exists(self) -> bool:
+        """Return whether the tool executable exists.
+
+        Returns:
+            bool: The property value.
+        """
         return self.path and os.path.exists(self.path)
 
     def create(self, cmdline: str) -> "PathType":
+        """Create an executable stub for a command line.
+
+        Args:
+            cmdline (str): Command line string to write or execute.
+
+        Returns:
+            PathType: The operation result.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "wt") as fd:
             if self.system == "windows":
@@ -148,6 +162,7 @@ class ToolStub(object):
         return self.path
 
     def remove(self):
+        """Remove the executable stub if it exists."""
         utils.ignore_errors(os.remove, args=(self.path,))
 
     def __repr__(self):
@@ -156,6 +171,7 @@ class ToolStub(object):
 
 class ToolProperty(object):
 
+    """Descriptor that resolves a named tool from an environment."""
     def __init__(self, name=None, raw: bool = False, default: Any = None,
                  internal: bool = False, validate: bool = False):
         self.name = name
@@ -167,6 +183,7 @@ class ToolProperty(object):
 
 class ToolMeta(type):
 
+    """Metaclass that binds ToolProperty descriptors."""
     def __new__(mcs, name, bases, attrs):
         attrs["__default__"] = default = {}
         for key in list(attrs.keys()):
@@ -189,6 +206,7 @@ class ToolMeta(type):
 
 
 class Tool(metaclass=ToolMeta):
+    """Executable tool wrapper with prepare and run helpers."""
     __default__: Dict
 
     name: str = ToolProperty(default=__missing__, raw=True, internal=True)
@@ -229,9 +247,10 @@ class Tool(metaclass=ToolMeta):
 
     @cached_property(lock=True)
     def config(self) -> dict:
-        """
-        获取工具配置
-        :return: 工具配置
+        """Config.
+
+        Returns:
+            dict: The operation result.
         """
         config = {
             key: _parse_value(self._raw_config, key)
@@ -339,8 +358,10 @@ class Tool(metaclass=ToolMeta):
 
     @property
     def supported(self) -> bool:
-        """
-        判断工具是否支持当前系统
+        """Return whether the tool supports the current environment.
+
+        Returns:
+            bool: The property value.
         """
         if self.exists:
             return True
@@ -350,8 +371,10 @@ class Tool(metaclass=ToolMeta):
 
     @property
     def exists(self) -> bool:
-        """
-        通过可执行文件是否存在来判断是否存在
+        """Return whether the tool executable exists.
+
+        Returns:
+            bool: The property value.
         """
         if self.absolute_path:
             if os.path.exists(self.absolute_path):
@@ -367,11 +390,14 @@ class Tool(metaclass=ToolMeta):
         )
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        获取配置值
-        :param key: 键
-        :param default: 默认值
-        :return: 配置值
+        """Get.
+
+        Args:
+            key (str): Configuration or item key.
+            default (Any): Value returned when no explicit value is available.
+
+        Returns:
+            Any: The operation result.
         """
         value = self.config.get(key, default)
         if isinstance(value, str):
@@ -379,16 +405,21 @@ class Tool(metaclass=ToolMeta):
         return value
 
     def copy(self, **kwargs) -> "Tool":
-        """
-        生成一个新的工具对象
-        :param kwargs: 新的配置
-        :return: 新的工具对象
+        """Create a copy with updated configuration.
+
+        Args:
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Tool: The operation result.
         """
         return Tool(self._tools, self.name, self._config, **kwargs)
 
     def prepare(self) -> None:
-        """
-        准备工具，包括下载、解压、创建stub脚本、修改文件权限等
+        """Prepare a tool for execution.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         if not self.supported:
             raise ToolNotSupport(
@@ -429,9 +460,7 @@ class Tool(metaclass=ToolMeta):
                 os.chmod(self.absolute_path, 0o0755)
 
     def clear(self) -> None:
-        """
-        清理工具相关文件
-        """
+        """Clear cached or generated data."""
         if self._stub.exists:
             self._tools.logger.debug(f"Delete {self._stub}")
             self._stub.remove()
@@ -446,10 +475,14 @@ class Tool(metaclass=ToolMeta):
             shutil.rmtree(self.root_path, ignore_errors=True)
 
     def popen(self, *args: Any, **kwargs) -> utils.Process:
-        """
-        执行命令
-        :param args: 命令行参数
-        :return: 打开的进程
+        """Start a process for this tool.
+
+        Args:
+            args (Any): Arguments passed to the operation.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            utils.Process: The operation result.
         """
         self.prepare()
 
@@ -477,15 +510,18 @@ class Tool(metaclass=ToolMeta):
             on_stderr: Callable[[str], None] = None,
             error_type: Callable[[str], Exception] = ToolExecError
     ) -> str:
-        """
-        执行命令
-        :param args: 命令
-        :param timeout: 超时时间
-        :param ignore_errors: 忽略错误，报错不会抛异常
-        :param on_stdout: stdout输出回调
-        :param on_stderr: stderr输出回调
-        :param error_type: 抛出异常类型
-        :return: 返回stdout输出内容
+        """Run a process command until completion.
+
+        Args:
+            args (Any): Arguments passed to the operation.
+            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+            ignore_errors (bool): Whether command errors should be suppressed.
+            on_stdout (Callable[[str], None]): Callback invoked for stdout output.
+            on_stderr (Callable[[str], None]): Callback invoked for stderr output.
+            error_type (Callable[[str], Exception]): Exception type raised for command failures.
+
+        Returns:
+            str: The operation result.
         """
         process = self.popen(*args, capture_output=True)
         return process.exec(
@@ -500,12 +536,18 @@ class Tool(metaclass=ToolMeta):
         return f"Tool<{self.name}>"
 
     def make_cmdline(self) -> str:
+        """Return the command line used to invoke this tool through linktools.
+
+        Returns:
+            str: The operation result.
+        """
         from ..cli import env
         return utils.list2cmdline([utils.get_interpreter(), "-m", env.__name__, "tool", self.name])
 
 
 class Tools(object):
 
+    """Registry and factory for tools available in an environment."""
     def __init__(self, environ: "BaseEnviron", config: Dict[str, Dict]):
         self.environ = environ
         self.logger = environ.get_logger("tools")
@@ -514,9 +556,10 @@ class Tools(object):
 
     @cached_property
     def stub_path(self) -> pathlib.Path:
-        """
-        获取stub脚本路径
-        :return: stub脚本路径
+        """Stub path.
+
+        Returns:
+            pathlib.Path: The operation result.
         """
         return self.environ.get_data_path(
             "scripts",
@@ -525,27 +568,30 @@ class Tools(object):
         )
 
     def keys(self) -> Generator[str, None, None]:
-        """
-        获取所有支持的工具名称
-        :return: 工具名称
+        """Keys.
+
+        Returns:
+            Generator[str, None, None]: The operation result.
         """
         for k, v in self.all.items():
             if v.supported:
                 yield k
 
     def values(self) -> Generator[Tool, None, None]:
-        """
-        获取所有支持的工具
-        :return: 工具对象
+        """Values.
+
+        Returns:
+            Generator[Tool, None, None]: The operation result.
         """
         for k, v in self.all.items():
             if v.supported:
                 yield v
 
     def items(self) -> Generator[Tuple[str, Tool], None, None]:
-        """
-        获取所有支持的工具
-        :return: 工具名称 & 工具对象
+        """Items.
+
+        Returns:
+            Generator[Tuple[str, Tool], None, None]: The operation result.
         """
         for k, v in self.all.items():
             if v.supported:

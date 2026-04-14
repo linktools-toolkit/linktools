@@ -5,8 +5,8 @@
 @author  : Hu Ji
 @file    : environment.py
 @time    : 2020/03/01
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -43,89 +43,127 @@ if TYPE_CHECKING:
 
 
 class BaseEnviron(abc.ABC):
+    """Base environment abstraction for config, paths, tools, and logging."""
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """
-        模块名
+        """Return the name.
+
+        Returns:
+            str: The property value.
         """
         pass
 
     @property
     def version(self) -> str:
-        """
-        模块版本号
+        """Return the version.
+
+        Returns:
+            str: The property value.
         """
         return NotImplemented
 
     @property
     def description(self) -> str:
-        """
-        模块描述
+        """Return the description.
+
+        Returns:
+            str: The property value.
         """
         return NotImplemented
 
     @property
     def root_path(self) -> "PathType":
+        """Return the root path.
+
+        Returns:
+            PathType: The property value.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
-        模块路径
-        """
-        raise NotImplemented
+        raise NotImplementedError()
 
     @property
     def system(self) -> str:
-        """
-        系统名称
+        """Return the system name.
+
+        Returns:
+            str: The property value.
         """
         return utils.get_system()
 
     @property
     def machine(self) -> str:
-        """
-        机器类型，e.g. 'i386'
+        """Return the machine architecture.
+
+        Returns:
+            str: The property value.
         """
         return utils.get_machine()
 
     @property
     def debug(self) -> bool:
-        """
-        debug模式
+        """Return whether debug mode is enabled.
+
+        Returns:
+            bool: The property value.
         """
         return self.get_config("DEBUG", bool)
 
     @debug.setter
     def debug(self, value: bool) -> None:
-        """
-        debug模式
+        """Return whether debug mode is enabled.
+
+        Args:
+            value (bool): Value to store or process.
         """
         self.set_config("DEBUG", value)
 
     @cached_property
     def data_path(self) -> Path:
-        """
-        存放文件目录
+        """Data path.
+
+        Returns:
+            Path: The operation result.
         """
         return Path(self.global_config["DATA_PATH"])
 
     @cached_property
     def temp_path(self) -> Path:
-        """
-        存放临时文件目录
+        """Temp path.
+
+        Returns:
+            Path: The operation result.
         """
         return Path(self.global_config["TEMP_PATH"])
 
     def get_path(self, *paths: str) -> Path:
-        """
-        获取模块目录下的子路径
+        """Return the path.
+
+        Args:
+            paths (str): The paths value.
+
+        Returns:
+            Path: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         if self.root_path == NotImplemented:
             raise RuntimeError("root_path not implemented")
         return utils.join_path(self.root_path, *paths)
 
     def get_data_path(self, *paths: str, create_parent: bool = False) -> Path:
-        """
-        获取数据目录下的子路径
+        """Return the data path.
+
+        Args:
+            paths (str): The paths value.
+            create_parent (bool): The create_parent value.
+
+        Returns:
+            Path: The operation result.
         """
         path = utils.join_path(self.data_path, *paths)
         if create_parent:
@@ -133,8 +171,14 @@ class BaseEnviron(abc.ABC):
         return path
 
     def get_temp_path(self, *paths: str, create_parent: bool = False) -> Path:
-        """
-        获取临时文件目录下的子路径
+        """Return the temp path.
+
+        Args:
+            paths (str): The paths value.
+            create_parent (bool): The create_parent value.
+
+        Returns:
+            Path: The operation result.
         """
         path = utils.join_path(self.temp_path, *paths)
         if create_parent:
@@ -142,8 +186,11 @@ class BaseEnviron(abc.ABC):
         return path
 
     def clean_temp_files(self, *paths: str, expire_days: int = 7) -> None:
-        """
-        清理临时文件
+        """Remove expired temporary files.
+
+        Args:
+            paths (str): The paths value.
+            expire_days (int): The expire_days value.
         """
         current_time = time.time()
         target_time = current_time - expire_days * 24 * 60 * 60
@@ -174,20 +221,32 @@ class BaseEnviron(abc.ABC):
 
     @cached_property
     def logger(self) -> "logging.Logger":
-        """
-        模块根logger
+        """Logger.
+
+        Returns:
+            logging.Logger: The operation result.
         """
         return logging.getLogger(self.name)
 
     def get_logger(self, name: str = None) -> "logging.Logger":
-        """
-        获取模块名作为前缀的logger
+        """Return the logger.
+
+        Args:
+            name (str): Name to resolve.
+
+        Returns:
+            logging.Logger: The operation result.
         """
         name = f"{self.name}.{name}" if name else self.name
         return logging.getLogger(name)
 
     @cached_classproperty(lock=True)
     def global_config(self) -> "ConfigDict":
+        """Build the global configuration dictionary.
+
+        Returns:
+            ConfigDict: The operation result.
+        """
         from ._config import ConfigDict
 
         prefix = f"{metadata.__name__}".upper()
@@ -223,37 +282,46 @@ class BaseEnviron(abc.ABC):
 
     @cached_property(lock=True)
     def config(self) -> "Config":
-        """
-        环境相关配置
+        """Config.
+
+        Returns:
+            Config: The operation result.
         """
         return self._create_config()
 
     def wrap_config(self, namespace: str = metadata.__missing__, env_prefix: str = metadata.__missing__) -> "Config":
-        """
-        环境相关配置，与environ.config共享配置数据，但不共享缓存数据和环境变量信息
-        :param namespace: 缓存对应的命名空间
-        :param env_prefix: 环境变量使用前缀
-        :return: 配置对象
+        """Return a scoped configuration wrapper.
+
+        Args:
+            namespace (str): Argparse namespace to update.
+            env_prefix (str): The env_prefix value.
+
+        Returns:
+            Config: The operation result.
         """
         from ._config import ConfigWrapper
 
         return ConfigWrapper(self.config, namespace=namespace, env_prefix=env_prefix)
 
     def get_config(self, key: str, type: "Type[T]" = None, default: Any = metadata.__missing__) -> "T":
-        """
-        获取指定配置，优先会从环境变量中获取
-        :param key: 配置键
-        :param type: 配置类型
-        :param default: 默认值
-        :return: 配置值
+        """Return a configuration value.
+
+        Args:
+            key (str): Configuration or item key.
+            type (Type[T]): Target type used to cast the value.
+            default (Any): Value returned when no explicit value is available.
+
+        Returns:
+            T: The operation result.
         """
         return self.config.get(key=key, type=type, default=default)
 
     def set_config(self, key: str, value: Any) -> None:
-        """
-        更新配置
-        :param key: 配置键
-        :param value: 配置值
+        """Set a configuration value.
+
+        Args:
+            key (str): Configuration or item key.
+            value (Any): Value to store or process.
         """
         self.config.set(key, value)
 
@@ -285,17 +353,22 @@ class BaseEnviron(abc.ABC):
 
     @cached_property(lock=True)
     def tools(self) -> "Tools":
-        """
-        工具集
+        """Tools.
+
+        Returns:
+            Tools: The operation result.
         """
         return self._create_tools()
 
     def get_tool(self, name: str, **kwargs) -> "Tool":
-        """
-        获取指定工具
-        :param name: 工具名
-        :param kwargs: 工具其他参数
-        :return: 工具对象
+        """Return a configured tool by name.
+
+        Args:
+            name (str): Name to resolve.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            Tool: The operation result.
         """
         tool = self.tools[name]
         if len(kwargs) != 0:
@@ -303,10 +376,13 @@ class BaseEnviron(abc.ABC):
         return tool
 
     def get_url_file(self, url: "PathType") -> "UrlFile":
-        """
-        获取指定url
-        :param url: url地址
-        :return: UrlFile对象
+        """Return a URL file wrapper for a URL.
+
+        Args:
+            url (PathType): URL to process.
+
+        Returns:
+            UrlFile: The operation result.
         """
         from ._url import HttpFile, LocalFile
 
@@ -322,27 +398,48 @@ class BaseEnviron(abc.ABC):
 
 
 class Environ(BaseEnviron):
+    """Default environment implementation for the linktools package."""
 
     @property
     def name(self) -> str:
+        """Return the name.
+
+        Returns:
+            str: The property value.
+        """
         return metadata.__name__
 
     @property
     def version(self) -> str:
+        """Return the version.
+
+        Returns:
+            str: The property value.
+        """
         return metadata.__version__
 
     @property
     def description(self) -> str:
+        """Return the description.
+
+        Returns:
+            str: The property value.
+        """
         return metadata.__description__
 
     @cached_property
     def root_path(self) -> Path:
+        """Return the root directory for the current package.
+
+        Returns:
+            Path: The operation result.
+        """
         return Path(os.path.dirname(os.path.dirname(__file__)))
 
     def _create_config(self):
         config = super()._create_config()
 
-        # 初始化下载相关参数
+        # Initialize download-related defaults.
         config.update(
             DEFAULT_USER_AGENT=
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

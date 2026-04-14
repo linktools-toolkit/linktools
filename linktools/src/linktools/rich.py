@@ -56,11 +56,12 @@ def _is_rich_available() -> bool:
         from linktools.cli.argparse import ArgParseComplete
         if ArgParseComplete.is_invocation():
             _rich_available = False
-        try:
-            import rich  # noqa
-            _rich_available = True
-        except ImportError:
-            _rich_available = False
+        else:
+            try:
+                import rich  # noqa
+                _rich_available = True
+            except ImportError:
+                _rich_available = False
     return _rich_available
 
 
@@ -295,6 +296,14 @@ def _get_plain_log_handler_class():
 
 
 def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
+    """Initialize root logging with rich output when available.
+
+    Args:
+        level (int): The level value.
+        show_level (bool): The show_level value.
+        show_time (bool): The show_time value.
+        force (bool): The force value.
+    """
     if not _is_rich_available():
         items = []
         if show_time:
@@ -327,6 +336,11 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
 
 
 def get_log_handler() -> "Optional[_LogHandlerMixin]":
+    """Return the active linktools log handler, if one is installed.
+
+    Returns:
+        Optional[_LogHandlerMixin]: The operation result.
+    """
     c = logging.getLogger()
     while c:
         if c.handlers:
@@ -484,6 +498,14 @@ def _get_log_column():
 
 
 def create_simple_progress(*fields: str):
+    """Create a simple progress renderer with optional task fields.
+
+    Args:
+        fields (str): The fields value.
+
+    Returns:
+        Any: The operation result.
+    """
     if not _is_rich_available():
         return _FakeProgress()
 
@@ -507,6 +529,11 @@ def create_simple_progress(*fields: str):
 
 
 def create_progress():
+    """Create a download-oriented progress renderer.
+
+    Returns:
+        Any: The operation result.
+    """
     if not _is_rich_available():
         return _FakeProgress()
 
@@ -676,7 +703,7 @@ def _plain_choose(
         texts = [str(choices[key]) for key in keys]
     else:
         keys = tuple(choices)
-        texts = [str(c) for c in choices]
+        texts = [str(c) for c in keys]
 
     begin_id = 1
     tip_id = 0
@@ -721,6 +748,21 @@ def prompt(
         show_default: bool = True,
         show_choices: bool = True
 ) -> "PromptResultType":
+    """Prompt for a typed value using rich when available.
+
+    Args:
+        prompt (str): The prompt value.
+        type (Type[PromptResultType]): Target type used to cast the value.
+        default (PromptResultType): Value returned when no explicit value is available.
+        allow_empty (bool): The allow_empty value.
+        choices (Optional[List[str]]): The choices value.
+        password (bool): Password used for authentication.
+        show_default (bool): The show_default value.
+        show_choices (bool): The show_choices value.
+
+    Returns:
+        PromptResultType: The operation result.
+    """
     if not _is_rich_available():
         return _plain_prompt(
             prompt, type=type, default=default, allow_empty=allow_empty,
@@ -745,6 +787,19 @@ def choose(
         show_default: bool = True,
         show_choices: bool = True
 ) -> "T":
+    """Prompt the user to choose one item from a list or mapping.
+
+    Args:
+        prompt (str): The prompt value.
+        choices (Union[Iterable[T], Dict[T, Any]]): The choices value.
+        title (str): The title value.
+        default (T): Value returned when no explicit value is available.
+        show_default (bool): The show_default value.
+        show_choices (bool): The show_choices value.
+
+    Returns:
+        T: The operation result.
+    """
     if not _is_rich_available():
         return _plain_choose(
             prompt, choices, title=title, default=default,
@@ -758,7 +813,7 @@ def choose(
         texts = [str(choices[key]) for key in keys]
     else:
         keys = tuple(choices)
-        texts = [str(choice) for choice in choices]
+        texts = [str(choice) for choice in keys]
 
     tip_id = 0
     default_id = None
@@ -795,6 +850,16 @@ def confirm(
         default: "PromptResultType" = __missing__,
         show_default: bool = True,
 ) -> bool:
+    """Prompt the user for a yes-or-no confirmation.
+
+    Args:
+        prompt (str): The prompt value.
+        default (PromptResultType): Value returned when no explicit value is available.
+        show_default (bool): The show_default value.
+
+    Returns:
+        bool: The operation result.
+    """
     if not _is_rich_available():
         return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(

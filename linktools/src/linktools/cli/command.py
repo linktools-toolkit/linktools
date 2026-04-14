@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : entry.py 
+@file    : entry.py
 @time    : 2022/12/18
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -46,7 +46,7 @@ from .. import utils
 from ..core import environ, BaseCapability, ConfigProperty
 from ..decorator import cached_property
 from ..metadata import __missing__
-from ..rich import get_log_handler, init_logging
+from ..rich import get_log_handler, init_logging, _is_rich_available
 from ..types import Error
 
 if TYPE_CHECKING:
@@ -59,28 +59,46 @@ if TYPE_CHECKING:
 
 
 class CommandError(Error):
+    """Base exception for command-line failures."""
     pass
 
 
 class SubCommandError(CommandError):
+    """Raised when subcommand discovery or execution fails."""
     pass
 
 
 class NotFoundSubCommand(SubCommandError):
+    """Raised when no runnable subcommand can be resolved."""
     pass
 
 
 class CommandParser(ArgumentParser):
 
+    """ArgumentParser subclass that applies deferred config actions."""
     def __init__(self, *args, command: "BaseCommand" = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._command = command
 
     @property
     def command(self) -> "BaseCommand":
+        """Command.
+
+        Returns:
+            BaseCommand: The property value.
+        """
         return self._command
 
     def parse_known_args(self, args=None, namespace=None):
+        """Parse args and resolve deferred config actions.
+
+        Args:
+            args: Arguments passed to the operation.
+            namespace: Argparse namespace to update.
+
+        Returns:
+            Any: The operation result.
+        """
         namespace, args = super().parse_known_args(args, namespace)
         for action in self._actions:
             if isinstance(action, ConfigAction):
@@ -128,6 +146,18 @@ def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
 
 
 def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error") -> Generator[_CommandInfo, Any, Any]:
+    """Yield command descriptors discovered from a command module package.
+
+    Args:
+        root (ModuleType): The root value.
+        onerror (ERROR_HANDLER): The onerror value.
+
+    Returns:
+        Generator[_CommandInfo, Any, Any]: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     prefix = root.__name__ + "."
     for finder, name, is_package in walk_packages(path=root.__path__, prefix=prefix):
         try:
@@ -166,6 +196,15 @@ def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error"
 
 
 def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error") -> Generator[_CommandInfo, Any, Any]:
+    """Yield command descriptors discovered from entry points.
+
+    Args:
+        group (str): The group value.
+        onerror (ERROR_HANDLER): The onerror value.
+
+    Returns:
+        Generator[_CommandInfo, Any, Any]: The operation result.
+    """
     for obj in _iter_entry_points(group, onerror=onerror):
         if isinstance(obj, CommandMain):
             info = _CommandInfo()
@@ -182,6 +221,15 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
 
 
 def iter_entry_points_capabilities(group: str, *, onerror: "ERROR_HANDLER" = "error"):
+    """Yield capability objects discovered from entry points.
+
+    Args:
+        group (str): The group value.
+        onerror (ERROR_HANDLER): The onerror value.
+
+    Returns:
+        Iterator[Any]: Generated values.
+    """
     for obj in _iter_entry_points(group, onerror=onerror):
         if isinstance(obj, BaseCapability):
             yield obj
@@ -265,8 +313,32 @@ def subcommand(
         allow_abbrev: bool = __missing__,
         pass_args: bool = False,
         order: str = None):
-    """
-    子命令装饰器
+    """Subcommand.
+
+    Args:
+        name (str): Name to resolve.
+        help (str): The help value.
+        aliases (List[str]): The aliases value.
+        prog (str): The prog value.
+        usage (str): The usage value.
+        description (str): The description value.
+        epilog (str): The epilog value.
+        parents (List[ArgumentParser]): The parents value.
+        formatter_class (Type[HelpFormatter]): The formatter_class value.
+        prefix_chars (str): The prefix_chars value.
+        fromfile_prefix_chars (str): The fromfile_prefix_chars value.
+        argument_default (Any): The argument_default value.
+        conflict_handler (str): The conflict_handler value.
+        add_help (bool): The add_help value.
+        allow_abbrev (bool): The allow_abbrev value.
+        pass_args (bool): The pass_args value.
+        order (str): The order value.
+
+    Returns:
+        Any: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
     """
 
     def decorator(func):
@@ -330,8 +402,26 @@ def subcommand_argument(
         required: bool = __missing__,
         type: "Union[Type[Union[int, float, str]], Callable[[str], T], FileType]" = __missing__,
         **kwargs: Any):
-    """
-    子命令参数装饰器，与@subcommand配合使用
+    """Subcommand argument.
+
+    Args:
+        name_or_flag (str): The name_or_flag value.
+        name_or_flags (str): The name_or_flags value.
+        no_param (bool): The no_param value.
+        action (Union[str, Type[Action]]): Argparse action being resolved.
+        choices (Iterable[T]): The choices value.
+        const (Any): The const value.
+        default (Any): Value returned when no explicit value is available.
+        dest (str): The dest value.
+        help (str): The help value.
+        metavar (Union[str, Tuple[str, ...]]): The metavar value.
+        nargs (Union[int, str]): The nargs value.
+        required (bool): The required value.
+        type (Union[Type[Union[int, float, str]], Callable[[str], T], FileType]): Target type used to cast the value.
+        kwargs (Any): Keyword arguments passed to the operation.
+
+    Returns:
+        Any: The operation result.
     """
 
     def decorator(func):
@@ -380,9 +470,7 @@ def _join_id(*ids: str):
 
 
 class SubCommand(metaclass=abc.ABCMeta):
-    """
-    子命令接口
-    """
+    """SubCommand."""
 
     ROOT_ID = _join_id()
 
@@ -395,28 +483,39 @@ class SubCommand(metaclass=abc.ABCMeta):
 
     @property
     def has_parent(self):
-        """
-        是否有父命令
+        """Has parent.
+
+        Returns:
+            Any: The property value.
         """
         return self.parent_id != self.ROOT_ID
 
     @property
     def is_group(self):
-        """
-        是否是命令组
+        """Return whether group is true.
+
+        Returns:
+            Any: The property value.
         """
         return False
 
     def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
-        """
-        创建CommandParser对象
+        """Create a command parser.
+
+        Args:
+            type (Callable[..., CommandParser]): Target type used to cast the value.
+
+        Returns:
+            CommandParser: The operation result.
         """
         return type(self.name, help=self.description)
 
     @abc.abstractmethod
     def run(self, args: Namespace):
-        """
-        业务逻辑入口
+        """Run.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
         """
         pass
 
@@ -425,17 +524,39 @@ class SubCommand(metaclass=abc.ABCMeta):
 
 
 class SubCommandGroup(SubCommand):
+    """Subcommand placeholder that groups child commands."""
 
     @property
     def is_group(self):
+        """Return whether group is true.
+
+        Returns:
+            Any: The property value.
+        """
         return True
 
     def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+        """Create a parser for a subcommand group.
+
+        Args:
+            type (Callable[..., CommandParser]): Target type used to cast the value.
+
+        Returns:
+            CommandParser: The operation result.
+        """
         parser = type(self.name, help=self.description)
         parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
         return parser
 
     def run(self, args: Namespace):
+        """Print help for this subcommand group.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         attr_name = f"__subcommand_help_{id(self):x}__"
         assert hasattr(args, attr_name)
         func = getattr(args, attr_name)
@@ -470,13 +591,13 @@ class _SubCommandMethod(SubCommand):
 
             no_param = argument_kwargs.pop("no_param", __missing__)
 
-            # 解析dest，把注解的参数和方法参数对应上
+            # Resolve dest so annotated arguments match method parameters.
             dest = argument_kwargs.get("dest", __missing__)
             if dest is __missing__:
                 prefix_chars = parser.prefix_chars
                 if not argument_args or len(argument_args) == 1 and argument_args[0][0] not in prefix_chars:
                     dest = argument_args[0]
-                    argument_kwargs["required"] = __missing__  # 这种方式不能指定required，所以这里设置为MISSING
+                    argument_kwargs["required"] = __missing__  # Positional arguments cannot set required here.
                 else:
                     option_strings = []
                     long_option_strings = []
@@ -493,7 +614,7 @@ class _SubCommandMethod(SubCommand):
                     dest = dest.replace('-', '_')
                     argument_kwargs["dest"] = dest
 
-            # 验证一下dest是否在参数列表中，不在就报错
+            # Validate that dest exists in the method signature.
             signature = inspect.signature(method)
             if not no_param and dest and dest not in signature.parameters:
                 raise SubCommandError(
@@ -502,7 +623,7 @@ class _SubCommandMethod(SubCommand):
                     f"1. add `{dest}` parameter to {self.info}, {os.linesep}"
                     f"2. add `no_param=True` parameter to argument `{', '.join(argument_args)}`.")
 
-            # 根据方法参数的注解，设置一些默认值
+            # Fill defaults from method parameter annotations.
             parameter = signature.parameters[dest] if not no_param else None
             if "config" in argument_kwargs:
                 config = argument_kwargs.get("config")
@@ -557,6 +678,7 @@ class _SubCommandMethod(SubCommand):
 
 class SubCommandWrapper(SubCommand):
 
+    """Wrap a BaseCommand so it can be used as a subcommand."""
     def __init__(self, command: "BaseCommand",
                  id: str = None, parent_id: str = None,
                  name: str = None, description: str = None,
@@ -571,21 +693,40 @@ class SubCommandWrapper(SubCommand):
         self.command = command
 
     def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+        """Create a parser for the wrapped command.
+
+        Args:
+            type (Callable[..., CommandParser]): Target type used to cast the value.
+
+        Returns:
+            CommandParser: The operation result.
+        """
         return self.command.create_parser(self.name, help=self.description, type=type)
 
     def run(self, args: Namespace):
+        """Run the wrapped command.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Any: The operation result.
+        """
         return self.command(args)
 
 
 class SubCommandMixin:
 
+    """Mixin that discovers, registers, and prints subcommands."""
     def walk_subcommands(self: "BaseCommand", target: Any, parent_id: str = None) -> Generator[SubCommand, None, None]:
-        """
-        根据target对象，遍历所有的子命令，规则如下：
-        1. 如果target是SubCommand类型，则直接返回
-        2. 如果target是list、tuple、set、generator类型，则递归遍历
-        3. 如果target是模块类型，则遍历模块下的所有子命令
-        4. 如果target是其他类型，则遍历target下的所有包含@subcommand注解的方法
+        """Yield subcommands discovered from a target object.
+
+        Args:
+            target (Any): The target value.
+            parent_id (str): The parent_id value.
+
+        Returns:
+            Generator[SubCommand, None, None]: The operation result.
         """
 
         if isinstance(target, SubCommand):
@@ -658,8 +799,19 @@ class SubCommandMixin:
             required: bool = False,
             sort: bool = False,
     ) -> List[_SubCommandInfo]:
-        """
-        向parser中添加子命令，规则参考walk_subcommands方法
+        """Register discovered subcommands on a parser.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
+            target (Any): The target value.
+            required (bool): The required value.
+            sort (bool): The sort value.
+
+        Returns:
+            List[_SubCommandInfo]: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         target = target or self
         target_parser = parser or self._argument_parser
@@ -705,7 +857,7 @@ class SubCommandMixin:
                 subparser.required = False
                 parsers[subcommand.id] = subparser
 
-            # BaseCommand 类型单独处理，因为有可能在init_arguments中添加了子命令
+            # Handle BaseCommand separately because init_arguments may add subcommands.
             if isinstance(subcommand, SubCommandWrapper):
                 sub_subcommand_infos = parser.get_default(f"__subcommands_{id(subcommand.command):x}__")
                 if sub_subcommand_infos:
@@ -718,8 +870,13 @@ class SubCommandMixin:
         return subcommand_infos
 
     def parse_subcommand(self: "BaseCommand", args: Namespace) -> Optional[SubCommand]:
-        """
-        解析子出args中的子命令
+        """Return the selected subcommand from parsed args.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Optional[SubCommand]: The operation result.
         """
         name = f"__subcommand_{id(self):x}__"
         if hasattr(args, name):
@@ -730,8 +887,16 @@ class SubCommandMixin:
         return None
 
     def run_subcommand(self: "BaseCommand", args: Namespace) -> Optional[int]:
-        """
-        解析并运行args中的子命令
+        """Run the selected subcommand from parsed args.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Optional[int]: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         subcommand = self.parse_subcommand(args)
         if subcommand:
@@ -744,8 +909,15 @@ class SubCommandMixin:
             root: SubCommand = None,
             max_level: int = None
     ) -> None:
-        """
-        打印args中的子命令
+        """Print the registered subcommand tree.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+            root (SubCommand): The root value.
+            max_level (int): The max_level value.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         name = f"__subcommands_{id(self):x}__"
         if not hasattr(args, name):
@@ -760,20 +932,60 @@ class SubCommandMixin:
         elif self.description:
             description = self.description
 
-        from rich import get_console
-        from rich.tree import Tree
+        if _is_rich_available():
+            from rich import get_console
+            from rich.tree import Tree
 
-        tree = self._make_subcommand_tree(
-            Tree(f"📎 {description}"),
-            getattr(args, name),
-            root_id,
-            max_level,
-        )
+            tree = self._make_subcommand_tree(
+                Tree(f"📎 {description}"),
+                getattr(args, name),
+                root_id,
+                max_level,
+            )
 
-        console = get_console()
-        if self.environ.description != NotImplemented:
-            console.print(self.environ.description, highlight=False)
-        console.print(tree, highlight=False)
+            console = get_console()
+            if self.environ.description != NotImplemented:
+                console.print(self.environ.description, highlight=False)
+            console.print(tree, highlight=False)
+        else:
+            if self.environ.description != NotImplemented:
+                print(self.environ.description)
+            print(description)
+            self._print_subcommand_tree(getattr(args, name), root_id, max_level=max_level)
+
+    def _print_subcommand_tree(
+            self: "BaseCommand",
+            infos: List[_SubCommandInfo],
+            root_id: str,
+            max_level: Optional[int],
+            level: int = 0,
+    ) -> None:
+        """
+        Print a plain-text command tree when rich is unavailable.
+        """
+        for info in infos:
+            if info.node.parent_id != root_id:
+                continue
+
+            current_level = level + 1
+            if max_level is not None and current_level > max_level:
+                continue
+
+            prefix = "  " * level
+            marker = "*" if info.node.is_group or info.children else "-"
+            text = f"{prefix}{marker} {info.node.name}"
+            if info.node.description:
+                text = f"{text}: {info.node.description}"
+            print(text)
+
+            child_infos = info.children or infos
+            child_root_id = SubCommand.ROOT_ID if info.children else info.node.id
+            self._print_subcommand_tree(
+                child_infos,
+                child_root_id,
+                max_level=max_level,
+                level=current_level,
+            )
 
     def _make_subcommand_tree(
             self: "BaseCommand",
@@ -826,15 +1038,23 @@ class SubCommandMixin:
 
 
 class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
+    """Base class for executable command-line commands."""
 
     @property
     def module(self) -> str:
+        """Module.
+
+        Returns:
+            str: The property value.
+        """
         return self.__module__
 
     @property
     def name(self) -> str:
-        """
-        命令名
+        """Return the name.
+
+        Returns:
+            str: The property value.
         """
         name = self.module
         index = name.rfind(".")
@@ -844,64 +1064,85 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
     @property
     def parent(self) -> Optional[str]:
-        """
-        父命令名
+        """Return the parent command id.
+
+        Returns:
+            Optional[str]: The property value.
         """
         return None
 
     @property
     def environ(self) -> "BaseEnviron":
-        """
-        环境信息
+        """Return the command environment.
+
+        Returns:
+            BaseEnviron: The property value.
         """
         return environ
 
     @property
     def config(self) -> dict:
-        """
-        配置信息
+        """Return the configuration object.
+
+        Returns:
+            dict: The property value.
         """
         return self.environ.config
 
     @property
     def logger(self) -> logging.Logger:
-        """
-        日志记录器
+        """Return the root logger.
+
+        Returns:
+            logging.Logger: The property value.
         """
         return self.environ.logger
 
     @cached_property
     def description(self) -> str:
-        """
-        命令描述，默认从docstring中获取
+        """Description.
+
+        Returns:
+            str: The operation result.
         """
         return textwrap.dedent((self.__doc__ or "")).strip()
 
     @cached_property
     def order(self) -> str:
-        """
-        命令顺序
+        """Order.
+
+        Returns:
+            str: The operation result.
         """
         return self.name
 
     @property
     def known_errors(self) -> List[Type[BaseException]]:
-        """
-        已知错误类型
+        """Return command-specific known error types.
+
+        Returns:
+            List[Type[BaseException]]: The property value.
         """
         return []
 
     @abc.abstractmethod
     def init_arguments(self, parser: CommandParser) -> None:
-        """
-        初始化参数，在调用create_parser时执行
+        """Initialize parser arguments.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
         """
         pass
 
     @abc.abstractmethod
     def run(self, args: Namespace) -> Optional[int]:
-        """
-        业务逻辑入口
+        """Run.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Optional[int]: The operation result.
         """
         pass
 
@@ -913,8 +1154,17 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             conflict_handler="resolve",
             **kwargs: Any
     ) -> CommandParser:
-        """
-        创建命令行解析器
+        """Create a command parser.
+
+        Args:
+            args (Any): Arguments passed to the operation.
+            type (Callable[..., CommandParser]): Target type used to cast the value.
+            formatter_class (Type[HelpFormatter]): The formatter_class value.
+            conflict_handler: The conflict_handler value.
+            kwargs (Any): Keyword arguments passed to the operation.
+
+        Returns:
+            CommandParser: The operation result.
         """
         description = kwargs.pop("description", None)
         if not description:
@@ -941,14 +1191,18 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return parser
 
     def init_base_arguments(self, parser: CommandParser) -> None:
-        """
-        初始化基础参数，在调用create_parser时执行
+        """Initialize base parser arguments.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
         """
         pass
 
     def init_global_arguments(self, parser: CommandParser) -> None:
-        """
-        初始化公共参数，会在命令本身和所有子命令中调用
+        """Initialize global parser arguments.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
         """
 
         environ = self.environ
@@ -1009,14 +1263,21 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
     @property
     def main(self) -> "CommandMain":
-        """
-        main命令入口
+        """Return the command entry point.
+
+        Returns:
+            CommandMain: The property value.
         """
         return CommandMain(self, show_log_level=True, show_log_time=False)
 
     def __call__(self, args: "Union[List[str], Namespace]" = None) -> int:
-        """
-        内部调用命令入口
+        """Call.
+
+        Args:
+            args (Union[List[str], Namespace]): Arguments passed to the operation.
+
+        Returns:
+            int: The operation result.
         """
         try:
             if not isinstance(args, Namespace):
@@ -1038,16 +1299,35 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
 class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
 
+    """Base command that dispatches to registered subcommands."""
     def init_subcommands(self) -> Any:
+        """Return the target used to discover subcommands.
+
+        Returns:
+            Any: The operation result.
+        """
         return self
 
     def init_arguments(self, parser: CommandParser) -> None:
+        """Register subcommands on the parser.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
+        """
         self.add_subcommands(
             parser=parser,
             target=self.init_subcommands(),
         )
 
     def run(self, args: Namespace) -> Optional[int]:
+        """Dispatch to the selected subcommand or print the command tree.
+
+        Args:
+            args (Namespace): Arguments passed to the operation.
+
+        Returns:
+            Optional[int]: The operation result.
+        """
         subcommand = self.parse_subcommand(args)
         if not subcommand or subcommand.is_group:
             return self.print_subcommands(args, subcommand, max_level=2)
@@ -1056,6 +1336,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
 
 class CommandMain:
 
+    """Callable command entry point with logging and error handling."""
     def __init__(
             self,
             command: BaseCommand, *,
@@ -1072,12 +1353,15 @@ class CommandMain:
 
     @property
     def command(self) -> BaseCommand:
+        """Command.
+
+        Returns:
+            BaseCommand: The property value.
+        """
         return self._command
 
     def init_logging(self):
-        """
-        初始化log
-        """
+        """Initialize logging for command execution."""
         init_logging(
             level=logging.INFO,
             show_time=self.show_log_time,
@@ -1085,8 +1369,13 @@ class CommandMain:
         )
 
     def __call__(self, args: List[str] = None) -> int:
-        """
-        main命令入口
+        """Call.
+
+        Args:
+            args (List[str]): Arguments passed to the operation.
+
+        Returns:
+            int: The operation result.
         """
         self.init_logging()
 
@@ -1105,10 +1394,11 @@ class CommandMain:
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except:
-            from rich import get_console
-            get_console().print_exception(show_locals=True) \
-                if self.command.environ.debug \
-                else self.command.logger.error(traceback.format_exc())
+            if self.command.environ.debug and _is_rich_available():
+                from rich import get_console
+                get_console().print_exception(show_locals=True)
+            else:
+                self.command.logger.error(traceback.format_exc())
             result = 1
 
         if self.exit_on_return:

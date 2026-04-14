@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : __main__.py 
+@file    : __main__.py
 @time    : 2022/12/13
-@site    :  
-@software: PyCharm 
+@site    :
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -33,7 +33,13 @@ from linktools.metadata import __ep_scripts__
 
 class Command(BaseCommandGroup):
 
+    """Top-level linktools command group."""
     def init_arguments(self, parser: CommandParser) -> None:
+        """Register top-level entry point commands.
+
+        Args:
+            parser (CommandParser): Argument parser to configure or inspect.
+        """
         self.add_subcommands(
             parser=parser,
             target=iter_entry_point_commands(__ep_scripts__, onerror="warn"),

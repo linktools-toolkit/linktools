@@ -71,6 +71,11 @@ _environ = _logger = None
 
 
 def get_environ() -> "Environ":
+    """Return the active linktools environment object.
+
+    Returns:
+        Environ: The operation result.
+    """
     global _environ
     if _environ is None:
         from ..core import environ
@@ -79,6 +84,11 @@ def get_environ() -> "Environ":
 
 
 def get_logger() -> "logging.Logger":
+    """Return the logger for the active linktools environment.
+
+    Returns:
+        logging.Logger: The operation result.
+    """
     global _logger
     if _logger is None:
         _logger = get_environ().get_logger("utils")
@@ -90,6 +100,17 @@ def ignore_errors(
         args: "P.args" = None, kwargs: "P.kwargs" = None,
         default: "T" = None
 ) -> "T":
+    """Run a callable and suppress the selected exception types.
+
+    Args:
+        fn (Callable[P, T]): Callable to invoke.
+        args (P.args): Arguments passed to the operation.
+        kwargs (P.kwargs): Keyword arguments passed to the operation.
+        default (T): Value returned when no explicit value is available.
+
+    Returns:
+        T: The operation result.
+    """
     try:
         if args is not None:
             return fn(*args, **kwargs) \
@@ -104,12 +125,15 @@ def ignore_errors(
 
 
 def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional[T]":  # noqa
-    """
-    类型转换
-    :param type: 目标类型
-    :param obj: 对象
-    :param default: 默认值
-    :return: 转换后的值
+    """Cast a value to the requested type.
+
+    Args:
+        type (Type[T]): Target type used to cast the value.
+        obj (Any): Object to inspect or convert.
+        default (Any): Value returned when no explicit value is available.
+
+    Returns:
+        Optional[T]: The operation result.
     """
     if default is __missing__:
         return type(obj)
@@ -120,28 +144,39 @@ def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional
 
 
 def cast_int(obj: "Any", default: "Any" = __missing__) -> int:
-    """
-    转为int
-    :param obj: 需要转换的值
-    :param default: 默认值
-    :return: 转换后的值
+    """Cast a value to int.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        default (Any): Value returned when no explicit value is available.
+
+    Returns:
+        int: The operation result.
     """
     return cast(int, obj, default)
 
 
 def cast_bool(obj: "Any", default: "Any" = __missing__) -> bool:
-    """
-    转为bool
-    :param obj: 需要转换的值
-    :param default: 默认值
-    :return: 转换后的值
+    """Cast a value to bool.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        default (Any): Value returned when no explicit value is available.
+
+    Returns:
+        bool: The operation result.
     """
     return cast(bool, obj, default)
 
 
 def coalesce(*args: "Any") -> "Any":
-    """
-    从参数列表中返回第一个不为None的值
+    """Return the first non-None value from the arguments.
+
+    Args:
+        args (Any): Arguments passed to the operation.
+
+    Returns:
+        Any: The operation result.
     """
     for arg in args:
         if arg is not None:
@@ -150,11 +185,14 @@ def coalesce(*args: "Any") -> "Any":
 
 
 def is_contain(obj: "Any", key: "Any") -> bool:
-    """
-    是否包含内容
-    :param obj: 对象
-    :param key: 键
-    :return: 是否包含
+    """Return whether an object contains a key.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        key (Any): Configuration or item key.
+
+    Returns:
+        bool: The operation result.
     """
     if obj is None:
         return False
@@ -164,10 +202,13 @@ def is_contain(obj: "Any", key: "Any") -> bool:
 
 
 def is_empty(obj: "Any") -> bool:
-    """
-    对象是否为空
-    :param obj: 对象
-    :return: 是否为空
+    """Return whether an object is empty.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+
+    Returns:
+        bool: The operation result.
     """
     if obj is None:
         return True
@@ -177,13 +218,16 @@ def is_empty(obj: "Any") -> bool:
 
 
 def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
-    """
-    获取子项
-    :param obj: 对象
-    :param keys: 键
-    :param type: 对应类型
-    :param default: 默认值
-    :return: 子项
+    """Return a nested item or attribute from an object.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        keys (Any): Keys to inspect or update.
+        type (Type[T]): Target type used to cast the value.
+        default (T): Value returned when no explicit value is available.
+
+    Returns:
+        Optional[T]: The operation result.
     """
     for key in keys:
         if obj is None:
@@ -213,13 +257,16 @@ def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
 
 
 def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
-    """
-    获取并删除子项
-    :param obj: 对象
-    :param keys: 键
-    :param type: 对应类型
-    :param default: 默认值
-    :return: 子项
+    """Return and remove a nested item from an object.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        keys (Any): Keys to inspect or update.
+        type (Type[T]): Target type used to cast the value.
+        default (T): Value returned when no explicit value is available.
+
+    Returns:
+        Optional[T]: The operation result.
     """
     last_obj = None
     last_key = None
@@ -262,13 +309,16 @@ def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
 
 
 def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":  # noqa
-    """
-    获取子项（列表）
-    :param obj: 对象
-    :param keys: 键
-    :param type: 对应类型
-    :param default: 默认值
-    :return: 子项
+    """Return a list item after trying several indexes.
+
+    Args:
+        obj (Any): Object to inspect or convert.
+        keys (Any): Keys to inspect or update.
+        type (Type[T]): Target type used to cast the value.
+        default (List[T]): Value returned when no explicit value is available.
+
+    Returns:
+        Optional[List[T]]: The operation result.
     """
     objs = get_item(obj, *keys, default=None)
     if objs is None or not isinstance(objs, (Tuple, List, Set)):
@@ -286,6 +336,15 @@ def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "Li
 
 
 def get_hash(data: "Union[str, bytes]", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+    """Return the digest for bytes or text using the selected hash algorithm.
+
+    Args:
+        data (Union[str, bytes]): The data value.
+        algorithm ("Literal['md5', 'sha1', 'sha256']"): The algorithm value.
+
+    Returns:
+        str: The operation result.
+    """
     import hashlib
     if isinstance(data, str):
         data = bytes(data, "utf8")
@@ -295,6 +354,15 @@ def get_hash(data: "Union[str, bytes]", algorithm: "Literal['md5', 'sha1', 'sha2
 
 
 def get_file_hash(path: "PathType", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+    """Return the digest for a file using the selected hash algorithm.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        algorithm ("Literal['md5', 'sha1', 'sha256']"): The algorithm value.
+
+    Returns:
+        str: The operation result.
+    """
     import hashlib
     m = getattr(hashlib, algorithm)()
     with open(path, "rb") as fd:
@@ -307,14 +375,38 @@ def get_file_hash(path: "PathType", algorithm: "Literal['md5', 'sha1', 'sha256']
 
 
 def get_md5(data: "Union[str, bytes]") -> str:
+    """Return the MD5 digest for bytes or text.
+
+    Args:
+        data (Union[str, bytes]): The data value.
+
+    Returns:
+        str: The operation result.
+    """
     return get_hash(data, algorithm="md5")
 
 
 def get_file_md5(path: "PathType"):
+    """Return the MD5 digest for a file.
+
+    Args:
+        path (PathType): Filesystem path to process.
+
+    Returns:
+        Any: The operation result.
+    """
     return get_file_hash(path, algorithm="md5")
 
 
 def get_hash_ident(data: "Union[str, bytes]"):
+    """Return a short stable identifier from a hashed value.
+
+    Args:
+        data (Union[str, bytes]): The data value.
+
+    Returns:
+        Any: The operation result.
+    """
     if isinstance(data, str):
         data = bytes(data, "utf8")
     length = f"{len(data):0>4x}"
@@ -324,24 +416,54 @@ def get_hash_ident(data: "Union[str, bytes]"):
 
 
 def make_uuid() -> str:
+    """Return a random UUID string.
+
+    Returns:
+        str: The operation result.
+    """
     import random
     import uuid
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{uuid.uuid1()}{random.random()}")).replace("-", "")
 
 
 def random_string(length: int = 16) -> str:
+    """Return a random string using the requested character set.
+
+    Args:
+        length (int): The length value.
+
+    Returns:
+        str: The operation result.
+    """
     import random
     import string
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
 def gzip_compress(data: "Union[str, bytes]") -> bytes:
+    """Return gzip-compressed bytes for the supplied data.
+
+    Args:
+        data (Union[str, bytes]): The data value.
+
+    Returns:
+        bytes: The operation result.
+    """
     if isinstance(data, str):
         data = bytes(data, "utf8")
     return gzip.compress(data)
 
 
 def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
+    """Return whether a path is contained within another path.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        root_path (PathType): The root_path value.
+
+    Returns:
+        bool: The operation result.
+    """
     try:
         abs_path = os.path.abspath(os.path.expanduser(path))
         abs_root_path = os.path.abspath(os.path.expanduser(root_path))
@@ -351,6 +473,18 @@ def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
 
 
 def join_path(root_path: PathType, *paths: str) -> Path:
+    """Join path segments and optionally expand user or environment markers.
+
+    Args:
+        root_path (PathType): The root_path value.
+        paths (str): The paths value.
+
+    Returns:
+        Path: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     target_path = str(root_path)
     for path in paths:
         parent_path = target_path
@@ -364,24 +498,72 @@ def join_path(root_path: PathType, *paths: str) -> Path:
 
 
 @overload
-def read_file(path: "PathType") -> bytes: ...
+def read_file(path: "PathType") -> bytes:
+    """Read file data from a path.
+
+    Args:
+        path (PathType): Filesystem path to process.
+
+    Returns:
+        bytes: The operation result.
+    """
+    ...
 
 
 @overload
-def read_file(path: "PathType", text: "Literal[False]") -> bytes: ...
+def read_file(path: "PathType", text: "Literal[False]") -> bytes:
+    """Read file data from a path.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        text (Literal[False]): Whether file data should be decoded as text.
+
+    Returns:
+        bytes: The operation result.
+    """
+    ...
 
 
 @overload
-def read_file(path: "PathType", text: "Literal[True]", encoding: str = DEFAULT_ENCODING) -> str: ...
+def read_file(path: "PathType", text: "Literal[True]", encoding: str = DEFAULT_ENCODING) -> str:
+    """Read file data from a path.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        text (Literal[True]): Whether file data should be decoded as text.
+        encoding (str): Text encoding used for file data.
+
+    Returns:
+        str: The operation result.
+    """
+    ...
 
 
 @overload
-def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]": ...
+def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]":
+    """Read file data from a path.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        text (bool): Whether file data should be decoded as text.
+        encoding (str): Text encoding used for file data.
+
+    Returns:
+        Union[str, bytes]: The operation result.
+    """
+    ...
 
 
 def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]":
-    """
-    读取文件数据
+    """Read data from a file.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        text (bool): Whether file data should be decoded as text.
+        encoding (str): Text encoding used for file data.
+
+    Returns:
+        Union[str, bytes]: The operation result.
     """
     if text:
         with open(path, "rt", encoding=encoding) as fd:
@@ -392,8 +574,12 @@ def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCO
 
 
 def write_file(path: "PathType", data: "Union[str, bytes]", encoding: str = DEFAULT_ENCODING) -> None:
-    """
-    写入文件数据
+    """Write data to a file.
+
+    Args:
+        path (PathType): Filesystem path to process.
+        data (Union[str, bytes]): The data value.
+        encoding (str): Text encoding used for file data.
     """
     if isinstance(data, str):
         with open(path, "wt", encoding=encoding) as fd:
@@ -404,8 +590,10 @@ def write_file(path: "PathType", data: "Union[str, bytes]", encoding: str = DEFA
 
 
 def remove_file(path: "PathType") -> None:
-    """
-    删除文件/目录
+    """Remove a file or directory.
+
+    Args:
+        path (PathType): Filesystem path to process.
     """
     if not os.path.exists(path):
         return
@@ -419,8 +607,10 @@ def remove_file(path: "PathType") -> None:
 
 
 def clear_directory(path: "PathType") -> None:
-    """
-    删除子目录
+    """Remove child paths from a directory.
+
+    Args:
+        path (PathType): Filesystem path to process.
     """
     if not os.path.isdir(path):
         return
@@ -436,8 +626,10 @@ def clear_directory(path: "PathType") -> None:
 
 
 def get_lan_ip() -> "Optional[str]":
-    """
-    获取本地IP地址
+    """Return the local LAN IP address.
+
+    Returns:
+        Optional[str]: The operation result.
     """
     s = None
     try:
@@ -453,8 +645,10 @@ def get_lan_ip() -> "Optional[str]":
 
 
 def get_wan_ip() -> "Optional[str]":
-    """
-    获取外网IP地址
+    """Return the public WAN IP address.
+
+    Returns:
+        Optional[str]: The operation result.
     """
     from urllib.request import urlopen
     try:
@@ -465,8 +659,13 @@ def get_wan_ip() -> "Optional[str]":
 
 
 def parse_version(version: str) -> "Tuple[int, ...]":
-    """
-    将字符串版本号解析成元组
+    """Parse a version string into a comparable tuple.
+
+    Args:
+        version (str): The version value.
+
+    Returns:
+        Tuple[int, ...]: The operation result.
     """
     result = []
     for x in version.split("."):
@@ -494,8 +693,13 @@ _widths = [
 
 
 def get_char_width(char):
-    """
-    获取字符宽度
+    """Return the display width of a character.
+
+    Args:
+        char: The char value.
+
+    Returns:
+        Any: The operation result.
     """
     global _widths
     o = ord(char)
@@ -511,8 +715,13 @@ _user_agent = None
 
 
 def user_agent(style=None) -> str:
-    """
-    随机获取一个User-Agent
+    """Return a random user-agent string.
+
+    Args:
+        style: The style value.
+
+    Returns:
+        str: The operation result.
     """
     global _user_agent
 
@@ -544,8 +753,17 @@ def user_agent(style=None) -> str:
 
 
 def make_url(scheme: str, host: str, port: int, *paths: str, **kwargs: "QueryType") -> str:
-    """
-    构建URL
+    """Build a URL from parts and query values.
+
+    Args:
+        scheme (str): The scheme value.
+        host (str): The host value.
+        port (int): Remote port number.
+        paths (str): The paths value.
+        kwargs (QueryType): Keyword arguments passed to the operation.
+
+    Returns:
+        str: The operation result.
     """
     url = f"{scheme}://{host}"
     if port is not None:
@@ -555,8 +773,15 @@ def make_url(scheme: str, host: str, port: int, *paths: str, **kwargs: "QueryTyp
 
 
 def join_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
-    """
-    拼接URL
+    """Join URL path segments safely.
+
+    Args:
+        url (str): URL to process.
+        paths (str): The paths value.
+        kwargs (QueryType): Keyword arguments passed to the operation.
+
+    Returns:
+        str: The operation result.
     """
     from urllib import parse
 
@@ -580,8 +805,13 @@ def join_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
 
 
 def guess_file_name(url: str) -> str:
-    """
-    根据url推测文件名
+    """Guess a filename from a URL and response metadata.
+
+    Args:
+        url (str): URL to process.
+
+    Returns:
+        str: The operation result.
     """
     from urllib import parse
     if not url:
@@ -595,7 +825,7 @@ def guess_file_name(url: str) -> str:
 def _parseparam(s):
     while s[:1] == ';':
         s = s[1:]
-        end = s.find(';')
+        end = s.find(";")
         while end > 0 and (s.count('"', 0, end) - s.count('\\"', 0, end)) % 2:
             end = s.find(';', end + 1)
         if end < 0:
@@ -608,14 +838,17 @@ def _parseparam(s):
 def parse_header(line):
     """Parse a Content-type like header.
 
-    Return the main content-type and a dictionary of options.
+    Args:
+        line: The line value.
 
+    Returns:
+        Any: The operation result.
     """
     parts = _parseparam(';' + line)
     key = parts.__next__()
     pdict = {}
     for p in parts:
-        i = p.find('=')
+        i = p.find("=")
         if i >= 0:
             name = p[:i].strip().lower()
             value = p[i + 1:].strip()
@@ -627,8 +860,13 @@ def parse_header(line):
 
 
 def parser_cookie(cookie: str) -> "Dict[str, str]":
-    """
-    解析cookie成字典
+    """Parse a cookie header into a dictionary.
+
+    Args:
+        cookie (str): The cookie value.
+
+    Returns:
+        Dict[str, str]: The operation result.
     """
     cookies = {}
     for item in cookie.split(";"):
@@ -641,8 +879,10 @@ _interpreter = _interpreter_ident = None
 
 
 def get_interpreter():
-    """
-    获取当前python解释器的绝对路径
+    """Return the absolute path to the current Python interpreter.
+
+    Returns:
+        Any: The operation result.
     """
     global _interpreter
     if _interpreter is None:
@@ -651,8 +891,10 @@ def get_interpreter():
 
 
 def get_interpreter_ident() -> str:
-    """
-    获取当前python解释器id
+    """Return a stable identifier for the current Python interpreter.
+
+    Returns:
+        str: The operation result.
     """
     global _interpreter_ident
     if _interpreter_ident is None:
@@ -665,8 +907,10 @@ _system = _machine = None
 
 
 def get_system() -> str:
-    """
-    获取系统类型
+    """Return the current operating system name.
+
+    Returns:
+        str: The operation result.
     """
     global _system
     if _system is None:
@@ -676,8 +920,10 @@ def get_system() -> str:
 
 
 def get_machine() -> str:
-    """
-    获取机器类型
+    """Return the current machine architecture name.
+
+    Returns:
+        str: The operation result.
     """
     global _machine
     if _machine is None:
@@ -687,15 +933,25 @@ def get_machine() -> str:
 
 
 def is_unix_like(system: str = None) -> bool:
-    """
-    是否为类Unix系统
+    """Return whether the current system is Unix-like.
+
+    Args:
+        system (str): The system value.
+
+    Returns:
+        bool: The operation result.
     """
     return system in ("darwin", "linux") if system else _is_unix_like
 
 
 def is_windows(system: str = None) -> bool:
-    """
-    是否为Windows系统
+    """Return whether the current system is Windows.
+
+    Args:
+        system (str): The system value.
+
+    Returns:
+        bool: The operation result.
     """
     return system == "windows" if system else _is_windows_like
 
@@ -703,30 +959,50 @@ def is_windows(system: str = None) -> bool:
 if is_windows():
 
     def get_user(uid: int = None):
-        """
-        获取当前用户，windows固定为当前用户名
+        """Return the user name for a UID or the current user.
+
+        Args:
+            uid (int): User id to resolve. If omitted, the current user is used.
+
+        Returns:
+            Any: The operation result.
         """
         import getpass
         return getpass.getuser()
 
 
     def get_uid(user: str = None):
-        """
-        获取用户ID，windows固定为0
+        """Return the UID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            Any: The operation result.
         """
         return 0
 
 
     def get_gid(user: str = None):
-        """
-        获取用户组ID，windows固定为0
+        """Return the GID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            Any: The operation result.
         """
         return 0
 
 
     def get_shell_path():
-        """
-        获取当前用户shell路径
+        """Return the shell path for the current user.
+
+        Returns:
+            Any: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         import shutil
         shell_path = shutil.which("powershell") or shutil.which("cmd")
@@ -741,8 +1017,13 @@ if is_windows():
 elif is_unix_like():
 
     def get_user(uid: int = None) -> str:
-        """
-        获取用户名，如果没有指定uid则返回当前用户名
+        """Return the user name for a UID or the current user.
+
+        Args:
+            uid (int): User id to resolve. If omitted, the current user is used.
+
+        Returns:
+            str: The operation result.
         """
         if uid is not None:
             import pwd
@@ -752,8 +1033,13 @@ elif is_unix_like():
 
 
     def get_uid(user: str = None):
-        """
-        获取用户ID，如果没有指定用户则返回当前用户ID
+        """Return the UID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            Any: The operation result.
         """
         if user is not None:
             import pwd
@@ -762,8 +1048,13 @@ elif is_unix_like():
 
 
     def get_gid(user: str = None):
-        """
-        获取用户组ID，如果没有指定用户则返回当前用户组ID
+        """Return the GID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            Any: The operation result.
         """
         if user is not None:
             import pwd
@@ -772,8 +1063,10 @@ elif is_unix_like():
 
 
     def get_shell_path():
-        """
-        获取当前用户shell路径
+        """Return the shell path for the current user.
+
+        Returns:
+            Any: The operation result.
         """
         if "SHELL" in os.environ:
             shell_path = os.environ["SHELL"]
@@ -789,39 +1082,74 @@ elif is_unix_like():
 else:
 
     def get_user(uid: int = None) -> str:
-        """
-        获取用户名，如果没有指定uid则返回当前用户名，windows固定为当前用户名
+        """Return the user name for a UID or the current user.
+
+        Args:
+            uid (int): User id to resolve. If omitted, the current user is used.
+
+        Returns:
+            str: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
     def get_uid(user: str = None) -> int:
-        """
-        获取用户ID，如果没有指定用户则返回当前用户ID，windows固定为0
+        """Return the UID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            int: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
     def get_gid(user: str = None) -> int:
-        """
-        获取用户组ID，如果没有指定用户则返回当前用户组ID，windows固定为0
+        """Return the GID for a user or the current user.
+
+        Args:
+            user (str): User name to resolve. If omitted, the current user is used.
+
+        Returns:
+            int: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
     def get_shell_path() -> str:
-        """
-        获取当前用户shell路径
+        """Return the shell path for the current user.
+
+        Returns:
+            str: The operation result.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
         """
         raise NotImplementedError(f"Unsupported system `{get_system()}`")
 
 
 def import_module(name: str, spec: "ModuleSpec" = None) -> "T":
-    """
-    延迟导入模块
-    :param name: 模块名
-    :param spec: 模块spec
-    :return: module
+    """Import a module, optionally using an import spec.
+
+    Args:
+        name (str): Name to resolve.
+        spec (ModuleSpec): The spec value.
+
+    Returns:
+        T: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
     """
     from importlib.util import find_spec, LazyLoader, module_from_spec
     if name in sys.modules:
@@ -838,11 +1166,17 @@ def import_module(name: str, spec: "ModuleSpec" = None) -> "T":
 
 
 def import_module_file(name: str, path: str) -> "T":
-    """
-    延迟导入模块
-    :param name: 模块名
-    :param path: 模块路径
-    :return: module
+    """Import a module from a file path.
+
+    Args:
+        name (str): Name to resolve.
+        path (str): Filesystem path to process.
+
+    Returns:
+        T: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
     """
     from importlib.util import LazyLoader, module_from_spec, spec_from_file_location
     if name in sys.modules:
@@ -863,23 +1197,13 @@ def import_module_file(name: str, path: str) -> "T":
 
 
 def get_derived_type(t: "Type[T]") -> "Type[T]":
-    """
-    生成委托类型，常用于自定义类继承委托类，替换某些方法, 如：
+    """Create a proxy type that delegates operations to another type.
 
-    import subprocess
+    Args:
+        t (Type[T]): The t value.
 
-    class Popen(get_derived_type(subprocess.Popen)):
-        __super__: subprocess.Popen
-
-        def communicate(self, *args, **kwargs):
-            out, err = self.__super__.communicate(*args, **kwargs)
-            return 'fake out!!!', 'fake error!!!'
-
-    process = Popen(subprocess.Popen(["/usr/bin/git", "status"]))
-    print(process.communicate())  # ('fake out!!!', 'fake error!!!')
-
-    :param t: 需要委托的类型
-    :return: 同参数t，需要委托的类型
+    Returns:
+        Type[T]: The operation result.
     """
 
     class Derived(Proxy):
@@ -895,24 +1219,54 @@ def get_derived_type(t: "Type[T]") -> "Type[T]":
 
 
 def lazy_load(fn: "Callable[P, T]", *args: "P.args", **kwargs: "P.kwargs") -> "T":
-    """
-    延迟加载
-    :param fn: 延迟加载的方法
-    :return: proxy
+    """Return a proxy that loads its target lazily.
+
+    Args:
+        fn (Callable[P, T]): Callable to invoke.
+        args (P.args): Arguments passed to the operation.
+        kwargs (P.kwargs): Keyword arguments passed to the operation.
+
+    Returns:
+        T: The operation result.
     """
     return Proxy(functools.partial(fn, *args, **kwargs))
 
 
 def raise_error(e: BaseException):
+    """Raise the provided exception instance.
+
+    Args:
+        e (BaseException): The e value.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     raise e
 
 
 def lazy_raise(e: BaseException) -> "T":
+    """Return a proxy that raises the supplied exception when accessed.
+
+    Args:
+        e (BaseException): The e value.
+
+    Returns:
+        T: The operation result.
+    """
     return lazy_load(raise_error, e)
 
 
 @timeoutable
 def wait_event(event: "threading.Event", timeout: TimeoutType) -> bool:
+    """Wait for a threading event with timeout handling.
+
+    Args:
+        event (threading.Event): Event name to register or trigger.
+        timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+    Returns:
+        bool: The operation result.
+    """
     interval = 1
     while True:
         t = timeout.remain
@@ -926,6 +1280,15 @@ def wait_event(event: "threading.Event", timeout: TimeoutType) -> bool:
 
 @timeoutable
 def wait_thread(thread: "threading.Thread", timeout: TimeoutType) -> bool:
+    """Wait for a thread to finish with timeout handling.
+
+    Args:
+        thread (threading.Thread): The thread value.
+        timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+    Returns:
+        bool: The operation result.
+    """
     interval = 1
     while True:
         t = timeout.remain
@@ -943,6 +1306,15 @@ def wait_thread(thread: "threading.Thread", timeout: TimeoutType) -> bool:
 
 @timeoutable
 def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional[int]":
+    """Wait for a process to finish with timeout handling.
+
+    Args:
+        process (subprocess.Popen): The process value.
+        timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
+
+    Returns:
+        Optional[int]: The operation result.
+    """
     import subprocess
     interval = 1
     while True:
@@ -958,9 +1330,27 @@ def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional
 
 
 def let(value: "T", fn: "Callable[[T], R]") -> "R":
+    """Apply a function to a value and return the function result.
+
+    Args:
+        value (T): Value to store or process.
+        fn (Callable[[T], R]): Callable to invoke.
+
+    Returns:
+        R: The operation result.
+    """
     return fn(value)
 
 
 def also(value: "T", fn: "Callable[[T], Any]") -> "T":
+    """Apply a function to a value and return the original value.
+
+    Args:
+        value (T): Value to store or process.
+        fn (Callable[[T], Any]): Callable to invoke.
+
+    Returns:
+        T: The operation result.
+    """
     fn(value)
     return value

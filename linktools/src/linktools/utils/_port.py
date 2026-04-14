@@ -28,20 +28,13 @@ if typing.TYPE_CHECKING:
 def bind(port: int, socket_type: "socket.SocketKind", socket_proto: int):
     """Try to bind to a socket of the specified type, protocol, and port.
 
-    This is primarily a helper function for PickUnusedPort, used to see
-    if a particular port number is available.
-
-    For the port to be considered available, the kernel must support at least
-    one of (IPv6, IPv4), and the port must be available on each supported
-    family.
-
     Args:
-      port: The port number to bind to, or 0 to have the OS pick a free port.
-      socket_type: The type of the socket (ex: socket.SOCK_STREAM).
-      socket_proto: The protocol of the socket (ex: socket.IPPROTO_TCP).
+        port (int): Remote port number.
+        socket_type (socket.SocketKind): The socket_type value.
+        socket_proto (int): The socket_proto value.
 
     Returns:
-      The port number on success or None on failure.
+        Any: The operation result.
     """
     import socket
 
@@ -69,9 +62,10 @@ def is_port_free(port: int):
     """Check if specified port is free.
 
     Args:
-      port: integer, port to check
+        port (int): Remote port number.
+
     Returns:
-      boolean, whether it is free to use for both TCP and UDP
+        Any: The operation result.
     """
     import socket
 
@@ -80,6 +74,14 @@ def is_port_free(port: int):
 
 
 def get_free_port():
+    """Return an available TCP port on the requested host.
+
+    Returns:
+        Any: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     import socket
 
     try:

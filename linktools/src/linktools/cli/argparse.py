@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : argparse.py 
+@file    : argparse.py
 @time    : 2023/8/25
 @site    : https://github.com/ice-black-tea
-@software: PyCharm 
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -59,6 +59,18 @@ if sys.version_info < (3, 10):
 ##############################
 
 def range_type(min: int, max: int):
+    """Create an argparse converter that accepts integers in a range.
+
+    Args:
+        min (int): The min value.
+        max (int): The max value.
+
+    Returns:
+        Any: The operation result.
+
+    Raises:
+        Exception: Propagates errors raised while completing the operation.
+    """
     def wrapper(o):
         value = utils.int(o)
         if min <= value <= max:
@@ -70,6 +82,7 @@ def range_type(min: int, max: int):
 
 class LazyChoices(typing.Iterable):
 
+    """Lazy iterable wrapper for argparse choices."""
     def __init__(self, func: "_t.Callable[P, _t.Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs"):
         self._data = __missing__
         self._fn = func
@@ -98,6 +111,7 @@ class LazyChoices(typing.Iterable):
 
 class ConfigLoader:
 
+    """Load configuration-backed argparse values after parsing."""
     def __call__(self, parser: "CommandParser", action: "ConfigAction", namespace, value=__missing__):
 
         from ..core._config import CacheConfigProperty
@@ -133,6 +147,7 @@ class ConfigLoader:
 
 class ConfigAction(argparse.Action):
 
+    """Argparse action that binds an option to a ConfigProperty."""
     def __init__(self,
                  option_strings,
                  dest,
@@ -215,6 +230,7 @@ else:
 
 class KeyValueAction(argparse.Action):
 
+    """Argparse action that collects KEY=VALUE pairs into a dict."""
     def __init__(self,
                  option_strings,
                  dest,
@@ -261,6 +277,7 @@ class KeyValueAction(argparse.Action):
 
 
 class ArgParseComplete:
+    """Helpers for argcomplete integration and completion detection."""
 
     @cached_classproperty
     def _argcomplete(self):
@@ -272,10 +289,24 @@ class ArgParseComplete:
 
     @classmethod
     def is_invocation(cls):
+        """Return whether the current process is an argcomplete invocation.
+
+        Returns:
+            Any: The operation result.
+        """
         return "_ARGCOMPLETE" in os.environ # and cls._argcomplete
 
     @classmethod
     def autocomplete(cls, argument_parser: argparse.ArgumentParser, **kwargs) -> argparse.ArgumentParser:
+        """Enable argcomplete for an argument parser when available.
+
+        Args:
+            argument_parser (argparse.ArgumentParser): The argument_parser value.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            argparse.ArgumentParser: The operation result.
+        """
         argcomplete = cls._argcomplete
         if argcomplete:
             argcomplete.autocomplete(argument_parser, **kwargs)
@@ -283,6 +314,16 @@ class ArgParseComplete:
 
     @classmethod
     def shellcode(cls, executables: typing.Iterable[str], shell: str, **kwargs) -> str:
+        """Return shell completion setup code when argcomplete is available.
+
+        Args:
+            executables (typing.Iterable[str]): The executables value.
+            shell (str): The shell value.
+            kwargs: Keyword arguments passed to the operation.
+
+        Returns:
+            str: The operation result.
+        """
         argcomplete = cls._argcomplete
         if argcomplete:
             return argcomplete.shellcode(executables, shell=shell, **kwargs)

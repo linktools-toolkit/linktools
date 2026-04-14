@@ -34,11 +34,24 @@ _channel_logger.setLevel(logging.CRITICAL)
 
 class SSHClient(paramiko.SSHClient):
 
+    """Paramiko SSH client with shell, transfer, and forwarding helpers."""
     def __init__(self):
         super().__init__()
         self.set_log_channel(_channel_logger.name)
 
     def connect_with_pwd(self, hostname, port=22, username=None, password=None, **kwargs):
+        """Connect and fall back to password authentication when needed.
+
+        Args:
+            hostname: Remote host name or address.
+            port: Remote port number.
+            username: User name used for authentication.
+            password: Password used for authentication.
+            kwargs: Keyword arguments passed to the operation.
+
+        Raises:
+            Exception: Propagates errors raised while completing the operation.
+        """
         if username is None:
             username = getpass.getuser()
 
@@ -85,6 +98,11 @@ class SSHClient(paramiko.SSHClient):
                     raise auth_exception from None
 
     def open_shell(self, *args: Any):
+        """Open an interactive or command-backed SSH shell.
+
+        Args:
+            args (Any): Arguments passed to the operation.
+        """
         if len(args) > 0:
             stdin, stdout, stderr = self.exec_command(
                 list2cmdline([str(arg) for arg in args]),
@@ -200,10 +218,28 @@ class SSHClient(paramiko.SSHClient):
             raise NotImplementedError("Unsupported platform")
 
     def get_file(self, remote_path: str, local_path: str):
+        """Download a remote file or directory through SCP.
+
+        Args:
+            remote_path (str): Remote filesystem path.
+            local_path (str): Local filesystem path.
+
+        Returns:
+            Any: The operation result.
+        """
         with self._open_scp() as scp:
             return scp.get(remote_path, local_path, recursive=True, preserve_times=True)
 
     def put_file(self, local_path: str, remote_path: str):
+        """Upload a local file or directory through SCP.
+
+        Args:
+            local_path (str): Local filesystem path.
+            remote_path (str): Remote filesystem path.
+
+        Returns:
+            Any: The operation result.
+        """
         with self._open_scp() as scp:
             return scp.put(local_path, remote_path, recursive=True, preserve_times=True)
 
@@ -231,11 +267,15 @@ class SSHClient(paramiko.SSHClient):
                 yield scp
 
     def forward(self, forward_host: str, forward_port: int, local_port: int = None) -> "SSHForward":
-        """
-        :param forward_host: The host to forward to.
-        :param forward_port: The port to forward to.
-        :param local_port: The local port to listen on.
-        :return: A Stoppable object.
+        """:param forward_host: The host to forward to.
+
+        Args:
+            forward_host (str): The forward_host value.
+            forward_port (int): The forward_port value.
+            local_port (int): The local_port value.
+
+        Returns:
+            SSHForward: The operation result.
         """
 
         if local_port is None:
@@ -244,16 +284,21 @@ class SSHClient(paramiko.SSHClient):
         return SSHForward(self, "", local_port, forward_host, forward_port)
 
     def reverse(self, forward_host: str, forward_port: int, remote_port: int = None):
-        """
-        :param forward_host: The host to forward to.
-        :param forward_port: The port to forward to.
-        :param remote_port: The remote port to listen on.
-        :return: A Stoppable object.
+        """:param forward_host: The host to forward to.
+
+        Args:
+            forward_host (str): The forward_host value.
+            forward_port (int): The forward_port value.
+            remote_port (int): The remote_port value.
+
+        Returns:
+            Any: The operation result.
         """
         return SSHReverse(self, forward_host, forward_port, "", remote_port)
 
 
 class SSHForward(Stoppable):
+    """Manage local-to-remote SSH port forwarding."""
     local_host = property(lambda self: self._local_host)
     local_port = property(lambda self: self._local_port)
     forward_host = property(lambda self: self._forward_host)
@@ -336,6 +381,7 @@ class SSHForward(Stoppable):
         self._stop_on_error(start)
 
     def stop(self):
+        """Stop local SSH port forwarding."""
         if self._forward_server is not None:
             try:
                 self._forward_server.shutdown()
@@ -351,6 +397,7 @@ class SSHForward(Stoppable):
 
 
 class SSHReverse(Stoppable):
+    """Manage remote-to-local SSH port forwarding."""
     remote_host = property(lambda self: self._remote_host)
     remote_port = property(lambda self: self._remote_port)
     forward_host = property(lambda self: self._forward_host)
@@ -439,6 +486,7 @@ class SSHReverse(Stoppable):
         self._stop_on_error(start)
 
     def stop(self):
+        """Stop remote SSH port forwarding."""
         if self._remote_port is not None:
             try:
                 self._transport.cancel_port_forward(self._remote_host, self._remote_port)

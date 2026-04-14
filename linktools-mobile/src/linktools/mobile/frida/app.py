@@ -536,7 +536,7 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
             self,
             device: Union[frida.core.Device, "FridaServer"],
             target_identifiers: Union[str, Collection[str]] = None,
-            user_parameters: Dict[str, any] = None,
+            user_parameters: Dict[str, Any] = None,
             user_scripts: Union[FridaUserScript, Collection[FridaUserScript]] = None,
             enable_spawn_gating: bool = False,
             enable_child_gating: bool = False,
@@ -571,12 +571,11 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         self._user_parameters = user_parameters or {}
 
         # 初始化所有需要注入的代码片段/脚本文件/远程脚本文件
+        self._user_scripts = []
         if isinstance(user_scripts, FridaUserScript):
-            self._user_scripts = [user_scripts]
+            self._user_scripts.append(user_scripts)
         elif isinstance(user_scripts, Collection):
-            self._user_scripts = user_scripts
-        else:
-            self._user_scripts: Iterable[FridaUserScript] = []
+            self._user_scripts.extend(user_scripts)
 
         # 初始化所有需要监听的脚本文件
         self._user_files = []
