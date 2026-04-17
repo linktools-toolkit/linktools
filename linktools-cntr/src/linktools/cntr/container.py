@@ -37,6 +37,7 @@ from jinja2 import Environment, TemplateError, FileSystemLoader
 
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
+from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
@@ -370,6 +371,72 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_removed(self, context: "EventContext"):
         pass
 
+    @subcommand("up", help="deploy this container")
+    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
+    @subcommand_argument("--pull", action=BooleanOptionalAction,
+                         help="always attempt to pull a newer version of the image")
+    def on_exec_up(self, build: bool = True, pull: bool = False):
+        context = self._make_exec_context(["up", pull and "pull", build and "build"])
+        services = self._get_exec_services()
+        build_options, up_options = self._get_exec_start_options(pull=pull)
+
+        with self.manager.notify_start(context):
+            if build:
+                self.manager.create_docker_compose_process(
+                    context.containers,
+                    "build", *build_options, *services,
+                ).check_call()
+            self.manager.create_docker_compose_process(
+                context.containers,
+                "up", *up_options, *services,
+            ).check_call()
+
+    @subcommand("restart", help="restart this container")
+    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
+    @subcommand_argument("--pull", action=BooleanOptionalAction,
+                         help="always attempt to pull a newer version of the image")
+    def on_exec_restart(self, build: bool = True, pull: bool = False):
+        context = self._make_exec_context(["restart", pull and "pull", build and "build"])
+        services = self._get_exec_services()
+        build_options, up_options = self._get_exec_start_options(pull=pull)
+
+        with self.manager.notify_stop(context):
+            self.manager.create_docker_compose_process(
+                context.containers,
+                "stop", *services,
+            ).check_call()
+
+        with self.manager.notify_start(context):
+            if build:
+                self.manager.create_docker_compose_process(
+                    context.containers,
+                    "build", *build_options, *services,
+                ).check_call()
+            self.manager.create_docker_compose_process(
+                context.containers,
+                "up", *up_options, *services,
+            ).check_call()
+
+    @subcommand("down", help="stop this container")
+    def on_exec_down(self):
+        context = self._make_exec_context("down")
+        services = self._get_exec_services()
+
+        with self.manager.notify_stop(context):
+            self.manager.create_docker_compose_process(
+                context.containers,
+                "down", *services,
+            ).check_call()
+
+    @subcommand("config", help="show docker compose config for this container")
+    def on_exec_config(self):
+        context = self._make_exec_context("config")
+        return self.manager.create_docker_compose_process(
+            context.containers,
+            "config", *self._get_exec_services(),
+            privilege=False,
+        ).check_call()
+
     @subcommand("shell", help="exec into container using command sh")
     @subcommand_argument("-c", "--command", help="shell command")
     @subcommand_argument("--privileged", help="give extended privileges to the command")
@@ -506,6 +573,42 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def get_config_later(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
         return utils.lazy_load(self.manager.config.get, key, type=type, default=default)
+
+    def _make_exec_context(self, commands) -> "EventContext":
+        from .context import EventContext
+
+        containers = self.manager.get_installed_containers(resolve=True)
+        if self not in containers:
+            raise ContainerError(f"{self} is not installed")
+
+        context = EventContext()
+        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
+        context.containers = containers
+        context.target_containers = [self]
+        context.is_full_containers = False
+        return context
+
+    def _get_exec_services(self) -> List[str]:
+        services = list(self.services.keys())
+        if not services:
+            raise ContainerError(f"No service found in container `{self.name}`")
+        return services
+
+    def _get_exec_start_options(self, pull: bool = False):
+        build_options = []
+        up_options = ["--detach", "--no-build"]
+        if pull:
+            build_options.extend(["--pull"])
+            up_options.extend(["--pull", "always"])
+
+        for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            if key in os.environ:
+                build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
+            key = key.upper()
+            if key in os.environ:
+                build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
+
+        return build_options, up_options
 
     def get_source_path(self, *paths: str) -> Path:
         return utils.join_path(self.root_path, *paths)
