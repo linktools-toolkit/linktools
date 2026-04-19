@@ -52,6 +52,7 @@ class Container(BaseContainer):
             SAFELINE_ARCH_SUFFIX="",
             SAFELINE_RELEASE="",
             SAFELINE_PORT=Config.Property(type=int) | 9200,
+            SAFELINE_API_TOKEN="",
         )
 
     @cached_property
@@ -63,6 +64,9 @@ class Container(BaseContainer):
                 auth_enable=self.get_config("SAFELINE_AUTH_ENABLE"),
                 auth_extra={
                     "acl_bypass": ["\\.(css|js)$"],
+                    "auth_headers": {
+                        "X-SLCE-API-TOKEN": self.get_config("SAFELINE_API_TOKEN"),
+                    }
                 },
             )),
             self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
