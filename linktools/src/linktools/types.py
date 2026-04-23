@@ -351,7 +351,7 @@ class EventHandlerMixin(object):
                 for callback, info in callbacks.items():
                     invoke_list.append(callback)
                     info["time"] += 1
-                    if info["max_times"] is not None and info["times"] >= info["max_times"]:
+                    if info["max_times"] is not None and info["time"] >= info["max_times"]:
                         remove_list.append(callback)
             for callback in remove_list:
                 callbacks.pop(callback)

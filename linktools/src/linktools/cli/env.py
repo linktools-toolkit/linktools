@@ -49,7 +49,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     Raises:
         Exception: Propagates errors raised while completing the operation.
     """
-    import argparse
     import os
     import re
 
@@ -92,7 +91,17 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             utils.remove_file(alias_path)
 
     def get_default_shell(environ: "BaseEnviron") -> str:
-        return "bash" if environ.system != "windows" else "powershell"
+        import shutil
+        if environ.system == "windows":
+            if shutil.which("powershell"):
+                return "powershell"
+            raise CommandError(f"No supported shell found, supported shells: {', '.join(SUPPORTED_SHELLS)}")
+        shell_env = os.environ.get("SHELL", "")
+        if shell_env:
+            name = os.path.basename(shell_env)
+            if name in ("bash", "zsh", "fish", "tcsh"):
+                return name
+        raise CommandError(f"Unsupported shell: {shell_env!r}, supported shells: {', '.join(SUPPORTED_SHELLS)}")
 
     @register_command(name="shell", description="run shell command")
     class ShellCommand(SubCommand):

@@ -321,6 +321,9 @@ class Command(BaseCommandGroup):
         if pull:
             build_options.extend(["--pull"])
             up_options.extend(["--pull", "always"])
+        else:
+            build_options.extend(["--pull=false"])
+            up_options.extend(["--pull", "missing"])
         if context.is_full_containers:
             up_options.extend(["--remove-orphans"])
 

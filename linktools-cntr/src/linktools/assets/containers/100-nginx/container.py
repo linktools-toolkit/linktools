@@ -160,6 +160,10 @@ class Container(BaseContainer):
             self.get_app_path("conf.d", "snippets", "header.conf"),
             X_HEADER_ENABLE=not waf_enable
         )
+        self.render_template(
+            self.get_source_path("templates", "params.conf"),
+            self.get_app_path("conf.d", "snippets", "params.conf")
+        )
         if waf_enable:
             self.render_template(
                 self.get_source_path("templates", "waf.conf"),
