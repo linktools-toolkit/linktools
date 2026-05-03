@@ -31,16 +31,17 @@ import contextlib
 import os
 import shelve
 import shutil
-from typing import TYPE_CHECKING, Tuple, Union, Iterable, Optional
+from typing import TYPE_CHECKING, Iterable
 
 from linktools.decorator import cached_property, timeoutable
 from linktools.rich import create_progress
-from linktools.types import TimeoutType, PathType, Timeout, DownloadError, DownloadHttpError, FileCache
+from linktools.types import DownloadError, DownloadHttpError, FileCache
 from linktools.utils import get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent, get_hash_ident, remove_file
 
 if TYPE_CHECKING:
     from typing import Literal
     from ._environ import BaseEnviron
+    from linktools.types import PathType, Timeout, TimeoutType
 
     UrlFileValidatorType = Union["UrlFile.Validator", Iterable["UrlFile.Validator"]]
 
@@ -70,8 +71,8 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @timeoutable
     def save(self,
-             dest_dir: PathType = None, dest_name: str = None,
-             timeout: TimeoutType = None, max_retries: int = 3,
+             dest_dir: "PathType" = None, dest_name: str = None,
+             timeout: "TimeoutType" = None, max_retries: int = 3,
              validators: "UrlFileValidatorType" = None, **kwargs) -> str:
         """Save or download data to a target path.
 
@@ -124,7 +125,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @timeoutable
-    def clear(self, timeout: TimeoutType = None):
+    def clear(self, timeout: "TimeoutType" = None):
         """Clear cached or generated data.
 
         Args:
@@ -137,7 +138,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._release()
 
     @abc.abstractmethod
-    def _download(self, *, max_retries: int, timeout: Timeout, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: "Timeout", validators: "UrlFileValidatorType", **kwargs) -> "tuple[str, str]":
         pass
 
     @abc.abstractmethod
@@ -145,7 +146,7 @@ class UrlFile(metaclass=abc.ABCMeta):
         pass
 
     @timeoutable
-    def _acquire(self, timeout: TimeoutType = None):
+    def _acquire(self, timeout: "TimeoutType" = None):
         self._lock.acquire(timeout=timeout.remain)
 
     def _release(self):
@@ -200,7 +201,7 @@ class LocalFile(UrlFile):
             is_local=True,
         )
 
-    def _download(self, *, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, validators: "UrlFileValidatorType", **kwargs) -> "tuple[str, str]":
         src_path = self._url
         if not os.path.exists(src_path):
             raise DownloadError(f"{src_path} does not exist")
@@ -225,7 +226,7 @@ class HttpFile(UrlFile):
         self._local_path = os.path.join(self._root_path, "file")
         self._context_path = os.path.join(self._root_path, "context")
 
-    def _download(self, *, max_retries: int, timeout: Timeout, validators: "UrlFileValidatorType", **kwargs) -> Tuple[str, str]:
+    def _download(self, *, max_retries: int, timeout: "Timeout", validators: "UrlFileValidatorType", **kwargs) -> "tuple[str, str]":
         if not os.path.exists(self._root_path):
             os.makedirs(self._root_path, exist_ok=True)
 
@@ -306,12 +307,12 @@ class HttpContextVar(property):
 
 class HttpContext:
     """Context manager for temporary HTTP download options."""
-    url: Optional[str] = HttpContextVar("Url")
-    user_agent: Optional[str] = HttpContextVar("UserAgent")
-    headers: Optional[dict] = HttpContextVar("Headers")
-    file_path: Optional[str] = HttpContextVar("FilePath")
-    file_size: Optional[int] = HttpContextVar("FileSize")
-    file_name: Optional[str] = HttpContextVar("FileName")
+    url: "str | None" = HttpContextVar("Url")
+    user_agent: "str | None" = HttpContextVar("UserAgent")
+    headers: "dict | None" = HttpContextVar("Headers")
+    file_path: "str | None" = HttpContextVar("FilePath")
+    file_size: "int | None" = HttpContextVar("FileSize")
+    file_name: "str | None" = HttpContextVar("FileName")
     completed: bool = HttpContextVar("IsCompleted", False)
     content_encoding: str = HttpContextVar("ContentEncoding", "")
 
@@ -326,7 +327,7 @@ class HttpContext:
     def __exit__(self, *args, **kwargs):
         self._db.__exit__(*args, **kwargs)
 
-    def download(self, timeout: TimeoutType):
+    def download(self, timeout: "TimeoutType"):
         """Download the configured URL into the temporary file path.
 
         Args:

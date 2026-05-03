@@ -175,7 +175,7 @@ class ConfigAction(argparse.Action):
         if not isinstance(config, ConfigProperty):
             raise argparse.ArgumentError(self, "config must be ConfigProperty")
 
-        self.property: ConfigProperty = config
+        self.property: "ConfigProperty" = config
         if default is not __missing__:
             self.property.set_default(default, ignore_errors=True)
 
@@ -297,7 +297,7 @@ class ArgParseComplete:
         return "_ARGCOMPLETE" in os.environ # and cls._argcomplete
 
     @classmethod
-    def autocomplete(cls, argument_parser: argparse.ArgumentParser, **kwargs) -> argparse.ArgumentParser:
+    def autocomplete(cls, argument_parser: "argparse.ArgumentParser", **kwargs) -> "argparse.ArgumentParser":
         """Enable argcomplete for an argument parser when available.
 
         Args:
@@ -313,7 +313,7 @@ class ArgParseComplete:
         return argument_parser
 
     @classmethod
-    def shellcode(cls, executables: typing.Iterable[str], shell: str, **kwargs) -> str:
+    def shellcode(cls, executables: "typing.Iterable[str]", shell: str, **kwargs) -> str:
         """Return shell completion setup code when argcomplete is available.
 
         Args:
@@ -332,11 +332,11 @@ class ArgParseComplete:
     class Completer(abc.ABC):
 
         @abc.abstractmethod
-        def get_parser(self) -> argparse.ArgumentParser:
+        def get_parser(self) -> "argparse.ArgumentParser":
             pass
 
         @abc.abstractmethod
-        def get_args(self, parsed_args: argparse.Namespace, **kwargs) -> typing.Optional[typing.List[str]]:
+        def get_args(self, parsed_args: "argparse.Namespace", **kwargs) -> "typing.typing.list[str] | None":
             pass
 
         def __call__(self, *, parsed_args, **kwargs):

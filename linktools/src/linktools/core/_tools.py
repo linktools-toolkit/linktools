@@ -32,15 +32,18 @@ import pathlib
 import shutil
 import warnings
 from collections import ChainMap
-from typing import TYPE_CHECKING, Dict, Iterator, Any, Tuple, List, Generator, Callable
+from typing import TYPE_CHECKING, Tuple, List
 
 from linktools import utils
 from linktools.decorator import cached_property, timeoutable
 from linktools.metadata import __missing__
-from linktools.types import TimeoutType, PathType, ToolNotFound, ToolNotSupport, ToolExecError
+from linktools.types import ToolNotFound, ToolNotSupport, ToolExecError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterator
+    from typing import Any
     from ._environ import BaseEnviron
+    from linktools.types import PathType, TimeoutType
 
 SUPPRESS = object()
 VALIDATE_KEYS = set()
@@ -172,7 +175,7 @@ class ToolStub(object):
 class ToolProperty(object):
 
     """Descriptor that resolves a named tool from an environment."""
-    def __init__(self, name=None, raw: bool = False, default: Any = None,
+    def __init__(self, name=None, raw: bool = False, default: "Any" = None,
                  internal: bool = False, validate: bool = False):
         self.name = name
         self.raw = raw
@@ -188,7 +191,7 @@ class ToolMeta(type):
         attrs["__default__"] = default = {}
         for key in list(attrs.keys()):
             if isinstance(attrs[key], ToolProperty):
-                prop: ToolProperty = attrs[key]
+                prop: "ToolProperty" = attrs[key]
                 prop_name = prop.name or key
                 if prop.validate:
                     VALIDATE_KEYS.add(prop_name)
@@ -199,7 +202,7 @@ class ToolMeta(type):
         return type.__new__(mcs, name, bases, attrs)
 
     @classmethod
-    def _make_property(mcs, prop: ToolProperty, name: str):
+    def _make_property(mcs, prop: "ToolProperty", name: str):
         return property(lambda self: self._raw_config.get(name)) \
             if prop.raw \
             else property(lambda self: self.config.get(name))
@@ -207,23 +210,23 @@ class ToolMeta(type):
 
 class Tool(metaclass=ToolMeta):
     """Executable tool wrapper with prepare and run helpers."""
-    __default__: Dict
+    __default__: "Dict"
 
     name: str = ToolProperty(default=__missing__, raw=True, internal=True)
     system: str = ToolProperty(default=__missing__, raw=True, internal=True, validate=True)
     machine: str = ToolProperty(default=__missing__, raw=True, internal=True, validate=True)
     version: str = ToolProperty(default="", raw=True)
-    depends_on: tuple = ToolProperty(default=[], internal=True)
+    depends_on: "tuple" = ToolProperty(default=[], internal=True)
     download_url: str = ToolProperty(default=__missing__)
     target_path: str = ToolProperty(default=__missing__, internal=True)
     root_path: str = ToolProperty(default=__missing__, internal=True)
     unpack_path: str = ToolProperty(default=__missing__, internal=True)
     absolute_path: str = ToolProperty(default=__missing__, internal=True)
     cmdline: str = ToolProperty(default=__missing__)
-    executable_cmdline: tuple = ToolProperty(default=[], internal=True)
-    environment: Dict[str, str] = ToolProperty(default={}, internal=True)
+    executable_cmdline: "tuple" = ToolProperty(default=[], internal=True)
+    environment: "dict[str, str]" = ToolProperty(default={}, internal=True)
 
-    def __init__(self, tools: "Tools", name: str, config: Dict[str, Any], **kwargs):
+    def __init__(self, tools: "Tools", name: str, config: "dict[str, Any]", **kwargs):
         self._tools = tools
         self._config = config
 
@@ -246,7 +249,7 @@ class Tool(metaclass=ToolMeta):
         self._raw_config = raw_config.new_child(new_config)
 
     @cached_property(lock=True)
-    def config(self) -> dict:
+    def config(self) -> "dict":
         """Config.
 
         Returns:
@@ -382,14 +385,14 @@ class Tool(metaclass=ToolMeta):
         return False
 
     @property
-    def _stub(self) -> ToolStub:
+    def _stub(self) -> "ToolStub":
         return ToolStub(
             self._tools.stub_path,
             self.name,
             environ=self._tools.environ
         )
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: "Any" = None) -> "Any":
         """Get.
 
         Args:
@@ -474,7 +477,7 @@ class Tool(metaclass=ToolMeta):
             self._tools.logger.debug(f"Delete {self.root_path}")
             shutil.rmtree(self.root_path, ignore_errors=True)
 
-    def popen(self, *args: Any, **kwargs) -> utils.Process:
+    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
         """Start a process for this tool.
 
         Args:
@@ -503,12 +506,12 @@ class Tool(metaclass=ToolMeta):
     @timeoutable
     def exec(
             self,
-            *args: Any,
-            timeout: TimeoutType = None,
+            *args: "Any",
+            timeout: "TimeoutType" = None,
             ignore_errors: bool = False,
-            on_stdout: Callable[[str], None] = None,
-            on_stderr: Callable[[str], None] = None,
-            error_type: Callable[[str], Exception] = ToolExecError
+            on_stdout: "Callable[[str], None]" = None,
+            on_stderr: "Callable[[str], None]" = None,
+            error_type: "Callable[[str], Exception]" = ToolExecError
     ) -> str:
         """Run a process command until completion.
 
@@ -548,14 +551,14 @@ class Tool(metaclass=ToolMeta):
 class Tools(object):
 
     """Registry and factory for tools available in an environment."""
-    def __init__(self, environ: "BaseEnviron", config: Dict[str, Dict]):
+    def __init__(self, environ: "BaseEnviron", config: "dict[str, Dict]"):
         self.environ = environ
         self.logger = environ.get_logger("tools")
         self.config = environ.wrap_config(env_prefix="")
         self.all = self._parse_items(config)
 
     @cached_property
-    def stub_path(self) -> pathlib.Path:
+    def stub_path(self) -> "pathlib.Path":
         """Stub path.
 
         Returns:
@@ -567,7 +570,7 @@ class Tools(object):
             f"tools_v{self.environ.version}",
         )
 
-    def keys(self) -> Generator[str, None, None]:
+    def keys(self) -> "Generator[str, None, None]":
         """Keys.
 
         Returns:
@@ -577,7 +580,7 @@ class Tools(object):
             if v.supported:
                 yield k
 
-    def values(self) -> Generator[Tool, None, None]:
+    def values(self) -> "Generator[Tool, None, None]":
         """Values.
 
         Returns:
@@ -587,7 +590,7 @@ class Tools(object):
             if v.supported:
                 yield v
 
-    def items(self) -> Generator[Tuple[str, Tool], None, None]:
+    def items(self) -> "Generator[tuple[str, Tool], None, None]":
         """Items.
 
         Returns:
@@ -597,22 +600,22 @@ class Tools(object):
             if v.supported:
                 yield k, v
 
-    def __iter__(self) -> Iterator[Tool]:
+    def __iter__(self) -> "Iterator[Tool]":
         return iter([t for t in self.all.values() if t.supported])
 
-    def __getitem__(self, item: str) -> Tool:
+    def __getitem__(self, item: str) -> "Tool":
         tool = self.all.get(item, None)
         if tool is None:
             raise ToolNotFound(f"Not found tool {item}")
         return tool
 
-    def __getattr__(self, item: str) -> Tool:
+    def __getattr__(self, item: str) -> "Tool":
         return self[item]
 
-    def __setitem__(self, key: str, value: Tool):
+    def __setitem__(self, key: str, value: "Tool"):
         self.all[key] = value
 
-    def _parse_items(self, config: Dict[str, Dict]) -> Dict[str, Tool]:
+    def _parse_items(self, config: "dict[str, dict[str, Any]]") -> "dict[str, Tool]":
         result = {
             "shell": Tool(self, "shell", {
                 "cmdline": None,

@@ -8,11 +8,16 @@ import queue
 import subprocess
 import threading
 from collections import ChainMap
-from typing import AnyStr, Optional, IO, Any, Dict, Union, List, Iterable, Generator, Tuple
+from typing import TYPE_CHECKING
 
 from . import _utils as utils
 from ..decorator import cached_property, timeoutable
-from ..types import TimeoutType, PathType, Timeout, ExecError
+from ..types import ExecError
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterable
+    from typing import Any, AnyStr, IO
+    from ..types import PathType, Timeout, TimeoutType
 
 STDOUT = 1
 STDERR = 2
@@ -30,7 +35,7 @@ def list2cmdline(args: "Iterable[str]") -> str:
     return subprocess.list2cmdline(args)
 
 
-def cmdline2list(cmdline: str) -> "List[str]":
+def cmdline2list(cmdline: str) -> "list[str]":
     """Split a shell command line string into an argv list.
 
     Args:
@@ -51,7 +56,7 @@ if utils.is_unix_like():
             self._stdout = stdout
             self._stderr = stderr
 
-        def get(self, timeout: Timeout):
+        def get(self, timeout: "Timeout"):
             import select
 
             fds = []
@@ -171,7 +176,7 @@ else:
                 event.set()
                 self._queue.put((None, None))
 
-        def get(self, timeout: Timeout):
+        def get(self, timeout: "Timeout"):
             while self.is_alive:
                 remain = utils.coalesce(timeout.remain, 1)
                 if remain <= 0:  # Timed out.
@@ -198,7 +203,7 @@ class Process(subprocess.Popen):
     """Wrapper around subprocess.Popen with timeout-aware helpers."""
 
     @timeoutable
-    def call(self, timeout: TimeoutType = None) -> int:
+    def call(self, timeout: "TimeoutType" = None) -> int:
         """Wait for the process and kill descendants on failure.
 
         Args:
@@ -218,7 +223,7 @@ class Process(subprocess.Popen):
                 raise
 
     @timeoutable
-    def check_call(self, timeout: TimeoutType = None) -> int:
+    def check_call(self, timeout: "TimeoutType" = None) -> int:
         """Wait for the process and raise on a nonzero exit code.
 
         Args:
@@ -241,7 +246,7 @@ class Process(subprocess.Popen):
                 raise
 
     @timeoutable
-    def fetch(self, timeout: TimeoutType = None) -> "Generator[Tuple[Optional[AnyStr], Optional[AnyStr]], Any, Any]":
+    def fetch(self, timeout: "TimeoutType" = None) -> "Generator[tuple[AnyStr | None, AnyStr | None], Any, Any]":
         """Collect stdout and stderr from the process.
 
         Args:
@@ -263,7 +268,7 @@ class Process(subprocess.Popen):
     @timeoutable
     def exec(
             self,
-            timeout: TimeoutType = None,
+            timeout: "TimeoutType" = None,
             ignore_errors: bool = False,
             on_stdout: "Callable[[str], None]" = None,
             on_stderr: "Callable[[str], None]" = None,
@@ -346,13 +351,13 @@ class Process(subprocess.Popen):
 
 
 def popen(
-        *args: Any,
+        *args: "Any",
         capture_output: bool = False,
-        stdin: "Union[int, IO]" = None, stdout: "Union[int, IO]" = None, stderr: "Union[int, IO]" = None,
-        shell: bool = False, cwd: PathType = None,
-        env: "Dict[str, str]" = None, append_env: "Dict[str, str]" = None, default_env: "Dict[str, str]" = None,
+        stdin: "int | IO" = None, stdout: "int | IO" = None, stderr: "int | IO" = None,
+        shell: bool = False, cwd: "PathType" = None,
+        env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
         **kwargs
-) -> Process:
+) -> "Process":
     """Create a Process for the supplied command.
 
     Args:

@@ -27,14 +27,19 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import re
-from typing import Optional, List, Type
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cli import CommandParser, CommandMain, CommandError
+from linktools.cli import CommandMain, CommandError
 from linktools.cli.argparse import range_type, KeyValueAction, BooleanOptionalAction
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaAndroidServer
 from linktools.types import DownloadError
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 
 class Command(AndroidCommand):
@@ -43,14 +48,14 @@ class Command(AndroidCommand):
     """
 
     @property
-    def main(self) -> CommandMain:
+    def main(self) -> "CommandMain":
         return CommandMain(self, show_log_level=True, show_log_time=True)
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-p", "--package", action="store", default=None,
                             help="target package (default: frontmost application)")
         parser.add_argument("--spawn", action="store_true", default=False,
@@ -95,7 +100,7 @@ class Command(AndroidCommand):
                             type=range_type(1, 65536),
                             help="redirect traffic to target port (default: 8080)")
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
 
         logger = self.logger
         user_parameters = args.user_parameters

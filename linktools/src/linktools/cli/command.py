@@ -36,10 +36,10 @@ import sys
 import textwrap
 import traceback
 from argparse import ArgumentParser, Action, Namespace
-from argparse import RawDescriptionHelpFormatter, SUPPRESS, FileType, HelpFormatter
+from argparse import RawDescriptionHelpFormatter, SUPPRESS
 from pkgutil import walk_packages
 from types import ModuleType, GeneratorType
-from typing import TYPE_CHECKING, Optional, Callable, List, Type, Tuple, Generator, Any, Iterable, Set, Dict
+from typing import TYPE_CHECKING
 
 from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
 from .. import utils
@@ -50,12 +50,14 @@ from ..rich import get_log_handler, init_logging, _is_rich_available
 from ..types import Error
 
 if TYPE_CHECKING:
-    from typing import Union, Literal
+    from argparse import FileType, HelpFormatter
+    from collections.abc import Callable, Generator, Iterable
+    from typing import Any, Literal
     from rich.tree import Tree
-    from ..types import T
     from ..core import BaseEnviron
+    from ..types import T
 
-    ERROR_HANDLER = Union[Literal["error", "ignore", "warn"], Callable[[str, Exception], None]]
+    ERROR_HANDLER = Literal["error", "ignore", "warn"] | Callable[[str, Exception], None]
 
 
 class CommandError(Error):
@@ -112,7 +114,7 @@ class _CommandInfo:
     id: str
     parent_id: str
     module: str
-    command: "Optional[BaseCommand]"
+    command: "BaseCommand | None"
     command_name: str
     command_description: str
     order: str
@@ -139,13 +141,13 @@ def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
             elif onerror == "warn":
                 environ.logger.warning(
                     f"Ignore {ep.name}, caused by {e.__class__.__name__}: {e}",
-                    exc_info=e if environ.debug else None
+                    exc_info=True if environ.debug else None
                 )
             elif onerror == "ignore":
                 pass
 
 
-def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error") -> Generator[_CommandInfo, Any, Any]:
+def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "error") -> "Generator[_CommandInfo, Any, Any]":
     """Yield command descriptors discovered from a command module package.
 
     Args:
@@ -189,13 +191,13 @@ def iter_module_commands(root: ModuleType, *, onerror: "ERROR_HANDLER" = "error"
             elif onerror == "warn":
                 environ.logger.warning(
                     f"Ignore {name}, caused by {e.__class__.__name__}: {e}",
-                    exc_info=e if environ.debug else None
+                    exc_info=True if environ.debug else None
                 )
             elif onerror == "ignore":
                 pass
 
 
-def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error") -> Generator[_CommandInfo, Any, Any]:
+def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error") -> "Generator[_CommandInfo, Any, Any]":
     """Yield command descriptors discovered from entry points.
 
     Args:
@@ -243,7 +245,7 @@ def _filter_kwargs(kwargs):
 
 class _SubCommandActionInfo:
 
-    def __init__(self, action: Action, no_param: bool):
+    def __init__(self, action: "Action", no_param: bool):
         self.action = action
         self.no_param = no_param
 
@@ -256,7 +258,7 @@ class _SubCommandActionInfo:
 
 
 _subcommand_index: int = 0
-_subcommand_map: Dict[str, Set[str]] = {}
+_subcommand_map: "dict[str, set[str]]" = {}
 
 
 class _SubCommandMethodInfo:
@@ -268,11 +270,11 @@ class _SubCommandMethodInfo:
         self.order = None
         self.pass_args = False
         self.index = _subcommand_index
-        self.kwargs: Optional[Dict[str, Any]] = None
-        self.func: Optional[Callable[..., Optional[int]]] = None
-        self.arguments: List[_SubCommandMethodArgumentInfo] = []
+        self.kwargs: "dict[str, Any] | None" = None
+        self.func: "Callable[..., int | None] | None" = None
+        self.arguments: "list[_SubCommandMethodArgumentInfo]" = []
 
-    def set_args(self, name: str, **kwargs: Any):
+    def set_args(self, name: str, **kwargs: "Any"):
         self.name = name
         self.kwargs = _filter_kwargs(kwargs)
         return self
@@ -284,11 +286,11 @@ class _SubCommandMethodInfo:
 class _SubCommandMethodArgumentInfo:
 
     def __init__(self):
-        self.args: Optional[Tuple[str]] = None
-        self.kwargs: Optional[Dict[str, Any]] = None
-        self.action: Optional[Union[str, Type[Action]]] = None
+        self.args: "tuple[str] | None" = None
+        self.kwargs: "dict[str, Any] | None" = None
+        self.action: "str | type[Action] | None" = None
 
-    def set_args(self, *args: str, **kwargs: Any):
+    def set_args(self, *args: str, **kwargs: "Any"):
         self.args = args
         self.kwargs = _filter_kwargs(kwargs)
         return self
@@ -298,16 +300,16 @@ def subcommand(
         name: str,
         *,
         help: str = __missing__,
-        aliases: List[str] = __missing__,
+        aliases: "list[str]" = __missing__,
         prog: str = __missing__,
         usage: str = __missing__,
         description: str = __missing__,
         epilog: str = __missing__,
-        parents: List[ArgumentParser] = __missing__,
-        formatter_class: Type[HelpFormatter] = __missing__,
+        parents: "list[ArgumentParser]" = __missing__,
+        formatter_class: "type[HelpFormatter]" = __missing__,
         prefix_chars: str = __missing__,
         fromfile_prefix_chars: str = __missing__,
-        argument_default: Any = __missing__,
+        argument_default: "Any" = __missing__,
         conflict_handler: str = __missing__,
         add_help: bool = __missing__,
         allow_abbrev: bool = __missing__,
@@ -391,17 +393,17 @@ def subcommand_argument(
         name_or_flag: str,
         *name_or_flags: str,
         no_param: bool = False,
-        action: "Union[str, Type[Action]]" = __missing__,
+        action: "str | type[Action]" = __missing__,
         choices: "Iterable[T]" = __missing__,
-        const: Any = __missing__,
-        default: Any = __missing__,
+        const: "Any" = __missing__,
+        default: "Any" = __missing__,
         dest: str = __missing__,
         help: str = __missing__,
-        metavar: "Union[str, Tuple[str, ...]]" = __missing__,
-        nargs: "Union[int, str]" = __missing__,
+        metavar: "str | tuple[str, ...]" = __missing__,
+        nargs: "int | str" = __missing__,
         required: bool = __missing__,
-        type: "Union[Type[Union[int, float, str]], Callable[[str], T], FileType]" = __missing__,
-        **kwargs: Any):
+        type: "type[int | float | str] | Callable[[str], T] | FileType" = __missing__,
+        **kwargs: "Any"):
     """Subcommand argument.
 
     Args:
@@ -455,9 +457,9 @@ def subcommand_argument(
 
 class _SubCommandInfo:
     node: "SubCommand"
-    children: "List[_SubCommandInfo]"
+    children: "list[_SubCommandInfo]"
 
-    def __init__(self, subcommand: "Union[SubCommand, _SubCommandInfo]"):
+    def __init__(self, subcommand: "SubCommand | _SubCommandInfo"):
         self.node = subcommand.node if isinstance(subcommand, _SubCommandInfo) else subcommand
         self.children = []
 
@@ -499,7 +501,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         """
         return False
 
-    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+    def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
         """Create a command parser.
 
         Args:
@@ -511,7 +513,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         return type(self.name, help=self.description)
 
     @abc.abstractmethod
-    def run(self, args: Namespace):
+    def run(self, args: "Namespace"):
         """Run.
 
         Args:
@@ -535,7 +537,7 @@ class SubCommandGroup(SubCommand):
         """
         return True
 
-    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+    def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
         """Create a parser for a subcommand group.
 
         Args:
@@ -548,7 +550,7 @@ class SubCommandGroup(SubCommand):
         parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
         return parser
 
-    def run(self, args: Namespace):
+    def run(self, args: "Namespace"):
         """Print help for this subcommand group.
 
         Args:
@@ -565,7 +567,7 @@ class SubCommandGroup(SubCommand):
 
 class _SubCommandMethod(SubCommand):
 
-    def __init__(self, info: _SubCommandMethodInfo, target: Any,
+    def __init__(self, info: "_SubCommandMethodInfo", target: "Any",
                  id: str = None, parent_id: str = None,
                  order: str = None):
         super().__init__(
@@ -578,7 +580,7 @@ class _SubCommandMethod(SubCommand):
         self.info = info
         self.target = target
 
-    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+    def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
 
         actions = []
         method = getattr(self.target, self.info.func.__name__)
@@ -657,7 +659,7 @@ class _SubCommandMethod(SubCommand):
 
         return parser
 
-    def run(self, args: Namespace):
+    def run(self, args: "Namespace"):
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
@@ -692,7 +694,7 @@ class SubCommandWrapper(SubCommand):
         )
         self.command = command
 
-    def create_parser(self, type: Callable[..., CommandParser]) -> CommandParser:
+    def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
         """Create a parser for the wrapped command.
 
         Args:
@@ -703,7 +705,7 @@ class SubCommandWrapper(SubCommand):
         """
         return self.command.create_parser(self.name, help=self.description, type=type)
 
-    def run(self, args: Namespace):
+    def run(self, args: "Namespace"):
         """Run the wrapped command.
 
         Args:
@@ -718,7 +720,7 @@ class SubCommandWrapper(SubCommand):
 class SubCommandMixin:
 
     """Mixin that discovers, registers, and prints subcommands."""
-    def walk_subcommands(self: "BaseCommand", target: Any, parent_id: str = None) -> Generator[SubCommand, None, None]:
+    def walk_subcommands(self: "BaseCommand", target: "Any", parent_id: str = None) -> "Generator[SubCommand, None, None]":
         """Yield subcommands discovered from a target object.
 
         Args:
@@ -770,7 +772,7 @@ class SubCommandMixin:
                     )
 
         else:
-            subcommand_map: Dict[str, List[_SubCommandMethod]] = {}
+            subcommand_map: "dict[str, list[_SubCommandMethod]]" = {}
             for clazz in target.__class__.mro():
                 class_name = f"{clazz.__module__}.{clazz.__qualname__}"
                 if class_name not in _subcommand_map:
@@ -781,12 +783,12 @@ class SubCommandMixin:
                     func = getattr(clazz, func_name)
                     if not hasattr(func, "__subcommand_info__"):
                         continue
-                    info: _SubCommandMethodInfo = func.__subcommand_info__
+                    info: "_SubCommandMethodInfo" = func.__subcommand_info__
                     subcommand = _SubCommandMethod(info, target, parent_id=parent_id, order=info.order)
                     subcommand_map.setdefault(subcommand.name, list())
                     subcommand_map[info.name].append(subcommand)
 
-            command_infos: List[Tuple[int, _SubCommandMethod]] = []
+            command_infos: "list[tuple[int, _SubCommandMethod]]" = []
             for name, subcommands in subcommand_map.items():
                 command_infos.append((min([c.info.index for c in subcommands]), subcommands[0]))
             for _, subcommand in sorted(command_infos, key=lambda o: o[0]):
@@ -795,10 +797,10 @@ class SubCommandMixin:
     def add_subcommands(
             self: "BaseCommand",
             parser: "CommandParser" = None,
-            target: Any = None,
+            target: "Any" = None,
             required: bool = False,
             sort: bool = False,
-    ) -> List[_SubCommandInfo]:
+    ) -> "list[_SubCommandInfo]":
         """Register discovered subcommands on a parser.
 
         Args:
@@ -835,7 +837,7 @@ class SubCommandMixin:
         parsers = {}
         root_parser = parser.add_subparsers(metavar="COMMAND", help="Command Help")
         root_parser.required = required
-        subcommand_infos: List[_SubCommandInfo] = sorted(
+        subcommand_infos: "list[_SubCommandInfo]" = sorted(
             [_SubCommandInfo(subcommand) for subcommand in subcommand_list],
             key=lambda x: subcommand_index.get(x.node.id)
         )
@@ -869,7 +871,7 @@ class SubCommandMixin:
 
         return subcommand_infos
 
-    def parse_subcommand(self: "BaseCommand", args: Namespace) -> Optional[SubCommand]:
+    def parse_subcommand(self: "BaseCommand", args: "Namespace") -> "SubCommand | None":
         """Return the selected subcommand from parsed args.
 
         Args:
@@ -886,7 +888,7 @@ class SubCommandMixin:
 
         return None
 
-    def run_subcommand(self: "BaseCommand", args: Namespace) -> Optional[int]:
+    def run_subcommand(self: "BaseCommand", args: "Namespace") -> "int | None":
         """Run the selected subcommand from parsed args.
 
         Args:
@@ -905,8 +907,8 @@ class SubCommandMixin:
 
     def print_subcommands(
             self: "BaseCommand",
-            args: Namespace,
-            root: SubCommand = None,
+            args: "Namespace",
+            root: "SubCommand" = None,
             max_level: int = None
     ) -> None:
         """Print the registered subcommand tree.
@@ -955,9 +957,9 @@ class SubCommandMixin:
 
     def _print_subcommand_tree(
             self: "BaseCommand",
-            infos: List[_SubCommandInfo],
+            infos: "list[_SubCommandInfo]",
             root_id: str,
-            max_level: Optional[int],
+            max_level: "int | None",
             level: int = 0,
     ) -> None:
         """
@@ -990,11 +992,11 @@ class SubCommandMixin:
     def _make_subcommand_tree(
             self: "BaseCommand",
             tree: "Tree",
-            infos: List[_SubCommandInfo],
+            infos: "list[_SubCommandInfo]",
             root_id: str,
-            max_level: Optional[int]
+            max_level: "int | None"
     ) -> "Tree":
-        nodes: "Dict[str, Tuple[Tree, int]]" = {}
+        nodes: "dict[str, tuple[Tree, int]]" = {}
         for info in infos:
             if info.node.parent_id == root_id:
                 parent_node, parent_node_level = tree, 0
@@ -1063,7 +1065,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return name
 
     @property
-    def parent(self) -> Optional[str]:
+    def parent(self) -> "str | None":
         """Return the parent command id.
 
         Returns:
@@ -1081,7 +1083,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return environ
 
     @property
-    def config(self) -> dict:
+    def config(self) -> "dict":
         """Return the configuration object.
 
         Returns:
@@ -1090,7 +1092,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return self.environ.config
 
     @property
-    def logger(self) -> logging.Logger:
+    def logger(self) -> "logging.Logger":
         """Return the root logger.
 
         Returns:
@@ -1117,7 +1119,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return self.name
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         """Return command-specific known error types.
 
         Returns:
@@ -1126,7 +1128,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return []
 
     @abc.abstractmethod
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         """Initialize parser arguments.
 
         Args:
@@ -1135,7 +1137,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
         """Run.
 
         Args:
@@ -1148,12 +1150,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
     def create_parser(
             self,
-            *args: Any,
-            type: Callable[..., CommandParser] = CommandParser,
-            formatter_class: Type[HelpFormatter] = RawDescriptionHelpFormatter,
+            *args: "Any",
+            type: "Callable[..., CommandParser]" = CommandParser,
+            formatter_class: "type[HelpFormatter]" = RawDescriptionHelpFormatter,
             conflict_handler="resolve",
-            **kwargs: Any
-    ) -> CommandParser:
+            **kwargs: "Any"
+    ) -> "CommandParser":
         """Create a command parser.
 
         Args:
@@ -1185,12 +1187,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         return parser
 
     @cached_property(lock=True)
-    def _argument_parser(self) -> CommandParser:
+    def _argument_parser(self) -> "CommandParser":
         parser = self.create_parser()
         self.init_global_arguments(parser)
         return parser
 
-    def init_base_arguments(self, parser: CommandParser) -> None:
+    def init_base_arguments(self, parser: "CommandParser") -> None:
         """Initialize base parser arguments.
 
         Args:
@@ -1198,7 +1200,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         pass
 
-    def init_global_arguments(self, parser: CommandParser) -> None:
+    def init_global_arguments(self, parser: "CommandParser") -> None:
         """Initialize global parser arguments.
 
         Args:
@@ -1270,7 +1272,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         """
         return CommandMain(self, show_log_level=True, show_log_time=False)
 
-    def __call__(self, args: "Union[List[str], Namespace]" = None) -> int:
+    def __call__(self, args: "list[str] | Namespace" = None) -> int:
         """Call.
 
         Args:
@@ -1300,7 +1302,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
 
     """Base command that dispatches to registered subcommands."""
-    def init_subcommands(self) -> Any:
+    def init_subcommands(self) -> "Any":
         """Return the target used to discover subcommands.
 
         Returns:
@@ -1308,7 +1310,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
         """
         return self
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         """Register subcommands on the parser.
 
         Args:
@@ -1319,7 +1321,7 @@ class BaseCommandGroup(BaseCommand, metaclass=abc.ABCMeta):
             target=self.init_subcommands(),
         )
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
         """Dispatch to the selected subcommand or print the command tree.
 
         Args:
@@ -1339,7 +1341,7 @@ class CommandMain:
     """Callable command entry point with logging and error handling."""
     def __init__(
             self,
-            command: BaseCommand, *,
+            command: "BaseCommand", *,
             show_log_time: bool = False,
             show_log_level: bool = False,
             expand_user: bool = True,
@@ -1352,7 +1354,7 @@ class CommandMain:
         self.exit_on_return = exit_on_return
 
     @property
-    def command(self) -> BaseCommand:
+    def command(self) -> "BaseCommand":
         """Command.
 
         Returns:
@@ -1368,7 +1370,7 @@ class CommandMain:
             show_level=self.show_log_level,
         )
 
-    def __call__(self, args: List[str] = None) -> int:
+    def __call__(self, args: "list[str]" = None) -> int:
         """Call.
 
         Args:

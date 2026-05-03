@@ -9,7 +9,7 @@ import socket
 import sys
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 import paramiko
 from paramiko.ssh_exception import AuthenticationException, SSHException
@@ -20,6 +20,9 @@ from linktools.core import environ
 from linktools.rich import prompt, create_progress
 from linktools.types import Stoppable
 from linktools.utils import list2cmdline, ignore_errors, is_unix_like
+
+if TYPE_CHECKING:
+    from typing import Any
 
 try:
     import SocketServer
@@ -97,7 +100,7 @@ class SSHClient(paramiko.SSHClient):
                 if auth_exception is not None:
                     raise auth_exception from None
 
-    def open_shell(self, *args: Any):
+    def open_shell(self, *args: "Any"):
         """Open an interactive or command-backed SSH shell.
 
         Args:
@@ -304,7 +307,7 @@ class SSHForward(Stoppable):
     forward_host = property(lambda self: self._forward_host)
     forward_port = property(lambda self: self._forward_port)
 
-    def __init__(self, client: SSHClient, local_host: str, local_port: int, forward_host: str, forward_port: int):
+    def __init__(self, client: "SSHClient", local_host: str, local_port: int, forward_host: str, forward_port: int):
         self._local_host = local_host
         self._local_port = local_port
         self._forward_host = forward_host
@@ -403,7 +406,7 @@ class SSHReverse(Stoppable):
     forward_host = property(lambda self: self._forward_host)
     forward_port = property(lambda self: self._forward_port)
 
-    def __init__(self, client: SSHClient, forward_host: str, forward_port: int, remote_host: str, remote_port: int):
+    def __init__(self, client: "SSHClient", forward_host: str, forward_port: int, remote_host: str, remote_port: int):
         self._remote_host = remote_host
         self._remote_port = None
         self._forward_host = forward_host
@@ -416,7 +419,7 @@ class SSHReverse(Stoppable):
         def start():
             self._remote_port = self._transport.request_port_forward(remote_host, remote_port or 0)
 
-            def forward_handler(channel: paramiko.Channel):
+            def forward_handler(channel: "paramiko.Channel"):
 
                 sock = socket.socket()
                 try:

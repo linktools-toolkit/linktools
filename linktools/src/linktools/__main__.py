@@ -26,15 +26,19 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+from typing import TYPE_CHECKING
 
-from linktools.cli import BaseCommandGroup, CommandParser, iter_entry_point_commands
+from linktools.cli import BaseCommandGroup, iter_entry_point_commands
 from linktools.metadata import __ep_scripts__
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
 
 
 class Command(BaseCommandGroup):
 
     """Top-level linktools command group."""
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         """Register top-level entry point commands.
 
         Args:

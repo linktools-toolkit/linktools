@@ -26,11 +26,15 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
-from linktools.cli import CommandParser
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 props = (
     "ro.product.manufacturer",
@@ -76,10 +80,10 @@ class Command(AndroidCommand):
     Collect detailed device information
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument('agent_args', nargs='...', help="agent args")
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
 
         environ.logger.info(f"Property", extra=dict(style="red"))

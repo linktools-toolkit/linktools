@@ -3,12 +3,13 @@
 
 import abc
 import pathlib
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING
 
 from .. import metadata
 from ..types import ModuleError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from ..types import PathType
 
 
@@ -70,7 +71,7 @@ class DevelopUpdater(Updater):
         return ["--editable", f"{path}{deps}"]
 
     @classmethod
-    def get_project_url(cls, path: "PathType", max_depth: int) -> Optional[pathlib.Path]:
+    def get_project_url(cls, path: "PathType", max_depth: int) -> "pathlib.Path | None":
         """Find a Python project directory near a path.
 
         Args:
@@ -244,7 +245,7 @@ class Capability(BaseCapability):
         )))
 
     @property
-    def root_path(self) -> pathlib.Path:
+    def root_path(self) -> "pathlib.Path":
         """Return the root path.
 
         Returns:
@@ -254,7 +255,7 @@ class Capability(BaseCapability):
 
         return environ.root_path
 
-    def get_asset_path(self, *names: str) -> pathlib.Path:
+    def get_asset_path(self, *names: str) -> "pathlib.Path":
         """Return a path inside the capability assets directory.
 
         Args:

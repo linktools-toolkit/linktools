@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import argparse
     import pathlib
-    from typing import Optional, Callable, List, Iterable
+    from collections.abc import Callable, Iterable
 
     from ..core import BaseEnviron
     from .command import SubCommand, CommandParser
@@ -56,7 +56,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     from ..core import environ as _environ
     from .command import SubCommand, CommandError, iter_entry_points_capabilities
 
-    commands: "List[SubCommand]" = []
+    commands: "list[SubCommand]" = []
 
     def register_command(name: str, description: str):
         def wrapper(cls: "Callable[[str, str], SubCommand]"):
@@ -372,7 +372,7 @@ if __name__ == '__main__':
             tool_parser.add_argument("args", nargs="...", help="tool Args")
             tool_parser.set_defaults(func=self.on_tool)
 
-        def run(self, args: "argparse.Namespace") -> "Optional[int]":
+        def run(self, args: "argparse.Namespace") -> "int | None":
             if args.verbose:
                 self.logger.level = logging.DEBUG
             return args.func(args)

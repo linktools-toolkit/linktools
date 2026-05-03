@@ -27,22 +27,25 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import os
-from argparse import Namespace
 from subprocess import SubprocessError
-from typing import Optional, List, Type, Dict, Any
+from typing import TYPE_CHECKING
 
 import yaml
 from git import GitCommandError
 
-from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, \
-    BaseCommandGroup, SubCommand, CommandParser
+from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ
 from linktools.rich import confirm, choose
 from linktools.types import ConfigError
-from .container import ContainerError, BaseContainer
+from .container import ContainerError
 from .context import EventContext
 from .manager import ContainerManager
+
+if TYPE_CHECKING:
+    from typing import Any
+    from argparse import Namespace
+    from linktools.cli import SubCommand
 
 manager = ContainerManager(environ)
 
@@ -117,10 +120,10 @@ class ConfigCommand(BaseCommand):
     def name(self):
         return "config"
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         self.add_subcommands(parser)
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
         subcommand = self.parse_subcommand(args)
         if subcommand:
             return subcommand.run(args)
@@ -133,7 +136,7 @@ class ConfigCommand(BaseCommand):
 
     @subcommand("set", help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
-    def on_command_set(self, configs: Dict[str, str]):
+    def on_command_set(self, configs: "dict[str, str]"):
         manager.config.cache.save(**configs)
         for key in sorted(configs.keys()):
             value = manager.config.get(key)
@@ -141,14 +144,14 @@ class ConfigCommand(BaseCommand):
 
     @subcommand("unset", help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
-    def on_command_remove(self, configs: Dict[str, str]):
+    def on_command_remove(self, configs: "dict[str, str]"):
         manager.config.cache.remove(*configs)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
     @subcommand("list", help="list container configs")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
-    def on_command_list(self, names: List[str]):
+    def on_command_list(self, names: "list[str]"):
         containers = manager.prepare_installed_containers()
         target_containers = [c for c in containers if c.name in names] if names else containers
 
@@ -188,10 +191,10 @@ class ExecCommand(BaseCommand):
         return manager.config
 
     @property
-    def _subparser(self) -> CommandParser:
+    def _subparser(self) -> "CommandParser":
         parser = CommandParser()
 
-        subcommands: List[SubCommand] = []
+        subcommands: "list[SubCommand]" = []
         for container in manager.get_installed_containers():
             subcommand_group = SubCommandGroup(container.name, container.description)
             subcommands.append(subcommand_group)
@@ -200,7 +203,7 @@ class ExecCommand(BaseCommand):
 
         return parser
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("exec_name", nargs="?", metavar="CONTAINER", help="container name",
                             choices=LazyChoices(_iter_installed_container_names))
         action = parser.add_argument("exec_args", nargs="...", metavar="ARGS", help="container exec args")
@@ -215,7 +218,7 @@ class ExecCommand(BaseCommand):
 
         action.completer = Completer()
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
         args = self._subparser.parse_args([args.exec_name, *args.exec_args] if args.exec_name else [])
         subcommand = self.parse_subcommand(args)
         if not subcommand or isinstance(subcommand, SubCommandGroup):
@@ -234,16 +237,16 @@ class Command(BaseCommandGroup):
         return "cntr"
 
     @property
-    def parent(self) -> Optional[str]:
+    def parent(self) -> "str | None":
         return "common"
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
             ContainerError, ConfigError, SubprocessError, GitCommandError, OSError, AssertionError,
         ]
 
-    def init_subcommands(self) -> Any:
+    def init_subcommands(self) -> "Any":
         return [
             self,
             SubCommandWrapper(ExecCommand()),
@@ -255,7 +258,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("--detail", action="store_true", help="show container detail info")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_container_names))
-    def on_command_list(self, names: List[str] = None, detail: bool = False):
+    def on_command_list(self, names: "list[str]" = None, detail: bool = False):
         install_containers = manager.get_installed_containers(resolve=False)
         all_install_containers = manager.resolve_depend_containers(install_containers)
         running_containers = manager.get_running_containers()
@@ -291,7 +294,7 @@ class Command(BaseCommandGroup):
     @subcommand("add", help="add containers to installed list")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_iter_container_names))
-    def on_command_add(self, names: List[str]):
+    def on_command_add(self, names: "list[str]"):
         containers = manager.add_installed_containers(*names)
         assert containers, "No container added"
         result = sorted(list([container.name for container in containers]))
@@ -301,7 +304,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("-f", "--force", help="Force remove")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_iter_container_names))
-    def on_command_remove(self, names: List[str], force: bool = False):
+    def on_command_remove(self, names: "list[str]", force: bool = False):
         containers = manager.remove_installed_containers(*names, force=force)
         assert containers, "No container removed"
         result = sorted(list([container.name for container in containers]))
@@ -313,7 +316,7 @@ class Command(BaseCommandGroup):
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
-    def on_command_up(self, names: List[str] = None, build: bool = True, pull: str = False):
+    def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False):
         context = self._make_context(["up", pull and "pull", build and "build"], names)
 
         build_options = []
@@ -364,7 +367,7 @@ class Command(BaseCommandGroup):
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
-    def on_command_restart(self, names: List[str] = None, build: bool = True, pull: str = False):
+    def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False):
         context = self._make_context(["restart", pull and "pull", build and "build"], names)
 
         build_options = []
@@ -408,7 +411,7 @@ class Command(BaseCommandGroup):
     @subcommand("down", help="stop installed containers")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
-    def on_command_down(self, names: List[str] = None):
+    def on_command_down(self, names: "list[str]" = None):
         context = self._make_context("down", names)
 
         services = []

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools.cli import CommandMain
-from linktools.mobile.cli import IOSCommand, IOSNamespace
+from linktools.mobile.cli import IOSCommand
+
+if TYPE_CHECKING:
+    from linktools.mobile.cli import IOSNamespace
+
 
 
 class Command(IOSCommand):
@@ -24,7 +28,7 @@ class Command(IOSCommand):
     def init_arguments(self, parser) -> None:
         parser.add_argument("ios_args", nargs="...", metavar="args", help="go-ios args")
 
-    def run(self, args: IOSNamespace) -> Optional[int]:
+    def run(self, args: "IOSNamespace") -> "int | None":
         if args.ios_args and args.ios_args[0] not in self._GENERAL_COMMANDS:
             device = args.device_selector.select()
             process = device.popen(*args.ios_args, capture_output=False)

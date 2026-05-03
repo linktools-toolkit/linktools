@@ -31,10 +31,9 @@ import functools
 import inspect
 import json
 import os
-import os.path
 import pathlib
 import shutil
-from typing import TYPE_CHECKING, Dict, Any, List, Union, Callable, Tuple, Set, Iterable
+from typing import TYPE_CHECKING
 
 from git import InvalidGitRepositoryError
 
@@ -42,14 +41,17 @@ from linktools import utils
 from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
-from linktools.types import PathType, FileCache
+from linktools.types import FileCache
 from .container import BaseContainer, SimpleContainer, ContainerError
 from .repository import Repository
 from ..capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from typing import Any
     from linktools.core import Environ
     from .context import EventContext
+    from linktools.types import PathType
 
 
 class ContainerManager:
@@ -197,7 +199,7 @@ class ContainerManager:
         return path
 
     @cached_property
-    def containers(self) -> Dict[str, BaseContainer]:
+    def containers(self) -> "dict[str, BaseContainer]":
         result = dict()
         for container in self._load_containers():
             if container.name in result:
@@ -209,15 +211,15 @@ class ContainerManager:
         return result
 
     @cached_property
-    def start_hooks(self) -> List[Callable[[], Any]]:
+    def start_hooks(self) -> "list[Callable[[], Any]]":
         return []
 
     @cached_property
-    def stop_hooks(self) -> List[Callable[[], Any]]:
+    def stop_hooks(self) -> "list[Callable[[], Any]]":
         return []
 
-    def _load_containers(self) -> List[BaseContainer]:
-        containers: List[BaseContainer] = []
+    def _load_containers(self) -> "list[BaseContainer]":
+        containers: "list[BaseContainer]" = []
 
         self.logger.debug(f"Load containers from assets")
         asset_path = __cap_cntr__.get_asset_path("containers")
@@ -235,7 +237,7 @@ class ContainerManager:
 
         return containers
 
-    def _walk_containers(self, path: PathType, max_level: int):
+    def _walk_containers(self, path: "PathType", max_level: int):
         if not os.path.isdir(path):
             return
         yield from self._load_container(path)
@@ -247,7 +249,7 @@ class ContainerManager:
                 max_level - 1
             )
 
-    def _load_container(self, path: PathType):
+    def _load_container(self, path: "PathType"):
         container_path = os.path.join(path, self.docker_container_name)
         if os.path.exists(container_path):
             try:
@@ -274,17 +276,17 @@ class ContainerManager:
                 yield container
                 return
 
-    def get_installed_containers(self, resolve: bool = True) -> List[BaseContainer]:
+    def get_installed_containers(self, resolve: bool = True) -> "list[BaseContainer]":
         with self._settings.lock():
             containers = self._load_installed_containers()
         if resolve:
             containers = self.resolve_depend_containers(containers)
         return containers
 
-    def resolve_depend_containers(self, containers: Iterable[BaseContainer]) -> List[BaseContainer]:
+    def resolve_depend_containers(self, containers: "Iterable[BaseContainer]") -> "list[BaseContainer]":
         order = lambda o: o() if callable(o) else o
-        result: Dict[BaseContainer, Union[int, Callable[[], int]]] = dict()
-        container_queue: Set[BaseContainer] = set(containers)
+        result: "dict[BaseContainer, int | Callable[[], int]]" = dict()
+        container_queue: "set[BaseContainer]" = set(containers)
         while container_queue:
             container = container_queue.pop()
             result.setdefault(container, container.order)
@@ -299,7 +301,7 @@ class ContainerManager:
                     result[depend_container] = functools.partial(lambda o: order(result[o]) - 1, container)
         return sorted(result, key=lambda o: (order(result[o]), o.order, o.name))
 
-    def prepare_installed_containers(self) -> List[BaseContainer]:
+    def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
         containers = self.get_installed_containers(resolve=True)
         if not containers:
@@ -319,7 +321,7 @@ class ContainerManager:
                 self.logger.debug(f"Load exposes for {container.name}")
         return containers
 
-    def add_installed_containers(self, *names: str) -> List[BaseContainer]:
+    def add_installed_containers(self, *names: str) -> "list[BaseContainer]":
         with self._settings.lock():
             result = set()
             for name in names:
@@ -331,7 +333,7 @@ class ContainerManager:
             self._dump_installed_containers(containers)
             return list(result)
 
-    def remove_installed_containers(self, *names: str, force: bool = False) -> List[BaseContainer]:
+    def remove_installed_containers(self, *names: str, force: bool = False) -> "list[BaseContainer]":
         with self._settings.lock():
             containers = self._load_installed_containers(reload=True)
 
@@ -363,14 +365,14 @@ class ContainerManager:
 
             return list(result)
 
-    def _load_installed_containers(self, reload: bool = False) -> List[BaseContainer]:
+    def _load_installed_containers(self, reload: bool = False) -> "list[BaseContainer]":
         result = set()
         for name in self._load_setting("INSTALLED_CONTAINERS", reload=reload, default=[]):
             if name in self.containers:
                 result.add(self.containers[name])
         return list(result)
 
-    def _dump_installed_containers(self, containers: Iterable[BaseContainer]) -> None:
+    def _dump_installed_containers(self, containers: "Iterable[BaseContainer]") -> None:
         self._dump_setting("INSTALLED_CONTAINERS", list(set([container.name for container in containers])))
 
     def get_running_containers(self):
@@ -384,7 +386,7 @@ class ContainerManager:
                 result.add(self.containers[name])
         return list(result)
 
-    def _dump_running_containers(self, containers: Iterable[BaseContainer]) -> None:
+    def _dump_running_containers(self, containers: "Iterable[BaseContainer]") -> None:
         self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
 
     @contextlib.contextmanager
@@ -456,15 +458,17 @@ class ContainerManager:
             *args,
             privilege: bool = None,
             **kwargs
-    ) -> utils.Process:
+    ) -> "utils.Process":
         if privilege:
             if self.system in ("darwin", "linux") and self.uid != 0:
-                envs = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-                args = [
-                    "sudo",
-                    f"--preserve-env={','.join([e.lower() for e in envs] + [e.upper() for e in envs])}",
-                    *args
-                ]
+                proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+                preserve_keys = [*[e.lower() for e in proxy_keys], *[e.upper() for e in proxy_keys]]
+                preserve_env = [key for key in preserve_keys if key in os.environ]
+                sudo_args = ["sudo"]
+                if preserve_env:
+                    sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
+                sudo_args.extend(args)
+                return utils.create_process(*sudo_args, **kwargs)
         return utils.create_process(*args, **kwargs)
 
     def create_docker_process(
@@ -472,7 +476,7 @@ class ContainerManager:
             *args,
             privilege: bool = None,
             **kwargs
-    ) -> utils.Process:
+    ) -> "utils.Process":
         commands = []
         if self.container_type in ("docker", "docker-rootless"):
             commands.extend(["docker"])
@@ -486,11 +490,11 @@ class ContainerManager:
 
     def create_docker_compose_process(
             self,
-            containers: Iterable[BaseContainer],
+            containers: "Iterable[BaseContainer]",
             *args: str,
             privilege: bool = None,
-            **kwargs: Any
-    ) -> utils.Process:
+            **kwargs: "Any"
+    ) -> "utils.Process":
         options = []
         for container in containers:
             path = container.get_docker_compose_file()
@@ -499,7 +503,7 @@ class ContainerManager:
         options.extend(["--project-name", self.project_name])
         return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
 
-    def change_file_owner(self, path: PathType, user: str, recursive: bool = False) -> None:
+    def change_file_owner(self, path: "PathType", user: str, recursive: bool = False) -> None:
         path = self.config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
@@ -521,7 +525,7 @@ class ContainerManager:
             self.logger.warning(f"Failed to chown of {path}")
             raise e
 
-    def change_file_mode(self, path: PathType, mode: int = 0o755, recursive: bool = False) -> None:
+    def change_file_mode(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
         if not shutil.which("chown"):
@@ -541,7 +545,7 @@ class ContainerManager:
             self.logger.warning(f"Failed to chmod of {path}")
             raise e
 
-    def get_all_repos(self) -> Dict[str, Dict[str, str]]:
+    def get_all_repos(self) -> "dict[str, dict[str, str]]":
         return self._load_setting("INSTALLED_REPOS", default={})
 
     def add_repo(self, url: str, branch: str = None, force: bool = False):
@@ -642,7 +646,7 @@ class ContainerManager:
             index += 1
         return path
 
-    def _remove_repo_file(self, repo: Dict[str, str]):
+    def _remove_repo_file(self, repo: "dict[str, str]"):
         repo_path = repo.get("repo_path", None)
         if repo_path and os.path.lexists(repo_path):
             if os.path.islink(repo_path):
@@ -652,7 +656,7 @@ class ContainerManager:
                 self.logger.info(f"Remove directory {repo_path}")
                 shutil.rmtree(repo_path, ignore_errors=True)
 
-    def _load_setting(self, key: str, reload: bool = False, default: Any = None) -> Union[Dict, List, Tuple]:
+    def _load_setting(self, key: str, reload: bool = False, default: "Any" = None) -> "dict | list | tuple":
         if reload:
             self._setting_cache.pop(key, None)
         elif key in self._setting_cache:
@@ -661,7 +665,7 @@ class ContainerManager:
             result = self._setting_cache[key] = data.get(key, default)
             return result
 
-    def _dump_setting(self, key: str, setting: Union[Dict, List, Tuple]):
+    def _dump_setting(self, key: str, setting: "dict | list | tuple"):
         self._setting_cache.pop(key, None)
         with self._settings.open() as data:
             data.set(key, setting)

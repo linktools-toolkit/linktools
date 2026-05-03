@@ -35,17 +35,19 @@ from typing import TYPE_CHECKING, overload, Tuple, List, Set
 
 from ..decorator import timeoutable
 from ..metadata import __missing__
-from ..types import PathType, QueryType, Proxy, Error, TimeoutType
+from ..types import Proxy, Error
 
 if TYPE_CHECKING:
     import subprocess
     import threading
     import logging
 
-    from typing import ParamSpec, Literal, Union, Callable, Optional, Type, Any, TypeVar, Dict
+    from collections.abc import Callable
+    from typing import Any, Literal, ParamSpec, TypeVar
     from importlib.machinery import ModuleSpec
 
     from ..core import Environ
+    from ..types import PathType, QueryType, TimeoutType
 
     T = TypeVar("T")
     R = TypeVar("R")
@@ -124,7 +126,7 @@ def ignore_errors(
         return default
 
 
-def cast(type: "Type[T]", obj: "Any", default: "Any" = __missing__) -> "Optional[T]":  # noqa
+def cast(type: "type[T]", obj: "Any", default: "Any" = __missing__) -> "T | None":  # noqa
     """Cast a value to the requested type.
 
     Args:
@@ -217,7 +219,7 @@ def is_empty(obj: "Any") -> bool:
     return False
 
 
-def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
+def get_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = None) -> "T | None":  # noqa
     """Return a nested item or attribute from an object.
 
     Args:
@@ -256,7 +258,7 @@ def get_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
     return obj
 
 
-def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = None) -> "Optional[T]":  # noqa
+def pop_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = None) -> "T | None":  # noqa
     """Return and remove a nested item from an object.
 
     Args:
@@ -308,7 +310,7 @@ def pop_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "T" = No
     return obj
 
 
-def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "List[T]" = None) -> "Optional[List[T]]":  # noqa
+def get_list_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "list[T]" = None) -> "list[T] | None":  # noqa
     """Return a list item after trying several indexes.
 
     Args:
@@ -335,7 +337,7 @@ def get_list_item(obj: "Any", *keys: "Any", type: "Type[T]" = None, default: "Li
     return result
 
 
-def get_hash(data: "Union[str, bytes]", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
+def get_hash(data: "str | bytes", algorithm: "Literal['md5', 'sha1', 'sha256']" = "md5") -> str:
     """Return the digest for bytes or text using the selected hash algorithm.
 
     Args:
@@ -374,7 +376,7 @@ def get_file_hash(path: "PathType", algorithm: "Literal['md5', 'sha1', 'sha256']
     return m.hexdigest()
 
 
-def get_md5(data: "Union[str, bytes]") -> str:
+def get_md5(data: "str | bytes") -> str:
     """Return the MD5 digest for bytes or text.
 
     Args:
@@ -398,7 +400,7 @@ def get_file_md5(path: "PathType"):
     return get_file_hash(path, algorithm="md5")
 
 
-def get_hash_ident(data: "Union[str, bytes]"):
+def get_hash_ident(data: "str | bytes"):
     """Return a short stable identifier from a hashed value.
 
     Args:
@@ -440,7 +442,7 @@ def random_string(length: int = 16) -> str:
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
 
-def gzip_compress(data: "Union[str, bytes]") -> bytes:
+def gzip_compress(data: "str | bytes") -> bytes:
     """Return gzip-compressed bytes for the supplied data.
 
     Args:
@@ -472,7 +474,7 @@ def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
         return False
 
 
-def join_path(root_path: PathType, *paths: str) -> Path:
+def join_path(root_path: "PathType", *paths: str) -> "Path":
     """Join path segments and optionally expand user or environment markers.
 
     Args:
@@ -540,7 +542,7 @@ def read_file(path: "PathType", text: "Literal[True]", encoding: str = DEFAULT_E
 
 
 @overload
-def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]":
+def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "str | bytes":
     """Read file data from a path.
 
     Args:
@@ -554,7 +556,7 @@ def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) ->
     ...
 
 
-def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCODING) -> "Union[str, bytes]":
+def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCODING) -> "str | bytes":
     """Read data from a file.
 
     Args:
@@ -573,7 +575,7 @@ def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCO
             return fd.read()
 
 
-def write_file(path: "PathType", data: "Union[str, bytes]", encoding: str = DEFAULT_ENCODING) -> None:
+def write_file(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_ENCODING) -> None:
     """Write data to a file.
 
     Args:
@@ -625,7 +627,7 @@ def clear_directory(path: "PathType") -> None:
             ignore_errors(os.remove, args=(target_path,))
 
 
-def get_lan_ip() -> "Optional[str]":
+def get_lan_ip() -> "str | None":
     """Return the local LAN IP address.
 
     Returns:
@@ -644,7 +646,7 @@ def get_lan_ip() -> "Optional[str]":
             ignore_errors(s.close)
 
 
-def get_wan_ip() -> "Optional[str]":
+def get_wan_ip() -> "str | None":
     """Return the public WAN IP address.
 
     Returns:
@@ -658,7 +660,7 @@ def get_wan_ip() -> "Optional[str]":
         return None
 
 
-def parse_version(version: str) -> "Tuple[int, ...]":
+def parse_version(version: str) -> "tuple[int, ...]":
     """Parse a version string into a comparable tuple.
 
     Args:
@@ -859,7 +861,7 @@ def parse_header(line):
     return key, pdict
 
 
-def parser_cookie(cookie: str) -> "Dict[str, str]":
+def parser_cookie(cookie: str) -> "dict[str, str]":
     """Parse a cookie header into a dictionary.
 
     Args:
@@ -1196,7 +1198,7 @@ def import_module_file(name: str, path: str) -> "T":
     return module
 
 
-def get_derived_type(t: "Type[T]") -> "Type[T]":
+def get_derived_type(t: "type[T]") -> "type[T]":
     """Create a proxy type that delegates operations to another type.
 
     Args:
@@ -1232,7 +1234,7 @@ def lazy_load(fn: "Callable[P, T]", *args: "P.args", **kwargs: "P.kwargs") -> "T
     return Proxy(functools.partial(fn, *args, **kwargs))
 
 
-def raise_error(e: BaseException):
+def raise_error(e: "BaseException"):
     """Raise the provided exception instance.
 
     Args:
@@ -1244,7 +1246,7 @@ def raise_error(e: BaseException):
     raise e
 
 
-def lazy_raise(e: BaseException) -> "T":
+def lazy_raise(e: "BaseException") -> "T":
     """Return a proxy that raises the supplied exception when accessed.
 
     Args:
@@ -1257,7 +1259,7 @@ def lazy_raise(e: BaseException) -> "T":
 
 
 @timeoutable
-def wait_event(event: "threading.Event", timeout: TimeoutType) -> bool:
+def wait_event(event: "threading.Event", timeout: "TimeoutType") -> bool:
     """Wait for a threading event with timeout handling.
 
     Args:
@@ -1279,7 +1281,7 @@ def wait_event(event: "threading.Event", timeout: TimeoutType) -> bool:
 
 
 @timeoutable
-def wait_thread(thread: "threading.Thread", timeout: TimeoutType) -> bool:
+def wait_thread(thread: "threading.Thread", timeout: "TimeoutType") -> bool:
     """Wait for a thread to finish with timeout handling.
 
     Args:
@@ -1305,7 +1307,7 @@ def wait_thread(thread: "threading.Thread", timeout: TimeoutType) -> bool:
 
 
 @timeoutable
-def wait_process(process: "subprocess.Popen", timeout: TimeoutType) -> "Optional[int]":
+def wait_process(process: "subprocess.Popen", timeout: "TimeoutType") -> "int | None":
     """Wait for a process to finish with timeout handling.
 
     Args:

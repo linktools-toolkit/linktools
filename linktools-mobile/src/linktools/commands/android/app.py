@@ -26,15 +26,19 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.core import environ
-from linktools.cli import CommandParser
 from linktools.cli.argparse import BooleanOptionalAction
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
-from linktools.mobile.android import App, Permission, \
-    Component, Activity, Service, Receiver, Provider, IntentFilter
+from linktools.mobile.cli import AndroidCommand
+from linktools.mobile.android import Activity, Service, Receiver, Provider
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+    from linktools.mobile.android import App, Component, IntentFilter, Permission
+
 
 
 class PrintLevel:
@@ -72,7 +76,7 @@ class PrintStream(PrintLevel):
 
 class PrintStreamWrapper(PrintLevel):
 
-    def __init__(self, stream: PrintStream, max_level: int = PrintLevel.max, min_level: int = PrintLevel.min):
+    def __init__(self, stream: "PrintStream", max_level: int = PrintLevel.max, min_level: int = PrintLevel.min):
         self.stream = stream
         self.max_level = max_level
         self.min_level = min_level
@@ -97,7 +101,7 @@ class PrintStreamWrapper(PrintLevel):
 
 class AppPrinter:
 
-    def __init__(self, stream: PrintStream, app: App):
+    def __init__(self, stream: "PrintStream", app: "App"):
         self.app = app
         self.max_level = PrintLevel.max if self.app.enabled else PrintLevel.useless
         self.min_level = PrintLevel.min
@@ -168,14 +172,14 @@ class AppPrinter:
             self.stream.print_line()
 
     @classmethod
-    def _print_permission(cls, stream: PrintStreamWrapper, permission: Permission, indent: int = 0,
+    def _print_permission(cls, stream: "PrintStreamWrapper", permission: "Permission", indent: int = 0,
                           identity: str = None):
         if permission.is_defined():
             stream.print("%s [%s] %s" % (identity, permission, permission.protection), indent=indent,
                          level=stream.dangerous if permission.is_dangerous() else stream.normal)
 
     @classmethod
-    def _print_component(cls, stream: PrintStreamWrapper, app: App, component: Component, indent: int = 0, identity: str = None):
+    def _print_component(cls, stream: "PrintStreamWrapper", app: "App", component: "Component", indent: int = 0, identity: str = None):
         if not component.enabled:
             description = "disabled"
             level = stream.useless
@@ -218,7 +222,7 @@ class AppPrinter:
                 cls._print_intent(stream, intent, indent=indent + 4, level=level)
 
     @classmethod
-    def _print_intent(cls, stream: PrintStreamWrapper, intent: IntentFilter, indent: int = 0,
+    def _print_intent(cls, stream: "PrintStreamWrapper", intent: "IntentFilter", indent: int = 0,
                       level: int = PrintLevel.normal):
         stream.print("IntentFilter:", indent=indent, level=level)
         for action in intent.actions:
@@ -242,7 +246,7 @@ class Command(AndroidCommand):
     Retrieve detailed information about installed applications on Android devices
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         group = parser.add_mutually_exclusive_group()
         group.add_argument('-t', '--top', action='store_true', default=False,
                            help='fetch current running app only')
@@ -260,7 +264,7 @@ class Command(AndroidCommand):
         parser.add_argument('--dangerous', action='store_true', default=False,
                             help='show app dangerous permissions and components only')
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
 
         if not utils.is_empty(args.packages):

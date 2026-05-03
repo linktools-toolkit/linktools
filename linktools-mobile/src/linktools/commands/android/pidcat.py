@@ -22,11 +22,15 @@ limitations under the License.
 import re
 import sys
 from subprocess import PIPE
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cli import CommandParser
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 __version__ = '2.1.0'
 
@@ -39,7 +43,7 @@ class Command(AndroidCommand):
     Filter logcat by package name
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument('-p', '--packages', dest='package', action='store', nargs='*', default=None,
                            help='application package name(s)')
         parser.add_argument('-w', '--tag-width', metavar='N', dest='tag_width', type=int, default=23,
@@ -61,7 +65,7 @@ class Command(AndroidCommand):
         parser.add_argument('-a', '--all', dest='all', action='store_true', default=False,
                             help='print all log messages')
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
         package = args.package or []
         min_level = LOG_LEVELS_MAP[args.min_level.upper()]

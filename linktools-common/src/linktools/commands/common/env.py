@@ -26,10 +26,13 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Any
+from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand, SubCommandWrapper, BaseCommandGroup
 from linktools.cli.env import get_commands
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class InitCommand(BaseCommandGroup):
@@ -70,7 +73,7 @@ class Command(BaseCommandGroup):
     Manage and configure the Linktools environment
     """
 
-    def init_subcommands(self) -> Any:
+    def init_subcommands(self) -> "Any":
         return [
             SubCommandWrapper(InitCommand()),
             get_commands(self.environ),

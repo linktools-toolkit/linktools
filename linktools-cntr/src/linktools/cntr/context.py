@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
-from .container import BaseContainer
+if TYPE_CHECKING:
+    from .container import BaseContainer
 
 
 class EventContext:
 
     def __init__(self):
-        self.commands: Optional[List[str]] = None
-        self.containers: Optional[List[BaseContainer]] = None
-        self.target_containers: Optional[List[BaseContainer]] = None
+        self.commands: "list[str] | None" = None
+        self.containers: "list[BaseContainer] | None" = None
+        self.target_containers: "list[BaseContainer] | None" = None
         self.is_full_containers: bool = True

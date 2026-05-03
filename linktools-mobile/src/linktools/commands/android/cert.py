@@ -30,15 +30,19 @@
 import hashlib
 import os
 from datetime import datetime
-from typing import Optional, Type, List, Union
+from typing import TYPE_CHECKING
 
 import OpenSSL
 from rich import get_console
 from rich.table import Table
 
 from linktools import utils
-from linktools.cli import subcommand, subcommand_argument, CommandParser
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.cli import subcommand, subcommand_argument
+from linktools.mobile.cli import AndroidCommand
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
 
 
 class Command(AndroidCommand):
@@ -47,13 +51,13 @@ class Command(AndroidCommand):
     """
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [OpenSSL.crypto.Error]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         self.add_subcommands(parser)
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         subcommand = self.parse_subcommand(args)
         if not subcommand:
             return self.print_subcommands(args)
@@ -66,7 +70,7 @@ class Command(AndroidCommand):
             date = datetime.strptime(date, '%Y%m%d%H%M%SZ')
             return date.strftime('%Y-%m-%d %H:%M:%S')
 
-        def format_hex(data: Union[int, bytes], length: int = None):
+        def format_hex(data: "int | bytes", length: int = None):
             result = f"{data:x}"
             if len(result) % 2 != 0:
                 result = f"0{result}"
@@ -74,7 +78,7 @@ class Command(AndroidCommand):
                 result = result.zfill(length)
             return f"0x{result}"
 
-        def format_components(issuer: OpenSSL.SSL.X509Name):
+        def format_components(issuer: "OpenSSL.SSL.X509Name"):
             components = []
             for item in issuer.get_components():
                 key = item[0].decode("utf-8")
@@ -82,10 +86,10 @@ class Command(AndroidCommand):
                 components.append(f"{key}={value}")
             return ", ".join(components)
 
-        def dump_pubkey(cert: OpenSSL.SSL.X509):
+        def dump_pubkey(cert: "OpenSSL.SSL.X509"):
             return OpenSSL.crypto.dump_publickey(OpenSSL.crypto.FILETYPE_PEM, cert.get_pubkey())
 
-        def subject_name_hash_old(cert: OpenSSL.SSL.X509):
+        def subject_name_hash_old(cert: "OpenSSL.SSL.X509"):
             subject_name = cert.get_subject().der()
             hash_obj = hashlib.md5(subject_name)
             hash_value = hash_obj.digest()
@@ -121,7 +125,7 @@ class Command(AndroidCommand):
 
     @subcommand("install", help="start setting activity", pass_args=True)
     @subcommand_argument("path", help="cert path")
-    def on_install(self, args: AndroidNamespace, path: str):
+    def on_install(self, args: "AndroidNamespace", path: str):
         device = args.device_selector.select()
         dest = device.push_file(path, device.get_data_path("cert"), log_output=True)
         device.shell("am", "start", "--user", "0",

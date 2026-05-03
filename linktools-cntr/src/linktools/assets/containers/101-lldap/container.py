@@ -27,13 +27,17 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import os
-from typing import Iterable
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.cli import CommandError
-from linktools.cntr import BaseContainer, ExposeLink, ContainerError, EventContext
+from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import Config
 from linktools.decorator import cached_property
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from linktools.cntr import EventContext, ExposeLink
 
 
 class Container(BaseContainer):
@@ -59,7 +63,7 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def exposes(self) -> Iterable[ExposeLink]:
+    def exposes(self) -> "Iterable[ExposeLink]":
         return [
             self.expose_container("LDAP", "account", "账号管理", self.load_port_url(
                 "LLDAP_WEB_PORT",
@@ -67,13 +71,13 @@ class Container(BaseContainer):
             )),
         ]
 
-    def on_check(self, context: EventContext):
+    def on_check(self, context: "EventContext"):
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
-    def on_starting(self, context: EventContext):
+    def on_starting(self, context: "EventContext"):
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
 

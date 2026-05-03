@@ -31,17 +31,21 @@ import json
 import os
 import re
 import time
-from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar, Iterable, Dict
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
-from linktools.types import TimeoutType, Stoppable
+from linktools.types import Stoppable
 from .types import App, UnixSocket, InetSocket, Process, File, SystemService
 from .._base import BridgeError, Bridge, BaseDevice
 from ...capabilities.mobile import __cap_mobile__
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterable
+    from typing import Any, TypeVar
+    from linktools.types import TimeoutType
+
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="AdbDevice")
 
 _logger = environ.get_logger("android.adb")
@@ -59,14 +63,14 @@ class AdbError(BridgeError):
 
 class Adb(Bridge):
 
-    def __init__(self, options: List[str] = None):
+    def __init__(self, options: "list[str]" = None):
         super().__init__(
             tool=environ.get_tool("adb"),
             options=options,
             error_type=AdbError
         )
 
-    def list_devices(self, alive: bool = None) -> Generator["AdbDevice", None, None]:
+    def list_devices(self, alive: bool = None) -> "Generator['AdbDevice', None, None]":
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -85,7 +89,7 @@ class Adb(Bridge):
 
 class AdbDevice(BaseDevice):
 
-    def __init__(self, id: str = None, adb: Adb = None):
+    def __init__(self, id: str = None, adb: "Adb" = None):
         """
         :param id: 设备号
         """
@@ -151,7 +155,7 @@ class AdbDevice(BaseDevice):
         """
         return (type or AdbDevice)(self._id, self._adb)
 
-    def popen(self, *args: Any, **kwargs) -> utils.Process:
+    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
         """
         执行命令
         :param args: 命令行参数
@@ -161,7 +165,7 @@ class AdbDevice(BaseDevice):
         return self._adb.popen(*args, **kwargs)
 
     @timeoutable
-    def exec(self, *args: Any, **kwargs) -> str:
+    def exec(self, *args: "Any", **kwargs) -> str:
         """
         执行命令
         :param args: 命令行参数
@@ -170,7 +174,7 @@ class AdbDevice(BaseDevice):
         args = ["-s", self.id, *args]
         return self._adb.exec(*args, **kwargs)
 
-    def make_shell_args(self, *args: Any, privilege: bool = False, user: str = None):
+    def make_shell_args(self, *args: "Any", privilege: bool = False, user: str = None):
         """
         生成shell参数
         :param args: 参数
@@ -188,7 +192,7 @@ class AdbDevice(BaseDevice):
         return args
 
     @timeoutable
-    def shell(self, *args: Any, privilege: bool = False, user: str = None, **kwargs) -> str:
+    def shell(self, *args: "Any", privilege: bool = False, user: str = None, **kwargs) -> str:
         """
         执行shell
         :param args: shell命令
@@ -200,7 +204,7 @@ class AdbDevice(BaseDevice):
         return self.exec(*args, **kwargs)
 
     @timeoutable
-    def sudo(self, *args: Any, **kwargs) -> str:
+    def sudo(self, *args: "Any", **kwargs) -> str:
         """
         以root权限执行shell
         :param args: shell命令
@@ -382,7 +386,7 @@ class AdbDevice(BaseDevice):
         return self.shell(*args, **kwargs).rstrip()
 
     @timeoutable
-    def start(self, package_name: str, activity_name: str = None, timeout: TimeoutType = None, **kwargs) -> str:
+    def start(self, package_name: str, activity_name: str = None, timeout: "TimeoutType" = None, **kwargs) -> str:
         """
         启动app的launcher页面
         :param package_name: 包名
@@ -449,7 +453,7 @@ class AdbDevice(BaseDevice):
         return utils.bool(utils.int(out, default=0), default=False)
 
     @cached_classproperty
-    def _agent_info(self) -> Dict[str, Any]:
+    def _agent_info(self) -> "dict[str, Any]":
         agent_path = __cap_mobile__.get_asset_path("android-tools.json")
         agent_data = json.loads(utils.read_file(agent_path, text=True))
         return agent_data["AGENT_APK"]
@@ -479,7 +483,7 @@ class AdbDevice(BaseDevice):
             data_path: str = None,
             library_path: str = None,
             plugin_path: str = None,
-    ) -> "List[str]":
+    ) -> "list[str]":
         """
         生成agent参数
         :param args: 参数
@@ -597,7 +601,7 @@ class AdbDevice(BaseDevice):
         return utils.get_item(obj, 0, "sourceDir", default="")
 
     @timeoutable
-    def get_uid(self, package_name: str = None, timeout: TimeoutType = None) -> int:
+    def get_uid(self, package_name: str = None, timeout: "TimeoutType" = None) -> int:
         """
         根据包名获取uid
         :param package_name: 包名，为空则返回当前uid
@@ -619,7 +623,7 @@ class AdbDevice(BaseDevice):
             raise AdbError("unknown adb uid: %s" % out)
 
     @timeoutable
-    def get_app(self, package_name: str, detail: bool = None, **kwargs) -> App:
+    def get_app(self, package_name: str, detail: bool = None, **kwargs) -> "App":
         """
         根据包名获取包信息
         :param package_name: 包名
@@ -635,7 +639,7 @@ class AdbDevice(BaseDevice):
         return App(objs[0])
 
     @timeoutable
-    def get_apps(self, *package_names: str, system: bool = None, detail: bool = False, **kwargs) -> "List[App]":
+    def get_apps(self, *package_names: str, system: bool = None, detail: bool = False, **kwargs) -> "list[App]":
         """
         获取包信息
         :param package_names: 需要匹配的所有包名，为空则匹配所有
@@ -660,7 +664,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def get_apps_for_uid(self, *uids: int, detail: bool = False, **kwargs) -> "List[App]":
+    def get_apps_for_uid(self, *uids: int, detail: bool = False, **kwargs) -> "list[App]":
         """
         获取指定uid包信息
         :param uids: 需要匹配的所有uid
@@ -680,7 +684,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def get_system_service(self, service_name: str, detail: bool = None, **kwargs) -> SystemService:
+    def get_system_service(self, service_name: str, detail: bool = None, **kwargs) -> "SystemService":
         """
         根据服务名获取系统服务信息
         :param service_name: 服务名
@@ -696,7 +700,7 @@ class AdbDevice(BaseDevice):
         return SystemService(objs[0])
 
     @timeoutable
-    def get_system_services(self, *service_names: str, detail: bool = False, **kwargs) -> "List[SystemService]":
+    def get_system_services(self, *service_names: str, detail: bool = False, **kwargs) -> "list[SystemService]":
         """
         获取系统服务信息
         :param service_names: 服务名（不填则全量）
@@ -716,7 +720,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_tcp_sockets(self, **kwargs) -> "List[InetSocket]":
+    def list_tcp_sockets(self, **kwargs) -> "list[InetSocket]":
         """
         同netstat命令，获取设备tcp连接情况，需要读取/proc/net/tcp文件，高版本设备至少需要shell权限
         :return: tcp连接列表
@@ -724,7 +728,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-tcp-sock"], **kwargs)
 
     @timeoutable
-    def list_udp_sockets(self, **kwargs) -> "List[InetSocket]":
+    def list_udp_sockets(self, **kwargs) -> "list[InetSocket]":
         """
         同netstat命令，获取设备udp连接情况，需要读取/proc/net/udp文件，高版本设备至少需要shell权限
         :return: udp连接列表
@@ -732,7 +736,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-udp-sock"], **kwargs)
 
     @timeoutable
-    def list_raw_sockets(self, **kwargs) -> "List[InetSocket]":
+    def list_raw_sockets(self, **kwargs) -> "list[InetSocket]":
         """
         同netstat命令，获取设备raw连接情况，需要读取/proc/net/raw文件，高版本设备至少需要shell权限
         :return: raw连接列表
@@ -740,7 +744,7 @@ class AdbDevice(BaseDevice):
         return self._list_sockets(InetSocket, ["common", "--list-raw-sock"], **kwargs)
 
     @timeoutable
-    def list_unix_sockets(self, **kwargs) -> "List[UnixSocket]":
+    def list_unix_sockets(self, **kwargs) -> "list[UnixSocket]":
         """
         同netstat命令，获取设备unix连接情况，需要读取/proc/net/unix文件，高版本设备至少需要shell权限
         :return: unix连接列表
@@ -756,7 +760,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_processes(self, **kwargs) -> "List[Process]":
+    def list_processes(self, **kwargs) -> "list[Process]":
         """
         列出所有进程
         """
@@ -768,7 +772,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_files(self, path: str, **kwargs) -> "List[File]":
+    def list_files(self, path: str, **kwargs) -> "list[File]":
         """
         列出指定目录下的所有文件
         """
@@ -849,7 +853,7 @@ class AdbForward(Stoppable):
     remote = property(fget=lambda self: self._remote)
     remote_port = property(fget=lambda self: int(self._remote[1]))
 
-    def __init__(self, device: AdbDevice, local: str, remote: str):
+    def __init__(self, device: "AdbDevice", local: str, remote: str):
         self._device = device
         self._local = None
         self._remote = None
@@ -875,7 +879,7 @@ class AdbReverse(Stoppable):
     remote = property(fget=lambda self: self._remote)
     remote_port = property(fget=lambda self: int(self._remote[1]))
 
-    def __init__(self, device: AdbDevice, remote: str, local: str):
+    def __init__(self, device: "AdbDevice", remote: str, local: str):
         self._device = device
         self._local = None
         self._remote = None
@@ -900,7 +904,7 @@ class AdbRedirect(Stoppable):
     address = property(fget=lambda self: self._address)
     port = property(fget=lambda self: self._port)
 
-    def __init__(self, device: AdbDevice, address: str, port: int, uid: int):
+    def __init__(self, device: "AdbDevice", address: str, port: int, uid: int):
         self._device = device
         self._address = None
         self._port = None

@@ -29,12 +29,16 @@
 
 import datetime
 import sys
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cli import CommandParser
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
 from linktools.core import environ
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 
 class Command(AndroidCommand):
@@ -42,7 +46,7 @@ class Command(AndroidCommand):
     Fetch basic information about the currently running application
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         group = parser.add_mutually_exclusive_group()
         group.add_argument('-p', '--package', action='store_const', const=True, default=False,
                            help='show current package name')
@@ -57,7 +61,7 @@ class Command(AndroidCommand):
         group.add_argument('--screen', metavar='DEST', action='store', type=str, nargs='?', default=".",
                            help='capture screen and pull file')
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
 
         if args.package:

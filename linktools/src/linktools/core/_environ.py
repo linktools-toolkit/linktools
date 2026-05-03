@@ -33,12 +33,13 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Type, Any
+from typing import TYPE_CHECKING
 
 from linktools import utils, metadata
 from linktools.decorator import cached_property, cached_classproperty
 
 if TYPE_CHECKING:
+    from typing import Any
     from linktools.types import T, ConfigDict, Config, Tools, Tool, UrlFile, PathType
 
 
@@ -122,7 +123,7 @@ class BaseEnviron(abc.ABC):
         self.set_config("DEBUG", value)
 
     @cached_property
-    def data_path(self) -> Path:
+    def data_path(self) -> "Path":
         """Data path.
 
         Returns:
@@ -131,7 +132,7 @@ class BaseEnviron(abc.ABC):
         return Path(self.global_config["DATA_PATH"])
 
     @cached_property
-    def temp_path(self) -> Path:
+    def temp_path(self) -> "Path":
         """Temp path.
 
         Returns:
@@ -139,7 +140,7 @@ class BaseEnviron(abc.ABC):
         """
         return Path(self.global_config["TEMP_PATH"])
 
-    def get_path(self, *paths: str) -> Path:
+    def get_path(self, *paths: str) -> "Path":
         """Return the path.
 
         Args:
@@ -155,7 +156,7 @@ class BaseEnviron(abc.ABC):
             raise RuntimeError("root_path not implemented")
         return utils.join_path(self.root_path, *paths)
 
-    def get_data_path(self, *paths: str, create_parent: bool = False) -> Path:
+    def get_data_path(self, *paths: str, create_parent: bool = False) -> "Path":
         """Return the data path.
 
         Args:
@@ -170,7 +171,7 @@ class BaseEnviron(abc.ABC):
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def get_temp_path(self, *paths: str, create_parent: bool = False) -> Path:
+    def get_temp_path(self, *paths: str, create_parent: bool = False) -> "Path":
         """Return the temp path.
 
         Args:
@@ -303,7 +304,7 @@ class BaseEnviron(abc.ABC):
 
         return ConfigWrapper(self.config, namespace=namespace, env_prefix=env_prefix)
 
-    def get_config(self, key: str, type: "Type[T]" = None, default: Any = metadata.__missing__) -> "T":
+    def get_config(self, key: str, type: "type[T]" = None, default: "Any" = metadata.__missing__) -> "T":
         """Return a configuration value.
 
         Args:
@@ -316,7 +317,7 @@ class BaseEnviron(abc.ABC):
         """
         return self.config.get(key=key, type=type, default=default)
 
-    def set_config(self, key: str, value: Any) -> None:
+    def set_config(self, key: str, value: "Any") -> None:
         """Set a configuration value.
 
         Args:
@@ -428,7 +429,7 @@ class Environ(BaseEnviron):
         return metadata.__description__
 
     @cached_property
-    def root_path(self) -> Path:
+    def root_path(self) -> "Path":
         """Return the root directory for the current package.
 
         Returns:

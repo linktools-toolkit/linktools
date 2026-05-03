@@ -26,11 +26,15 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Iterable
+from typing import TYPE_CHECKING
 
 from linktools.core import Config
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer, ExposeLink
+from linktools.cntr import BaseContainer
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from linktools.cntr import ExposeLink
 
 
 class Container(BaseContainer):
@@ -45,7 +49,7 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def exposes(self) -> Iterable[ExposeLink]:
+    def exposes(self) -> "Iterable[ExposeLink]":
         return [
             self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
                 "PORTAINER_DOMAIN",

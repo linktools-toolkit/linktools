@@ -2,15 +2,19 @@
 # -*- coding:utf-8 -*-
 
 import os
-from typing import Optional, Type, List
+from typing import TYPE_CHECKING
 
 import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.cli import CommandParser
-from linktools.mobile.cli import IOSCommand, IOSNamespace
+from linktools.mobile.cli import IOSCommand
 from linktools.ssh import SSHClient
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import IOSNamespace
+
 
 _REMOTE_PATH_PREFIX = ":"
 
@@ -38,10 +42,10 @@ class Command(IOSCommand):
     """
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [NotImplementedError, FileNotFoundError, SSHException]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-u", "--username", action="store", default="root",
                             help="iOS ssh username (default: root)")
         parser.add_argument("-p", "--port", action="store", type=int, default=22,
@@ -52,7 +56,7 @@ class Command(IOSCommand):
         parser.add_argument("target", action="store", type=SCPFile, default=None,
                             help=f"target file path, remote path needs to be prefixed with \"{_REMOTE_PATH_PREFIX}\"")
 
-    def run(self, args: IOSNamespace) -> Optional[int]:
+    def run(self, args: "IOSNamespace") -> "int | None":
         device = args.device_selector.select()
 
         local_port = utils.get_free_port()

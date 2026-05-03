@@ -26,14 +26,18 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+from typing import TYPE_CHECKING
 import json
 import subprocess
-from argparse import Namespace
-from typing import Optional, Type, List
 
-from linktools.cli import BaseCommand, CommandMain, CommandParser
+from linktools.cli import BaseCommand, CommandMain
 from linktools.cli.argparse import KeyValueAction
 from linktools.types import DownloadError, ToolError
+
+if TYPE_CHECKING:
+    from argparse import Namespace
+    from linktools.cli import CommandParser
+
 
 
 class Command(BaseCommand):
@@ -42,14 +46,14 @@ class Command(BaseCommand):
     """
 
     @property
-    def main(self) -> CommandMain:
+    def main(self) -> "CommandMain":
         return CommandMain(self, show_log_level=False, show_log_time=False)
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [ToolError, DownloadError]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("--set", action=KeyValueAction, nargs=1, dest="configs",
                             help="set the config of tool")
 
@@ -71,7 +75,7 @@ class Command(BaseCommand):
             tool_parser.add_argument("tool_args", metavar="args", nargs="...")
             tool_parser.set_defaults(tool_name=tool_name)
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
 
         tool_name, tool_args = args.tool_name, args.tool_args
         tool = self.environ.get_tool(tool_name, **(args.configs or {}))

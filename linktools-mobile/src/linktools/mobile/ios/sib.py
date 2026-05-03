@@ -5,7 +5,7 @@ import json
 import subprocess
 import time
 from subprocess import TimeoutExpired
-from typing import Any, Generator, List, Callable, Dict, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
@@ -14,6 +14,8 @@ from linktools.decorator import cached_property, timeoutable
 from linktools.types import Stoppable
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+    from typing import Any
     from linktools.ssh import SSHClient
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="SibDevice")
@@ -27,14 +29,14 @@ class SibError(BridgeError):
 
 class Sib(Bridge):
 
-    def __init__(self, options: List[str] = None):
+    def __init__(self, options: "list[str]" = None):
         super().__init__(
             tool=environ.get_tool("sib"),
             options=options,
             error_type=SibError
         )
 
-    def list_devices(self, alive: bool = None) -> Generator["SibDevice", None, None]:
+    def list_devices(self, alive: bool = None) -> "Generator['SibDevice', None, None]":
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -53,7 +55,7 @@ class Sib(Bridge):
 
 class SibDevice(BaseDevice):
 
-    def __init__(self, id: str = None, info: Dict = None, sib: Sib = None):
+    def __init__(self, id: str = None, info: "Dict" = None, sib: "Sib" = None):
         """
         :param id: 设备号
         :param info: 设备信息
@@ -105,7 +107,7 @@ class SibDevice(BaseDevice):
         return self.info.get("remoteAddr")
 
     @cached_property
-    def info(self) -> dict:
+    def info(self) -> "dict":
         """
         获取设备详细信息
         :return: 设备信息
@@ -118,7 +120,7 @@ class SibDevice(BaseDevice):
         raise SibError(f"device '{self.id}' not found")
 
     @cached_property
-    def detail(self) -> dict:
+    def detail(self) -> "dict":
         """
         获取设备详细信息
         :return: 设备详细信息
@@ -133,7 +135,7 @@ class SibDevice(BaseDevice):
         """
         return (type or SibDevice)(self._id, self._info, self._sib)
 
-    def popen(self, *args: Any, **kwargs) -> utils.Process:
+    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
         """
         执行命令
         :param args: 命令行参数
@@ -143,7 +145,7 @@ class SibDevice(BaseDevice):
         return self._sib.popen(*args, **kwargs)
 
     @timeoutable
-    def exec(self, *args: Any, **kwargs) -> str:
+    def exec(self, *args: "Any", **kwargs) -> str:
         """
         执行命令
         :param args: 命令行参数
@@ -243,7 +245,7 @@ class Forward(Stoppable):
     local_port = property(lambda self: self._local_port)
     remote_port = property(lambda self: self._remote_port)
 
-    def __init__(self, device: SibDevice, local_port: int, remote_port: int):
+    def __init__(self, device: "SibDevice", local_port: int, remote_port: int):
         self._local_port = local_port
         self._remote_port = remote_port
         self._process = None

@@ -37,9 +37,7 @@ import threading
 from collections import ChainMap
 from pathlib import Path
 from types import ModuleType
-from typing import \
-    TYPE_CHECKING, Type, Optional, Generator, \
-    Any, Tuple, IO, Mapping, Union, List, Dict, Callable
+from typing import TYPE_CHECKING, Tuple, List, Dict
 
 from linktools import utils
 from linktools.metadata import __missing__
@@ -47,10 +45,12 @@ from linktools.rich import choose, prompt, confirm
 from linktools.types import PathType, get_args, ConfigError, FileCache
 
 if TYPE_CHECKING:
-    from typing import Self, Literal
-    from ..types import T
+    from collections.abc import Callable, Generator, Mapping
+    from typing import Any, IO, Literal, Self, Union
     from ._environ import BaseEnviron
+    from ..types import T
 
+    ConfigKeyType = Union[str, "Config.Property"]
     ConfigLiteralType = Literal["path", "json"]
     ConfigType = Union[ConfigLiteralType, Callable[[Any], T], None]
     ConfigTypeMap = Dict[ConfigType, Callable[[Any], T]]
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 SUPPRESS = object()
 
 
-def is_type(obj: Any) -> bool:
+def is_type(obj: "Any") -> bool:
     """Return whether a value already matches the requested config type.
 
     Args:
@@ -70,7 +70,7 @@ def is_type(obj: Any) -> bool:
     return isinstance(obj, type)
 
 
-def cast_bool(obj: Any) -> bool:
+def cast_bool(obj: "Any") -> bool:
     """Cast a config value to bool.
 
     Args:
@@ -94,7 +94,7 @@ def cast_bool(obj: Any) -> bool:
     return bool(obj)
 
 
-def cast_str(obj: Any) -> str:
+def cast_str(obj: "Any") -> str:
     """Cast a config value to str.
 
     Args:
@@ -112,7 +112,7 @@ def cast_str(obj: Any) -> str:
     return str(obj)
 
 
-def cast_path(obj: Any) -> Path:
+def cast_path(obj: "Any") -> "Path":
     """Cast a config value to an expanded filesystem path.
 
     Args:
@@ -133,7 +133,7 @@ def cast_path(obj: Any) -> Path:
     raise TypeError(f"{type(obj)} cannot be converted to path")
 
 
-def cast_json(obj: Any) -> Union[List, Dict]:
+def cast_json(obj: "Any") -> "List | Dict":
     """Cast a config value to JSON-compatible data.
 
     Args:
@@ -163,7 +163,7 @@ CONFIG_TYPES: "ConfigTypeMap" = dict({
 class ConfigProperty(metaclass=abc.ABCMeta):
 
     """Descriptor for reading and writing typed config values."""
-    def __init__(self, *, type: "ConfigType" = None, default: Any = __missing__):
+    def __init__(self, *, type: "ConfigType" = None, default: "Any" = __missing__):
         self._type = type
         self._default = default
         self._tail = None
@@ -182,7 +182,7 @@ class ConfigProperty(metaclass=abc.ABCMeta):
         return self._type
 
     @property
-    def default(self) -> Any:
+    def default(self) -> "Any":
         """Default.
 
         Returns:
@@ -191,7 +191,7 @@ class ConfigProperty(metaclass=abc.ABCMeta):
         return self._default
 
     @abc.abstractmethod
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: "Any", **kwargs) -> "Any":
         """Return a resolved config value.
 
         Args:
@@ -206,7 +206,7 @@ class ConfigProperty(metaclass=abc.ABCMeta):
         """
         pass
 
-    def set_default(self, value: Any, ignore_errors: bool = False) -> "Self":
+    def set_default(self, value: "Any", ignore_errors: bool = False) -> "Self":
         """Set the default value for this config property chain.
 
         Args:
@@ -252,14 +252,14 @@ class ConfigProperty(metaclass=abc.ABCMeta):
 
         return self
 
-    def __or__(self, other: Any) -> "Self":
+    def __or__(self, other: "Any") -> "Self":
         return self.set_default(other, ignore_errors=False)
 
 
 class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
     """Config property whose default value is computed lazily."""
-    def get(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+    def get(self, config: "Config", key: str, *, type: "ConfigType", default: "Any", **kwargs) -> "Any":
         """Resolve a lazy config value.
 
         Args:
@@ -278,7 +278,7 @@ class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
         return result
 
     @abc.abstractmethod
-    def load(self, config: "Config", key: str, *, type: "ConfigType", default: Any, **kwargs) -> Any:
+    def load(self, config: "Config", key: str, *, type: "ConfigType", default: "Any", **kwargs) -> "Any":
         """Load the lazy config value.
 
         Args:
@@ -297,12 +297,12 @@ class LazyConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 
     """Config property that can persist prompted values."""
-    def __init__(self, *, type: "ConfigType" = None, default: Any, cached: bool = __missing__):
+    def __init__(self, *, type: "ConfigType" = None, default: "Any", cached: bool = __missing__):
         super().__init__(type=type, default=default)
         self._data = __missing__
         self._cached = cached
 
-    def get(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+    def get(self, config: "Config", key: str, type: "ConfigType", default: "Any", **kwargs) -> "Any":
         """Resolve a cached config value.
 
         Args:
@@ -348,7 +348,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
         return result
 
     @abc.abstractmethod
-    def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
+    def load(self, config: "Config", key: str, *, type: "ConfigType", cache: "Any", **kwargs) -> "Any":
         """Load a config value using cached data.
 
         Args:
@@ -363,7 +363,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
         """
         pass
 
-    def save(self, config: "Config", key: str, value: Any) -> None:
+    def save(self, config: "Config", key: str, value: "Any") -> None:
         """Save a config value into the cache when enabled.
 
         Args:
@@ -378,7 +378,7 @@ class CacheConfigProperty(ConfigProperty, metaclass=abc.ABCMeta):
 class ConfigDict(dict):
 
     """Dictionary wrapper that applies typed config property access."""
-    def update_from_pyfile(self, filename: PathType, silent: bool = False) -> bool:
+    def update_from_pyfile(self, filename: "PathType", silent: bool = False) -> bool:
         """Load uppercase config keys from a Python file.
 
         Args:
@@ -410,7 +410,7 @@ class ConfigDict(dict):
         self.update_from_object(d)
         return True
 
-    def update_from_file(self, filename: PathType, load: Callable[[IO[Any]], Mapping], silent: bool = False) -> bool:
+    def update_from_file(self, filename: "PathType", load: "Callable[[IO[Any]], Mapping]", silent: bool = False) -> bool:
         """Load config keys from a file with a custom loader.
 
         Args:
@@ -436,7 +436,7 @@ class ConfigDict(dict):
 
         return self.update_from_mapping(obj)
 
-    def update_from_object(self, obj: Union[object, str]) -> None:
+    def update_from_object(self, obj: "object | str") -> None:
         """Load uppercase config keys from an object.
 
         Args:
@@ -446,7 +446,7 @@ class ConfigDict(dict):
             if key[0].isupper():
                 self[key] = getattr(obj, key)
 
-    def update_from_mapping(self, mapping: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> bool:
+    def update_from_mapping(self, mapping: "Mapping[str, Any] | None" = None, **kwargs: "Any") -> bool:
         """Load uppercase config keys from a mapping.
 
         Args:
@@ -456,7 +456,7 @@ class ConfigDict(dict):
         Returns:
             bool: The operation result.
         """
-        mappings: Dict[str, Any] = {}
+        mappings: "dict[str, Any]" = {}
         if mapping is not None:
             mappings.update(mapping)
         mappings.update(kwargs)
@@ -484,7 +484,7 @@ class ConfigParser(configparser.ConfigParser):
 class ConfigCacheParser:
 
     """Parser for loading cached config data."""
-    def __init__(self, path: PathType, namespace: str):
+    def __init__(self, path: "PathType", namespace: str):
         self._parser = ConfigParser(default_section="ENV")  # Keep ENV as the legacy default section.
         self._path = path
         self._cache = FileCache(f"{self._path}.cache")
@@ -507,7 +507,7 @@ class ConfigCacheParser:
             with open(self._path, "wt") as fd:
                 self._parser.write(fd)
 
-    def get(self, key: str, default: Any) -> Any:
+    def get(self, key: str, default: "Any") -> "Any":
         """Return a cached option value.
 
         Args:
@@ -541,7 +541,7 @@ class ConfigCacheParser:
         """
         return self._parser.remove_option(self._section, key)
 
-    def items(self) -> Generator[Tuple[str, Any], None, None]:
+    def items(self) -> "Generator[tuple[str, Any], None, None]":
         """Yield cached option items.
 
         Returns:
@@ -569,7 +569,7 @@ class ConfigCache(dict):
         self.load()
 
     @property
-    def path(self) -> Path:
+    def path(self) -> "Path":
         """Return the cache file path.
 
         Returns:
@@ -598,7 +598,7 @@ class ConfigCache(dict):
             self.update(parser.items())
         return self
 
-    def save(self, **kwargs: Any) -> "ConfigCache":
+    def save(self, **kwargs: "Any") -> "ConfigCache":
         """Save or download data to a target path.
 
         Args:
@@ -639,7 +639,7 @@ class Config:
     def __init__(
             self,
             environ: "BaseEnviron",
-            data: ConfigDict,
+            data: "ConfigDict",
             namespace: str = __missing__,
             env_prefix: str = __missing__,
     ):
@@ -685,7 +685,7 @@ class Config:
         })
         self._cache.clear()
 
-    def cast(self, obj: Any, type: "ConfigType", default: Any = __missing__) -> "T":
+    def cast(self, obj: "Any", type: "ConfigType", default: "Any" = __missing__) -> "T":
         """Cast a value to the requested type.
 
         Args:
@@ -709,11 +709,11 @@ class Config:
                 raise
         return obj
 
-    def get(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
+    def get(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
         """Get.
 
         Args:
-            key (str): Configuration or item key.
+            key (ConfigKeyType): Configuration key or a Property whose `.key` is used.
             type (ConfigType): Target type used to cast the value.
             default (Any): Value returned when no explicit value is available.
 
@@ -723,7 +723,17 @@ class Config:
         Raises:
             Exception: Propagates errors raised while completing the operation.
         """
-        if type in (None, __missing__):
+        if isinstance(key, Config.Property):
+            prop = key
+            if prop.key in (None, __missing__):
+                raise ValueError("Config.Property used as key must have its key attribute set")
+            if type in (None, __missing__):
+                type = prop.type
+            if prop.default is not __missing__:
+                default = prop.default
+            key = prop.key
+
+        elif type in (None, __missing__):
             value = self._data.get(key, __missing__)
             if isinstance(value, ConfigProperty):
                 type = value.type
@@ -760,7 +770,7 @@ class Config:
 
         return default
 
-    def keys(self) -> Generator[str, None, None]:
+    def keys(self) -> "Generator[str, None, None]":
         """Keys.
 
         Returns:
@@ -769,7 +779,7 @@ class Config:
         for key in sorted(self._map.keys()):
             yield key
 
-    def items(self) -> Generator[Tuple[str, Any], None, None]:
+    def items(self) -> "Generator[tuple[str, Any], None, None]":
         """Items.
 
         Returns:
@@ -778,7 +788,7 @@ class Config:
         for key in self.keys():
             yield key, self.get(key)
 
-    def set(self, key: str, value: Any) -> "Config":
+    def set(self, key: str, value: "Any") -> "Config":
         """Set.
 
         Args:
@@ -791,7 +801,7 @@ class Config:
         self._data[key] = value
         return self
 
-    def set_default(self, key: str, value: Any) -> Any:
+    def set_default(self, key: str, value: "Any") -> "Any":
         """Set the default.
 
         Args:
@@ -828,7 +838,7 @@ class Config:
             self._data.setdefault(key, value)
         return self
 
-    def update_from_file(self, path: str, load: Callable[[IO[Any]], Mapping] = None) -> bool:
+    def update_from_file(self, path: str, load: "Callable[[IO[Any]], Mapping]" = None) -> bool:
         """Update from file.
 
         Args:
@@ -876,7 +886,7 @@ class Config:
                 self.update_from_file(os.path.join(root, name))
         return True
 
-    def update_cache(self, **kwargs: Any) -> "Config":
+    def update_cache(self, **kwargs: "Any") -> "Config":
         """Update cache.
 
         Args:
@@ -903,10 +913,10 @@ class Config:
     def __contains__(self, key) -> bool:
         return key in self._map
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> "Any":
         return self.get(key)
 
-    def __setitem__(self, key: str, value: Any):
+    def __setitem__(self, key: str, value: "Any"):
         self.set(key, value)
 
     class Property(CacheConfigProperty):
@@ -915,16 +925,16 @@ class Config:
                 self,
                 key: str = __missing__,
                 type: "ConfigType" = str,
-                default: Any = __missing__,
+                default: "Any" = __missing__,
                 cached: bool = __missing__,
         ):
             super().__init__(type=type, default=default, cached=cached)
             self.key = key
 
-        def get(self, config: "Config", key: str, type: "ConfigType", default: Any, **kwargs) -> Any:
+        def get(self, config: "Config", key: str, type: "ConfigType", default: "Any", **kwargs) -> "Any":
             return super().get(config, self.key or key, type, default, **kwargs)
 
-        def load(self, config: "Config", key: str, *, type: "ConfigType", cache: Any, **kwargs) -> Any:
+        def load(self, config: "Config", key: str, *, type: "ConfigType", cache: "Any", **kwargs) -> "Any":
             if isinstance(self.default, ConfigProperty):
                 return self.default.get(
                     config,
@@ -940,7 +950,7 @@ class Config:
                 default=cache if cache is not __missing__ else self.default
             )
 
-        def save(self, config: "Config", key: str, value: Any) -> None:
+        def save(self, config: "Config", key: str, value: "Any") -> None:
             if self._cached is __missing__:
                 if isinstance(self.default, CacheConfigProperty):
                     return self.default.save(config, self.key or key, value)
@@ -948,15 +958,15 @@ class Config:
 
     class Prompt(CacheConfigProperty):
 
-        type: "Union[Type[Union[str, int, float]], ConfigLiteralType]"
+        type: "type[str | int | float] | ConfigLiteralType"
 
         def __init__(
                 self,
                 prompt: str = None,
                 password: bool = False,
-                choices: "Union[List[str], Dict[str, str]]" = None,
-                type: "Union[Type[Union[str, int, float]], ConfigLiteralType]" = str,
-                default: Any = __missing__,
+                choices: "list[str] | dict[str, str]" = None,
+                type: "type[str | int | float] | ConfigLiteralType" = str,
+                default: "Any" = __missing__,
                 cached: bool = __missing__,
                 always_ask: bool = False,
                 allow_empty: bool = False,
@@ -969,8 +979,8 @@ class Config:
             self.always_ask = always_ask
             self.allow_empty = allow_empty
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any,
-                 choices: "Union[List[str], Dict[str, str]]" = None,
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: "Any",
+                 choices: "list[str] | dict[str, str]" = None,
                  **kwargs):
 
             if cache is not __missing__ and not self.always_ask:
@@ -1011,7 +1021,7 @@ class Config:
         def __init__(
                 self,
                 prompt: str = None,
-                default: Any = __missing__,
+                default: "Any" = __missing__,
                 cached: bool = __missing__,
                 always_ask: bool = False,
         ):
@@ -1020,7 +1030,7 @@ class Config:
             self.prompt = prompt
             self.always_ask = always_ask
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: "Any", **kwargs):
 
             if cache is not __missing__ and not self.always_ask:
                 if key in config.cache:
@@ -1047,13 +1057,13 @@ class Config:
                 self,
                 *keys: str,
                 type: "ConfigType" = str,
-                default: Any = __missing__,
+                default: "Any" = __missing__,
                 cached: bool = __missing__
         ):
             super().__init__(type=type, default=default, cached=cached)
             self.keys = keys
 
-        def load(self, config: "Config", key: str, type: "ConfigType", cache: Any, **kwargs):
+        def load(self, config: "Config", key: str, type: "ConfigType", cache: "Any", **kwargs):
             if cache is not __missing__:
                 return cache
 
@@ -1081,7 +1091,7 @@ class Config:
             super().__init__()
             self.func = func
 
-        def load(self, config: "Config", key: str, **kwargs) -> Any:
+        def load(self, config: "Config", key: str, **kwargs) -> "Any":
             return self.func(config)
 
     class Error(LazyConfigProperty):
@@ -1090,7 +1100,7 @@ class Config:
             super().__init__()
             self.message = message
 
-        def load(self, config: "Config", key: str, **kwargs) -> Any:
+        def load(self, config: "Config", key: str, **kwargs) -> "Any":
             message = self.message or \
                       f"Cannot find config \"{key}\". {os.linesep}" \
                       f"You can use any of the following methods to fix it: {os.linesep}" \

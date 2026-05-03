@@ -44,7 +44,7 @@ QueryType = _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataTy
 TimeoutType = _t.Union["Timeout", float, int, None]
 
 if _t.TYPE_CHECKING:
-    from .core._config import ConfigDict, Config, ConfigLiteralType, ConfigType, ConfigTypeMap  # noqa
+    from .core._config import ConfigDict, Config, ConfigKeyType, ConfigLiteralType, ConfigType, ConfigTypeMap  # noqa
     from .core._tools import Tools, Tool, ToolExecError  # noqa
     from .core._url import UrlFile, UrlFileValidatorType  # noqa
     from .core import BaseEnviron as _BaseEnviron  # noqa
@@ -52,7 +52,7 @@ if _t.TYPE_CHECKING:
     P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
 
-_logger: "_t.Optional[_logging.Logger]" = None
+_logger: "_logging.Logger | None" = None
 
 
 def _get_logger() -> "_logging.Logger":
@@ -165,10 +165,10 @@ def get_args(tp):
 
 class Timeout:
     """Track timeout state and compute remaining time for operations."""
-    _timeout: "_t.Optional[float]"
-    _deadline: "_t.Optional[float]"
+    _timeout: "float | None"
+    _deadline: "float | None"
 
-    def __new__(cls, timeout: TimeoutType = None):
+    def __new__(cls, timeout: "TimeoutType" = None):
         if isinstance(timeout, cls):
             return timeout
         elif isinstance(timeout, (float, int, type(None))):
@@ -180,7 +180,7 @@ class Timeout:
         raise TypeError(f"Timeout/int/float was expects, got {type(timeout)}")
 
     @property
-    def remain(self) -> _t.Union[float, None]:
+    def remain(self) -> "float | None":
         """Remain.
 
         Returns:
@@ -192,7 +192,7 @@ class Timeout:
         return timeout
 
     @property
-    def deadline(self) -> _t.Union[float, None]:
+    def deadline(self) -> "float | None":
         """Deadline.
 
         Returns:
@@ -265,7 +265,7 @@ class _EventHandler(dict):
         self._lock = _threading.RLock()
 
     @property
-    def lock(self) -> _threading.RLock:
+    def lock(self) -> "_threading.RLock":
         return self._lock
 
 
@@ -334,7 +334,7 @@ class EventHandlerMixin(object):
         """
         self.on(event, callback, 1)
 
-    def trigger(self, event: str, *args: _t.Any, **kwargs: _t.Any):
+    def trigger(self, event: str, *args: "_t.Any", **kwargs: "_t.Any"):
         """Trigger an event and invoke registered callbacks.
 
         Args:
@@ -374,7 +374,7 @@ class SlidingQueue(_t.Generic[T]):
         self._last_put_time = 0  # Timestamp of the last put operation
         self._last_get_time = 0  # Timestamp of the last get operation
 
-    def put(self, item: T) -> _t.Optional[T]:
+    def put(self, item: "T") -> "T | None":
         """Store an item in the queue and update the put timestamp.
 
         Args:
@@ -391,7 +391,7 @@ class SlidingQueue(_t.Generic[T]):
             self._last_put_time = int(_time.time())
             return result
 
-    def get(self) -> _t.Optional[T]:
+    def get(self) -> "T | None":
         """Retrieve the item from the queue if available and update the get timestamp.
 
         Returns:
@@ -403,7 +403,7 @@ class SlidingQueue(_t.Generic[T]):
                 return self._queue.popleft()
             return None
 
-    def peek(self) -> _t.Optional[T]:
+    def peek(self) -> "T | None":
         """View the current item in the queue without updating the get timestamp.
 
         Returns:
@@ -460,7 +460,7 @@ class SlidingQueue(_t.Generic[T]):
 _basic_cache_types = (type(None), int, float, bool, complex)
 
 
-def _filter_cache_items(d: _t.Dict[_t.Any, _t.Any]) -> _t.Dict[_t.Any, _t.Any]:
+def _filter_cache_items(d: "dict[_t.Any, _t.Any]") -> "dict[_t.Any, _t.Any]":
     return {k: v for k, v in d.items() if v}
 
 
@@ -472,7 +472,7 @@ class _FileCacheLock:
         path.mkdir(parents=True, exist_ok=True)
         self._lock = FileLock(str(path / f"{key or ''}.lock"))
 
-    def acquire(self, timeout: TimeoutType = None):
+    def acquire(self, timeout: "TimeoutType" = None):
         self._lock.acquire(Timeout(timeout).remain)
 
     def release(self):
@@ -533,7 +533,7 @@ class _FileCacheBackup:
 
         return version
 
-    def list_versions(self) -> "_t.List[str]":
+    def list_versions(self) -> "list[str]":
         import os
 
         if not self._directory.is_dir():
@@ -547,7 +547,7 @@ class _FileCacheBackup:
 
         return sorted(versions.keys(), key=lambda o: versions[o])
 
-    def _get_version_path(self, version: str) -> _Path:
+    def _get_version_path(self, version: str) -> "_Path":
         return self._directory / f"{version}{_file_cache_backup_suffix}"
 
     @classmethod
@@ -575,18 +575,18 @@ class _FileCacheData(_t.Generic[T]):
         self._data.close()
         self._lock.release()
 
-    def set(self, key: str, value: T, ttl: int = None) -> None:
+    def set(self, key: str, value: "T", ttl: int = None) -> None:
         self._data[key] = _filter_cache_items({
             "data": self._cache.serialize(value),
             "ttl": int(ttl) if ttl else None,
             "ts": int(_time.time()),
         })
 
-    def update(self, **kwargs: T) -> None:
+    def update(self, **kwargs: "T") -> None:
         for key, value in kwargs.items():
             self.set(key, value)
 
-    def _get(self, key: str) -> _t.Optional[_t.Dict[str, _t.Any]]:
+    def _get(self, key: str) -> "dict[str, _t.Any] | None":
         value = self._data.get(key, None)
         if value:
             timestamp = value.get("ts", None)
@@ -597,27 +597,27 @@ class _FileCacheData(_t.Generic[T]):
             return value
         return None
 
-    def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+    def get(self, key: str, default: "_t.Any" = None) -> "T | None":
         value = self._get(key)
         if value:
             return self._cache.unserialize(value.get("data", None))
         return default
 
-    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+    def pop(self, key: str, default: "_t.Any" = None) -> "T | None":
         value = self._get(key)
         if value:
             self._data.pop(key)
             return self._cache.unserialize(value.get("data", None))
         return default
 
-    def peek(self) -> _t.Optional[str]:
+    def peek(self) -> "str | None":
         for key in list(self._data.keys()):
             value = self._get(key)
             if value:
                 return key
         return None
 
-    def peekitem(self) -> _t.Tuple[_t.Optional[str], _t.Optional[T]]:
+    def peekitem(self) -> "tuple[str | None, T | None]":
         for key in list(self._data.keys()):
             value = self._get(key)
             if value:
@@ -645,7 +645,7 @@ class _FileCacheData(_t.Generic[T]):
             if value:
                 yield key
 
-    def items(self) -> "_t.Generator[_t.Tuple[str, T], None, None]":
+    def items(self) -> "_t.Generator[tuple[str, T], None, None]":
         for key in list(self._data.keys()):
             value = self._get(key)
             if value:
@@ -669,9 +669,9 @@ class _FileCacheData(_t.Generic[T]):
 class FileCache(_t.Generic[T]):
 
     """Persist and retrieve cached values in a local file."""
-    def __init__(self, directory: PathType, *,
-                 serialize: _t.Callable[[str], T] = None, unserialize: _t.Callable[[T], str] = None,
-                 dump: _t.Callable[[T], str] = None, load: _t.Callable[[str], T] = None):
+    def __init__(self, directory: "PathType", *,
+                 serialize: "_t.Callable[[str], T]" = None, unserialize: "_t.Callable[[T], str]" = None,
+                 dump: "_t.Callable[[T], str]" = None, load: "_t.Callable[[str], T]" = None):
         if dump or load:
             _get_logger().warning("deprecated dump and load, use serialize and unserialize instead")
         self._directory = _Path(directory)
@@ -679,7 +679,7 @@ class FileCache(_t.Generic[T]):
         self._unserialize = unserialize or load
 
     @property
-    def directory(self) -> _Path:
+    def directory(self) -> "_Path":
         """Directory.
 
         Returns:
@@ -714,7 +714,7 @@ class FileCache(_t.Generic[T]):
         """
         return _FileCacheData(self, "data")
 
-    def set(self, key: str, value: T, ttl: int = None) -> None:
+    def set(self, key: str, value: "T", ttl: int = None) -> None:
         """Store a cache value by key.
 
         Args:
@@ -725,7 +725,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             data.set(key, value, ttl)
 
-    def update(self, **kwargs: T) -> None:
+    def update(self, **kwargs: "T") -> None:
         """Update multiple cache values.
 
         Args:
@@ -734,7 +734,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             data.update(**kwargs)
 
-    def get(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+    def get(self, key: str, default: "_t.Any" = None) -> "T | None":
         """Return a cache value by key.
 
         Args:
@@ -747,7 +747,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             return data.get(key, default=default)
 
-    def pop(self, key: str, default: _t.Any = None) -> _t.Optional[T]:
+    def pop(self, key: str, default: "_t.Any" = None) -> "T | None":
         """Remove and return a cache value by key.
 
         Args:
@@ -760,7 +760,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             return data.pop(key, default=default)
 
-    def peek(self) -> _t.Optional[T]:
+    def peek(self) -> "T | None":
         """Return the next cache value without removing it.
 
         Returns:
@@ -769,7 +769,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             return data.peek()
 
-    def peekitem(self) -> _t.Tuple[_t.Optional[str], _t.Optional[T]]:
+    def peekitem(self) -> "tuple[str | None, T | None]":
         """Return the next cache item without removing it.
 
         Returns:
@@ -801,7 +801,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             yield from data.keys()
 
-    def items(self) -> "_t.Generator[_t.Tuple[str, T], None, None]":
+    def items(self) -> "_t.Generator[tuple[str, T], None, None]":
         """Yield cache items.
 
         Returns:
@@ -810,7 +810,7 @@ class FileCache(_t.Generic[T]):
         with self.open() as data:
             yield from data.items()
 
-    def serialize(self, data: T) -> _t.Any:
+    def serialize(self, data: "T") -> "_t.Any":
         """Serialize a cache value for storage.
 
         Args:
@@ -824,7 +824,7 @@ class FileCache(_t.Generic[T]):
                 return self._serialize(data)
         return data
 
-    def unserialize(self, data: _t.Any) -> T:
+    def unserialize(self, data: "_t.Any") -> "T":
         """Restore a cache value after loading.
 
         Args:
@@ -871,7 +871,7 @@ class Reactor:
         self._worker = None
         self._pending: "_collections.deque[_ReactorEvent]" = _collections.deque([])
 
-    def is_running(self) -> "bool":
+    def is_running(self) -> bool:
         """Return whether the reactor worker is running.
 
         Returns:
@@ -892,7 +892,7 @@ class Reactor:
             self._worker.daemon = True
             self._worker.start()
 
-    def run(self, timeout: TimeoutType):
+    def run(self, timeout: "TimeoutType"):
         """Run the reactor until it stops or times out.
 
         Args:
@@ -980,7 +980,7 @@ class Reactor:
     def _work(self, fn: "_t.Callable[[], any]"):
         fn()
 
-    def wait(self, timeout: TimeoutType = None) -> bool:
+    def wait(self, timeout: "TimeoutType" = None) -> bool:
         """Wait for the reactor worker to finish.
 
         Args:

@@ -2,12 +2,18 @@
 # -*- coding:utf-8 -*-
 import subprocess
 from abc import ABCMeta, abstractmethod
-from typing import Any, Generator, TypeVar, Callable, Union, IO, Generic, Iterable
+from typing import TypeVar, Generic, TYPE_CHECKING
 
 from linktools import utils
-from linktools.core import environ, Tool
+from linktools.core import environ
 from linktools.decorator import timeoutable
-from linktools.types import TimeoutType, Error
+from linktools.types import Error
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterable
+    from typing import Any, IO
+    from linktools.types import TimeoutType
+    from linktools.core import Tool
 
 BridgeType = TypeVar("BridgeType", bound="Bridge")
 DeviceType = TypeVar("DeviceType", bound="BaseDevice")
@@ -23,16 +29,16 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
 
     def __init__(
             self,
-            tool: Tool,
-            options: Iterable[str] = None,
-            error_type: Callable[[str], BridgeError] = BridgeError
+            tool: "Tool",
+            options: "Iterable[str]" = None,
+            error_type: "Callable[[str], BridgeError]" = BridgeError
     ):
         self._tool = tool
         self._options = options or []
         self._error_type = error_type
 
     @abstractmethod
-    def list_devices(self, alive: bool = None) -> Generator["DeviceType", None, None]:
+    def list_devices(self, alive: bool = None) -> "Generator['DeviceType', None, None]":
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -40,7 +46,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
         """
         pass
 
-    def popen(self, *args: Any, **kwargs) -> utils.Process:
+    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
         """
         执行命令
         :param args: 命令参数
@@ -53,9 +59,9 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
         )
 
     @timeoutable
-    def exec(self, *args: Any,
-             timeout: TimeoutType = None,
-             stdin: Union[int, IO] = None, stdout: Union[int, IO] = None, stderr: Union[int, IO] = None,
+    def exec(self, *args: "Any",
+             timeout: "TimeoutType" = None,
+             stdin: "int | IO" = None, stdout: "int | IO" = None, stderr: "int | IO" = None,
              log_output: bool = False, ignore_errors: bool = False,
              kill_on_return: bool = True) -> str:
         """
@@ -89,7 +95,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
             if kill_on_return:
                 process.recursive_kill()
 
-    def _exec(self, process: utils.Process, timeout: TimeoutType, log_output: bool, ignore_errors: bool) -> str:
+    def _exec(self, process: "utils.Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
         out = err = None
         for _out, _err in process.fetch(timeout=timeout):
             if _out is not None:
@@ -170,7 +176,7 @@ class BaseDevice(metaclass=ABCMeta):
         return f"{self.id} {name}" if name else ""
 
 
-def list_devices(alive: bool = None) -> Generator["BaseDevice", None, None]:
+def list_devices(alive: bool = None) -> "Generator['BaseDevice', None, None]":
     """
     获取所有设备列表（包括Android、iOS、Harmony）
     :param alive: 只显示在线的设备

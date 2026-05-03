@@ -27,11 +27,16 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import os
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from linktools.cli import CommandParser, CommandError
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.cli import CommandError
+from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.android import AdbDevice
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 
 class AgentDevice(AdbDevice):
@@ -39,7 +44,7 @@ class AgentDevice(AdbDevice):
     def get_agent_path(self, *name: str) -> str:
         return self.get_data_path("android", "agent", *name)
 
-    def push_agent_plugin(self, src_path: str = None) -> Optional[str]:
+    def push_agent_plugin(self, src_path: str = None) -> "str | None":
         if not src_path:
             return None
         if not os.path.exists(src_path):
@@ -52,7 +57,7 @@ class Command(AndroidCommand):
     Debug and interact with android-tools.apk for troubleshooting
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-p", "--privilege", action="store_true", default=False,
                             help="run with root privilege")
         parser.add_argument("-u", "--user", action="store",
@@ -65,7 +70,7 @@ class Command(AndroidCommand):
                             help="plugin file path")
         parser.add_argument("agent_args", nargs="...", help="agent args")
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select().copy(AgentDevice)
 
         agent_args = device.make_agent_args(

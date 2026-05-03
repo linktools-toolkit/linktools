@@ -29,32 +29,35 @@
 import json
 import subprocess
 import time
-from typing import TYPE_CHECKING, TypeVar, List, Generator, Any, Callable, Dict
+from typing import TYPE_CHECKING
 
 from .types import App, Process
 from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
-from linktools.types import Stoppable, TimeoutType, Timeout
+from linktools.types import Stoppable, Timeout
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+    from typing import Any, TypeVar
     from linktools.ssh import SSHClient
+    from linktools.types import TimeoutType
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="GoIOSDevice")
 
 _logger = environ.get_logger("ios.go-ios")
 
 
-def _is_log(data: Any) -> bool:
+def _is_log(data: "Any") -> bool:
     return isinstance(data, dict) and "level" in data and "msg" in data
 
 
-def _get_log_msg(log: "Dict[str, str]") -> str:
+def _get_log_msg(log: "dict[str, str]") -> str:
     return log.get("msg")
 
 
-def _get_log_err_msg(log: "Dict[str, str]") -> str:
+def _get_log_err_msg(log: "dict[str, str]") -> str:
     return log.get("error") or log.get("msg")
 
 
@@ -64,14 +67,14 @@ class GoIOSError(BridgeError):
 
 class GoIOS(Bridge):
 
-    def __init__(self, options: List[str] = None):
+    def __init__(self, options: "list[str]" = None):
         super().__init__(
             tool=environ.get_tool("ios"),
             options=options,
             error_type=GoIOSError,
         )
 
-    def list_devices(self, alive: bool = None) -> Generator["GoIOSDevice", None, None]:
+    def list_devices(self, alive: bool = None) -> "Generator['GoIOSDevice', None, None]":
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -87,13 +90,13 @@ class GoIOS(Bridge):
                     elif alive is True:  # online only
                         yield GoIOSDevice(id, ios=self)
 
-    def _exec(self, process: utils.Process, timeout: TimeoutType, log_output: bool, ignore_errors: bool) -> str:
+    def _exec(self, process: "utils.Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
         result = None
         for out, err in process.fetch(timeout=timeout):
             if out is not None:
                 result = out if result is None else result + out
             for line in (out or "").splitlines() + (err or "").splitlines():
-                data: dict = utils.ignore_errors(json.loads, args=(line,), default=None)
+                data: "dict" = utils.ignore_errors(json.loads, args=(line,), default=None)
                 if log_output:
                     if _is_log(data):
                         level = data.get("level")
@@ -132,7 +135,7 @@ class GoIOS(Bridge):
 
 class GoIOSDevice(BaseDevice):
 
-    def __init__(self, id: str = None, ios: GoIOS = None):
+    def __init__(self, id: str = None, ios: "GoIOS" = None):
         """
         :param id: 设备号
         :param ios: IOS对象
@@ -181,7 +184,7 @@ class GoIOSDevice(BaseDevice):
         return self.info.get("ProductType")
 
     @cached_property
-    def info(self) -> dict:
+    def info(self) -> "dict":
         """
         获取设备详细信息
         :return: 设备类型
@@ -198,7 +201,7 @@ class GoIOSDevice(BaseDevice):
         """
         return (type or GoIOSDevice)(self._id, self._ios)
 
-    def popen(self, *args: Any, **kwargs) -> utils.Process:
+    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
         """
         执行命令
         :param args: 命令行参数
@@ -208,7 +211,7 @@ class GoIOSDevice(BaseDevice):
         return self._ios.popen(*args, **kwargs)
 
     @timeoutable
-    def exec(self, *args: Any, **kwargs) -> str:
+    def exec(self, *args: "Any", **kwargs) -> str:
         """
         执行命令
         :param args: 命令行参数
@@ -256,7 +259,7 @@ class GoIOSDevice(BaseDevice):
         return self.exec("kill", bundle_id, **kwargs)
 
     @timeoutable
-    def get_app(self, bundle_id: str, **kwargs) -> App:
+    def get_app(self, bundle_id: str, **kwargs) -> "App":
         """
         根据包名获取包信息
         :param bundle_id: 包名
@@ -271,7 +274,7 @@ class GoIOSDevice(BaseDevice):
         raise GoIOSError(f"App '{bundle_id}' not found")
 
     @timeoutable
-    def get_apps(self, *bundle_ids: str, system: bool = None, **kwargs) -> "List[App]":
+    def get_apps(self, *bundle_ids: str, system: bool = None, **kwargs) -> "list[App]":
         """
         获取包信息
         :param bundle_ids: 需要匹配的所有包名，为空则匹配所有
@@ -294,7 +297,7 @@ class GoIOSDevice(BaseDevice):
         return result
 
     @timeoutable
-    def get_processes(self, **kwargs) -> "List[Process]":
+    def get_processes(self, **kwargs) -> "list[Process]":
         """
         获取进程列表
         :return: 进程列表
@@ -366,7 +369,7 @@ class GoIOSForward(Stoppable):
     local_port = property(lambda self: self._local_port)
     remote_port = property(lambda self: self._remote_port)
 
-    def __init__(self, ios: GoIOSDevice, local_port: int, remote_port: int):
+    def __init__(self, ios: "GoIOSDevice", local_port: int, remote_port: int):
         self._local_port = local_port
         self._remote_port = remote_port
         self._process = None

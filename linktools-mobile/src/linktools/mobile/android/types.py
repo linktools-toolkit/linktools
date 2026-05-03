@@ -26,14 +26,13 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional
 
 from linktools import utils
 
 
 class PatternMatcher:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.path = utils.get_item(obj, "path", type=str, default="")
         self.type = utils.get_item(obj, "type", type=str, default="literal")
 
@@ -46,7 +45,7 @@ class PatternMatcher:
 
 class PathPermission(PatternMatcher):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.read_permission = utils.get_item(obj, "readPermission", type=Permission, default=Permission.default())
         self.write_permission = utils.get_item(obj, "writePermission", type=Permission, default=Permission.default())
@@ -60,7 +59,7 @@ class PathPermission(PatternMatcher):
 
 class AuthorityEntry:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.host = utils.get_item(obj, "host", type=str, default="")
         self.port = utils.get_item(obj, "port", type=int, default=0)
 
@@ -73,7 +72,7 @@ class AuthorityEntry:
 
 class IntentFilter:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.actions = utils.get_list_item(obj, "actions", type=str, default=[])
         self.categories = utils.get_list_item(obj, "categories", type=str, default=[])
         self.data_schemes = utils.get_list_item(obj, "dataSchemes", type=str, default=[])
@@ -93,7 +92,7 @@ class Permission:
     def default() -> "Permission":
         return Permission({"name": "", "protection": "normal"})
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.protection = utils.get_item(obj, "protection", type=str, default="normal")
 
@@ -112,7 +111,7 @@ class Permission:
 
 class Component:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.exported = utils.get_item(obj, "exported", type=bool, default=False)
         self.enabled = utils.get_item(obj, "enabled", type=bool, default=False)
@@ -130,7 +129,7 @@ class Component:
 
 class Activity(Component):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
@@ -146,7 +145,7 @@ class Activity(Component):
 
 class Service(Component):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
@@ -162,7 +161,7 @@ class Service(Component):
 
 class Receiver(Component):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
@@ -178,7 +177,7 @@ class Receiver(Component):
 
 class Provider(Component):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.authority = utils.get_item(obj, "authority", type=str, default="")
         self.read_permission = utils.get_item(obj, "readPermission", type=Permission, default=Permission.default())
@@ -205,7 +204,7 @@ class Provider(Component):
 
 class App:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.app_name = utils.get_item(obj, "appName", type=str, default="")
         self.user_id = utils.get_item(obj, "userId", type=int, default=0)
@@ -228,7 +227,7 @@ class App:
         self.receivers = utils.get_list_item(obj, "receivers", type=Receiver, default=[])
         self.providers = utils.get_list_item(obj, "providers", type=Provider, default=[])
 
-    def get_launch_activity(self) -> Optional[Activity]:
+    def get_launch_activity(self) -> "Activity | None":
         for activity in self.activities:
             for intent in activity.intents:
                 if "android.intent.action.MAIN" in intent.actions and \
@@ -293,7 +292,7 @@ class App:
 
 class Socket:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.proto = utils.get_item(obj, "proto", type=str, default="")
         self.state = utils.get_item(obj, "state", type=str, default="")
         self.inode = utils.get_item(obj, "inode", type=int, default=0)
@@ -308,7 +307,7 @@ class Socket:
 
 class InetSocket(Socket):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.local_address = utils.get_item(obj, "localAddress", type=str, default="")
         self.local_port = utils.get_item(obj, "localPort", type=int, default=0)
@@ -324,7 +323,7 @@ class InetSocket(Socket):
 
 class UnixSocket(Socket):
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         super().__init__(obj)
         self.ref_cnt = utils.get_item(obj, "refCnt", type=int, default=0)
         self.flags = utils.get_item(obj, "flags", type=str, default="")
@@ -342,7 +341,7 @@ class UnixSocket(Socket):
 
 class Process:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.pid = utils.get_item(obj, "pid", type=int, default=0)
         self.uid = utils.get_item(obj, "uid", type=int, default=0)
         self.gid = utils.get_item(obj, "gid", type=int, default=0)
@@ -366,7 +365,7 @@ class Process:
 
 class File:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.path = utils.get_item(obj, "path", type=str, default="")
         self.is_directory = utils.get_item(obj, "isDirectory", type=bool, default=False)
@@ -380,7 +379,7 @@ class File:
 
 class SystemService:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.desc = utils.get_item(obj, "desc", type=str, default="")
         self.binder = utils.get_item(obj, "binder", type=str, default="")

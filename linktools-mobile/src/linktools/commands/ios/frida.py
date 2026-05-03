@@ -27,14 +27,19 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import re
-from typing import Optional, Type, List
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cli import CommandError, CommandMain, CommandParser
+from linktools.cli import CommandError, CommandMain
 from linktools.cli.argparse import KeyValueAction, range_type, BooleanOptionalAction
-from linktools.mobile.cli import IOSCommand, IOSNamespace
+from linktools.mobile.cli import IOSCommand
 from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaIOSServer
 from linktools.types import DownloadError
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import IOSNamespace
+
 
 
 class Command(IOSCommand):
@@ -43,14 +48,14 @@ class Command(IOSCommand):
     """
 
     @property
-    def main(self) -> CommandMain:
+    def main(self) -> "CommandMain":
         return CommandMain(self, show_log_level=True, show_log_time=True)
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-b", "--bundle-id", action="store", default=None,
                             help="target bundle id (default: frontmost application)")
         parser.add_argument("--spawn", action="store_true", default=False,
@@ -86,7 +91,7 @@ class Command(IOSCommand):
         parser.add_argument("--child-gating", action=BooleanOptionalAction, default=False,
                             help="enable child gating (default: false)")
 
-    def run(self, args: IOSNamespace) -> Optional[int]:
+    def run(self, args: "IOSNamespace") -> "int | None":
 
         logger = self.logger
         user_parameters = args.user_parameters

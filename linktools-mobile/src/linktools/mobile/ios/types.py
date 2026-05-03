@@ -32,7 +32,7 @@ from linktools import utils
 
 class App:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.bundle_id = utils.get_item(obj, "CFBundleIdentifier", type=str, default="")
         self.name = utils.get_item(obj, "CFBundleName", type=str, default="")
         self.short_version = utils.get_item(obj, "CFBundleVersion", type=str, default="")
@@ -46,7 +46,7 @@ class App:
 
 class Process:
 
-    def __init__(self, obj: dict):
+    def __init__(self, obj: "dict"):
         self.pid = utils.get_item(obj, "Pid", type=int, default=0)
         self.name = utils.get_item(obj, "Name", type=str, default=0)
         self.real_app_name = utils.get_item(obj, "RealAppName", type=str, default="")

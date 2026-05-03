@@ -31,8 +31,7 @@ import os
 import re
 import shutil
 import zipfile
-from argparse import Namespace
-from typing import Optional, Union, Callable
+from typing import TYPE_CHECKING
 
 import lief
 import magic
@@ -42,7 +41,12 @@ from rich.text import Text
 
 from linktools import utils
 from linktools.core import environ
-from linktools.cli import BaseCommand, CommandParser
+from linktools.cli import BaseCommand
+
+if TYPE_CHECKING:
+    from argparse import Namespace
+    from collections.abc import Callable
+    from linktools.cli import CommandParser
 
 pprint = functools.partial(get_console().print, sep="", markup=False, highlight=NullHighlighter)
 
@@ -52,7 +56,7 @@ class GrepHandler:
     _filter_handlers = {}
 
     @classmethod
-    def match(cls, *mimetypes: Union[str, Callable[[str], bool]]):
+    def match(cls, *mimetypes: "str | Callable[[str], bool]"):
 
         def decorator(fn):
 
@@ -98,7 +102,7 @@ class GrepHandler:
 
 class GrepMatcher:
 
-    def __init__(self, pattern: re.Pattern):
+    def __init__(self, pattern: "re.Pattern"):
         self.pattern = pattern
 
     def match(self, path: str):
@@ -218,7 +222,7 @@ class Command(BaseCommand):
     Search and match files using regular expressions
     """
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument('-i', '--ignore-case', action='store_true', default=False,
                             help='ignore case')
         parser.add_argument('pattern', action='store', default=None,
@@ -226,7 +230,7 @@ class Command(BaseCommand):
         parser.add_argument('files', metavar="file", action='store', nargs='*', default=None,
                             help='target files path')
 
-    def run(self, args: Namespace) -> Optional[int]:
+    def run(self, args: "Namespace") -> "int | None":
 
         flags = 0
         if args.ignore_case:

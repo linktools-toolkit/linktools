@@ -29,14 +29,18 @@
 import json
 import os
 import shutil
-from typing import Dict, Any
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ContainerError, EventContext
+from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
-from linktools.types import PathType
+
+if TYPE_CHECKING:
+    from typing import Any
+    from linktools.cntr import EventContext
+    from linktools.types import PathType
 
 
 class Container(BaseContainer):
@@ -138,7 +142,7 @@ class Container(BaseContainer):
     def on_init(self):
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
-    def on_check(self, context: EventContext):
+    def on_check(self, context: "EventContext"):
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.manager.containers["safeline"].enable:
@@ -192,7 +196,7 @@ class Container(BaseContainer):
                 flush=True,
             )
 
-    def on_started(self, context: EventContext):
+    def on_started(self, context: "EventContext"):
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
             self.logger.info("Renew nginx certificates if necessary.")
@@ -217,7 +221,7 @@ class Container(BaseContainer):
             "sh", "-c", "killall nginx 1>/dev/null 2>&1"
         ).call()
 
-    def on_stopped(self, context: EventContext):
+    def on_stopped(self, context: "EventContext"):
         if context.is_full_containers:
             self.on_removed(context)
             return
@@ -226,16 +230,16 @@ class Container(BaseContainer):
             if path.exists():
                 utils.remove_file(path)
 
-    def on_removed(self, context: EventContext):
+    def on_removed(self, context: "EventContext"):
         utils.clear_directory(self.get_app_path("temporary"))
         utils.clear_directory(self.get_app_path("conf.d"))
 
     def write_conf(
-        self, container: BaseContainer, domain: str, *,
+        self, container: "BaseContainer", domain: str, *,
         proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-        proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+        proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
         https_enable: bool = __missing__, waf_enable: bool = __missing__,
-        auth_enable: bool = False, auth_extra: "Dict[str, Any]" = __missing__,
+        auth_enable: bool = False, auth_extra: "dict[str, Any]" = __missing__,
         flush: bool = False,
     ):
 
@@ -256,11 +260,14 @@ class Container(BaseContainer):
                     raise ContainerError("not found url")
                 proxy_conf = self.get_source_path("templates", "default.conf")
 
+            self.logger.debug(f"Write nginx conf for {container} {domain}")
+
             if https_enable is __missing__:
                 https_enable = True
+            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+
             if waf_enable is __missing__:
                 waf_enable = True
-            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
 
             if auth_enable:

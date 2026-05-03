@@ -26,11 +26,15 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cli import CommandParser
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 
 class Command(AndroidCommand):
@@ -42,7 +46,7 @@ class Command(AndroidCommand):
     def _description(self) -> str:
         return "debugger"
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument('package', action='store', default=None,
                             help='regular expression')
         parser.add_argument('activity', action='store', default=None,
@@ -50,7 +54,7 @@ class Command(AndroidCommand):
         parser.add_argument('-p', '--port', action='store', type=int, default=8701,
                             help='fetch all apps')
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
 
         device.shell("am", "force-stop", args.package, log_output=True)

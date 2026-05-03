@@ -26,16 +26,21 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional, List, Type
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.capabilities.mobile import __cap_mobile__
-from linktools.cli import CommandParser, CommandError
+from linktools.cli import CommandError
 from linktools.cli.argparse import range_type, BooleanOptionalAction
 from linktools.core import environ
-from linktools.mobile.cli import AndroidCommand, AndroidNamespace
+from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.frida import FridaAndroidServer
 from linktools.types import DownloadError
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import AndroidNamespace
+
 
 
 class Command(AndroidCommand):
@@ -44,10 +49,10 @@ class Command(AndroidCommand):
     """
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-p", "--package", action="store", default=None,
                             help="target package (default: frontmost application)")
         parser.add_argument("-s", "--startup-command", action="append", default=[],
@@ -76,7 +81,7 @@ class Command(AndroidCommand):
                             type=range_type(1, 65536),
                             help="redirect traffic to target port (default: 8080)")
 
-    def run(self, args: AndroidNamespace) -> Optional[int]:
+    def run(self, args: "AndroidNamespace") -> "int | None":
         device = args.device_selector.select()
 
         server = FridaAndroidServer(

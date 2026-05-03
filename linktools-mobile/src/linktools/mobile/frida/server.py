@@ -34,7 +34,7 @@ import os
 import shutil
 import time
 from collections import ChainMap
-from typing import List, Dict, Optional, Mapping, Iterable
+from typing import TYPE_CHECKING
 
 import frida
 
@@ -45,6 +45,9 @@ from linktools.types import Timeout, Stoppable, DownloadHttpError
 from ..android import AdbDevice
 from ..ios import GoIOSDevice
 from ...capabilities.mobile import __cap_mobile__
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 _logger = environ.get_logger("frida.server")
 
@@ -57,7 +60,7 @@ class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.
                   Stoppable,
                   metaclass=abc.ABCMeta):
 
-    def __init__(self, device: frida.core.Device):
+    def __init__(self, device: "frida.core.Device"):
         super().__init__(device)
 
     @property
@@ -151,12 +154,12 @@ class FridaAndroidServer(FridaServer):
     android server
     """
 
-    def __init__(self, device: AdbDevice = None, local_port: int = 47042, remote_port: int = 47042, serve: bool = True):
+    def __init__(self, device: "AdbDevice" = None, local_port: int = 47042, remote_port: int = 47042, serve: bool = True):
         super().__init__(frida.get_device_manager().add_remote_device(f"localhost:{local_port}"))
         self._device = device or AdbDevice()
         self._local_port = local_port
         self._remote_port = remote_port
-        self._forward: Optional[Stoppable] = None
+        self._forward: "Stoppable | None" = None
 
         self._serve = serve
         self._server_name = f"{environ.name}-fs-{frida.__version__}-{self._remote_port}"
@@ -208,7 +211,7 @@ class FridaAndroidServer(FridaServer):
             self._forward = None
 
     @cached_classproperty
-    def _server_info(self) -> "List[Dict[str, str]]":
+    def _server_info(self) -> "list[dict[str, str]]":
         server_path = __cap_mobile__.get_asset_path("android-tools.json")
         server_data = json.loads(utils.read_file(server_path, text=True))
         return server_data["FRIDA_SERVER"]
@@ -272,7 +275,7 @@ class FridaAndroidServer(FridaServer):
 
     class Executable:
 
-        def __init__(self, config: Mapping[str, str]):
+        def __init__(self, config: "Mapping[str, str]"):
             self.url = config["url"].format(**config)
             self.name = config["name"].format(**config)
             self.path = environ.get_data_path("android", "frida", self.name, create_parent=True)
@@ -301,12 +304,12 @@ class FridaIOSServer(FridaServer):  # proxy for frida.core.Device
     ios server
     """
 
-    def __init__(self, device: GoIOSDevice = None, local_port: int = 37042, remote_port: int = 27042):
+    def __init__(self, device: "GoIOSDevice" = None, local_port: int = 37042, remote_port: int = 27042):
         super().__init__(frida.get_device_manager().add_remote_device(f"localhost:{local_port}"))
         self._device = device or GoIOSDevice()
         self._local_port = local_port
         self._remote_port = remote_port
-        self._forward: Optional[Stoppable] = None
+        self._forward: "Stoppable | None" = None
 
     @property
     def local_port(self):

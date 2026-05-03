@@ -30,7 +30,7 @@ import os
 import re
 import textwrap
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, Callable, Iterable
+from typing import TYPE_CHECKING
 
 import yaml
 from jinja2 import Environment, TemplateError, FileSystemLoader
@@ -42,12 +42,14 @@ from linktools.core import Config
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
 from linktools.rich import choose, confirm
-from linktools.types import PathType, Error, FileCache
+from linktools.types import Error, FileCache
 from ..capabilities.cntr import __cap_cntr__
 
 
 if TYPE_CHECKING:
-    from linktools.types import T, ConfigType
+    from collections.abc import Callable, Iterable
+    from typing import Any
+    from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .manager import ContainerManager
     from .context import EventContext
 
@@ -64,7 +66,7 @@ class ExposeCategory:
 
 class ExposeLink:
 
-    def __init__(self, category: ExposeCategory, name: str, icon: str, desc: str, url: str):
+    def __init__(self, category: "ExposeCategory", name: str, icon: str, desc: str, url: str):
         self.category = category
         self.name = name
         self.icon = icon
@@ -72,7 +74,7 @@ class ExposeLink:
         self._url = url
 
     @property
-    def url(self) -> Optional[str]:
+    def url(self) -> "str | None":
         if not self._url:
             return None
         return str(self._url)
@@ -88,7 +90,7 @@ class ExposeMixin:
     expose_container = ExposeCategory("container", "Internal")
     expose_other = ExposeCategory("other", "Tools")
 
-    def load_config_url(self: "BaseContainer", key: str, *path: str):
+    def load_config_url(self: "BaseContainer", key: "ConfigKeyType", *path: str):
         def make_url():
             url = self.get_config(key, type=str, default=None)
             if url:
@@ -97,7 +99,7 @@ class ExposeMixin:
 
         return utils.lazy_load(make_url)
 
-    def load_port_url(self: "BaseContainer", key: str, *path: str, https: bool = True):
+    def load_port_url(self: "BaseContainer", key: "ConfigKeyType", *path: str, https: bool = True):
         def make_url():
             port = self.get_config(key, type=int, default=0)
             if 0 < port < 65535:
@@ -107,39 +109,56 @@ class ExposeMixin:
         return utils.lazy_load(make_url)
 
     def load_nginx_url(
-            self: "BaseContainer", key: str, *path: str,
+            self: "BaseContainer", key: "ConfigKeyType", *path: str,
             proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-            proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__,
-            auth_enable: bool = False, auth_extra: Dict[str, Any] = None,
+            auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
     ):
-        domain = self.get_config(key, type=str, default=None)
-        if domain:
-            if not proxy_conf and not proxy_url:
-                return ""
-            if https_enable is __missing__:
-                https_enable = True
-            if waf_enable is __missing__:
-                waf_enable = True
-            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
-            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
-            self.start_hooks.append(lambda: self.write_nginx_conf(
-                domain=domain,
-                proxy_name=proxy_name,
-                proxy_domain_name=proxy_domain_name,
-                proxy_conf=proxy_conf,
-                proxy_url=proxy_url,
-                https_enable=https_enable,
-                waf_enable=waf_enable,
-                auth_enable=auth_enable,
-                auth_extra=auth_extra,
-            ))
-            scheme = "https" if https_enable else "http"
-            port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
-            return utils.make_url(scheme, domain, port, *path)
-        return ""
 
-    def load_exist_nginx_url(self: "BaseContainer", key: str, *path: str, https: bool = True):
+        def make_url():
+            nonlocal https_enable
+            domain = self.get_config(key, type=str, default=None)
+            if domain:
+                if https_enable is __missing__:
+                    https_enable = True
+                https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+                scheme = "https" if https_enable else "http"
+                port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
+                return utils.make_url(scheme, domain, port, *path)
+            return ""
+
+        def make_nginx_conf():
+            nonlocal https_enable, waf_enable
+            domain = self.get_config(key, type=str, default=None)
+            if domain:
+                if not proxy_conf and not proxy_url:
+                    return ""
+
+                if https_enable is __missing__:
+                    https_enable = True
+                https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+
+                if waf_enable is __missing__:
+                    waf_enable = True
+                waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
+
+                self.write_nginx_conf(
+                    domain=domain,
+                    proxy_name=proxy_name,
+                    proxy_domain_name=proxy_domain_name,
+                    proxy_conf=proxy_conf,
+                    proxy_url=proxy_url,
+                    https_enable=https_enable,
+                    waf_enable=waf_enable,
+                    auth_enable=auth_enable,
+                    auth_extra=auth_extra,
+                )
+
+        self.start_hooks.append(make_nginx_conf)
+        return utils.lazy_load(make_url)
+
+    def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType", *path: str, https: bool = True):
         def make_url():
             nonlocal https
             domain = self.get_config(key, type=str, default=None)
@@ -157,7 +176,7 @@ class NginxMixin:
 
     def get_nginx_domain(self: "BaseContainer", name: str = None):
 
-        def get_domain(cfg: Config):
+        def get_domain(cfg: "Config"):
             if not self.manager.containers["nginx"].enable:
                 return ""
             if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
@@ -176,9 +195,9 @@ class NginxMixin:
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,
             proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-            proxy_conf: PathType = __missing__, proxy_url: str = __missing__,
+            proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__,
-            auth_enable: bool = False, auth_extra: Dict[str, Any] = __missing__,
+            auth_enable: bool = False, auth_extra: "dict[str, Any]" = __missing__,
     ):
 
         nginx = self.manager.containers["nginx"]
@@ -217,7 +236,7 @@ class AbstractMetaClass(type):
 class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     __abstract__ = True
 
-    def __init__(self, manager: "ContainerManager", root_path: PathType, name: str = None):
+    def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
         name = name or self.__module__
         index = name.rfind(".")
         if index >= 0:
@@ -259,11 +278,11 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     @property
-    def configs(self) -> Dict[str, Any]:
+    def configs(self) -> "dict[str, Any]":
         return {}
 
     @property
-    def extend_configs(self) -> Dict[str, Any]:
+    def extend_configs(self) -> "dict[str, Any]":
         return {}
 
     @property
@@ -271,11 +290,11 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     @property
-    def settings(self) -> FileCache:
+    def settings(self) -> "FileCache":
         return FileCache(self.manager.setting_path / "app" / self.name)
 
     @cached_property
-    def docker_compose(self) -> Optional[Dict[str, Any]]:
+    def docker_compose(self) -> "dict[str, Any] | None":
         with self.settings.open() as settings:
             mount_paths = settings.get("mount_paths", {})
             for name in self.manager.docker_compose_names:
@@ -326,25 +345,25 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return None
 
     @cached_property
-    def docker_file(self) -> Optional[str]:
+    def docker_file(self) -> "str | None":
         path = self.get_source_path("Dockerfile")
         if os.path.exists(path):
             return self.render_template(path)
         return None
 
     @cached_property
-    def services(self) -> Dict[str, Dict[str, Any]]:
+    def services(self) -> "dict[str, dict[str, Any]]":
         services = utils.get_item(self.docker_compose, "services")
         if not services or not isinstance(services, dict):
             return {}
         return services
 
     @cached_property
-    def start_hooks(self) -> List[Callable[[], Any]]:
+    def start_hooks(self) -> "list[Callable[[], Any]]":
         return []
 
     @cached_property
-    def stop_hooks(self) -> List[Callable[[], Any]]:
+    def stop_hooks(self) -> "list[Callable[[], Any]]":
         return []
 
     def on_init(self):
@@ -568,10 +587,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             settings.set("mount_paths", mount_paths)
             self.logger.info(f"remove {mount_path}")
 
-    def get_config(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
+    def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
         return self.manager.config.get(key, type=type, default=default)
 
-    def get_config_later(self, key: str, type: "ConfigType" = None, default: Any = __missing__) -> "T":
+    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
         return utils.lazy_load(self.manager.config.get, key, type=type, default=default)
 
     def _make_exec_context(self, commands) -> "EventContext":
@@ -588,7 +607,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         context.is_full_containers = False
         return context
 
-    def _get_exec_services(self) -> List[str]:
+    def _get_exec_services(self) -> "list[str]":
         services = list(self.services.keys())
         if not services:
             raise ContainerError(f"No service found in container `{self.name}`")
@@ -610,28 +629,28 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
         return build_options, up_options
 
-    def get_source_path(self, *paths: str) -> Path:
+    def get_source_path(self, *paths: str) -> "Path":
         return utils.join_path(self.root_path, *paths)
 
-    def get_app_path(self, *paths: str, create_parent: bool = False) -> Path:
+    def get_app_path(self, *paths: str, create_parent: bool = False) -> "Path":
         path = utils.join_path(self.manager.app_path, self.name, *paths)
         if create_parent:
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def get_app_data_path(self, *paths: str, create_parent: bool = False) -> Path:
+    def get_app_data_path(self, *paths: str, create_parent: bool = False) -> "Path":
         path = utils.join_path(self.manager.app_data_path, self.name, *paths)
         if create_parent:
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def get_temp_path(self, *paths: str, create_parent: bool = False) -> Path:
+    def get_temp_path(self, *paths: str, create_parent: bool = False) -> "Path":
         path = utils.join_path(self.manager.temp_path, "container", self.name, *paths)
         if create_parent:
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def choose_service(self, name: str = None) -> Optional[Dict[str, Any]]:
+    def choose_service(self, name: str = None) -> "dict[str, Any] | None":
         services = self.services
         if not services:
             raise ContainerError(f"Not found any service in {self}")
@@ -648,7 +667,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         default=keys[0])
         return self.services[key]
 
-    def get_docker_compose_file(self) -> Optional[Path]:
+    def get_docker_compose_file(self) -> "Path | None":
         destination = None
         if self.docker_compose:
             destination = utils.join_path(self.manager.data_path, "compose", f"{self.name}.yml")
@@ -656,7 +675,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             utils.write_file(destination, yaml.dump(self.docker_compose))
         return destination
 
-    def get_docker_file_path(self) -> Optional[Path]:
+    def get_docker_file_path(self) -> "Path | None":
         destination = None
         if self.docker_file:
             destination = utils.join_path(self.manager.data_path, "dockerfile", f"{self.name}.Dockerfile")
@@ -664,7 +683,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             utils.write_file(destination, self.docker_file)
         return destination
 
-    def get_docker_context_path(self) -> Path:
+    def get_docker_context_path(self) -> "Path":
         return self.get_source_path()
 
     def get_service_name(self, key: str) -> str:
@@ -685,21 +704,21 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         next_items.add(next_dependency)
         return False
 
-    def render_template(self, source: PathType, destination: PathType = None, **kwargs: Any):
+    def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any"):
         config = self.manager.config
 
-        def mkdir(path: PathType) -> str:
+        def mkdir(path: "PathType") -> str:
             path = config.cast(path, type="path")
             self.start_hooks.append(lambda: os.makedirs(path, mode=0o755, exist_ok=True))
             return path
 
-        def chown(path: PathType, user: str = None, recursive: bool = False) -> str:
+        def chown(path: "PathType", user: str = None, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
             if user:
                 self.start_hooks.append(lambda: self.manager.change_file_owner(path, user, recursive=recursive))
             return path
 
-        def chmod(path: PathType, mode: int = 0o755, recursive: bool = False) -> str:
+        def chmod(path: "PathType", mode: int = 0o755, recursive: bool = False) -> str:
             path = config.cast(path, type="path")
             self.start_hooks.append(lambda: self.manager.change_file_mode(path, mode, recursive=recursive))
             return path
@@ -769,7 +788,7 @@ class SourceContainer(BaseContainer):
     def _source_path(self):
         raise NotImplementedError()
 
-    def _handle_source_file(self, source: PathType, destination: PathType):
+    def _handle_source_file(self, source: "PathType", destination: "PathType"):
         import zipfile
         with zipfile.ZipFile(source) as f:
             for names in f.namelist():

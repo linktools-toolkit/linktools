@@ -28,16 +28,20 @@
 """
 
 import os
-from typing import Iterable
+from typing import TYPE_CHECKING
 
 import rsa
 import yaml
 
 from linktools import utils
 from linktools.cli import CommandError, subcommand
-from linktools.cntr import BaseContainer, ExposeLink, ContainerError, EventContext
+from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import Config
 from linktools.decorator import cached_property
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from linktools.cntr import EventContext, ExposeLink
 
 
 class Container(BaseContainer):
@@ -67,7 +71,7 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def exposes(self) -> Iterable[ExposeLink]:
+    def exposes(self) -> "Iterable[ExposeLink]":
         return [
             self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url(
                 "AUTHELIA_DOMAIN", "auth-admin",
@@ -133,7 +137,7 @@ class Container(BaseContainer):
     def on_init(self):
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
-    def on_check(self, context: EventContext):
+    def on_check(self, context: "EventContext"):
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
@@ -168,11 +172,11 @@ class Container(BaseContainer):
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
             settings.set(f"{self._key_prefix}_oidc_clients", self.oidc_clients)
 
-    def on_stopped(self, context: EventContext):
+    def on_stopped(self, context: "EventContext"):
         if context.is_full_containers:
             self.on_removed(context)
 
-    def on_removed(self, context: EventContext):
+    def on_removed(self, context: "EventContext"):
         with self.settings.open() as settings:
             settings.pop(f"{self._key_prefix}_acl_rules", None)
             settings.pop(f"{self._key_prefix}_oidc_clients", None)

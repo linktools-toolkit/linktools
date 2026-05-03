@@ -26,15 +26,19 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Iterable
+from typing import TYPE_CHECKING
 
 import yaml
 
 from linktools import utils
 from linktools.core import Config
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer, EventContext
+from linktools.cntr import BaseContainer
 from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from linktools.cntr import EventContext
 
 
 class Container(BaseContainer):
@@ -68,7 +72,7 @@ class Container(BaseContainer):
             self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
         ]
 
-    def on_starting(self, context: EventContext):
+    def on_starting(self, context: "EventContext"):
 
         categories = {}
         apps = []

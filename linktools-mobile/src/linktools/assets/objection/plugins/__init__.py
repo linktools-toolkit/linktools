@@ -62,13 +62,13 @@ class LinktoolsPlugin(Plugin, FridaScriptHandler):
                 "Log.setLevel(Log.DEBUG);"
             ])
 
-    def eval_code(self, args: list):
+    def eval_code(self, args: "list"):
         self.api.load_scripts([
             FridaEvalCode(arg).as_dict() for arg in args
         ])
 
     @functools.cached_property
-    def _frida_script(self) -> FridaScript:
+    def _frida_script(self) -> "FridaScript":
         return FridaScript(
             FridaSession(self.session),
             self.script
@@ -79,7 +79,7 @@ class LinktoolsPlugin(Plugin, FridaScriptHandler):
             self._frida_script, message, data
         )
 
-    def on_script_log(self, script: FridaScript, level: str, message: Any, data: Any):
+    def on_script_log(self, script: "FridaScript", level: str, message: "Any", data: "Any"):
         if level == self.LogLevel.INFO:
             click.secho(f"[{level}] ({namespace}) {message}")
         elif level == self.LogLevel.WARNING:

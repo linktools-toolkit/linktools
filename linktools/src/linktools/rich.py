@@ -33,11 +33,13 @@ import re
 import sys
 from abc import ABCMeta, abstractmethod
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional, Union, List, Dict, Type, TypeVar, TextIO, Iterable, Any
+from typing import TYPE_CHECKING
 
 from linktools.metadata import __missing__
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Any, TextIO, Type, TypeVar
     from rich.console import ConsoleRenderable, Console
     from rich.prompt import PromptBase
     from rich.text import Text, TextType
@@ -45,9 +47,9 @@ if TYPE_CHECKING:
     T = TypeVar("T")
 
     PromptType = TypeVar("PromptType", bound=PromptBase)
-    PromptResultType = Union[str, int, float, bool]
+    PromptResultType = str | int | float | bool
 
-_rich_available: "Optional[bool]" = None
+_rich_available: "bool | None" = None
 
 
 def _is_rich_available() -> bool:
@@ -230,12 +232,12 @@ def _get_rich_log_handler_class():
                 return style.get("message")
             return None
 
-        def get_level_text(self, record: logging.LogRecord) -> "Text":
+        def get_level_text(self, record: "logging.LogRecord") -> "Text":
             level_name = record.levelname
             level_no = record.levelno
             return self.make_level_text(level_no, level_name)
 
-        def render_message(self, record: logging.LogRecord, message: str) -> "ConsoleRenderable":
+        def render_message(self, record: "logging.LogRecord", message: str) -> "ConsoleRenderable":
             indent = getattr(record, "indent", 0)
             if indent > 0:
                 message = " " * indent + message
@@ -335,7 +337,7 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
         )
 
 
-def get_log_handler() -> "Optional[_LogHandlerMixin]":
+def get_log_handler() -> "_LogHandlerMixin | None":
     """Return the active linktools log handler, if one is installed.
 
     Returns:
@@ -360,7 +362,7 @@ class _FakeProgress:
     _BAR_WIDTH = 20
 
     def __init__(self):
-        self._tasks: Dict[int, dict] = {}
+        self._tasks: "dict[int, dict[str, Any]]" = {}
         self._next_id = 0
         self._is_tty = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
         self._last_line_len = 0
@@ -478,7 +480,7 @@ def _get_log_column():
         def __init__(self):
             super().__init__(table_column=Column(no_wrap=True))
 
-        def render(self, task: Task = None) -> "Union[str, Text]":
+        def render(self, task: "Task" = None) -> "str | Text":
             result = Text()
 
             handler = get_log_handler()
@@ -559,7 +561,7 @@ def create_progress():
     return Progress(*columns)
 
 
-def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "Type[PromptType]":
+def _create_prompt_class(type: "type[PromptResultType]", allow_empty: bool) -> "type[PromptType]":
     from rich.text import Text
     from rich.prompt import Prompt, IntPrompt, InvalidResponse, FloatPrompt, Confirm
 
@@ -576,7 +578,7 @@ def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "
                 console: "Console",
                 prompt: "TextType",
                 password: bool,
-                stream: Optional[TextIO] = None,
+                stream: "TextIO | None" = None,
         ) -> str:
 
             prefix = []
@@ -600,7 +602,7 @@ def _create_prompt_class(type: "Type[PromptResultType]", allow_empty: bool) -> "
 
             return console.input(password=password, stream=stream)
 
-        def on_validate_error(self, value: str, error: InvalidResponse) -> None:
+        def on_validate_error(self, value: str, error: "InvalidResponse") -> None:
             prefix = Text("")
             handler = get_log_handler()
             if handler and handler.show_time:
@@ -623,7 +625,7 @@ def _plain_prompt(
         type: "Type" = str,
         default=__missing__,
         allow_empty: bool = False,
-        choices: Optional[List[str]] = None,
+        choices: "list[str] | None" = None,
         password: bool = False,
         show_default: bool = True,
         show_choices: bool = True,
@@ -692,7 +694,7 @@ def _plain_confirm(
 
 def _plain_choose(
         prompt_text: str,
-        choices: "Union[Iterable, Dict]",
+        choices: "Iterable | Dict",
         title: str = None,
         default=__missing__,
         show_default: bool = True,
@@ -740,10 +742,10 @@ def _plain_choose(
 
 def prompt(
         prompt: str,
-        type: "Type[PromptResultType]" = str,
+        type: "type[PromptResultType]" = str,
         default: "PromptResultType" = __missing__,
         allow_empty: bool = False,
-        choices: Optional[List[str]] = None,
+        choices: "list[str] | None" = None,
         password: bool = False,
         show_default: bool = True,
         show_choices: bool = True
@@ -781,7 +783,7 @@ def prompt(
 
 def choose(
         prompt: str,
-        choices: "Union[Iterable[T], Dict[T, Any]]",
+        choices: "Iterable[T] | dict[T, Any]",
         title: str = None,
         default: "T" = __missing__,
         show_default: bool = True,

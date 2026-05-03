@@ -29,20 +29,21 @@
 import functools
 import inspect
 import threading
-from typing import TYPE_CHECKING, TypeVar, Type, Any, Callable, Tuple
+from typing import TYPE_CHECKING
 
 from linktools.metadata import __missing__
-from .types import Timeout
+from linktools.types import Timeout
 
 if TYPE_CHECKING:
-    from typing import ParamSpec, Union
+    from collections.abc import Callable
+    from typing import Any, ParamSpec, Union
 
     T = TypeVar("T")
     P = ParamSpec("P")
     WRAPPER = Callable[[T], T]
 
 
-def singleton(cls: "Type[T]") -> "Callable[P, T]":
+def singleton(cls: "type[T]") -> "Callable[P, T]":
     """Decorate a class so construction returns a single shared instance.
 
     Returns:
@@ -63,7 +64,7 @@ def singleton(cls: "Type[T]") -> "Callable[P, T]":
     return wrapper
 
 
-def try_except(errors: "Tuple[Type[BaseException]]" = (Exception,), default: "Any" = None):
+def try_except(errors: "tuple[type[BaseException]]" = (Exception,), default: "Any" = None):
     """Decorate a function to return a default value for selected exceptions.
 
     Args:
@@ -201,7 +202,7 @@ class _CachedClassproperty:
 
 def cached_classproperty(
         fn: "Callable[P, T]" = None, *, lock: bool = False
-) -> "Union[_CachedClassproperty, Callable[[Callable[P, T]], _CachedClassproperty]]":
+) -> "_CachedClassproperty | Callable[[Callable[P, T]], _CachedClassproperty]":
     """Create a class property that caches its computed value.
 
     Args:

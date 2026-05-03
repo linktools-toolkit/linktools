@@ -34,7 +34,7 @@ import struct
 import subprocess
 import threading
 import time
-from typing import List, Dict, Any, Optional, Callable
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.core import environ
@@ -42,6 +42,10 @@ from linktools.decorator import cached_classproperty
 from linktools.types import Stoppable
 from .adb import AdbDevice, AdbError
 from ...capabilities.mobile import __cap_mobile__
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
 
 logger = environ.get_logger("android.scrcpy")
 
@@ -394,18 +398,18 @@ class ScrcpySurfaceControl:
 
 class ScrcpyServer(Stoppable):
 
-    def __init__(self, device: AdbDevice = None, version: str = None):
+    def __init__(self, device: "AdbDevice" = None, version: str = None):
         self._device = device or AdbDevice()
         self._version = version
-        self._process: Optional[utils.Process] = None
+        self._process: "utils.Process | None" = None
 
     @cached_classproperty
-    def _server_info(self) -> "List[Dict[str, str]]":
+    def _server_info(self) -> "list[dict[str, str]]":
         server_path = __cap_mobile__.get_asset_path("android-tools.json")
         server_data = json.loads(utils.read_file(server_path, text=True))
         return server_data["SCRCPY_SERVER"]
 
-    def start(self, *args: Any):
+    def start(self, *args: "Any"):
 
         def start():
             server_info = dict(self._server_info)  # noqa
@@ -461,12 +465,12 @@ class ScrcpyServer(Stoppable):
 
 class ScrcpySession(Stoppable):
 
-    def __init__(self, device: AdbDevice = None, version: str = None):
+    def __init__(self, device: "AdbDevice" = None, version: str = None):
         self._device = device or AdbDevice()
         self._version = version
         self._thread = threading.Thread()
         self._lock = threading.RLock()
-        self._listeners: Dict[str, "List[Callable[..., Any]]"] = dict()
+        self._listeners: "dict[str, 'list[Callable[..., Any]]']" = dict()
         self._video_socket = None
         self._audio_socket = None
         self._control_socket = None
@@ -703,45 +707,45 @@ class ScrcpySession(Stoppable):
             except Exception as e:
                 raise ScrcpyError(f"Send scrcpy control packet error: {e}") from None
 
-    def add_init_listener(self, listener: Callable[[], Any]):
+    def add_init_listener(self, listener: "Callable[[], Any]"):
         with self._lock:
             listeners = self._listeners.setdefault("init", list())
             listeners.append(listener)
 
-    def remove_init_listener(self, listener: Callable[[], Any]):
+    def remove_init_listener(self, listener: "Callable[[], Any]"):
         with self._lock:
             listeners = self._listeners.get("init", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_stop_listener(self, listener: Callable[[], Any]):
+    def add_stop_listener(self, listener: "Callable[[], Any]"):
         with self._lock:
             listeners = self._listeners.setdefault("stop", list())
             listeners.append(listener)
 
-    def remove_stop_listener(self, listener: Callable[[], Any]):
+    def remove_stop_listener(self, listener: "Callable[[], Any]"):
         with self._lock:
             listeners = self._listeners.get("stop", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_video_listener(self, listener: Callable[[bytes], Any]):
+    def add_video_listener(self, listener: "Callable[[bytes], Any]"):
         with self._lock:
             listeners = self._listeners.setdefault("video", list())
             listeners.append(listener)
 
-    def remove_video_listener(self, listener: Callable[[bytes], Any]):
+    def remove_video_listener(self, listener: "Callable[[bytes], Any]"):
         with self._lock:
             listeners = self._listeners.get("video", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_audio_listener(self, listener: Callable[[bytes], Any]):
+    def add_audio_listener(self, listener: "Callable[[bytes], Any]"):
         with self._lock:
             listeners = self._listeners.setdefault("audio", list())
             listeners.append(listener)
 
-    def remove_audio_listener(self, listener: Callable[[bytes], Any]):
+    def remove_audio_listener(self, listener: "Callable[[bytes], Any]"):
         with self._lock:
             listeners = self._listeners.get("audio", list())
             if listener in listeners:
@@ -1032,7 +1036,7 @@ if __name__ == '__main__':
     video_frames = SlidingQueue[av.VideoFrame](100)
 
 
-    def on_init(session: ScrcpySession):
+    def on_init(session: "ScrcpySession"):
         session.inject_keycode(ScrcpyKeyEvent.KEYCODE_HOME, ScrcpyMotionEvent.ACTION_DOWN)
         session.inject_keycode(ScrcpyKeyEvent.KEYCODE_HOME, ScrcpyMotionEvent.ACTION_UP)
 

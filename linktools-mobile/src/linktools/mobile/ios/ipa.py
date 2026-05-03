@@ -9,9 +9,12 @@
 
 import re
 import zipfile
-from typing import Optional, Dict, Any, List
+from typing import TYPE_CHECKING
 
 from linktools.types import Error
+
+if TYPE_CHECKING:
+    from typing import Any
 
 _INFO_PLIST = "Info.plist"
 
@@ -36,7 +39,7 @@ class IPA(object):
         plist_data = self.zip.read(plist_path)
         self._plist[_INFO_PLIST] = plistlib.loads(plist_data)
 
-    def find_file(self, name) -> Optional[str]:
+    def find_file(self, name) -> "str | None":
         name_list = self.zip.namelist()
         pattern = re.compile(rf'Payload/[^/]+\.app/{name}$')
         for path in name_list:
@@ -45,7 +48,7 @@ class IPA(object):
                 return m.group()
         return None
 
-    def list_files(self) -> List[str]:
+    def list_files(self) -> "list[str]":
         return self.zip.namelist()
 
     def read_file(self, filename) -> bytes:
@@ -54,7 +57,7 @@ class IPA(object):
         except KeyError:
             raise IPAError(f"Not found {filename}")
 
-    def get_info_plist(self) -> Dict[str, Any]:
+    def get_info_plist(self) -> "dict[str, Any]":
         return self._plist[_INFO_PLIST]
 
     def get_launch_storyboard_name(self) -> str:
@@ -72,5 +75,5 @@ class IPA(object):
     def get_version_string(self) -> str:
         return self.get_info_plist().get("CFBundleShortVersionString")
 
-    def get_permissions(self) -> Dict[str, str]:
+    def get_permissions(self) -> "dict[str, str]":
         return {k: v for k, v in self.get_info_plist().items() if k.endswith("Description")}

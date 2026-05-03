@@ -26,16 +26,21 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from typing import Optional, List, Type
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.capabilities.mobile import __cap_mobile__
-from linktools.cli import CommandParser, CommandError
+from linktools.cli import CommandError
 from linktools.cli.argparse import range_type
 from linktools.core import environ
-from linktools.mobile.cli import IOSCommand, IOSNamespace
+from linktools.mobile.cli import IOSCommand
 from linktools.mobile.frida import FridaIOSServer
 from linktools.types import DownloadError
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import IOSNamespace
+
 
 
 class Command(IOSCommand):
@@ -44,10 +49,10 @@ class Command(IOSCommand):
     """
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [DownloadError]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-b", "--bundle-id", action="store", default=None,
                             help="target bundle id (default: frontmost application)")
         parser.add_argument("-s", "--startup-command", action="append", default=[],
@@ -67,7 +72,7 @@ class Command(IOSCommand):
                             type=range_type(1, 65536), default=27042,
                             help="remote frida port (default: 27042)")
 
-    def run(self, args: IOSNamespace) -> Optional[int]:
+    def run(self, args: "IOSNamespace") -> "int | None":
         device = args.device_selector.select()
 
         server = FridaIOSServer(

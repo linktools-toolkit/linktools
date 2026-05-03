@@ -28,15 +28,20 @@
 """
 import os
 import shutil
-from typing import Optional, Type, List
+from typing import TYPE_CHECKING
 
 import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.cli import CommandParser, CommandMain
-from linktools.mobile.cli import IOSCommand, IOSNamespace
+from linktools.cli import CommandMain
+from linktools.mobile.cli import IOSCommand
 from linktools.ssh import SSHClient
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+    from linktools.mobile.cli import IOSNamespace
+
 
 
 class Command(IOSCommand):
@@ -45,21 +50,21 @@ class Command(IOSCommand):
     """
 
     @property
-    def main(self) -> CommandMain:
+    def main(self) -> "CommandMain":
         return CommandMain(self, show_log_level=False, show_log_time=False)
 
     @property
-    def known_errors(self) -> List[Type[BaseException]]:
+    def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [SSHException]
 
-    def init_arguments(self, parser: CommandParser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("-u", "--username", action="store", default="root",
                             help="iOS ssh username (default: root)")
         parser.add_argument("-p", "--port", action="store", type=int, default=22,
                             help="iOS ssh port (default: 22)")
         parser.add_argument("ssh_args", nargs="...", help="ssh args")
 
-    def run(self, args: IOSNamespace) -> Optional[int]:
+    def run(self, args: "IOSNamespace") -> "int | None":
         device = args.device_selector.select()
 
         local_port = utils.get_free_port()

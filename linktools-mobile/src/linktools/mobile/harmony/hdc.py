@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
-from typing import Any, Generator, List, Callable, TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, timeoutable
-from linktools.types import TimeoutType
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+    from typing import Any, TypeVar
+    from linktools.types import TimeoutType
+
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="HdcDevice")
 
 _logger = environ.get_logger("harmony.hdc")
@@ -21,14 +24,14 @@ class HdcError(BridgeError):
 
 class Hdc(Bridge):
 
-    def __init__(self, options: List[str] = None):
+    def __init__(self, options: "list[str]" = None):
         super().__init__(
             tool=environ.get_tool("hdc"),
             options=options,
             error_type=HdcError
         )
 
-    def list_devices(self, alive: bool = None) -> Generator["HdcDevice", None, None]:
+    def list_devices(self, alive: bool = None) -> "Generator['HdcDevice', None, None]":
         """
         获取所有设备列表
         :param alive: 只显示在线的设备
@@ -47,7 +50,7 @@ class Hdc(Bridge):
 
 class HdcDevice(BaseDevice):
 
-    def __init__(self, id: str = None, hdc: Hdc = None):
+    def __init__(self, id: str = None, hdc: "Hdc" = None):
         """
         :param id: 设备号
         """
@@ -112,7 +115,7 @@ class HdcDevice(BaseDevice):
         return (type or HdcDevice)(self._id, self._hdc)
 
     @timeoutable
-    def exec(self, *args: Any, **kwargs) -> str:
+    def exec(self, *args: "Any", **kwargs) -> str:
         """
         执行命令
         :param args: 命令行参数
@@ -121,7 +124,7 @@ class HdcDevice(BaseDevice):
         args = ["-t", self.id, *args]
         return self._hdc.exec(*args, **kwargs)
 
-    def make_shell_args(self, *args: Any):
+    def make_shell_args(self, *args: "Any"):
         """
         生成shell命令参数
         :param args: shell命令
@@ -131,7 +134,7 @@ class HdcDevice(BaseDevice):
         return ["shell", cmd]
 
     @timeoutable
-    def shell(self, *args: Any, **kwargs) -> str:
+    def shell(self, *args: "Any", **kwargs) -> str:
         """
         执行shell
         :param args: shell命令
@@ -150,7 +153,7 @@ class HdcDevice(BaseDevice):
         return self.shell("param", "get", prop, **kwargs).rstrip()
 
     @timeoutable
-    def get_uid(self, timeout: TimeoutType = None) -> int:
+    def get_uid(self, timeout: "TimeoutType" = None) -> int:
         out = self.shell("id", "-u", timeout=timeout)
         uid = utils.int(out.strip(), default=-1)
         if uid >= 0:

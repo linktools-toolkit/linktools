@@ -30,7 +30,6 @@ import abc
 import json
 import os
 import threading
-from typing import Union, Optional
 
 from linktools import utils
 from linktools.core import environ
@@ -43,10 +42,10 @@ _logger = environ.get_logger("frida.app")
 class FridaUserScript(metaclass=abc.ABCMeta):
 
     def __init__(self):
-        self._source: Union[str, object] = __missing__
+        self._source: "str | object" = __missing__
         self._lock = threading.RLock()
 
-    def load(self) -> Optional[str]:
+    def load(self) -> "str | None":
         source = self._source
         if source is __missing__:
             with self._lock:
@@ -65,10 +64,10 @@ class FridaUserScript(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def _load(self) -> Optional[str]:
+    def _load(self) -> "str | None":
         pass
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> "dict":
         return {"filename": str(self.filename), "source": self.load()}
 
     def as_json(self) -> str:
@@ -95,7 +94,7 @@ class FridaScriptFile(FridaUserScript):
     def filename(self):
         return self._path
 
-    def _load(self) -> Optional[str]:
+    def _load(self) -> "str | None":
         _logger.info(f"Load {self}")
         return utils.read_file(self._path, text=True)
 
