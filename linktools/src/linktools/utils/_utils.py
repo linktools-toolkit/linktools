@@ -754,7 +754,7 @@ def user_agent(style=None) -> str:
     return _user_agent.fallback
 
 
-def make_url(scheme: str, host: str, port: int, *paths: str, **kwargs: "QueryType") -> str:
+def make_url(scheme: str, host: str, port: int, *paths: str, queries: "QueryType | None" = None) -> str:
     """Build a URL from parts and query values.
 
     Args:
@@ -771,10 +771,10 @@ def make_url(scheme: str, host: str, port: int, *paths: str, **kwargs: "QueryTyp
     if port is not None:
         if (scheme == "http" and port != 80) or (scheme == "https" and port != 443):
             url += f":{port}"
-    return join_url(url, *paths, **kwargs)
+    return join_url(url, *paths, queries=queries)
 
 
-def join_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
+def join_url(url: str, *paths: str, queries: "QueryType | None" = None) -> str:
     """Join URL path segments safely.
 
     Args:
@@ -793,15 +793,15 @@ def join_url(url: str, *paths: str, **kwargs: "QueryType") -> str:
         if path:
             result = result.rstrip("/") + "/" + path.lstrip("/")
 
-    if len(kwargs) > 0:
-        queries = []
-        for key, value in kwargs.items():
+    if queries:
+        query_list = []
+        for key, value in queries.items():
             if isinstance(value, (list, tuple)):
-                queries.extend((key, v) for v in value)
+                query_list.extend((key, v) for v in value)
             else:
-                queries.append((key, value))
+                query_list.append((key, value))
 
-        result = result + "?" + parse.urlencode(queries)
+        result = result + "?" + parse.urlencode(query_list)
 
     return result
 

@@ -49,7 +49,7 @@ from ..capabilities.cntr import __cap_cntr__
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import Any
-    from linktools.types import T, ConfigType, ConfigKeyType, PathType
+    from linktools.types import T, ConfigType, ConfigKeyType, PathType, QueryType
     from .manager import ContainerManager
     from .context import EventContext
 
@@ -90,58 +90,63 @@ class ExposeMixin:
     expose_container = ExposeCategory("container", "Internal")
     expose_other = ExposeCategory("other", "Tools")
 
-    def load_config_url(self: "BaseContainer", key: "ConfigKeyType", *path: str):
+    def load_config_url(self: "BaseContainer", key: "ConfigKeyType",
+                        *path: str, queries: "QueryType | None" = None):
         def make_url():
             url = self.get_config(key, type=str, default=None)
             if url:
-                return utils.join_url(url, *path)
+                return utils.join_url(url, *path, queries=queries)
             return ""
 
         return utils.lazy_load(make_url)
 
-    def load_port_url(self: "BaseContainer", key: "ConfigKeyType", *path: str, https: bool = True):
+    def load_port_url(self: "BaseContainer", key: "ConfigKeyType",
+                      *path: str, queries: "QueryType | None" = None, 
+                      https: bool = True):
         def make_url():
             port = self.get_config(key, type=int, default=0)
             if 0 < port < 65535:
-                return utils.make_url("https" if https else "http", self.manager.host, port, *path)
+                return utils.make_url(
+                    "https" if https else "http",
+                    self.manager.host,
+                    port,
+                    *path,
+                    queries=queries)
             return ""
 
         return utils.lazy_load(make_url)
 
     def load_nginx_url(
-            self: "BaseContainer", key: "ConfigKeyType", *path: str,
+            self: "BaseContainer", key: "ConfigKeyType",
+            *path: str, queries: "QueryType | None" = None, 
             proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
             proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
             https_enable: bool = __missing__, waf_enable: bool = __missing__,
             auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
     ):
 
+        if not proxy_conf and not proxy_url:
+            return ""
+
         def make_url():
-            nonlocal https_enable
             domain = self.get_config(key, type=str, default=None)
             if domain:
-                if https_enable is __missing__:
-                    https_enable = True
-                https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
-                scheme = "https" if https_enable else "http"
-                port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
-                return utils.make_url(scheme, domain, port, *path)
+                _https = True if https_enable is __missing__ else https_enable
+                _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
+                scheme = "https" if _https else "http"
+                port = self.get_config("NGINX_HTTPS_PORT" if _https else "NGINX_HTTP_PORT")
+                return utils.make_url(scheme, domain, port, *path, queries=queries)
             return ""
 
         def make_nginx_conf():
-            nonlocal https_enable, waf_enable
             domain = self.get_config(key, type=str, default=None)
             if domain:
-                if not proxy_conf and not proxy_url:
-                    return ""
 
-                if https_enable is __missing__:
-                    https_enable = True
-                https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+                _https = True if https_enable is __missing__ else https_enable
+                _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
 
-                if waf_enable is __missing__:
-                    waf_enable = True
-                waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
+                _waf = True if waf_enable is __missing__ else waf_enable
+                _waf = _waf and self.get_config("NGINX_WAF_ENABLE")
 
                 self.write_nginx_conf(
                     domain=domain,
@@ -149,8 +154,8 @@ class ExposeMixin:
                     proxy_domain_name=proxy_domain_name,
                     proxy_conf=proxy_conf,
                     proxy_url=proxy_url,
-                    https_enable=https_enable,
-                    waf_enable=waf_enable,
+                    https_enable=_https,
+                    waf_enable=_waf,
                     auth_enable=auth_enable,
                     auth_extra=auth_extra,
                 )
@@ -158,7 +163,9 @@ class ExposeMixin:
         self.start_hooks.append(make_nginx_conf)
         return utils.lazy_load(make_url)
 
-    def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType", *path: str, https: bool = True):
+    def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType", 
+                             *path: str, queries: "QueryType | None" = None, 
+                             https: bool = True):
         def make_url():
             nonlocal https
             domain = self.get_config(key, type=str, default=None)
@@ -166,7 +173,7 @@ class ExposeMixin:
                 https = https and self.get_config("NGINX_HTTPS_ENABLE")
                 scheme = "https" if https else "http"
                 port = self.get_config("NGINX_HTTPS_PORT" if https else "NGINX_HTTP_PORT")
-                return utils.make_url(scheme, domain, port, *path)
+                return utils.make_url(scheme, domain, port, *path, queries=queries)
             return ""
 
         return utils.lazy_load(make_url)

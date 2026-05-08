@@ -64,6 +64,18 @@ class Container(BaseContainer):
                 if cfg.get("NGINX_HTTPS_ENABLE")
                 else Config.Alias(type=int) | 0
             ),
+            NGINX_DEFAULT_SCHEME=Config.Lazy(
+                lambda cfg:
+                "https"
+                if cfg.get("NGINX_HTTPS_ENABLE")
+                else "http"
+            ),
+            NGINX_DEFAULT_PORT=Config.Lazy(
+                lambda cfg:
+                cfg.get("NGINX_HTTPS_PORT")
+                if cfg.get("NGINX_HTTPS_ENABLE")
+                else cfg.get("NGINX_HTTP_PORT")
+            ),
             NGINX_INDEX_URL=Config.Lazy(
                 lambda cfg: self._get_default_index_url()
             ),
@@ -128,16 +140,13 @@ class Container(BaseContainer):
                 self._acme_ssl_domains.append(domain)
 
     def _get_default_index_url(self):
-        host = "www.google.com" \
-            if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
-            else self.get_config("NGINX_ROOT_DOMAIN")
-        if self.get_config("NGINX_HTTPS_ENABLE"):
-            scheme = "https"
-            port = self.get_config("NGINX_HTTPS_PORT")
-        else:
-            scheme = "http"
-            port = self.get_config("NGINX_HTTP_PORT")
-        return utils.make_url(scheme, host, port)
+        return utils.make_url(
+            self.get_config("NGINX_DEFAULT_SCHEME"),
+            "www.google.com" \
+                if self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost") \
+                else self.get_config("NGINX_ROOT_DOMAIN"),
+            self.get_config("NGINX_DEFAULT_PORT")
+        )
 
     def on_init(self):
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
@@ -262,12 +271,10 @@ class Container(BaseContainer):
 
             self.logger.debug(f"Write nginx conf for {container} {domain}")
 
-            if https_enable is __missing__:
-                https_enable = True
+            https_enable = True if https_enable is __missing__ else https_enable
             https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
 
-            if waf_enable is __missing__:
-                waf_enable = True
+            waf_enable = True if waf_enable is __missing__ else waf_enable
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
 
             if auth_enable:
@@ -315,8 +322,8 @@ class Container(BaseContainer):
                             if not uri:
                                 self.logger.info(f"{container} invalid oidc redirect uri: None, skip.")
                                 continue
-                            scheme = "https" if https_enable else "http"
-                            port = self.get_config("NGINX_HTTPS_PORT" if https_enable else "NGINX_HTTP_PORT")
+                            scheme = self.get_config("NGINX_DEFAULT_SCHEME")
+                            port = self.get_config("NGINX_DEFAULT_PORT")
                             base_url = utils.make_url(scheme, domain, port)
                             redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
                             if not redirect_uri:

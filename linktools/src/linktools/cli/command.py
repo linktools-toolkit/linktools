@@ -625,6 +625,21 @@ class _SubCommandMethod(SubCommand):
                     f"1. add `{dest}` parameter to {self.info}, {os.linesep}"
                     f"2. add `no_param=True` parameter to argument `{', '.join(argument_args)}`.")
 
+            # Resolve string annotations (e.g. from `from __future__ import annotations`).
+            try:
+                import typing
+                type_hints = typing.get_type_hints(method)
+            except Exception:
+                type_hints = {}
+
+            def _resolve_annotation(param):
+                if param is None:
+                    return inspect.Parameter.empty
+                hint = type_hints.get(param.name, inspect.Parameter.empty)
+                if hint is not inspect.Parameter.empty:
+                    return hint
+                return param.annotation
+
             # Fill defaults from method parameter annotations.
             parameter = signature.parameters[dest] if not no_param else None
             if "config" in argument_kwargs:
@@ -632,9 +647,9 @@ class _SubCommandMethod(SubCommand):
                 if isinstance(config, ConfigProperty):
                     if "action" not in argument_kwargs:
                         argument_kwargs.setdefault("action", ConfigAction)
-                        if parameter and parameter.annotation != signature.empty:
-                            if parameter.annotation in (int, float, str, bool):
-                                argument_kwargs.setdefault("type", parameter.annotation)
+                        annotation = _resolve_annotation(parameter)
+                        if annotation not in (inspect.Parameter.empty,) and annotation in (int, float, str, bool):
+                            argument_kwargs.setdefault("type", annotation)
                     argument_kwargs.setdefault("required", False)
 
             if parameter and "default" not in argument_kwargs:
@@ -645,10 +660,11 @@ class _SubCommandMethod(SubCommand):
                     argument_kwargs.setdefault("required", True)
 
             if parameter and "action" not in argument_kwargs:
-                if parameter.annotation != signature.empty:
-                    if parameter.annotation in (int, float, str):
-                        argument_kwargs.setdefault("type", parameter.annotation)
-                    elif parameter.annotation == bool:
+                annotation = _resolve_annotation(parameter)
+                if annotation is not inspect.Parameter.empty:
+                    if annotation in (int, float, str):
+                        argument_kwargs.setdefault("type", annotation)
+                    elif annotation == bool:
                         if argument_kwargs.get("default", False):
                             argument_kwargs.setdefault("action", "store_false")
                         else:

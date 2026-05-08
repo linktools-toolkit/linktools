@@ -40,7 +40,7 @@ from pathlib import Path as _Path
 T = _t.TypeVar("T")
 PathType = _t.Union[str, _Path]
 QueryDataType = _t.Union[str, int, float]
-QueryType = _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataType]]
+QueryType = _t.Dict[str, _t.Union[QueryDataType, _t.List[QueryDataType], _t.Tuple[QueryDataType, ...]]]
 TimeoutType = _t.Union["Timeout", float, int, None]
 
 if _t.TYPE_CHECKING:
