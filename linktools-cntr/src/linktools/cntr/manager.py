@@ -66,6 +66,7 @@ class ContainerManager:
         self.environ = environ
         self.logger = environ.get_logger("container")
 
+        self._name = name
         self.env_config = self.environ.wrap_config(namespace="container", env_prefix="")
         self.env_config.update_defaults(**self.configs)
         self.env_config.update_defaults(**self.extend_configs)
@@ -73,7 +74,6 @@ class ContainerManager:
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 
-        self._name = name
         self._setting_cache = {}
 
     @property
