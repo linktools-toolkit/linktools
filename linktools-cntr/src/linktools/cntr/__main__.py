@@ -137,15 +137,15 @@ class ConfigCommand(BaseCommand):
     @subcommand("set", help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
     def on_command_set(self, configs: "dict[str, str]"):
-        manager.config.cache.save(**configs)
+        manager.env_config.cache.save(**configs)
         for key in sorted(configs.keys()):
-            value = manager.config.get(key)
+            value = manager.env_config.get(key)
             self.logger.info(f"{key}: {value}")
 
     @subcommand("unset", help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
     def on_command_remove(self, configs: "dict[str, str]"):
-        manager.config.cache.remove(*configs)
+        manager.env_config.cache.remove(*configs)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
     @subcommand("list", help="list container configs")
@@ -161,19 +161,20 @@ class ConfigCommand(BaseCommand):
         for container in target_containers:
             keys.update(container.extend_configs.keys())
         if not names:
-            keys.update(manager.config.cache.keys())
+            keys.update(manager.configs.keys())
+            keys.update(manager.env_config.cache.keys())
         for key in sorted(keys):
-            value = manager.config.get(key)
+            value = manager.env_config.get(key)
             self.logger.info(f"{key}={value}")
 
     @subcommand("edit", help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
     def on_command_edit(self, editor: str):
-        return manager.create_process(editor, manager.config.cache.path).call()
+        return manager.create_process(editor, manager.env_config.cache.path).call()
 
     @subcommand("reload", help="reload container configs")
     def on_command_reload(self):
-        manager.config.reload()
+        manager.env_config.reload()
         manager.prepare_installed_containers()
 
 
@@ -188,7 +189,7 @@ class ExecCommand(BaseCommand):
 
     @property
     def config(self):
-        return manager.config
+        return manager.env_config
 
     @property
     def _subparser(self) -> "CommandParser":

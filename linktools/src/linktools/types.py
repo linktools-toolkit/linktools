@@ -65,22 +65,18 @@ def _get_logger() -> "_logging.Logger":
 
 class Error(Exception):
     """Base exception for linktools-specific errors."""
-    pass
 
 
 class ModuleError(Error):
     """Raised when a linktools module cannot be loaded or used."""
-    pass
 
 
 class DownloadError(Error):
     """Base exception for download failures."""
-    pass
 
 
 class ExecError(Error):
     """Base exception for process execution failures."""
-    pass
 
 
 class DownloadHttpError(DownloadError):
@@ -93,27 +89,22 @@ class DownloadHttpError(DownloadError):
 
 class ConfigError(Error):
     """Raised when configuration data is invalid or unavailable."""
-    pass
 
 
 class ToolError(Error):
     """Base exception for tool discovery and execution failures."""
-    pass
 
 
 class ToolNotFound(ToolError):
     """Raised when a requested tool cannot be found."""
-    pass
 
 
 class ToolNotSupport(ToolError):
     """Raised when a tool is not supported in the current environment."""
-    pass
 
 
 class ToolExecError(ToolError):
     """Raised when a tool process exits with an execution error."""
-    pass
 
 
 class NoFreePortFoundError(Error):

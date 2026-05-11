@@ -50,8 +50,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import Any
     from linktools.core import Environ
-    from .context import EventContext
     from linktools.types import PathType
+    from .context import EventContext
 
 
 class ContainerManager:
@@ -66,21 +66,40 @@ class ContainerManager:
         self.environ = environ
         self.logger = environ.get_logger("container")
 
-        self.config = self.environ.wrap_config(namespace="container", env_prefix="")
-        self.config.update_defaults(
-            COMPOSE_PROJECT_NAME=name or self.environ.name,
-            DOCKER_USER=Config.Prompt(default=os.environ.get("SUDO_USER", self.user).replace(" ", ""), cached=True),
-            DOCKER_UID=Config.Lazy(lambda cfg: utils.get_uid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_GID=Config.Lazy(lambda cfg: utils.get_gid(cfg.get("DOCKER_USER", type=str))),
-            SERVICE_RESTART_POLICY="unless-stopped",
-            SERVICE_LOG_DRIVER="json-file",
-            SERVICE_LOG_MAX_SIZE="10m",
-        )
+        self.env_config = self.environ.wrap_config(namespace="container", env_prefix="")
+        self.env_config.update_defaults(**self.configs)
+        self.env_config.update_defaults(**self.extend_configs)
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 
+        self._name = name
         self._setting_cache = {}
+
+    @property
+    def configs(self) -> "dict[str, Any]":
+        return dict(
+            COMPOSE_PROJECT_NAME=self._name or self.environ.name,
+            SERVICE_RESTART_POLICY="unless-stopped",
+            SERVICE_LOG_DRIVER="json-file",
+            SERVICE_LOG_MAX_SIZE="10m",
+            DOCKER_HOST="/var/run/docker.sock",
+        )
+
+    @property
+    def extend_configs(self) -> "dict[str, Any]":
+        choices = ["docker", "docker-rootless", "podman"] \
+            if self.system in ("darwin", "linux") and os.getuid() != 0 \
+            else ["docker", "podman"]
+        return dict(
+            CONTAINER_TYPE=Config.Prompt(choices=choices, cached=True),
+            DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
+            DOCKER_UID=Config.Lazy(lambda cfg: utils.get_uid(cfg.get("DOCKER_USER", type=str))),
+            DOCKER_GID=Config.Lazy(lambda cfg: utils.get_gid(cfg.get("DOCKER_USER", type=str))),
+            DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | Config.Lazy(lambda cfg: self.data_path.joinpath("app")),
+            DOCKER_APP_DATA_PATH=Config.Alias("DOCKER_APP_PATH", type="path"),
+            HOST=Config.Prompt(default=Config.Lazy(lambda cfg: utils.get_lan_ip())),
+        )
 
     @property
     def debug(self) -> bool:
@@ -88,39 +107,23 @@ class ContainerManager:
 
     @cached_property
     def container_type(self) -> str:
-        choices = ["docker", "docker-rootless", "podman"] \
-            if self.system in ("darwin", "linux") and os.getuid() != 0 \
-            else ["docker", "podman"]
-        return self.config.get(
-            "CONTAINER_TYPE",
-            type=str,
-            default=Config.Prompt(choices=choices, cached=True),
-        )
+        return self.env_config.get("CONTAINER_TYPE", type=str)
 
     @cached_property
     def container_host(self) -> str:
-        default = "/var/run/docker.sock"
-        host = self.config.get(
-            "DOCKER_HOST",
-            type=str,
-            default=default
-        )
+        host = self.env_config.get("DOCKER_HOST", type=str)
         if host:
             left, sep, right = host.partition("://")
             return right or left
-        return default
+        return "/var/run/docker.sock"
 
     @cached_property
     def host(self) -> str:
-        return self.config.get(
-            "HOST",
-            type=str,
-            default=Config.Prompt(default=utils.get_lan_ip())
-        )
+        return self.env_config.get("HOST", type=str)
 
     @cached_property
     def project_name(self) -> str:
-        return self.config.get("COMPOSE_PROJECT_NAME")
+        return self.env_config.get("COMPOSE_PROJECT_NAME")
 
     @cached_property
     def root_path(self):
@@ -128,24 +131,11 @@ class ContainerManager:
 
     @cached_property
     def app_path(self):
-        return self.config.get(
-            "DOCKER_APP_PATH",
-            type="path",
-            default=Config.Prompt(
-                default=Config.Lazy(
-                    lambda cfg: self.data_path.joinpath("app")
-                ),
-                cached=True,
-            )
-        )
+        return self.env_config.get("DOCKER_APP_PATH", type="path")
 
     @cached_property
     def app_data_path(self):
-        return self.config.get(
-            "DOCKER_APP_DATA_PATH",
-            type="path",
-            default=self.app_path
-        )
+        return self.env_config.get("DOCKER_APP_DATA_PATH", type="path")
 
     @cached_property
     def data_path(self):
@@ -309,7 +299,7 @@ class ContainerManager:
         for container in self.containers.values():
             container.enable = container in containers
         for container in reversed(containers):
-            self.config.update_defaults(**container.configs)
+            self.env_config.update_defaults(**container.configs)
         for container in containers:
             self._callback(func=container.on_prepare)
         for container in containers:
@@ -504,7 +494,7 @@ class ContainerManager:
         return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
 
     def change_file_owner(self, path: "PathType", user: str, recursive: bool = False) -> None:
-        path = self.config.cast(path, type="path")
+        path = self.env_config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
         if not shutil.which("chown"):

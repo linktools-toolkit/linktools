@@ -595,10 +595,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             self.logger.info(f"remove {mount_path}")
 
     def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
-        return self.manager.config.get(key, type=type, default=default)
+        return self.manager.env_config.get(key, type=type, default=default)
 
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
-        return utils.lazy_load(self.manager.config.get, key, type=type, default=default)
+        return utils.lazy_load(self.manager.env_config.get, key, type=type, default=default)
 
     def _make_exec_context(self, commands) -> "EventContext":
         from .context import EventContext
@@ -712,7 +712,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return False
 
     def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any"):
-        config = self.manager.config
+        config = self.manager.env_config
 
         def mkdir(path: "PathType") -> str:
             path = config.cast(path, type="path")
