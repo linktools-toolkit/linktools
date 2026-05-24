@@ -775,7 +775,7 @@ def prompt(
         prompt,
         password=password,
         choices=choices,
-        default=default if default is not __missing__ else ...,
+        default=str(default) if default is not __missing__ else ...,
         show_default=show_default,
         show_choices=show_choices
     )
@@ -866,6 +866,6 @@ def confirm(
         return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(
         prompt,
-        default=default if default is not __missing__ else ...,
+        default=str(default) if default is not __missing__ else ...,
         show_default=show_default,
     )

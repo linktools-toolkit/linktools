@@ -63,13 +63,12 @@ class ContainerManager:
         self.system = utils.get_system()
         self.machine = utils.get_machine()
 
+        self.name = name or self.environ.name
         self.environ = environ
         self.logger = environ.get_logger("container")
 
-        self._name = name
         self.env_config = self.environ.wrap_config(namespace="container", env_prefix="")
         self.env_config.update_defaults(**self.configs)
-        self.env_config.update_defaults(**self.extend_configs)
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -78,27 +77,28 @@ class ContainerManager:
 
     @property
     def configs(self) -> "dict[str, Any]":
-        return dict(
-            COMPOSE_PROJECT_NAME=self._name or self.environ.name,
-            SERVICE_RESTART_POLICY="unless-stopped",
-            SERVICE_LOG_DRIVER="json-file",
-            SERVICE_LOG_MAX_SIZE="10m",
-            DOCKER_HOST="/var/run/docker.sock",
-        )
-
-    @property
-    def extend_configs(self) -> "dict[str, Any]":
         choices = ["docker", "docker-rootless", "podman"] \
             if self.system in ("darwin", "linux") and os.getuid() != 0 \
             else ["docker", "podman"]
+
         return dict(
+            HOST=Config.Prompt() | Config.Lazy(lambda cfg: utils.get_lan_ip()),
+            DOCKER_HOST="/var/run/docker.sock",
+
+            COMPOSE_PROJECT_NAME=self.name,
+            SERVICE_RESTART_POLICY="unless-stopped",
+            SERVICE_LOG_DRIVER="json-file",
+            SERVICE_LOG_MAX_SIZE="10m",
+
             CONTAINER_TYPE=Config.Prompt(choices=choices, cached=True),
             DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
             DOCKER_UID=Config.Lazy(lambda cfg: utils.get_uid(cfg.get("DOCKER_USER", type=str))),
             DOCKER_GID=Config.Lazy(lambda cfg: utils.get_gid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | Config.Lazy(lambda cfg: self.data_path.joinpath("app")),
+
+            DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("app"),
             DOCKER_APP_DATA_PATH=Config.Alias("DOCKER_APP_PATH", type="path"),
-            HOST=Config.Prompt(default=Config.Lazy(lambda cfg: utils.get_lan_ip())),
+            DOCKER_USER_DATA_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("user_data"),
+            DOCKER_DOWNLOAD_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("download"),
         )
 
     @property
@@ -131,11 +131,11 @@ class ContainerManager:
 
     @cached_property
     def app_path(self):
-        return self.env_config.get("DOCKER_APP_PATH", type="path")
+        return self.env_config.get("DOCKER_APP_PATH")
 
     @cached_property
     def app_data_path(self):
-        return self.env_config.get("DOCKER_APP_DATA_PATH", type="path")
+        return self.env_config.get("DOCKER_APP_DATA_PATH")
 
     @cached_property
     def data_path(self):

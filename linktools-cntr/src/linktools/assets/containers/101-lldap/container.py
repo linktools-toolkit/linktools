@@ -42,10 +42,6 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
 
-    @property
-    def dependencies(self) -> "Iterable[str]":
-        return ["nginx"]
-
     @cached_property
     def configs(self):
         def get_base_dn(cfg):

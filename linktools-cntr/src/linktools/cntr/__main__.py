@@ -35,7 +35,7 @@ from git import GitCommandError
 
 from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
-from linktools.core import environ
+from linktools.core import environ, ConfigProperty
 from linktools.rich import confirm, choose
 from linktools.types import ConfigError
 from .container import ContainerError
@@ -151,9 +151,13 @@ class ConfigCommand(BaseCommand):
     @subcommand("list", help="list container configs")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
-    def on_command_list(self, names: "list[str]"):
+    @subcommand_argument("-d", "--with-dependencies", action="store_true", default=False,
+                         help="include configs from dependency containers")
+    def on_command_list(self, names: "list[str]", with_dependencies: bool = False):
         containers = manager.prepare_installed_containers()
         target_containers = [c for c in containers if c.name in names] if names else containers
+        if with_dependencies and names:
+            target_containers = manager.resolve_depend_containers(target_containers)
 
         keys = set()
         for container in target_containers:
@@ -161,7 +165,7 @@ class ConfigCommand(BaseCommand):
         for container in target_containers:
             keys.update(container.extend_configs.keys())
         if not names:
-            keys.update(manager.configs.keys())
+            keys.update([key for key, value in manager.configs.items() if not isinstance(value, ConfigProperty)])
             keys.update(manager.env_config.cache.keys())
         for key in sorted(keys):
             value = manager.env_config.get(key)
