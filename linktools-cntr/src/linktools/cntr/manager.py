@@ -35,7 +35,7 @@ import pathlib
 import shutil
 from typing import TYPE_CHECKING
 
-from git import InvalidGitRepositoryError
+from dulwich.errors import NotGitRepository
 
 from linktools import utils
 from linktools.core import Config
@@ -588,7 +588,7 @@ class ContainerManager:
                 try:
                     if os.path.exists(repo_path):
                         repo = Repository(repo_path)
-                except InvalidGitRepositoryError:
+                except NotGitRepository:
                     self.logger.debug(f"Invalid git repository, skip: {url}")
                     repo = None
 

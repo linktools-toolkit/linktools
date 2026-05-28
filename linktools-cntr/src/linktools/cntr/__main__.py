@@ -31,7 +31,7 @@ from subprocess import SubprocessError
 from typing import TYPE_CHECKING
 
 import yaml
-from git import GitCommandError
+from dulwich.errors import GitProtocolError
 
 from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
@@ -248,7 +248,7 @@ class Command(BaseCommandGroup):
     @property
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
-            ContainerError, ConfigError, SubprocessError, GitCommandError, OSError, AssertionError,
+            ContainerError, ConfigError, SubprocessError, GitProtocolError, OSError, AssertionError,
         ]
 
     def init_subcommands(self) -> "Any":

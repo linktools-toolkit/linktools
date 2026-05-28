@@ -3,10 +3,10 @@
 
 """
 @author  : Hu Ji
-@file    : repository.py 
+@file    : repository.py
 @time    : 2024/3/24
 @site    : https://github.com/ice-black-tea
-@software: PyCharm 
+@software: PyCharm
 
               ,----------------,              ,---------,
          ,-----------------------,          ,"        ,"|
@@ -26,130 +26,126 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-from git import Repo, RemoteProgress, GitCommandError
-from git.util import CallableRemoteProgress
+import re
+
+from dulwich import porcelain
+from dulwich.repo import Repo as DulwichRepo
 
 from linktools import utils
 from linktools.rich import create_simple_progress
 
+_PROGRESS_RE = re.compile(rb'^(.+?):\s+(?:\s*\d+%\s+\((\d+)/(\d+)\))?')
 
-class Repository(Repo):
+
+class _ProgressStream:
+    """Writable stream that parses git progress output and updates rich progress bars."""
+
+    def __init__(self, progress_ctx):
+        self._progress = progress_ctx
+        self._tasks = {}
+        self._buf = b""
+
+    def write(self, data: bytes) -> int:
+        self._buf += data
+        while True:
+            nl = self._buf.find(b'\n')
+            cr = self._buf.find(b'\r')
+            if nl == -1 and cr == -1:
+                break
+            idx = min(x for x in (nl, cr) if x != -1)
+            line = self._buf[:idx].strip()
+            self._buf = self._buf[idx + 1:]
+            self._parse_line(line)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def _parse_line(self, line: bytes):
+        if not line:
+            return
+        m = _PROGRESS_RE.match(line)
+        if not m:
+            return
+        stage = m.group(1).decode("utf-8", errors="replace")
+        cur = utils.int(m.group(2), default=None) if m.group(2) else None
+        total = utils.int(m.group(3), default=None) if m.group(3) else None
+
+        task_id = self._tasks.get(stage)
+        if task_id is None:
+            task_id = self._tasks[stage] = self._progress.add_task(
+                stage, total=None, message=""
+            )
+        message = (
+            f"[progress.percentage]"
+            f"{utils.coalesce(cur, '?')}/"
+            f"{utils.coalesce(total, '?')}"
+        )
+        self._progress.update(task_id, message=message, completed=cur, total=total)
+
+
+class _GitProxy:
+    """Proxy that exposes common git operations on a repo path via dulwich porcelain."""
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def stash(self, *args):
+        if args and args[0] == "pop":
+            porcelain.stash_pop(self._path)
+        else:
+            porcelain.stash_push(self._path)
+
+    def reset(self, hard: bool = False, **kwargs):
+        porcelain.reset(self._path, mode="hard" if hard else "mixed")
+
+    def checkout(self, branch: str):
+        porcelain.switch(self._path, branch)
+
+
+class _Head:
+
+    def __init__(self, path: str, name: str):
+        self._path = path
+        self.name = name
+
+    def checkout(self):
+        porcelain.switch(self._path, self.name)
+
+
+class Repository:
+
+    def __init__(self, path):
+        self._path = str(path)
+        self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
+        self.git = _GitProxy(self._path)
+
+    @property
+    def heads(self):
+        refs = self._repo.refs.as_dict(b"refs/heads/")
+        return [name.decode() for name in refs]
+
+    def is_dirty(self) -> bool:
+        status = porcelain.status(self._path)
+        staged = status.staged
+        unstaged = status.unstaged
+        return bool(any(staged.values()) or unstaged)
+
+    def create_head(self, branch: str) -> _Head:
+        porcelain.branch_create(self._path, branch)
+        return _Head(self._path, branch)
 
     def update_with_progress(self):
-
-        try:
-            with create_simple_progress("message") as progress:
-
-                tasks = {}
-                def update_progress(op_code, cur_count, max_count, git_message):
-                    op_name = self._get_op_name(op_code)
-                    if not op_name:
-                        return
-
-                    task_id = tasks.get(op_name)
-                    if task_id is None:
-                        task_id = tasks[op_name] = progress.add_task(
-                            op_name,
-                            total=None,
-                            message=""
-                        )
-
-                    max_count = utils.int(max_count, default=None)
-                    cur_count = utils.int(cur_count, default=None)
-
-                    message = f"[progress.percentage]" \
-                              f"{utils.coalesce(cur_count, '?')}/" \
-                              f"{utils.coalesce(max_count, '?')}"
-                    if git_message:
-                        message += f" [progress.data.speed]{git_message}"
-
-                    progress.update(
-                        task_id,
-                        message=message,
-                        completed=cur_count,
-                        total=max_count
-                    )
-
-                self.remote().pull(
-                    self.active_branch.name,
-                    progress=CallableRemoteProgress(update_progress),
-                    allow_unsafe_protocols=True,
-                    rebase=True,
-                )
-
-        except GitCommandError as e:
-            if e.stderr and "unable to auto-detect email address" in e.stderr:
-                pass
-            raise e
+        with create_simple_progress("message") as progress:
+            porcelain.pull(
+                self._path,
+                errstream=_ProgressStream(progress),
+            )
 
     @classmethod
     def clone_with_progress(cls, url: str, repo_path: str = None, branch: str = None):
-
-        try:
-            with create_simple_progress("message") as progress:
-
-                tasks = {}
-                options = dict(depth="1")
-                if branch:
-                    options["branch"] = branch
-
-                def update_progress(op_code, cur_count, max_count, git_message):
-                    op_name = cls._get_op_name(op_code)
-                    if not op_name:
-                        return
-
-                    task_id = tasks.get(op_name)
-                    if task_id is None:
-                        task_id = tasks[op_name] = progress.add_task(
-                            op_name,
-                            total=None,
-                            message=""
-                        )
-
-                    max_count = utils.int(max_count, default=None)
-                    cur_count = utils.int(cur_count, default=None)
-
-                    message = f"[progress.percentage]" \
-                              f"{utils.coalesce(cur_count, '?')}/" \
-                              f"{utils.coalesce(max_count, '?')}"
-                    if git_message:
-                        message += f" [progress.data.speed]{git_message}"
-
-                    progress.update(
-                        task_id,
-                        message=message,
-                        completed=cur_count,
-                        total=max_count
-                    )
-
-                cls.clone_from(
-                    url,
-                    repo_path,
-                    progress=update_progress,
-                    allow_unsafe_protocols=True,
-                    **options
-                )
-
-        except GitCommandError as e:
-            if e.stderr and "unable to auto-detect email address" in e.stderr:
-                pass
-            raise e
-
-    @classmethod
-    def _get_op_name(cls, op_code: int) -> str:
-        op_name = ""
-        if op_code & RemoteProgress.COUNTING:
-            op_name = "Counting objects"
-        elif op_code & RemoteProgress.COMPRESSING:
-            op_name = "Compressing objects"
-        elif op_code & RemoteProgress.WRITING:
-            op_name = "Writing objects"
-        elif op_code & RemoteProgress.RECEIVING:
-            op_name = "Receiving objects"
-        elif op_code & RemoteProgress.RESOLVING:
-            op_name = "Resolving deltas"
-        elif op_code & RemoteProgress.FINDING_SOURCES:
-            op_name = "Finding sources"
-        elif op_code & RemoteProgress.CHECKING_OUT:
-            op_name = "Checking out files"
-        return op_name
+        kwargs = {}
+        if branch:
+            kwargs["branch"] = branch
+        with create_simple_progress("message") as progress:
+            porcelain.clone(url, repo_path, depth=1, errstream=_ProgressStream(progress), **kwargs)
