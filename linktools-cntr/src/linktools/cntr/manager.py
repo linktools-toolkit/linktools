@@ -428,6 +428,10 @@ class ContainerManager:
                 all_containers = {*context.containers, *running_containers}
                 for container in running_containers:
                     if container not in context.containers:
+                        # A removed container is no longer in the installed list, so its
+                        # `configs` defaults were never registered in env_config. Register
+                        # them here so on_removed can read its own configs without failing.
+                        self.env_config.update_defaults(**container.configs)
                         self._callback(container.on_removed, context)
                         all_containers.remove(container)
                 self._dump_running_containers(all_containers)
@@ -613,7 +617,7 @@ class ContainerManager:
                             new_branch = repo.create_head(branch)
                             new_branch.checkout()
 
-                    repo.update_with_progress()
+                    repo.update_with_progress(reset=reset)
 
                 finally:
                     if is_stash:

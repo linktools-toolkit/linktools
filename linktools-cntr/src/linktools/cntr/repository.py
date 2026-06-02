@@ -135,11 +135,16 @@ class Repository:
         porcelain.branch_create(self._path, branch)
         return _Head(self._path, branch)
 
-    def update_with_progress(self):
+    def update_with_progress(self, reset: bool = False):
         with create_simple_progress("message") as progress:
+            # fast_forward=False lets dulwich merge diverged branches instead of
+            # raising DivergedBranches; force=True (when reset) force-updates the
+            # local branch to the remote, overwriting any local commits/changes.
             porcelain.pull(
                 self._path,
                 errstream=_ProgressStream(progress),
+                fast_forward=False,
+                force=reset,
             )
 
     @classmethod
