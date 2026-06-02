@@ -138,21 +138,36 @@ class Repository:
 
     def update_with_progress(self, reset: bool = False):
         with create_simple_progress("message") as progress:
+            if reset:
+                self._force_update(progress)
+                return
             try:
-                # force=True (when reset) force-updates the local branch to the
-                # remote, overwriting local commits/changes. Merging is avoided
-                # on purpose: these repos are shallow (depth=1) clones, so dulwich
-                # cannot find a merge base and would fail.
                 porcelain.pull(
                     self._path,
                     errstream=_ProgressStream(progress),
-                    force=reset,
                 )
             except porcelain.DivergedBranches:
                 raise ContainerError(
                     "Local branch has diverged from the remote and cannot be "
                     "fast-forwarded. Re-run with `--force` to reset it to the remote."
                 )
+
+    def _force_update(self, progress):
+        # These repos are shallow (depth=1) clones, so dulwich cannot merge or
+        # rebase a diverged branch. A forced update instead fetches the remote
+        # objects and hard-resets the local branch to match the remote.
+        head_refs, _ = self._repo.refs.follow(b"HEAD")
+        branch_ref = head_refs[-1]  # e.g. b"refs/heads/master"
+        result = porcelain.fetch(
+            self._path,
+            errstream=_ProgressStream(progress),
+            depth=1,
+            force=True,
+        )
+        target = result.refs.get(branch_ref) or result.refs.get(b"HEAD")
+        if target is None:
+            raise ContainerError("Unable to resolve the remote branch to reset to.")
+        porcelain.reset(self._path, "hard", target)
 
     @classmethod
     def clone_with_progress(cls, url: str, repo_path: str = None, branch: str = None):
