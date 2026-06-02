@@ -656,7 +656,10 @@ class ContainerManager:
         elif key in self._setting_cache:
             return self._setting_cache[key]
         with self._settings.open() as data:
-            result = self._setting_cache[key] = data.get(key, default)
+            result = data.get(key, default)
+            if result is None:  # key may be stored explicitly as null
+                result = default
+            self._setting_cache[key] = result
             return result
 
     def _dump_setting(self, key: str, setting: "dict | list | tuple"):
