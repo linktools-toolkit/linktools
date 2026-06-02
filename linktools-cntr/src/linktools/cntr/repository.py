@@ -33,6 +33,7 @@ from dulwich.repo import Repo as DulwichRepo
 
 from linktools import utils
 from linktools.rich import create_simple_progress
+from .container import ContainerError
 
 _PROGRESS_RE = re.compile(rb'^(.+?):\s+(?:\s*\d+%\s+\((\d+)/(\d+)\))?')
 
@@ -137,15 +138,21 @@ class Repository:
 
     def update_with_progress(self, reset: bool = False):
         with create_simple_progress("message") as progress:
-            # fast_forward=False lets dulwich merge diverged branches instead of
-            # raising DivergedBranches; force=True (when reset) force-updates the
-            # local branch to the remote, overwriting any local commits/changes.
-            porcelain.pull(
-                self._path,
-                errstream=_ProgressStream(progress),
-                fast_forward=False,
-                force=reset,
-            )
+            try:
+                # force=True (when reset) force-updates the local branch to the
+                # remote, overwriting local commits/changes. Merging is avoided
+                # on purpose: these repos are shallow (depth=1) clones, so dulwich
+                # cannot find a merge base and would fail.
+                porcelain.pull(
+                    self._path,
+                    errstream=_ProgressStream(progress),
+                    force=reset,
+                )
+            except porcelain.DivergedBranches:
+                raise ContainerError(
+                    "Local branch has diverged from the remote and cannot be "
+                    "fast-forwarded. Re-run with `--force` to reset it to the remote."
+                )
 
     @classmethod
     def clone_with_progress(cls, url: str, repo_path: str = None, branch: str = None):
