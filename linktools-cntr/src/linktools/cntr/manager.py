@@ -77,10 +77,6 @@ class ContainerManager:
 
     @property
     def configs(self) -> "dict[str, Any]":
-        choices = ["docker", "docker-rootless", "podman"] \
-            if self.system in ("darwin", "linux") and os.getuid() != 0 \
-            else ["docker", "podman"]
-
         return dict(
             HOST=Config.Prompt() | Config.Lazy(lambda cfg: utils.get_lan_ip()),
             DOCKER_HOST="/var/run/docker.sock",
@@ -90,10 +86,14 @@ class ContainerManager:
             SERVICE_LOG_DRIVER="json-file",
             SERVICE_LOG_MAX_SIZE="10m",
 
-            CONTAINER_TYPE=Config.Prompt(choices=choices, cached=True),
             DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
             DOCKER_UID=Config.Lazy(lambda cfg: utils.get_uid(cfg.get("DOCKER_USER", type=str))),
             DOCKER_GID=Config.Lazy(lambda cfg: utils.get_gid(cfg.get("DOCKER_USER", type=str))),
+            DOCKER_TYPE=Config.Lazy(lambda cfg: \
+                Config.Alias("CONTAINER_TYPE") | Config.Prompt(choices=["docker", "docker-rootless"], cached=True) \
+                if self.system == "linux" and os.getuid() != 0 \
+                else "docker"
+            ),
 
             DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("app"),
             DOCKER_APP_DATA_PATH=Config.Alias("DOCKER_APP_PATH", type="path"),
@@ -107,7 +107,7 @@ class ContainerManager:
 
     @cached_property
     def container_type(self) -> str:
-        return self.env_config.get("CONTAINER_TYPE", type=str)
+        return self.env_config.get("DOCKER_TYPE", type=str)
 
     @cached_property
     def container_host(self) -> str:
@@ -585,7 +585,7 @@ class ContainerManager:
             if repo_type == "git" and repo_path:
                 self.logger.info(f"Update git repository: {url}")
                 if not os.path.exists(repo_path):
-                    Repository.clone_with_progress(url, repo_path)
+                    Repository.clone_with_progress(url, repo_path, branch)
                     continue
                 repo = Repository(repo_path)
             else:

@@ -133,7 +133,14 @@ class Repository:
         return bool(any(staged.values()) or unstaged)
 
     def create_head(self, branch: str) -> _Head:
-        porcelain.branch_create(self._path, branch)
+        branch_ref = self._branch_ref(branch)
+        target = self._remote_branch_target(branch)
+        if target is None:
+            result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
+            target = result.refs.get(branch_ref)
+        if target is None:
+            raise ContainerError(f"Remote branch `{branch}` not found.")
+        porcelain.branch_create(self._path, branch, target)
         return _Head(self._path, branch)
 
     def update_with_progress(self, reset: bool = False):
@@ -141,9 +148,11 @@ class Repository:
             if reset:
                 self._force_update(progress)
                 return
+            branch_ref = self._current_branch_ref()
             try:
                 porcelain.pull(
                     self._path,
+                    refspecs=branch_ref,
                     errstream=_ProgressStream(progress),
                 )
             except porcelain.DivergedBranches:
@@ -152,12 +161,25 @@ class Repository:
                     "fast-forwarded. Re-run with `--force` to reset it to the remote."
                 )
 
+    def _branch_ref(self, branch: str) -> bytes:
+        return b"refs/heads/" + branch.encode()
+
+    def _current_branch_ref(self) -> bytes:
+        head_refs, _ = self._repo.refs.follow(b"HEAD")
+        branch_ref = head_refs[-1]
+        if not branch_ref.startswith(b"refs/heads/"):
+            raise ContainerError("Repository HEAD is detached; unable to resolve branch to update.")
+        return branch_ref
+
+    def _remote_branch_target(self, branch: str):
+        remote_ref = b"refs/remotes/origin/" + branch.encode()
+        return self._repo.refs.as_dict().get(remote_ref)
+
     def _force_update(self, progress):
         # These repos are shallow (depth=1) clones, so dulwich cannot merge or
         # rebase a diverged branch. A forced update instead fetches the remote
         # objects and hard-resets the local branch to match the remote.
-        head_refs, _ = self._repo.refs.follow(b"HEAD")
-        branch_ref = head_refs[-1]  # e.g. b"refs/heads/master"
+        branch_ref = self._current_branch_ref()  # e.g. b"refs/heads/master"
         result = porcelain.fetch(
             self._path,
             errstream=_ProgressStream(progress),
