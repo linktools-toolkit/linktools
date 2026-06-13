@@ -186,9 +186,9 @@ class Repository:
             depth=1,
             force=True,
         )
-        target = result.refs.get(branch_ref) or result.refs.get(b"HEAD")
+        target = result.refs.get(branch_ref)
         if target is None:
-            raise ContainerError("Unable to resolve the remote branch to reset to.")
+            raise ContainerError(f"Remote branch `{branch_ref.decode()}` not found.")
         porcelain.reset(self._path, "hard", target)
 
     @classmethod

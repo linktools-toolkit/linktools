@@ -27,7 +27,6 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import contextlib
-import functools
 import inspect
 import json
 import os
@@ -177,7 +176,7 @@ class ContainerManager:
                             data.set("INSTALLED_REPOS", json.load(fd))
                         utils.remove_file(repo_path)
                         utils.remove_file(repo_lock)
-                    except:
+                    except Exception as e:
                         self.logger.warning(f"Failed to load old repo file: {e}")
 
         return settings
@@ -274,22 +273,27 @@ class ContainerManager:
         return containers
 
     def resolve_depend_containers(self, containers: "Iterable[BaseContainer]") -> "list[BaseContainer]":
-        order = lambda o: o() if callable(o) else o
-        result: "dict[BaseContainer, int | Callable[[], int]]" = dict()
-        container_queue: "set[BaseContainer]" = set(containers)
-        while container_queue:
-            container = container_queue.pop()
-            result.setdefault(container, container.order)
+        result: "list[BaseContainer]" = []
+        visited: "set[BaseContainer]" = set()
+        visiting: "set[BaseContainer]" = set()
+
+        def visit(container: "BaseContainer"):
+            if container in visited:
+                return
+            if container in visiting:
+                raise ContainerError(f"Circular dependency detected for container {container}")
+            visiting.add(container)
             for dependency in container.dependencies:
                 if dependency not in self.containers:
                     raise ContainerError(f"Dependency container {dependency} not found")
-                depend_container = self.containers[dependency]
-                if depend_container not in result:
-                    result.setdefault(depend_container, depend_container.order)
-                    container_queue.add(depend_container)
-                if order(result[depend_container]) >= order(result[container]):
-                    result[depend_container] = functools.partial(lambda o: order(result[o]) - 1, container)
-        return sorted(result, key=lambda o: (order(result[o]), o.order, o.name))
+                visit(self.containers[dependency])
+            visiting.remove(container)
+            visited.add(container)
+            result.append(container)
+
+        for container in sorted(containers, key=lambda o: (o.order, o.name)):
+            visit(container)
+        return result
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
@@ -579,50 +583,54 @@ class ContainerManager:
 
     def update_repos(self, branch: str = None, reset: bool = False):
         for url, meta in self.get_all_repos().items():
-            repo = None
             repo_type = meta.get("type", None)
             repo_path = meta.get("repo_path", None)
-            if repo_type == "git" and repo_path:
+            if not repo_path:
+                continue
+
+            if repo_type == "git" and not os.path.exists(repo_path):
                 self.logger.info(f"Update git repository: {url}")
-                if not os.path.exists(repo_path):
-                    Repository.clone_with_progress(url, repo_path, branch)
-                    continue
+                Repository.clone_with_progress(url, repo_path, branch)
+                continue
+
+            if not os.path.exists(repo_path):
+                continue
+
+            try:
                 repo = Repository(repo_path)
-            else:
-                try:
-                    if os.path.exists(repo_path):
-                        repo = Repository(repo_path)
-                except NotGitRepository:
-                    self.logger.debug(f"Invalid git repository, skip: {url}")
-                    repo = None
+            except NotGitRepository:
+                self.logger.debug(f"Invalid git repository, skip: {url}")
+                continue
 
-            if repo:
-                is_stash = False
-                try:
-                    if repo.is_dirty():
-                        if not reset:
-                            self.logger.info(f"Repository `{repo_path}` is dirty, stash changes before pull")
-                            is_stash = True
-                            repo.git.stash()
-                        else:
-                            self.logger.warning(f"Repository `{repo_path}` is dirty, reset to HEAD")
-                            repo.git.reset(hard=True)
+            if repo_type == "git":
+                self.logger.info(f"Update git repository: {url}")
 
-                    if branch:
-                        if branch in repo.heads:
-                            self.logger.info(f"Checkout branch `{branch}` in repository `{repo_path}`")
-                            repo.git.checkout(branch)
-                        else:
-                            self.logger.info(f"Branch `{branch}` not found in repository `{repo_path}`, create and checkout")
-                            new_branch = repo.create_head(branch)
-                            new_branch.checkout()
+            is_stash = False
+            try:
+                if repo.is_dirty():
+                    if not reset:
+                        self.logger.info(f"Repository `{repo_path}` is dirty, stash changes before pull")
+                        is_stash = True
+                        repo.git.stash()
+                    else:
+                        self.logger.warning(f"Repository `{repo_path}` is dirty, reset to HEAD")
+                        repo.git.reset(hard=True)
 
-                    repo.update_with_progress(reset=reset)
+                if branch:
+                    if branch in repo.heads:
+                        self.logger.info(f"Checkout branch `{branch}` in repository `{repo_path}`")
+                        repo.git.checkout(branch)
+                    else:
+                        self.logger.info(f"Branch `{branch}` not found in repository `{repo_path}`, create and checkout")
+                        new_branch = repo.create_head(branch)
+                        new_branch.checkout()
 
-                finally:
-                    if is_stash:
-                        self.logger.info(f"Repository `{repo_path}` is updated, pop stashed changes")
-                        repo.git.stash("pop")
+                repo.update_with_progress(reset=reset)
+
+            finally:
+                if is_stash:
+                    self.logger.info(f"Repository `{repo_path}` is updated, pop stashed changes")
+                    repo.git.stash("pop")
 
     def remove_repo(self, url: str):
         with self._settings.lock("repo"):
