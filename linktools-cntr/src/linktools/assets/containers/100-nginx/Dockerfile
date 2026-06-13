@@ -13,7 +13,7 @@ RUN mkdir -p /etc/certs && \
     chmod +x /docker-entrypoint.d/99-start-crond.sh
 
 {%- for key, value in container.extend_configs.items() %}
-ENV {{ key }} {{ config.get(key, default=value) }}
+ENV {{ key }}={{ config.get(key, default=value) }}
 {%- endfor %}
 
 RUN acme.sh --issue {{ container.acme_ssl_domains_args }} --dns {{ ACME_DNS_API }} --debug 2
