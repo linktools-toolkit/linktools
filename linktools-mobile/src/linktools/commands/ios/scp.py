@@ -8,6 +8,7 @@ import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
+from linktools.platform import get_free_port
 from linktools.mobile.cli import IOSCommand
 from linktools.ssh import SSHClient
 
@@ -59,7 +60,7 @@ class Command(IOSCommand):
     def run(self, args: "IOSNamespace") -> "int | None":
         device = args.device_selector.select()
 
-        local_port = utils.get_free_port()
+        local_port = get_free_port()
         with device.forward(local_port, args.port):
             with SSHClient() as client:
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())

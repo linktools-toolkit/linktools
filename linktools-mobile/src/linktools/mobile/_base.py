@@ -7,7 +7,8 @@ from typing import TypeVar, Generic, TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable
-from linktools.types import Error
+from linktools.errors import Error
+from linktools.runtime import Process, list2cmdline
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
@@ -46,7 +47,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
         """
         pass
 
-    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
+    def popen(self, *args: "Any", **kwargs) -> "Process":
         """
         执行命令
         :param args: 命令参数
@@ -95,7 +96,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
             if kill_on_return:
                 process.recursive_kill()
 
-    def _exec(self, process: "utils.Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
+    def _exec(self, process: "Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
         out = err = None
         for _out, _err in process.fetch(timeout=timeout):
             if _out is not None:
@@ -118,7 +119,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
             if code is None:
                 timeout.ensure(
                     self._error_type,
-                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
+                    f"Timeout when executing command: {list2cmdline(process.args)}"
                 )
             if code not in (0, None):
                 if isinstance(err, bytes):

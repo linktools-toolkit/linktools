@@ -41,7 +41,9 @@ import frida
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
-from linktools.types import Timeout, Stoppable, DownloadHttpError
+from linktools.errors import DownloadHttpError
+from linktools.runtime import get_derived_type
+from linktools.types import Timeout, Stoppable
 from ..android import AdbDevice
 from ..ios import GoIOSDevice
 from ...capabilities.mobile import __cap_mobile__
@@ -56,7 +58,7 @@ class ServerNotRunningError(frida.ServerNotRunningError):
     ...
 
 
-class FridaServer(utils.get_derived_type(frida.core.Device),  # proxy for frida.core.Device
+class FridaServer(get_derived_type(frida.core.Device),  # proxy for frida.core.Device
                   Stoppable,
                   metaclass=abc.ABCMeta):
 

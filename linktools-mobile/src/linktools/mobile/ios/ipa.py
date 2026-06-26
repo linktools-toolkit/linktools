@@ -11,7 +11,7 @@ import re
 import zipfile
 from typing import TYPE_CHECKING
 
-from linktools.types import Error
+from linktools.errors import Error
 
 if TYPE_CHECKING:
     from typing import Any

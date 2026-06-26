@@ -36,8 +36,11 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
+from linktools.platform import get_free_port
+from linktools.runtime import Process, list2cmdline
 from linktools.types import Stoppable
-from .types import App, UnixSocket, InetSocket, Process, File, SystemService
+from linktools.utils._hash import get_hash_ident
+from .types import App, UnixSocket, InetSocket, Process as ProcessInfo, File, SystemService
 from .._base import BridgeError, Bridge, BaseDevice
 from ...capabilities.mobile import __cap_mobile__
 
@@ -155,7 +158,7 @@ class AdbDevice(BaseDevice):
         """
         return (type or AdbDevice)(self._id, self._adb)
 
-    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
+    def popen(self, *args: "Any", **kwargs) -> "Process":
         """
         执行命令
         :param args: 命令行参数
@@ -182,7 +185,7 @@ class AdbDevice(BaseDevice):
         :param user: 以指定user运行
         :return: 参数列表
         """
-        cmd = utils.list2cmdline([str(arg) for arg in args])
+        cmd = list2cmdline([str(arg) for arg in args])
         if privilege and self.uid != 0:
             args = ["shell", "su", "-c", cmd]
         elif user:
@@ -229,7 +232,7 @@ class AdbDevice(BaseDevice):
             remote_path = self.push_file(
                 apk_path,
                 self.get_data_path("android", "apk"),
-                f"installed_{int(time.time())}_{utils.get_hash_ident(apk_path)}.apk",
+                f"installed_{int(time.time())}_{get_hash_ident(apk_path)}.apk",
                 **kwargs)
             if self.uid >= 10000:
                 self.shell("am", "start", "--user", "0",
@@ -361,7 +364,7 @@ class AdbDevice(BaseDevice):
         :return: 重定向对象
         """
         if not port:
-            port = utils.get_free_port()
+            port = get_free_port()
 
         return AdbRedirect(self, address, port, uid)
 
@@ -760,7 +763,7 @@ class AdbDevice(BaseDevice):
         return result
 
     @timeoutable
-    def list_processes(self, **kwargs) -> "list[Process]":
+    def list_processes(self, **kwargs) -> "list[ProcessInfo]":
         """
         列出所有进程
         """
@@ -768,7 +771,7 @@ class AdbDevice(BaseDevice):
         agent_args = ["common", "--list-process"]
         objs = json.loads(self.call_agent(*agent_args, **kwargs))
         for obj in objs:
-            result.append(Process(obj))
+            result.append(ProcessInfo(obj))
         return result
 
     @timeoutable

@@ -20,7 +20,9 @@ from frida.core import Session, Script
 from linktools import utils, metadata
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
-from linktools.types import Stoppable, Reactor
+from linktools.platform import wait_event
+from linktools.runtime import Reactor, get_derived_type
+from linktools.types import Stoppable
 from .script import FridaUserScript, FridaEvalCode, FridaScriptFile
 from ...capabilities.mobile import __cap_mobile__
 
@@ -45,7 +47,7 @@ class FridaReactor(Reactor):
             fn()
 
 
-class FridaSession(utils.get_derived_type(Session)):  # proxy for frida.core.Session
+class FridaSession(get_derived_type(Session)):  # proxy for frida.core.Session
 
     __super__: "Session"
 
@@ -93,7 +95,7 @@ class FridaSession(utils.get_derived_type(Session)):  # proxy for frida.core.Ses
     __str__ = __repr__
 
 
-class FridaScript(utils.get_derived_type(Script)):  # proxy for frida.core.Script
+class FridaScript(get_derived_type(Script)):  # proxy for frida.core.Script
 
     __super__: "Script"
 
@@ -647,13 +649,13 @@ class FridaApplication(Stoppable, FridaDeviceHandler, FridaSessionHandler, Frida
         try:
             self._init()
             self._reactor.start()
-            utils.wait_event(self._stop_request, timeout)
+            wait_event(self._stop_request, timeout)
         finally:
             self.stop()
 
     @timeoutable
     def wait(self, timeout: "TimeoutType" = None) -> bool:
-        return utils.wait_event(self._stop_request, timeout)
+        return wait_event(self._stop_request, timeout)
 
     def stop(self):
         self._reactor.signal_stop()

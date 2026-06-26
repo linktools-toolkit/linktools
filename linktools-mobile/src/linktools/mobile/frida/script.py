@@ -35,6 +35,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.metadata import __missing__
 from linktools.rich import confirm
+from linktools.utils._hash import get_md5
 
 _logger = environ.get_logger("frida.app")
 
@@ -151,7 +152,7 @@ class FridaShareScript(FridaUserScript):
             if os.path.exists(cached_md5_path):
                 cached_md5 = utils.read_file(cached_md5_path, text=True)
 
-            source_md5 = utils.get_md5(source)
+            source_md5 = get_md5(source)
             if cached_md5 == source_md5:
                 _logger.info(f"Load trusted {self}")
                 return source

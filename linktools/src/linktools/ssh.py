@@ -17,9 +17,11 @@ from scp import SCPClient
 
 from linktools import utils
 from linktools.core import environ
+from linktools.platform import get_free_port, is_unix_like, is_windows
 from linktools.rich import prompt, create_progress
+from linktools.runtime import list2cmdline
 from linktools.types import Stoppable
-from linktools.utils import list2cmdline, ignore_errors, is_unix_like
+from linktools.utils import ignore_errors
 
 if TYPE_CHECKING:
     from typing import Any
@@ -133,7 +135,7 @@ class SSHClient(paramiko.SSHClient):
             finally:
                 ignore_errors(chan.close)
 
-    if utils.is_windows():
+    if is_windows():
 
         @classmethod
         def _open_shell(cls, channel: "paramiko.Channel"):
@@ -282,7 +284,7 @@ class SSHClient(paramiko.SSHClient):
         """
 
         if local_port is None:
-            local_port = utils.get_free_port()
+            local_port = get_free_port()
 
         return SSHForward(self, "", local_port, forward_host, forward_port)
 

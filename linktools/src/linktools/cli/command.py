@@ -42,12 +42,12 @@ from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING
 
 from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
-from .. import utils
 from ..core import environ, BaseCapability, ConfigProperty
 from ..decorator import cached_property
 from ..metadata import __missing__
 from ..rich import get_log_handler, init_logging, _is_rich_available
-from ..types import Error
+from ..errors import Error
+from ..runtime import import_module
 
 if TYPE_CHECKING:
     from argparse import FileType, HelpFormatter
@@ -163,7 +163,7 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
     prefix = root.__name__ + "."
     for finder, name, is_package in walk_packages(path=root.__path__, prefix=prefix):
         try:
-            module = utils.import_module(name, spec=finder.find_spec(name))
+            module = import_module(name, spec=finder.find_spec(name))
             info = _CommandInfo()
             if is_package:
                 info.id = name[len(prefix):]

@@ -29,6 +29,7 @@
 from typing import TYPE_CHECKING
 
 from linktools import utils
+from linktools.runtime import popen
 from linktools.mobile.cli import AndroidCommand
 
 if TYPE_CHECKING:
@@ -64,7 +65,7 @@ class Command(AndroidCommand):
         with device.forward(f"tcp:{args.port}", f"jdwp:{pid}"):
             data = input("jdb connect? [Y/n]: ").strip()
             if data in ["", "Y", "y"]:
-                process = utils.popen(
+                process = popen(
                     "jdb", "-connect", f"com.sun.jdi.SocketAttach:hostname=127.0.0.1,port={args.port}")
                 return process.call()
 

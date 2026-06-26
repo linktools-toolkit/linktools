@@ -42,7 +42,9 @@ from typing import TYPE_CHECKING, Tuple, List, Dict
 from linktools import utils
 from linktools.metadata import __missing__
 from linktools.rich import choose, prompt, confirm
-from linktools.types import PathType, get_args, ConfigError, FileCache
+from linktools.cache import FileCache
+from linktools.errors import ConfigError
+from linktools.types import PathType, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
@@ -493,7 +495,7 @@ class ConfigCacheParser:
 
     def load(self):
         """Load cache data from disk."""
-        with self._cache.backup():
+        with self._cache.backups():
             if self._path and os.path.exists(self._path):
                 self._parser.read(self._path)
             if not self._parser.has_section(self._section):
@@ -501,7 +503,7 @@ class ConfigCacheParser:
 
     def dump(self):
         """Write cache data to disk."""
-        with self._cache.backup() as backup:
+        with self._cache.backups() as backup:
             if self._path and os.path.exists(self._path):
                 backup.backup(self._path)
             with open(self._path, "wt") as fd:

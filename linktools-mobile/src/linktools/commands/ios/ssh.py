@@ -35,7 +35,9 @@ from paramiko.ssh_exception import SSHException
 
 from linktools import utils
 from linktools.cli import CommandMain
+from linktools.platform import get_free_port
 from linktools.mobile.cli import IOSCommand
+from linktools.runtime import popen
 from linktools.ssh import SSHClient
 
 if TYPE_CHECKING:
@@ -67,7 +69,7 @@ class Command(IOSCommand):
     def run(self, args: "IOSNamespace") -> "int | None":
         device = args.device_selector.select()
 
-        local_port = utils.get_free_port()
+        local_port = get_free_port()
         with device.forward(local_port, args.port):
             ssh = shutil.which("ssh")
             if ssh:
@@ -75,7 +77,7 @@ class Command(IOSCommand):
                     "-o", "StrictHostKeyChecking=no",
                     "-o", f"UserKnownHostsFile={os.devnull}",
                 ]
-                process = utils.popen(
+                process = popen(
                     ssh,
                     *option_args,
                     f"{args.username}@127.0.0.1", "-p", local_port,

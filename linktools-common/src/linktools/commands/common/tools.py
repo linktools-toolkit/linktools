@@ -32,7 +32,7 @@ import subprocess
 
 from linktools.cli import BaseCommand, CommandMain
 from linktools.cli.argparse import KeyValueAction
-from linktools.types import DownloadError, ToolError
+from linktools.errors import DownloadError, ToolError
 
 if TYPE_CHECKING:
     from argparse import Namespace

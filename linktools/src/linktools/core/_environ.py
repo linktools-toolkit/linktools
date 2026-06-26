@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools import utils, metadata
+from linktools.platform import get_machine, get_system
 from linktools.decorator import cached_property, cached_classproperty
 
 if TYPE_CHECKING:
@@ -93,7 +94,7 @@ class BaseEnviron(abc.ABC):
         Returns:
             str: The property value.
         """
-        return utils.get_system()
+        return get_system()
 
     @property
     def machine(self) -> str:
@@ -102,7 +103,7 @@ class BaseEnviron(abc.ABC):
         Returns:
             str: The property value.
         """
-        return utils.get_machine()
+        return get_machine()
 
     @property
     def debug(self) -> bool:

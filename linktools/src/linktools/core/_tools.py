@@ -35,9 +35,11 @@ from collections import ChainMap
 from typing import TYPE_CHECKING, Tuple, List
 
 from linktools import utils
+from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
+from linktools.platform import get_interpreter, get_interpreter_ident, get_shell_path, get_system
+from linktools.runtime import Process, list2cmdline, popen
 from linktools.decorator import cached_property, timeoutable
 from linktools.metadata import __missing__
-from linktools.types import ToolNotFound, ToolNotSupport, ToolExecError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
@@ -128,7 +130,7 @@ class ToolStub(object):
 
     """Lightweight descriptor for a tool definition."""
     def __init__(self, path: "PathType", name: str, environ: "BaseEnviron" = None):
-        self.system = environ.system if environ else utils.get_system()
+        self.system = environ.system if environ else get_system()
         self.name = f"{name}.bat" if self.system == "windows" else name
         self.path = pathlib.Path(path, self.name)
 
@@ -477,7 +479,7 @@ class Tool(metaclass=ToolMeta):
             self._tools.logger.debug(f"Delete {self.root_path}")
             shutil.rmtree(self.root_path, ignore_errors=True)
 
-    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
+    def popen(self, *args: "Any", **kwargs) -> "Process":
         """Start a process for this tool.
 
         Args:
@@ -485,7 +487,7 @@ class Tool(metaclass=ToolMeta):
             kwargs: Keyword arguments passed to the operation.
 
         Returns:
-            utils.Process: The operation result.
+            Process: The operation result.
         """
         self.prepare()
 
@@ -501,7 +503,7 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[executable_cmdline[0]]
             return tool.popen(*args, **kwargs)
 
-        return utils.popen(*[*executable_cmdline, *args], **kwargs)
+        return popen(*[*executable_cmdline, *args], **kwargs)
 
     @timeoutable
     def exec(
@@ -545,7 +547,7 @@ class Tool(metaclass=ToolMeta):
             str: The operation result.
         """
         from ..cli import env
-        return utils.list2cmdline([utils.get_interpreter(), "-m", env.__name__, "tool", self.name])
+        return list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
 
 
 class Tools(object):
@@ -566,7 +568,7 @@ class Tools(object):
         """
         return self.environ.get_data_path(
             "scripts",
-            utils.get_interpreter_ident(),
+            get_interpreter_ident(),
             f"tools_v{self.environ.version}",
         )
 
@@ -619,11 +621,11 @@ class Tools(object):
         result = {
             "shell": Tool(self, "shell", {
                 "cmdline": None,
-                "absolute_path": utils.get_shell_path(),
+                "absolute_path": get_shell_path(),
             }),
             "python": Tool(self, "python", {
                 "cmdline": None,
-                "absolute_path": utils.get_interpreter(),
+                "absolute_path": get_interpreter(),
             }),
         }
 

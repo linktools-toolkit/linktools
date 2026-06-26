@@ -6,7 +6,7 @@ import pathlib
 from typing import TYPE_CHECKING
 
 from .. import metadata
-from ..types import ModuleError
+from ..errors import ModuleError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

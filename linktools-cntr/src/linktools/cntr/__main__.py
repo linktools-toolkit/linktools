@@ -37,7 +37,7 @@ from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ, ConfigProperty
 from linktools.rich import confirm, choose
-from linktools.types import ConfigError
+from linktools.errors import ConfigError
 from .container import ContainerError
 from .context import EventContext
 from .manager import ContainerManager
@@ -209,18 +209,17 @@ class ExecCommand(BaseCommand):
         return parser
 
     def init_arguments(self, parser: "CommandParser") -> None:
+
+        class Completer(ArgParseComplete.Completer):
+            get_parser = lambda _: self._subparser
+            get_args = lambda _, args, **kw: \
+                [args.exec_name, *args.exec_args] \
+                if args.exec_name \
+                else None
+
         parser.add_argument("exec_name", nargs="?", metavar="CONTAINER", help="container name",
                             choices=LazyChoices(_iter_installed_container_names))
         action = parser.add_argument("exec_args", nargs="...", metavar="ARGS", help="container exec args")
-
-        class Completer(ArgParseComplete.Completer):
-
-            def get_parser(_):
-                return self._subparser
-
-            def get_args(_, args, **kw):
-                return [args.exec_name, *args.exec_args] if args.exec_name else None
-
         action.completer = Completer()
 
     def run(self, args: "Namespace") -> "int | None":

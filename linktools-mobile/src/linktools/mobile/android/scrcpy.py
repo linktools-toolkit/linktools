@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
+from linktools.runtime import Process, list2cmdline
 from linktools.types import Stoppable
 from .adb import AdbDevice, AdbError
 from ...capabilities.mobile import __cap_mobile__
@@ -401,7 +402,7 @@ class ScrcpyServer(Stoppable):
     def __init__(self, device: "AdbDevice" = None, version: str = None):
         self._device = device or AdbDevice()
         self._version = version
-        self._process: "utils.Process | None" = None
+        self._process: "Process | None" = None
 
     @cached_classproperty
     def _server_info(self) -> "list[dict[str, str]]":
@@ -430,7 +431,7 @@ class ScrcpyServer(Stoppable):
             )
             self._process = self._device.popen(
                 "shell",
-                utils.list2cmdline([
+                list2cmdline([
                     f"CLASSPATH={remote_path}", "app_process", "/", "com.genymobile.scrcpy.Server", server_version,
                     *[str(arg) for arg in args]
                 ]),
@@ -1023,12 +1024,69 @@ class ScrcpySession(Stoppable):
 
 
 if __name__ == '__main__':
+    import collections
     import logging
+    from typing import Generic, TypeVar
+
     import av
     import cv2
 
     from linktools.rich import init_logging
-    from linktools.types import SlidingQueue
+
+    T = TypeVar("T")
+
+    class SlidingQueue(Generic[T]):
+        """A thread-safe, generic data queue for producer-consumer patterns."""
+
+        def __init__(self, size: int):
+            self._lock = threading.RLock()
+            self._size = size
+            self._queue = collections.deque([])
+            self._last_put_time = 0
+            self._last_get_time = 0
+
+        def put(self, item: "T") -> "T | None":
+            with self._lock:
+                result = None
+                if 0 <= self._size <= len(self._queue):
+                    result = self._queue.popleft()
+                self._queue.append(item)
+                self._last_put_time = int(time.time())
+                return result
+
+        def get(self) -> "T | None":
+            with self._lock:
+                if len(self._queue) > 0:
+                    self._last_get_time = int(time.time())
+                    return self._queue.popleft()
+                return None
+
+        def peek(self) -> "T | None":
+            with self._lock:
+                if len(self._queue) > 0:
+                    return self._queue[0]
+                return None
+
+        def is_backlogged(self, timeout: int) -> bool:
+            with self._lock:
+                if len(self._queue) == 0:
+                    return False
+                return self._last_get_time + timeout < int(time.time())
+
+        def is_starving(self, timeout: int) -> bool:
+            with self._lock:
+                return self._last_put_time + timeout < int(time.time())
+
+        def is_empty(self) -> bool:
+            with self._lock:
+                return len(self._queue) == 0
+
+        def clear(self) -> None:
+            with self._lock:
+                self._queue.clear()
+                self._last_put_time = 0
+                self._last_get_time = 0
+
 
     init_logging(level=logging.DEBUG, show_level=True)
 

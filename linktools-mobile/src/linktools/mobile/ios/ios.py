@@ -31,11 +31,13 @@ import subprocess
 import time
 from typing import TYPE_CHECKING
 
-from .types import App, Process
+from .types import App, Process as ProcessInfo
 from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
+from linktools.platform import get_free_port, is_port_free, wait_process
+from linktools.runtime import Process, list2cmdline
 from linktools.types import Stoppable, Timeout
 
 if TYPE_CHECKING:
@@ -90,7 +92,7 @@ class GoIOS(Bridge):
                     elif alive is True:  # online only
                         yield GoIOSDevice(id, ios=self)
 
-    def _exec(self, process: "utils.Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
+    def _exec(self, process: "Process", timeout: "TimeoutType", log_output: bool, ignore_errors: bool) -> str:
         result = None
         for out, err in process.fetch(timeout=timeout):
             if out is not None:
@@ -121,7 +123,7 @@ class GoIOS(Bridge):
             if code is None:
                 timeout.ensure(
                     self._error_type,
-                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
+                    f"Timeout when executing command: {list2cmdline(process.args)}"
                 )
 
         if isinstance(result, bytes):
@@ -201,7 +203,7 @@ class GoIOSDevice(BaseDevice):
         """
         return (type or GoIOSDevice)(self._id, self._ios)
 
-    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
+    def popen(self, *args: "Any", **kwargs) -> "Process":
         """
         执行命令
         :param args: 命令行参数
@@ -297,7 +299,7 @@ class GoIOSDevice(BaseDevice):
         return result
 
     @timeoutable
-    def get_processes(self, **kwargs) -> "list[Process]":
+    def get_processes(self, **kwargs) -> "list[ProcessInfo]":
         """
         获取进程列表
         :return: 进程列表
@@ -305,7 +307,7 @@ class GoIOSDevice(BaseDevice):
         result = []
         for line in self.exec("ps", **kwargs).splitlines():
             for obj in utils.ignore_errors(json.loads, args=(line,), default=[]):
-                result.append(Process(obj))
+                result.append(ProcessInfo(obj))
         return result
 
     def forward(self, local_port: int, remote_port: int) -> "GoIOSForward":
@@ -332,7 +334,7 @@ class GoIOSDevice(BaseDevice):
         client = None
         try:
             forward = self.forward(
-                local_port=utils.get_free_port(),
+                local_port=get_free_port(),
                 remote_port=port,
             )
 
@@ -403,13 +405,13 @@ class GoIOSForward(Stoppable):
 
                 if self._process.poll() is None:
                     time.sleep(min(max(timeout.remain, 1), 1))
-                    if self._process.poll() is None and not utils.is_port_free(local_port):
+                    if self._process.poll() is None and not is_port_free(local_port):
                         _logger.debug(f"{self} process is running, continue")
                         return
 
                 _logger.debug(f"Start forward failed, kill {self} process and restart it.")
                 utils.ignore_errors(self._process.recursive_kill)
-                utils.wait_process(self._process, .5)
+                wait_process(self._process, .5)
                 self._process = ios.popen(
                     "forward",
                     local_port,
@@ -427,7 +429,7 @@ class GoIOSForward(Stoppable):
         if process is not None:
             _logger.debug(f"Kill {self} process")
             utils.ignore_errors(process.recursive_kill)
-            utils.wait_process(process, 5)
+            wait_process(process, 5)
 
     def __repr__(self):
         return f"GoIOSForward<{self.local_port}:{self.remote_port}>"

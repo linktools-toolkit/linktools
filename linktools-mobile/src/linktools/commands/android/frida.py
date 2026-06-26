@@ -32,9 +32,10 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandMain, CommandError
 from linktools.cli.argparse import range_type, KeyValueAction, BooleanOptionalAction
+from linktools.platform import get_free_port
 from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaAndroidServer
-from linktools.types import DownloadError
+from linktools.errors import DownloadError
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -121,7 +122,7 @@ class Command(AndroidCommand):
 
         server = FridaAndroidServer(
             device=device,
-            local_port=args.local_port or utils.get_free_port(),
+            local_port=args.local_port or get_free_port(),
             remote_port=args.remote_port,
             serve=args.serve
         )

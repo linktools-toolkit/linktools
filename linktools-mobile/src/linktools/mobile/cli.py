@@ -34,7 +34,7 @@ from typing import Generic, TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 from linktools.rich import choose
-from linktools.types import FileCache
+from linktools.cache import FileCache
 from . import Bridge, BridgeError, BaseDevice, BridgeType, DeviceType, list_devices
 from .android import Adb, AdbError, AdbDevice
 from .ios import GoIOS, GoIOSError, GoIOSDevice

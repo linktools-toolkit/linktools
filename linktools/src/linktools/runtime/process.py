@@ -10,45 +10,51 @@ import threading
 from collections import ChainMap
 from typing import TYPE_CHECKING
 
-from . import _utils as utils
 from ..decorator import cached_property, timeoutable
-from ..types import ExecError
+from ..errors import ExecError
+from ..platform import is_unix_like, wait_process
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
-    from typing import Any, AnyStr, IO
+    from typing import Any, AnyStr, Callable, IO
     from ..types import PathType, Timeout, TimeoutType
 
 STDOUT = 1
 STDERR = 2
 
 
+def _coalesce(*args):
+    for arg in args:
+        if arg is not None:
+            return arg
+    return None
+
+
+def _get_environ():
+    from ..core import environ
+    return environ
+
+
+_logger = None
+
+
+def _get_logger():
+    global _logger
+    if _logger is None:
+        _logger = _get_environ().get_logger("process")
+    return _logger
+
+
 def list2cmdline(args: "Iterable[str]") -> str:
-    """Convert an argv list into a shell command line string.
-
-    Args:
-        args (Iterable[str]): Arguments passed to the operation.
-
-    Returns:
-        str: The operation result.
-    """
     return subprocess.list2cmdline(args)
 
 
 def cmdline2list(cmdline: str) -> "list[str]":
-    """Split a shell command line string into an argv list.
-
-    Args:
-        cmdline (str): Command line string to write or execute.
-
-    Returns:
-        List[str]: The operation result.
-    """
     import shlex
     return shlex.split(cmdline)
 
 
-if utils.is_unix_like():
+if is_unix_like():
 
     class Output:
 
@@ -69,8 +75,8 @@ if utils.is_unix_like():
                 fds.append(stderr.fd)
 
             while len(fds) > 0:
-                remain = utils.coalesce(timeout.remain, 1)
-                if remain <= 0:  # Timed out.
+                remain = _coalesce(timeout.remain, 1)
+                if remain <= 0:
                     break
                 rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
                 if stdout.fd is not None and stdout.fd in rlist:
@@ -103,7 +109,7 @@ if utils.is_unix_like():
                             self.buffer.extend(data)
                 except OSError as e:
                     if e.errno != errno.EBADF:
-                        utils.get_logger().debug(f"Read io error: {e}")
+                        _get_logger().debug(f"Read io error: {e}")
                 if data:
                     while True:
                         index = self.buffer.find(b"\n")
@@ -171,18 +177,17 @@ else:
                     self._queue.put((code, data))
             except OSError as e:
                 if e.errno != errno.EBADF:
-                    utils.get_logger().debug(f"Handle output error: {e}")
+                    _get_logger().debug(f"Handle output error: {e}")
             finally:
                 event.set()
                 self._queue.put((None, None))
 
         def get(self, timeout: "Timeout"):
             while self.is_alive:
-                remain = utils.coalesce(timeout.remain, 1)
-                if remain <= 0:  # Timed out.
+                remain = _coalesce(timeout.remain, 1)
+                if remain <= 0:
                     break
                 try:
-                    # Use a one-second timeout to avoid deadlock with multiple consumers.
                     code, data = self._queue.get(timeout=min(remain, 1))
                     if code is not None:
                         yield code, data
@@ -191,7 +196,6 @@ else:
 
             while True:
                 try:
-                    # Drain any remaining consumable data.
                     code, data = self._queue.get_nowait()
                     if code is not None:
                         yield code, data
@@ -200,21 +204,9 @@ else:
 
 
 class Process(subprocess.Popen):
-    """Wrapper around subprocess.Popen with timeout-aware helpers."""
 
     @timeoutable
     def call(self, timeout: "TimeoutType" = None) -> int:
-        """Wait for the process and kill descendants on failure.
-
-        Args:
-            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
-
-        Returns:
-            int: The operation result.
-
-        Raises:
-            Exception: Propagates errors raised while completing the operation.
-        """
         with self:
             try:
                 return self.wait(timeout.remain)
@@ -224,17 +216,6 @@ class Process(subprocess.Popen):
 
     @timeoutable
     def check_call(self, timeout: "TimeoutType" = None) -> int:
-        """Wait for the process and raise on a nonzero exit code.
-
-        Args:
-            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
-
-        Returns:
-            int: The operation result.
-
-        Raises:
-            Exception: Propagates errors raised while completing the operation.
-        """
         with self:
             try:
                 retcode = self.wait(timeout.remain)
@@ -247,14 +228,6 @@ class Process(subprocess.Popen):
 
     @timeoutable
     def fetch(self, timeout: "TimeoutType" = None) -> "Generator[tuple[AnyStr | None, AnyStr | None], Any, Any]":
-        """Collect stdout and stderr from the process.
-
-        Args:
-            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
-
-        Returns:
-            Generator[Tuple[Optional[AnyStr], Optional[AnyStr]], Any, Any]: The operation result.
-        """
         if self.stdout or self.stderr:
             for code, data in self._output.get(timeout):
                 out = err = None
@@ -263,7 +236,7 @@ class Process(subprocess.Popen):
                 elif code == STDERR:
                     err = data
                 yield out, err
-        utils.wait_process(self, timeout)
+        wait_process(self, timeout)
 
     @timeoutable
     def exec(
@@ -274,21 +247,6 @@ class Process(subprocess.Popen):
             on_stderr: "Callable[[str], None]" = None,
             error_type: "Callable[[str], Exception]" = ExecError
     ) -> str:
-        """Run a process command until completion.
-
-        Args:
-            timeout (TimeoutType): Maximum time to wait, or None to wait indefinitely.
-            ignore_errors (bool): Whether command errors should be suppressed.
-            on_stdout (Callable[[str], None]): Callback invoked for stdout output.
-            on_stderr (Callable[[str], None]): Callback invoked for stderr output.
-            error_type (Callable[[str], Exception]): Exception type raised for command failures.
-
-        Returns:
-            str: The operation result.
-
-        Raises:
-            Exception: Propagates errors raised while completing the operation.
-        """
         try:
             out = err = None
             for _out, _err in self.fetch(timeout=timeout):
@@ -328,7 +286,6 @@ class Process(subprocess.Popen):
             self.recursive_kill()
 
     def recursive_kill(self) -> None:
-        """Terminate the process and all child processes."""
         import psutil
         try:
             for p in reversed(psutil.Process(self.pid).children(recursive=True)):
@@ -337,11 +294,11 @@ class Process(subprocess.Popen):
                 except psutil.NoSuchProcess:
                     pass
                 except Exception as e:
-                    utils.get_logger().debug(f"Kill children process failed: {e}")
+                    _get_logger().debug(f"Kill children process failed: {e}")
         except psutil.NoSuchProcess:
             pass
         except Exception as e:
-            utils.get_logger().debug(f"List children process failed: {e}")
+            _get_logger().debug(f"List children process failed: {e}")
 
         self.terminate()
 
@@ -357,28 +314,7 @@ def popen(
         shell: bool = False, cwd: "PathType" = None,
         env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
         **kwargs
-) -> "Process":
-    """Create a Process for the supplied command.
-
-    Args:
-        args (Any): Arguments passed to the operation.
-        capture_output (bool): The capture_output value.
-        stdin (Union[int, IO]): The stdin value.
-        stdout (Union[int, IO]): The stdout value.
-        stderr (Union[int, IO]): The stderr value.
-        shell (bool): The shell value.
-        cwd (PathType): The cwd value.
-        env (Dict[str, str]): The env value.
-        append_env (Dict[str, str]): The append_env value.
-        default_env (Dict[str, str]): The default_env value.
-        kwargs: Keyword arguments passed to the operation.
-
-    Returns:
-        Process: The operation result.
-
-    Raises:
-        Exception: Propagates errors raised while completing the operation.
-    """
+) -> Process:
     args = [str(arg) for arg in args]
 
     if capture_output is True:
@@ -392,7 +328,7 @@ def popen(
         try:
             cwd = os.getcwd()
         except FileNotFoundError:
-            cwd = utils.get_environ().temp_path
+            cwd = _get_environ().temp_path
             cwd.mkdir(parents=True, exist_ok=True)
 
     if append_env or default_env:
@@ -404,7 +340,7 @@ def popen(
             maps.append(default_env)
         env = ChainMap(*maps)
 
-    utils.get_logger().debug(f"Exec cmdline: {list2cmdline(args)}")
+    _get_logger().debug(f"Exec cmdline: {list2cmdline(args)}")
 
     return Process(
         args,

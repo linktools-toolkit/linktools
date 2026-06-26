@@ -35,8 +35,10 @@ from typing import TYPE_CHECKING, Iterable
 
 from linktools.decorator import cached_property, timeoutable
 from linktools.rich import create_progress
-from linktools.types import DownloadError, DownloadHttpError, FileCache
-from linktools.utils import get_file_hash, ignore_errors, parse_header, guess_file_name, user_agent, get_hash_ident, remove_file
+from linktools.cache import FileCache
+from linktools.errors import DownloadError, DownloadHttpError
+from linktools.utils import ignore_errors, parse_header, guess_file_name, user_agent, remove_file
+from linktools.utils._hash import get_file_hash, get_hash_ident
 
 if TYPE_CHECKING:
     from typing import Literal

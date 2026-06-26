@@ -32,10 +32,12 @@ from linktools import utils
 from linktools.capabilities.mobile import __cap_mobile__
 from linktools.cli import CommandError
 from linktools.cli.argparse import range_type, BooleanOptionalAction
+from linktools.platform import get_free_port, get_interpreter
 from linktools.core import environ
 from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.frida import FridaAndroidServer
-from linktools.types import DownloadError
+from linktools.runtime import popen
+from linktools.errors import DownloadError
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -86,13 +88,13 @@ class Command(AndroidCommand):
 
         server = FridaAndroidServer(
             device=device,
-            local_port=args.local_port or utils.get_free_port(),
+            local_port=args.local_port or get_free_port(),
             remote_port=args.remote_port,
             serve=args.serve
         )
 
         with server:
-            objection_args = [utils.get_interpreter(), "-m", "objection.console.commands"]
+            objection_args = [get_interpreter(), "-m", "objection.console.commands"]
             if environ.debug:
                 objection_args += ["--debug"]
             objection_args += ["-N", "-p", server.local_port]
@@ -123,9 +125,9 @@ class Command(AndroidCommand):
                 port = args.redirect_port or 8080
                 uid = device.get_uid(package)
                 with device.redirect(address, port, uid):
-                    return utils.popen(*objection_args).call()
+                    return popen(*objection_args).call()
             else:
-                return utils.popen(*objection_args).call()
+                return popen(*objection_args).call()
 
 
 command = Command()

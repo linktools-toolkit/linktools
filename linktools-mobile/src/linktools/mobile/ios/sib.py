@@ -11,6 +11,8 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, timeoutable
+from linktools.platform import get_free_port
+from linktools.runtime import Process
 from linktools.types import Stoppable
 
 if TYPE_CHECKING:
@@ -135,7 +137,7 @@ class SibDevice(BaseDevice):
         """
         return (type or SibDevice)(self._id, self._info, self._sib)
 
-    def popen(self, *args: "Any", **kwargs) -> "utils.Process":
+    def popen(self, *args: "Any", **kwargs) -> "Process":
         """
         执行命令
         :param args: 命令行参数
@@ -208,7 +210,7 @@ class SibDevice(BaseDevice):
         client = None
         try:
             forward = self.forward(
-                local_port=utils.get_free_port(),
+                local_port=get_free_port(),
                 remote_port=port,
             )
 

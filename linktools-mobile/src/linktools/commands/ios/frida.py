@@ -32,9 +32,10 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError, CommandMain
 from linktools.cli.argparse import KeyValueAction, range_type, BooleanOptionalAction
+from linktools.platform import get_free_port
 from linktools.mobile.cli import IOSCommand
 from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaIOSServer
-from linktools.types import DownloadError
+from linktools.errors import DownloadError
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -112,7 +113,7 @@ class Command(IOSCommand):
 
         server = FridaIOSServer(
             device=device,
-            local_port=args.local_port or utils.get_free_port(),
+            local_port=args.local_port or get_free_port(),
             remote_port=args.remote_port,
         )
 

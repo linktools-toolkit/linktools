@@ -54,6 +54,8 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     from .. import utils, metadata
     from ..core import environ as _environ
+    from ..platform import get_interpreter, get_interpreter_ident
+    from ..runtime import list2cmdline, popen
     from .command import SubCommand, CommandError, iter_entry_points_capabilities
 
     commands: "list[SubCommand]" = []
@@ -68,14 +70,14 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     def get_stub_path() -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
-            utils.get_interpreter_ident(),
+            get_interpreter_ident(),
             f"env_v{environ.version}",
         )
 
     def get_alias_path() -> "pathlib.Path":
         return environ.get_data_path(
             "scripts",
-            utils.get_interpreter_ident(),
+            get_interpreter_ident(),
             f"alias_v{environ.version}",
         )
 
@@ -126,7 +128,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             env = dict(PATH=os.pathsep.join(paths))
             if args.command:
-                return utils.popen(args.command, shell=True, append_env=env).call()
+                return popen(args.command, shell=True, append_env=env).call()
 
             return shell.popen(append_env=env).call()
 
@@ -171,7 +173,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         names.append(temp.command_name)
                     executable = "-".join(reversed(names))
                     stub = ToolStub(stub_path, executable, environ=environ)
-                    stub.create(utils.list2cmdline([utils.get_interpreter(), "-m", command_info.module]))
+                    stub.create(list2cmdline([get_interpreter(), "-m", command_info.module]))
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
                     executables.append(executable)
 
@@ -315,7 +317,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     pip_args.append("--no-build-isolation")
 
                 remove_cache_files()
-                return utils.popen(utils.get_interpreter(), "-m", *pip_args).check_call()
+                return popen(get_interpreter(), "-m", *pip_args).check_call()
 
     @register_command(name="clean", description="clean temporary files")
     class CleanCommand(SubCommand):

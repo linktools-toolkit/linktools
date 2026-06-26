@@ -77,7 +77,10 @@ ct-tools apktool -h
   - `_tools.py` (`Tools`, `Tool`) — declarative tool definitions from `assets/tools.json`; handles download, extraction, and execution
   - `_capability.py` (`BaseCapability`) — sub-package self-registration with version and path info
 - **`cli/`** — CLI framework: `BaseCommand`, `BaseCommandGroup`, `CommandParser` (enhanced `ArgumentParser`). All commands in all sub-packages inherit from these.
-- **`types.py`** — `Stoppable` (context manager pattern), `Reactor` (event loop), `Timeout`, error hierarchy (`Error → ConfigError → ToolError → ToolNotFound/ToolNotSupport/ToolExecError`)
+- **`types.py`** — `Stoppable` (context manager pattern), `Timeout`, `EventHandlerMixin`
+- **`errors.py`** — error hierarchy (`Error → ConfigError → ToolError → ToolNotFound/ToolNotSupport/ToolExecError`)
+- **`platform.py`** — OS/user/network helpers (`get_system`, `get_user`, `get_uid`/`get_gid`, `get_lan_ip`, `wait_process`, etc.)
+- **`runtime/`** — `Process`/`popen` (subprocess wrapper), `Reactor` (event loop), `Proxy`/`IterProxy` (lazy proxies)
 - **`decorator.py`** — `@singleton`, `@cached_property`, `@try_except`, `@timeoutable`
 - **`rich.py`** — terminal UI: logging, progress bars, `prompt`/`confirm`/`choose`
 

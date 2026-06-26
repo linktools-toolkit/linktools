@@ -32,10 +32,12 @@ from linktools import utils
 from linktools.capabilities.mobile import __cap_mobile__
 from linktools.cli import CommandError
 from linktools.cli.argparse import range_type
+from linktools.platform import get_free_port, get_interpreter
 from linktools.core import environ
 from linktools.mobile.cli import IOSCommand
 from linktools.mobile.frida import FridaIOSServer
-from linktools.types import DownloadError
+from linktools.runtime import popen
+from linktools.errors import DownloadError
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -77,12 +79,12 @@ class Command(IOSCommand):
 
         server = FridaIOSServer(
             device=device,
-            local_port=args.local_port or utils.get_free_port(),
+            local_port=args.local_port or get_free_port(),
             remote_port=args.remote_port,
         )
 
         with server:
-            objection_args = [utils.get_interpreter(), "-m", "objection.console.commands"]
+            objection_args = [get_interpreter(), "-m", "objection.console.commands"]
             if environ.debug:
                 objection_args += ["--debug"]
             objection_args += ["-N", "-p", server.local_port]
@@ -107,7 +109,7 @@ class Command(IOSCommand):
             if args.plugin_folder:
                 objection_args += ["--plugin-folder", args.plugin_folder]
 
-            return utils.popen(*objection_args).call()
+            return popen(*objection_args).call()
 
 
 command = Command()

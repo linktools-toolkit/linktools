@@ -39,10 +39,13 @@ from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import Config
+from linktools.cache import FileCache
 from linktools.decorator import cached_property
+from linktools.errors import Error
 from linktools.metadata import __missing__
+from linktools.runtime import cmdline2list, lazy_load, list2cmdline
 from linktools.rich import choose, confirm
-from linktools.types import Error, FileCache
+from linktools.utils._hash import get_md5
 from ..capabilities.cntr import __cap_cntr__
 
 
@@ -98,7 +101,7 @@ class ExposeMixin:
                 return utils.join_url(url, *path, queries=queries)
             return ""
 
-        return utils.lazy_load(make_url)
+        return lazy_load(make_url)
 
     def load_port_url(self: "BaseContainer", key: "ConfigKeyType",
                       *path: str, queries: "QueryType | None" = None, 
@@ -114,7 +117,7 @@ class ExposeMixin:
                     queries=queries)
             return ""
 
-        return utils.lazy_load(make_url)
+        return lazy_load(make_url)
 
     def load_nginx_url(
             self: "BaseContainer", key: "ConfigKeyType",
@@ -161,7 +164,7 @@ class ExposeMixin:
                 )
 
         self.start_hooks.append(make_nginx_conf)
-        return utils.lazy_load(make_url)
+        return lazy_load(make_url)
 
     def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType", 
                              *path: str, queries: "QueryType | None" = None, 
@@ -176,7 +179,7 @@ class ExposeMixin:
                 return utils.make_url(scheme, domain, port, *path, queries=queries)
             return ""
 
-        return utils.lazy_load(make_url)
+        return lazy_load(make_url)
 
 
 class NginxMixin:
@@ -302,7 +305,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":
-        with self.settings.open() as settings:
+        with self.settings.session() as settings:
             mount_paths = settings.get("mount_paths", {})
             for name in self.manager.docker_compose_names:
                 path = self.get_source_path(name)
@@ -488,9 +491,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                 commands.extend(shell_command)
             commands.extend(["else", "sh", ";"])
             commands.append("fi")
-            commands = ("sh", "-c", utils.list2cmdline(commands))
+            commands = ("sh", "-c", list2cmdline(commands))
         else:
-            commands = utils.cmdline2list(command)
+            commands = cmdline2list(command)
 
         return self.manager.create_docker_process(
             "exec", "-it", *options, service.get("container_name"), *commands
@@ -539,7 +542,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None):
         if not source or not target:
             if not source and not target:
-                with self.settings.open() as settings:
+                with self.settings.session() as settings:
                     result = {}
                     mount_paths = settings.get("mount_paths") or {}
                     for service in self.services.values():
@@ -564,7 +567,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             return
 
         service = self.choose_service(service_name)
-        with self.settings.open() as settings:
+        with self.settings.session() as settings:
             mount_paths = settings.get("mount_paths") or {}
             containers_paths = mount_paths.setdefault(service.get("container_name"), {})
             container_path = f"{source_path}:{target_path}:{permission}"
@@ -580,7 +583,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_unmount_file(self, service_name: str = None):
         service = self.choose_service(service_name)
-        with self.settings.open() as settings:
+        with self.settings.session() as settings:
             mount_paths = settings.get("mount_paths") or {}
             containers_paths = mount_paths.setdefault(service.get("container_name"), {})
             if not containers_paths:
@@ -598,7 +601,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self.manager.env_config.get(key, type=type, default=default)
 
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
-        return utils.lazy_load(self.manager.env_config.get, key, type=type, default=default)
+        return lazy_load(self.manager.env_config.get, key, type=type, default=default)
 
     def _make_exec_context(self, commands) -> "EventContext":
         from .context import EventContext
@@ -738,9 +741,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         context.update(
             DEBUG=self.manager.debug,
 
-            SOURCE_PATH=utils.lazy_load(self.get_source_path),
-            APP_PATH=utils.lazy_load(self.get_app_path),
-            APP_DATA_PATH=utils.lazy_load(self.get_app_data_path),
+            SOURCE_PATH=lazy_load(self.get_source_path),
+            APP_PATH=lazy_load(self.get_app_path),
+            APP_DATA_PATH=lazy_load(self.get_app_data_path),
 
             manager=self.manager,
             container=self,
@@ -803,7 +806,7 @@ class SourceContainer(BaseContainer):
 
     @cached_property
     def _context_path(self):
-        name = utils.get_md5(self._source_url)
+        name = get_md5(self._source_url)
         source_path = self.get_app_path("source", f"{name}.in")
         dest_path = self.get_app_path("source", f"{name}.out")
 

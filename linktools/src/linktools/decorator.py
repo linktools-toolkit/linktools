@@ -36,7 +36,7 @@ from linktools.types import Timeout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import Any, ParamSpec, Union
+    from typing import Any, ParamSpec
 
     T = TypeVar("T")
     P = ParamSpec("P")

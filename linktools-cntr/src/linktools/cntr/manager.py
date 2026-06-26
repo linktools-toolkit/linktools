@@ -37,10 +37,12 @@ from typing import TYPE_CHECKING
 from dulwich.errors import NotGitRepository
 
 from linktools import utils
+from linktools.platform import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
 from linktools.core import Config
+from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.metadata import __missing__
-from linktools.types import FileCache
+from linktools.runtime import Process, import_module_file, popen
 from .container import BaseContainer, SimpleContainer, ContainerError
 from .repository import Repository
 from ..capabilities.cntr import __cap_cntr__
@@ -53,14 +55,22 @@ if TYPE_CHECKING:
     from .context import EventContext
 
 
+def _is_chown_supported(system: str = None) -> bool:
+    """Return whether chown/chmod on a host path is reflected inside a container
+    bind-mounting that path. Docker Desktop's VM-backed bind mounts on macOS and
+    Windows don't honor host-side ownership/permission changes, so this is only
+    true on Linux."""
+    return (system or get_system()) == "linux"
+
+
 class ContainerManager:
 
     def __init__(self, environ: "Environ", name: str = "aio"):  # all_in_one
-        self.user = utils.get_user()
-        self.uid = utils.get_uid()
-        self.gid = utils.get_gid()
-        self.system = utils.get_system()
-        self.machine = utils.get_machine()
+        self.user = get_user()
+        self.uid = get_uid()
+        self.gid = get_gid()
+        self.system = get_system()
+        self.machine = get_machine()
 
         self.name = name or self.environ.name
         self.environ = environ
@@ -77,7 +87,7 @@ class ContainerManager:
     @property
     def configs(self) -> "dict[str, Any]":
         return dict(
-            HOST=Config.Prompt() | Config.Lazy(lambda cfg: utils.get_lan_ip()),
+            HOST=Config.Prompt() | Config.Lazy(lambda cfg: get_lan_ip()),
             DOCKER_HOST="/var/run/docker.sock",
 
             COMPOSE_PROJECT_NAME=self.name,
@@ -86,8 +96,8 @@ class ContainerManager:
             SERVICE_LOG_MAX_SIZE="10m",
 
             DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
-            DOCKER_UID=Config.Lazy(lambda cfg: utils.get_uid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_GID=Config.Lazy(lambda cfg: utils.get_gid(cfg.get("DOCKER_USER", type=str))),
+            DOCKER_UID=Config.Lazy(lambda cfg: get_uid(cfg.get("DOCKER_USER", type=str))),
+            DOCKER_GID=Config.Lazy(lambda cfg: get_gid(cfg.get("DOCKER_USER", type=str))),
             DOCKER_TYPE=Config.Lazy(lambda cfg: \
                 Config.Alias("CONTAINER_TYPE") | Config.Prompt(choices=["docker", "docker-rootless"], cached=True) \
                 if self.system == "linux" and os.getuid() != 0 \
@@ -159,7 +169,7 @@ class ContainerManager:
         repo_lock = self.data_path.joinpath("repo", "repo.lock")
 
         if os.path.isfile(config_path) or os.path.isfile(repo_path):
-            with settings.open() as data:
+            with settings.session() as data:
                 if os.path.isfile(config_path):
                     self.logger.warning("Found old config file, try to migrate.")
                     try:
@@ -243,7 +253,7 @@ class ContainerManager:
         if os.path.exists(container_path):
             try:
                 name = path.replace(os.sep, ".")
-                module = utils.import_module_file(name, container_path)
+                module = import_module_file(name, container_path)
                 for key, value in module.__dict__.items():
                     if isinstance(value, type) and issubclass(value, BaseContainer):
                         if not value.__abstract__:
@@ -456,7 +466,7 @@ class ContainerManager:
             *args,
             privilege: bool = None,
             **kwargs
-    ) -> "utils.Process":
+    ) -> "Process":
         if privilege:
             if self.system in ("darwin", "linux") and self.uid != 0:
                 proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
@@ -466,15 +476,15 @@ class ContainerManager:
                 if preserve_env:
                     sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
                 sudo_args.extend(args)
-                return utils.create_process(*sudo_args, **kwargs)
-        return utils.create_process(*args, **kwargs)
+                return popen(*sudo_args, **kwargs)
+        return popen(*args, **kwargs)
 
     def create_docker_process(
             self,
             *args,
             privilege: bool = None,
             **kwargs
-    ) -> "utils.Process":
+    ) -> "Process":
         commands = []
         if self.container_type in ("docker", "docker-rootless"):
             commands.extend(["docker"])
@@ -492,7 +502,7 @@ class ContainerManager:
             *args: str,
             privilege: bool = None,
             **kwargs: "Any"
-    ) -> "utils.Process":
+    ) -> "Process":
         options = []
         for container in containers:
             path = container.get_docker_compose_file()
@@ -505,13 +515,16 @@ class ContainerManager:
         path = self.env_config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
+        if not _is_chown_supported(self.system):
+            self.logger.debug(f"Skip chown of {path} on {self.system}")
+            return
         if not shutil.which("chown"):
             self.logger.debug("Command `chown` not found")
             return
         args = ["chown"]
         if recursive:
             args.append("-R")
-        uid, gid = utils.get_uid(user), utils.get_gid(user)
+        uid, gid = get_uid(user), get_gid(user)
         args.extend([f"{uid}:{gid}", str(path)])
         try:
             stat = os.stat(path)
@@ -526,6 +539,9 @@ class ContainerManager:
     def change_file_mode(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
+        if not _is_chown_supported(self.system):
+            self.logger.debug(f"Skip chmod of {path} on {self.system}")
+            return
         if not shutil.which("chown"):
             self.logger.debug("Command `chmod` not found")
             return
@@ -663,7 +679,7 @@ class ContainerManager:
             self._setting_cache.pop(key, None)
         elif key in self._setting_cache:
             return self._setting_cache[key]
-        with self._settings.open() as data:
+        with self._settings.session() as data:
             result = data.get(key, default)
             if result is None:  # key may be stored explicitly as null
                 result = default
@@ -672,5 +688,5 @@ class ContainerManager:
 
     def _dump_setting(self, key: str, setting: "dict | list | tuple"):
         self._setting_cache.pop(key, None)
-        with self._settings.open() as data:
+        with self._settings.session() as data:
             data.set(key, setting)
