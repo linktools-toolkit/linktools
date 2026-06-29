@@ -251,7 +251,7 @@ class SSHClient(paramiko.SSHClient):
     @contextlib.contextmanager
     def _open_scp(self):
 
-        with create_progress() as progress:
+        with create_progress(transfer=True) as progress:
             tasks = {}
 
             def update_progress(filename, size, sent):

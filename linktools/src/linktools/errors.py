@@ -50,3 +50,7 @@ class ToolExecError(ToolError):
 
 class NoFreePortFoundError(Error):
     """Exception indicating that no free port could be found."""
+
+
+class GitError(Error):
+    """Raised when a git repository operation fails."""

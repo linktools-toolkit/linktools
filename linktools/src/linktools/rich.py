@@ -499,11 +499,14 @@ def _get_log_column():
     return _LogColumn()
 
 
-def create_simple_progress(*fields: str):
-    """Create a simple progress renderer with optional task fields.
+def create_progress(*fields: str, transfer: bool = False):
+    """Create a progress renderer with optional task fields.
 
     Args:
-        fields (str): The fields value.
+        fields (str): Extra per-task fields to render as columns.
+        transfer (bool): If True, render transfer-oriented columns
+            (size, speed, ETA) in addition to the description and bar.
+            Suitable for both uploads and downloads.
 
     Returns:
         Any: The operation result.
@@ -524,39 +527,19 @@ def create_simple_progress(*fields: str):
         BarColumn(),
     ])
 
+    if transfer:
+        from rich.progress import DownloadColumn, TransferSpeedColumn, TaskProgressColumn, TimeRemainingColumn
+
+        columns.extend([
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TaskProgressColumn(),
+            TextColumn("eta"),
+            TimeRemainingColumn(),
+        ])
+
     for field in fields:
         columns.append(TextColumn(f"{{task.fields[{field}]}}"))
-
-    return Progress(*columns)
-
-
-def create_progress():
-    """Create a download-oriented progress renderer.
-
-    Returns:
-        Any: The operation result.
-    """
-    if not _is_rich_available():
-        return _FakeProgress()
-
-    from rich.progress import Progress, TextColumn, BarColumn, DownloadColumn, \
-        TransferSpeedColumn, TaskProgressColumn, TimeRemainingColumn
-
-    columns = []
-
-    handler = get_log_handler()
-    if handler and (handler.show_time or handler.show_level):
-        columns.append(_get_log_column())
-
-    columns.extend([
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TaskProgressColumn(),
-        TextColumn("eta"),
-        TimeRemainingColumn(),
-    ])
 
     return Progress(*columns)
 

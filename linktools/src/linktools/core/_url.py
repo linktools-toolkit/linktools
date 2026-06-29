@@ -358,7 +358,7 @@ class HttpContext:
         except ModuleNotFoundError:
             fn = self._download_with_urllib
 
-        with create_progress() as progress:
+        with create_progress(transfer=True) as progress:
             task_id = progress.add_task(self.file_name, total=None)
             progress.advance(task_id, initial)
 

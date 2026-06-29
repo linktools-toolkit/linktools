@@ -37,7 +37,7 @@ from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ, ConfigProperty
 from linktools.rich import confirm, choose
-from linktools.errors import ConfigError
+from linktools.errors import ConfigError, GitError
 from .container import ContainerError
 from .context import EventContext
 from .manager import ContainerManager
@@ -247,7 +247,7 @@ class Command(BaseCommandGroup):
     @property
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
-            ContainerError, ConfigError, SubprocessError, GitProtocolError, OSError, AssertionError,
+            ContainerError, ConfigError, GitError, SubprocessError, GitProtocolError, OSError, AssertionError,
         ]
 
     def init_subcommands(self) -> "Any":

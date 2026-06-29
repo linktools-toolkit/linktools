@@ -25,3 +25,16 @@ optional-dependencies:
   # Used for docker/podman container management
   cntr:
     - linktools-cntr
+
+  ssh:
+    # 使用ssh连接越狱后的iphone
+    # Use ssh to connect to jailbroken iphone
+    - paramiko
+    - scp
+
+  git:
+    # 用于git仓库的克隆、拉取等操作
+    # Used for git repository clone/pull operations
+    # >=0.25.1: porcelain.switch() 在 0.25.0 引入，但 porcelain.status() 的
+    # untracked 字段类型不一致，0.25.1 才修复
+    - dulwich>=0.25.1

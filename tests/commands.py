@@ -1,35 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 import unittest
-from argparse import Namespace
-from typing import Optional
 
-from linktools.cli import BaseCommand, subcommand, subcommand_argument, commands, SubCommandWrapper, CommandParser
+from linktools.cli import BaseCommand, subcommand, subcommand_argument, SubCommandWrapper, iter_entry_point_commands
+from linktools.metadata import __ep_scripts__
+from linktools.__main__ import command
 
 
 class TestCommands(unittest.TestCase):
 
     def test_help(self):
-        class Command(BaseCommand):
-
-            def __init__(self):
-                self.subcommands = list(self.walk_subcommands(commands))
-
-            def init_arguments(self, parser: CommandParser) -> None:
-                self.add_subcommands(parser, self.subcommands)
-
-            def run(self, args: Namespace) -> Optional[int]:
-                self.run_subcommand(args)
-                return 0
-
-        command = Command()
+        # `--help` exits via argparse's SystemExit rather than returning, for
+        # both the top-level command and every installed sub-package's CLI.
         with self.subTest(command.name, command=command):
-            self.assertEqual(command(["--help"]), 0)
+            with self.assertRaises(SystemExit) as cm:
+                command(["--help"])
+            self.assertEqual(cm.exception.code, 0)
 
-        for subcommand in command.subcommands:
+        for subcommand in command.walk_subcommands(iter_entry_point_commands(__ep_scripts__, onerror="warn")):
             if isinstance(subcommand, SubCommandWrapper):
                 with self.subTest(subcommand.name, command=subcommand.command):
-                    self.assertEqual(subcommand.command(["--help"]), 0)
+                    with self.assertRaises(SystemExit) as cm:
+                        subcommand.command(["--help"])
+                    self.assertEqual(cm.exception.code, 0)
 
     def test_sub_command(self):
         class SubCommand(BaseCommand):
@@ -67,14 +60,20 @@ class TestCommands(unittest.TestCase):
             def ccc(self, arg1, arg2: str = 123):
                 print("SubCommand2.ccc", arg1)
 
-        command = SubCommand2()
-        with self.subTest(command.name, command=command):
-            self.assertEqual(command(["--help"]), 0)
-            self.assertEqual(command(["-h"]), 0)
-            self.assertEqual(command(["aaa"]), 0)
-            self.assertEqual(command(["bbb"]), 0)
-            self.assertEqual(command(["ccc", "--arg1", "test"]), 0)
-            self.assertEqual(command(["ddd"]), 0)
+        command_ = SubCommand2()
+        with self.subTest(command_.name, command=command_):
+            with self.assertRaises(SystemExit) as cm:
+                command_(["--help"])
+            self.assertEqual(cm.exception.code, 0)
+
+            with self.assertRaises(SystemExit) as cm:
+                command_(["-h"])
+            self.assertEqual(cm.exception.code, 0)
+
+            self.assertEqual(command_(["aaa"]), 0)
+            self.assertEqual(command_(["bbb"]), 0)
+            self.assertEqual(command_(["ccc", "--arg1", "test"]), 0)
+            self.assertEqual(command_(["ddd"]), 0)
 
 
 if __name__ == '__main__':

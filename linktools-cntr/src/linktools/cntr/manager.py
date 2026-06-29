@@ -41,10 +41,10 @@ from linktools.platform import get_gid, get_lan_ip, get_machine, get_system, get
 from linktools.core import Config
 from linktools.cache import FileCache
 from linktools.decorator import cached_property
+from linktools.git import GitRepository
 from linktools.metadata import __missing__
 from linktools.runtime import Process, import_module_file, popen
 from .container import BaseContainer, SimpleContainer, ContainerError
-from .repository import Repository
 from ..capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -580,7 +580,7 @@ class ContainerManager:
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
-                Repository.clone_with_progress(url, repo_path, branch)
+                GitRepository.clone(url, repo_path, branch)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
 
             else:
@@ -606,14 +606,14 @@ class ContainerManager:
 
             if repo_type == "git" and not os.path.exists(repo_path):
                 self.logger.info(f"Update git repository: {url}")
-                Repository.clone_with_progress(url, repo_path, branch)
+                GitRepository.clone(url, repo_path, branch)
                 continue
 
             if not os.path.exists(repo_path):
                 continue
 
             try:
-                repo = Repository(repo_path)
+                repo = GitRepository(repo_path)
             except NotGitRepository:
                 self.logger.debug(f"Invalid git repository, skip: {url}")
                 continue
@@ -641,7 +641,7 @@ class ContainerManager:
                         new_branch = repo.create_head(branch)
                         new_branch.checkout()
 
-                repo.update_with_progress(reset=reset)
+                repo.pull(reset=reset)
 
             finally:
                 if is_stash:

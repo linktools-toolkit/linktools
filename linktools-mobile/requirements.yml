@@ -18,8 +18,7 @@ optional-dependencies:
   ssh:
     # 使用ssh连接越狱后的iphone
     # Use ssh to connect to jailbroken iphone
-    - paramiko
-    - scp
+    - linktools[ssh]
 
   ssl:
     # 用于解析证书时使用
