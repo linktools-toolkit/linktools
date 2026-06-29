@@ -34,7 +34,7 @@ import typing
 
 from .. import utils
 from ..decorator import cached_classproperty
-from ..metadata import __missing__
+from ..types import MISSING
 from ..runtime import list2cmdline
 
 if typing.TYPE_CHECKING:
@@ -85,14 +85,14 @@ class LazyChoices(typing.Iterable):
 
     """Lazy iterable wrapper for argparse choices."""
     def __init__(self, func: "_t.Callable[P, _t.Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs"):
-        self._data = __missing__
+        self._data = MISSING
         self._fn = func
         self._args = args
         self._kwargs = kwargs
 
     def _load(self):
         result = self._data
-        if result == __missing__:
+        if result == MISSING:
             result = self._data = self._fn(*self._args, **self._kwargs)
         return result
 
@@ -113,7 +113,7 @@ class LazyChoices(typing.Iterable):
 class ConfigLoader:
 
     """Load configuration-backed argparse values after parsing."""
-    def __call__(self, parser: "CommandParser", action: "ConfigAction", namespace, value=__missing__):
+    def __call__(self, parser: "CommandParser", action: "ConfigAction", namespace, value=MISSING):
 
         from ..core._config import CacheConfigProperty
         from .command import CommandParser
@@ -129,12 +129,12 @@ class ConfigLoader:
 
         config = parser.command.config
         key = f"`{item}` for `{parser.prog}`"
-        if value is __missing__ or isinstance(value, ConfigLoader):
+        if value is MISSING or isinstance(value, ConfigLoader):
             value = action.property.get(
                 config,
                 key=key,
                 type=action.type or action.property.type,
-                default=__missing__,
+                default=MISSING,
                 choices=action.choices,
             )
         setattr(namespace, action.dest, value)
@@ -152,7 +152,7 @@ class ConfigAction(argparse.Action):
     def __init__(self,
                  option_strings,
                  dest,
-                 default=__missing__,
+                 default=MISSING,
                  type=None,
                  choices=None,
                  required=False,
@@ -177,7 +177,7 @@ class ConfigAction(argparse.Action):
             raise argparse.ArgumentError(self, "config must be ConfigProperty")
 
         self.property: "ConfigProperty" = config
-        if default is not __missing__:
+        if default is not MISSING:
             self.property.set_default(default, ignore_errors=True)
 
     def __call__(self, parser: "CommandParser", namespace, values, option_string=None):

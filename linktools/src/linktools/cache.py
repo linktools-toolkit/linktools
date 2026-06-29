@@ -6,10 +6,7 @@ import time as _time
 import typing as _t
 from pathlib import Path as _Path
 
-from .types import Timeout, TimeoutType
-
-T = _t.TypeVar("T")
-PathType = _t.Union[str, _Path]
+from .types import PathType, T, Timeout, TimeoutType
 
 _basic_cache_types = (type(None), int, float, bool, complex)
 _file_cache_backup_suffix = ".backup"

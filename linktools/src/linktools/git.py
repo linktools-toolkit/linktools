@@ -10,6 +10,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.errors import GitError
 from linktools.rich import create_progress
+from linktools.types import PathType
 
 if TYPE_CHECKING:
     from typing import Any
@@ -104,7 +105,7 @@ class GitRepository:
     and keep a shallow (depth=1) checkout in sync with its remote.
     """
 
-    def __init__(self, path: "Any"):
+    def __init__(self, path: "PathType"):
         self._path = str(path)
         self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
         self.git = _GitProxy(self._path)

@@ -162,7 +162,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             executables = []
             command_infos = {
                 command_info.id: command_info
-                for command_info in iter_entry_point_commands(metadata.__ep_scripts__, onerror="warn")
+                for command_info in iter_entry_point_commands(metadata.__scripts_group__, onerror="warn")
             }
             for command_info in command_infos.values():
                 if command_info.command:
@@ -288,7 +288,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 pip_index_urls = set()
                 pip_index_trusted_host = set()
 
-                for module in iter_entry_points_capabilities(metadata.__ep_capability__, onerror="warn"):
+                for module in iter_entry_points_capabilities(metadata.__capability_group__, onerror="warn"):
                     package, name, deps = get_package(module.name)
                     if package:
                         environ.logger.info(f"Update {package} ...")

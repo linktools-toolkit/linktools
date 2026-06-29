@@ -39,7 +39,7 @@ from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
 from linktools.platform import get_interpreter, get_interpreter_ident, get_shell_path, get_system
 from linktools.runtime import Process, list2cmdline, popen
 from linktools.decorator import cached_property, timeoutable
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
@@ -214,17 +214,17 @@ class Tool(metaclass=ToolMeta):
     """Executable tool wrapper with prepare and run helpers."""
     __default__: "Dict"
 
-    name: str = ToolProperty(default=__missing__, raw=True, internal=True)
-    system: str = ToolProperty(default=__missing__, raw=True, internal=True, validate=True)
-    machine: str = ToolProperty(default=__missing__, raw=True, internal=True, validate=True)
+    name: str = ToolProperty(default=MISSING, raw=True, internal=True)
+    system: str = ToolProperty(default=MISSING, raw=True, internal=True, validate=True)
+    machine: str = ToolProperty(default=MISSING, raw=True, internal=True, validate=True)
     version: str = ToolProperty(default="", raw=True)
     depends_on: "tuple" = ToolProperty(default=[], internal=True)
-    download_url: str = ToolProperty(default=__missing__)
-    target_path: str = ToolProperty(default=__missing__, internal=True)
-    root_path: str = ToolProperty(default=__missing__, internal=True)
-    unpack_path: str = ToolProperty(default=__missing__, internal=True)
-    absolute_path: str = ToolProperty(default=__missing__, internal=True)
-    cmdline: str = ToolProperty(default=__missing__)
+    download_url: str = ToolProperty(default=MISSING)
+    target_path: str = ToolProperty(default=MISSING, internal=True)
+    root_path: str = ToolProperty(default=MISSING, internal=True)
+    unpack_path: str = ToolProperty(default=MISSING, internal=True)
+    absolute_path: str = ToolProperty(default=MISSING, internal=True)
+    cmdline: str = ToolProperty(default=MISSING)
     executable_cmdline: "tuple" = ToolProperty(default=[], internal=True)
     environment: "dict[str, str]" = ToolProperty(default={}, internal=True)
 
@@ -324,7 +324,7 @@ class Tool(metaclass=ToolMeta):
 
         # set executable cmdline
         cmdline = utils.get_item(config, "cmdline")
-        if cmdline in (__missing__, None):
+        if cmdline in (MISSING, None):
             cmdline = config["name"]
         assert isinstance(cmdline, str), \
             f"{self} cmdline type error, " \

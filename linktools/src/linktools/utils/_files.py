@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import overload, TYPE_CHECKING
 
 from ..errors import Error
-from ._utils import get_environ, get_logger
+from ._common import get_environ, get_logger
 
 DEFAULT_ENCODING = "utf-8"
 

@@ -3,7 +3,7 @@
 import unittest
 
 from linktools.cli import BaseCommand, subcommand, subcommand_argument, SubCommandWrapper, iter_entry_point_commands
-from linktools.metadata import __ep_scripts__
+from linktools.metadata import __scripts_group__
 from linktools.__main__ import command
 
 
@@ -17,7 +17,7 @@ class TestCommands(unittest.TestCase):
                 command(["--help"])
             self.assertEqual(cm.exception.code, 0)
 
-        for subcommand in command.walk_subcommands(iter_entry_point_commands(__ep_scripts__, onerror="warn")):
+        for subcommand in command.walk_subcommands(iter_entry_point_commands(__scripts_group__, onerror="warn")):
             if isinstance(subcommand, SubCommandWrapper):
                 with self.subTest(subcommand.name, command=subcommand.command):
                     with self.assertRaises(SystemExit) as cm:

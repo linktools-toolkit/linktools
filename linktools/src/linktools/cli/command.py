@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
 from ..core import environ, BaseCapability, ConfigProperty
 from ..decorator import cached_property
-from ..metadata import __missing__
+from ..types import MISSING
 from ..rich import get_log_handler, init_logging, _is_rich_available
 from ..errors import Error
 from ..runtime import import_module
@@ -240,7 +240,7 @@ def iter_entry_points_capabilities(group: str, *, onerror: "ERROR_HANDLER" = "er
 
 
 def _filter_kwargs(kwargs):
-    return {k: v for k, v in kwargs.items() if v is not __missing__}
+    return {k: v for k, v in kwargs.items() if v is not MISSING}
 
 
 class _SubCommandActionInfo:
@@ -299,20 +299,20 @@ class _SubCommandMethodArgumentInfo:
 def subcommand(
         name: str,
         *,
-        help: str = __missing__,
-        aliases: "list[str]" = __missing__,
-        prog: str = __missing__,
-        usage: str = __missing__,
-        description: str = __missing__,
-        epilog: str = __missing__,
-        parents: "list[ArgumentParser]" = __missing__,
-        formatter_class: "type[HelpFormatter]" = __missing__,
-        prefix_chars: str = __missing__,
-        fromfile_prefix_chars: str = __missing__,
-        argument_default: "Any" = __missing__,
-        conflict_handler: str = __missing__,
-        add_help: bool = __missing__,
-        allow_abbrev: bool = __missing__,
+        help: str = MISSING,
+        aliases: "list[str]" = MISSING,
+        prog: str = MISSING,
+        usage: str = MISSING,
+        description: str = MISSING,
+        epilog: str = MISSING,
+        parents: "list[ArgumentParser]" = MISSING,
+        formatter_class: "type[HelpFormatter]" = MISSING,
+        prefix_chars: str = MISSING,
+        fromfile_prefix_chars: str = MISSING,
+        argument_default: "Any" = MISSING,
+        conflict_handler: str = MISSING,
+        add_help: bool = MISSING,
+        allow_abbrev: bool = MISSING,
         pass_args: bool = False,
         order: str = None):
     """Subcommand.
@@ -353,7 +353,7 @@ def subcommand(
         subcommand_info.order = order
         subcommand_info.set_args(
             name,
-            help=help if help is not __missing__ else "",
+            help=help if help is not MISSING else "",
             aliases=aliases,
             prog=prog,
             usage=usage,
@@ -393,16 +393,16 @@ def subcommand_argument(
         name_or_flag: str,
         *name_or_flags: str,
         no_param: bool = False,
-        action: "str | type[Action]" = __missing__,
-        choices: "Iterable[T]" = __missing__,
-        const: "Any" = __missing__,
-        default: "Any" = __missing__,
-        dest: str = __missing__,
-        help: str = __missing__,
-        metavar: "str | tuple[str, ...]" = __missing__,
-        nargs: "int | str" = __missing__,
-        required: bool = __missing__,
-        type: "type[int | float | str] | Callable[[str], T] | FileType" = __missing__,
+        action: "str | type[Action]" = MISSING,
+        choices: "Iterable[T]" = MISSING,
+        const: "Any" = MISSING,
+        default: "Any" = MISSING,
+        dest: str = MISSING,
+        help: str = MISSING,
+        metavar: "str | tuple[str, ...]" = MISSING,
+        nargs: "int | str" = MISSING,
+        required: bool = MISSING,
+        type: "type[int | float | str] | Callable[[str], T] | FileType" = MISSING,
         **kwargs: "Any"):
     """Subcommand argument.
 
@@ -591,15 +591,15 @@ class _SubCommandMethod(SubCommand):
             argument_args = argument.args
             argument_kwargs = dict(argument.kwargs)
 
-            no_param = argument_kwargs.pop("no_param", __missing__)
+            no_param = argument_kwargs.pop("no_param", MISSING)
 
             # Resolve dest so annotated arguments match method parameters.
-            dest = argument_kwargs.get("dest", __missing__)
-            if dest is __missing__:
+            dest = argument_kwargs.get("dest", MISSING)
+            if dest is MISSING:
                 prefix_chars = parser.prefix_chars
                 if not argument_args or len(argument_args) == 1 and argument_args[0][0] not in prefix_chars:
                     dest = argument_args[0]
-                    argument_kwargs["required"] = __missing__  # Positional arguments cannot set required here.
+                    argument_kwargs["required"] = MISSING  # Positional arguments cannot set required here.
                 else:
                     option_strings = []
                     long_option_strings = []

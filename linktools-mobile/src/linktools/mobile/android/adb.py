@@ -39,7 +39,7 @@ from linktools.decorator import cached_property, cached_classproperty, timeoutab
 from linktools.platform import get_free_port
 from linktools.runtime import Process, list2cmdline
 from linktools.types import Stoppable
-from linktools.utils._hash import get_hash_ident
+from linktools.utils import get_hash_ident
 from .types import App, UnixSocket, InetSocket, Process as ProcessInfo, File, SystemService
 from .._base import BridgeError, Bridge, BaseDevice
 from ...capabilities.mobile import __cap_mobile__

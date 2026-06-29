@@ -42,7 +42,7 @@ from linktools.core import Config
 from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.git import GitRepository
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 from linktools.runtime import Process, import_module_file, popen
 from .container import BaseContainer, SimpleContainer, ContainerError
 from ..capabilities.cntr import __cap_cntr__
@@ -450,10 +450,10 @@ class ContainerManager:
                         all_containers.remove(container)
                 self._dump_running_containers(all_containers)
 
-    def _callback(self, func, context: "EventContext" = __missing__):
+    def _callback(self, func, context: "EventContext" = MISSING):
         if self.environ.debug:
             self.logger.debug(f"Callback {func}")
-        if context is __missing__:
+        if context is MISSING:
             return func()
         sig = inspect.signature(func)
         if len(sig.parameters) == 0:

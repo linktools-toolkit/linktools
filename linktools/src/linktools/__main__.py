@@ -29,7 +29,7 @@
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommandGroup, iter_entry_point_commands
-from linktools.metadata import __ep_scripts__
+from linktools.metadata import __scripts_group__
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -46,7 +46,7 @@ class Command(BaseCommandGroup):
         """
         self.add_subcommands(
             parser=parser,
-            target=iter_entry_point_commands(__ep_scripts__, onerror="warn"),
+            target=iter_entry_point_commands(__scripts_group__, onerror="warn"),
             sort=True
         )
 

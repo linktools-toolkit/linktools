@@ -35,7 +35,7 @@ from abc import ABCMeta, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -606,7 +606,7 @@ def _create_prompt_class(type: "type[PromptResultType]", allow_empty: bool) -> "
 def _plain_prompt(
         prompt_text: str,
         type: "Type" = str,
-        default=__missing__,
+        default=MISSING,
         allow_empty: bool = False,
         choices: "list[str] | None" = None,
         password: bool = False,
@@ -616,7 +616,7 @@ def _plain_prompt(
     suffix_parts = []
     if choices and show_choices:
         suffix_parts.append(f"[{'/'.join(choices)}]")
-    if default is not __missing__ and show_default:
+    if default is not MISSING and show_default:
         suffix_parts.append(f"(default: {default})")
     full_prompt = prompt_text
     if suffix_parts:
@@ -632,7 +632,7 @@ def _plain_prompt(
         value = value.strip()
 
         if not value:
-            if default is not __missing__:
+            if default is not MISSING:
                 return default
             if allow_empty:
                 return type()
@@ -652,11 +652,11 @@ def _plain_prompt(
 
 def _plain_confirm(
         prompt_text: str,
-        default=__missing__,
+        default=MISSING,
         show_default: bool = True,
 ) -> bool:
     while True:
-        if default is not __missing__ and show_default:
+        if default is not MISSING and show_default:
             hint = " [Y/n]" if default else " [y/N]"
         else:
             hint = " [y/n]"
@@ -665,7 +665,7 @@ def _plain_confirm(
         except (EOFError, KeyboardInterrupt):
             raise
         if not value:
-            if default is not __missing__:
+            if default is not MISSING:
                 return bool(default)
             continue
         if value in ('y', 'yes'):
@@ -679,7 +679,7 @@ def _plain_choose(
         prompt_text: str,
         choices: "Iterable | Dict",
         title: str = None,
-        default=__missing__,
+        default=MISSING,
         show_default: bool = True,
         show_choices: bool = True,
 ):
@@ -693,7 +693,7 @@ def _plain_choose(
     begin_id = 1
     tip_id = 0
     default_id = None
-    if default is not __missing__ and default in keys:
+    if default is not MISSING and default in keys:
         tip_id = default_id = keys.index(default)
 
     if title:
@@ -726,7 +726,7 @@ def _plain_choose(
 def prompt(
         prompt: str,
         type: "type[PromptResultType]" = str,
-        default: "PromptResultType" = __missing__,
+        default: "PromptResultType" = MISSING,
         allow_empty: bool = False,
         choices: "list[str] | None" = None,
         password: bool = False,
@@ -758,7 +758,7 @@ def prompt(
         prompt,
         password=password,
         choices=choices,
-        default=str(default) if default is not __missing__ else ...,
+        default=str(default) if default is not MISSING else ...,
         show_default=show_default,
         show_choices=show_choices
     )
@@ -768,7 +768,7 @@ def choose(
         prompt: str,
         choices: "Iterable[T] | dict[T, Any]",
         title: str = None,
-        default: "T" = __missing__,
+        default: "T" = MISSING,
         show_default: bool = True,
         show_choices: bool = True
 ) -> "T":
@@ -802,7 +802,7 @@ def choose(
 
     tip_id = 0
     default_id = None
-    if default is not __missing__ and default in keys:
+    if default is not MISSING and default in keys:
         tip_id = default_id = keys.index(default)
 
     begin_id = 1
@@ -832,7 +832,7 @@ def choose(
 
 def confirm(
         prompt: str,
-        default: "PromptResultType" = __missing__,
+        default: "PromptResultType" = MISSING,
         show_default: bool = True,
 ) -> bool:
     """Prompt the user for a yes-or-no confirmation.
@@ -849,6 +849,6 @@ def confirm(
         return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(
         prompt,
-        default=str(default) if default is not __missing__ else ...,
+        default=str(default) if default is not MISSING else ...,
         show_default=show_default,
     )

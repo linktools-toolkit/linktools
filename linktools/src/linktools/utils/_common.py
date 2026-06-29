@@ -27,10 +27,9 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import gzip
-import os
 from typing import TYPE_CHECKING, Tuple, List, Set
 
-from ..metadata import __missing__
+from ..types import MISSING
 
 if TYPE_CHECKING:
     import logging
@@ -101,7 +100,7 @@ def ignore_errors(
         return default
 
 
-def cast(type: "type[T]", obj: "Any", default: "Any" = __missing__) -> "T | None":  # noqa
+def cast(type: "type[T]", obj: "Any", default: "Any" = MISSING) -> "T | None":  # noqa
     """Cast a value to the requested type.
 
     Args:
@@ -112,7 +111,7 @@ def cast(type: "type[T]", obj: "Any", default: "Any" = __missing__) -> "T | None
     Returns:
         Optional[T]: The operation result.
     """
-    if default is __missing__:
+    if default is MISSING:
         return type(obj)
     try:
         return type(obj)
@@ -120,7 +119,7 @@ def cast(type: "type[T]", obj: "Any", default: "Any" = __missing__) -> "T | None
         return default
 
 
-def cast_int(obj: "Any", default: "Any" = __missing__) -> int:
+def cast_int(obj: "Any", default: "Any" = MISSING) -> int:
     """Cast a value to int.
 
     Args:
@@ -133,7 +132,7 @@ def cast_int(obj: "Any", default: "Any" = __missing__) -> int:
     return cast(int, obj, default)
 
 
-def cast_bool(obj: "Any", default: "Any" = __missing__) -> bool:
+def cast_bool(obj: "Any", default: "Any" = MISSING) -> bool:
     """Cast a value to bool.
 
     Args:

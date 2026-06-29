@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 from linktools import utils, metadata
 from linktools.platform import get_machine, get_system
 from linktools.decorator import cached_property, cached_classproperty
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
@@ -291,7 +292,7 @@ class BaseEnviron(abc.ABC):
         """
         return self._create_config()
 
-    def wrap_config(self, namespace: str = metadata.__missing__, env_prefix: str = metadata.__missing__) -> "Config":
+    def wrap_config(self, namespace: str = MISSING, env_prefix: str = MISSING) -> "Config":
         """Return a scoped configuration wrapper.
 
         Args:
@@ -305,7 +306,7 @@ class BaseEnviron(abc.ABC):
 
         return ConfigWrapper(self.config, namespace=namespace, env_prefix=env_prefix)
 
-    def get_config(self, key: str, type: "type[T]" = None, default: "Any" = metadata.__missing__) -> "T":
+    def get_config(self, key: str, type: "type[T]" = None, default: "Any" = MISSING) -> "T":
         """Return a configuration value.
 
         Args:

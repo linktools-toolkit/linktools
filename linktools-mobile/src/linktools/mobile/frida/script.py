@@ -33,9 +33,9 @@ import threading
 
 from linktools import utils
 from linktools.core import environ
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 from linktools.rich import confirm
-from linktools.utils._hash import get_md5
+from linktools.utils import get_md5
 
 _logger = environ.get_logger("frida.app")
 
@@ -43,21 +43,21 @@ _logger = environ.get_logger("frida.app")
 class FridaUserScript(metaclass=abc.ABCMeta):
 
     def __init__(self):
-        self._source: "str | object" = __missing__
+        self._source: "str | object" = MISSING
         self._lock = threading.RLock()
 
     def load(self) -> "str | None":
         source = self._source
-        if source is __missing__:
+        if source is MISSING:
             with self._lock:
                 source = self._source
-                if source is __missing__:
+                if source is MISSING:
                     source = self._source = self._load()
         return source
 
     def clear(self) -> None:
         with self._lock:
-            self._source = __missing__
+            self._source = MISSING
 
     @property
     @abc.abstractmethod

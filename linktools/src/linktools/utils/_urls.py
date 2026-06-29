@@ -3,7 +3,7 @@
 
 import os
 
-from ._utils import get_environ, get_logger
+from ._common import get_environ, get_logger
 
 _user_agent = None
 

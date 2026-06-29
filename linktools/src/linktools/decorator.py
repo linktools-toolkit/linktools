@@ -31,7 +31,7 @@ import inspect
 import threading
 from typing import TYPE_CHECKING
 
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 from linktools.types import Timeout
 
 if TYPE_CHECKING:
@@ -49,15 +49,15 @@ def singleton(cls: "type[T]") -> "Callable[P, T]":
     Returns:
         Callable[P, T]: The operation result.
     """
-    instance = __missing__
+    instance = MISSING
     lock = threading.RLock()
 
     @functools.wraps(cls)
     def wrapper(*args, **kwargs):
         nonlocal instance
-        if instance is __missing__:
+        if instance is MISSING:
             with lock:
-                if instance is __missing__:
+                if instance is MISSING:
                     instance = cls(*args, **kwargs)
         return instance
 
@@ -120,13 +120,13 @@ class _CachedProperty:
             )
             raise TypeError(msg) from None
 
-        val = cache.get(self.attrname, __missing__)
-        if val is __missing__:
+        val = cache.get(self.attrname, MISSING)
+        if val is MISSING:
             if self.lock is not None:
                 with self.lock:
                     # check if another thread filled cache while we awaited lock
-                    val = cache.get(self.attrname, __missing__)
-                    if val is __missing__:
+                    val = cache.get(self.attrname, MISSING)
+                    if val is MISSING:
                         val = self.func(instance)
                         try:
                             cache[self.attrname] = val
@@ -185,14 +185,14 @@ class _CachedClassproperty:
         self.func = func
         self.__doc__ = func.__doc__
         self.lock = lock
-        self.val = __missing__
+        self.val = MISSING
 
     def __get__(self, instance, owner=None):
-        if self.val is __missing__:
+        if self.val is MISSING:
             if self.lock is not None:
                 with self.lock:
                     # check if another thread filled cache while we awaited lock
-                    if self.val is __missing__:
+                    if self.val is MISSING:
                         self.val = self.func(owner)
             else:
                 self.val = self.func(owner)

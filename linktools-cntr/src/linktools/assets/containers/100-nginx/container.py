@@ -35,7 +35,7 @@ from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import Config
 from linktools.decorator import cached_property
-from linktools.metadata import __missing__
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
@@ -245,10 +245,10 @@ class Container(BaseContainer):
 
     def write_conf(
         self, container: "BaseContainer", domain: str, *,
-        proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-        proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
-        https_enable: bool = __missing__, waf_enable: bool = __missing__,
-        auth_enable: bool = False, auth_extra: "dict[str, Any]" = __missing__,
+        proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
+        proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
+        https_enable: bool = MISSING, waf_enable: bool = MISSING,
+        auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
         flush: bool = False,
     ):
 
@@ -271,10 +271,10 @@ class Container(BaseContainer):
 
             self.logger.debug(f"Write nginx conf for {container} {domain}")
 
-            https_enable = True if https_enable is __missing__ else https_enable
+            https_enable = True if https_enable is MISSING else https_enable
             https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
 
-            waf_enable = True if waf_enable is __missing__ else waf_enable
+            waf_enable = True if waf_enable is MISSING else waf_enable
             waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
 
             if auth_enable:
@@ -299,7 +299,7 @@ class Container(BaseContainer):
                 conf_path,
                 **context,
             )
-            if proxy_conf is not __missing__ or proxy_url is not __missing__:
+            if proxy_conf is not MISSING or proxy_url is not MISSING:
                 container.render_template(
                     proxy_conf,
                     sub_conf_path,

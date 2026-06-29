@@ -42,10 +42,10 @@ from linktools.core import Config
 from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.errors import Error
-from linktools.metadata import __missing__
 from linktools.runtime import cmdline2list, lazy_load, list2cmdline
 from linktools.rich import choose, confirm
-from linktools.utils._hash import get_md5
+from linktools.types import MISSING
+from linktools.utils import get_md5
 from ..capabilities.cntr import __cap_cntr__
 
 
@@ -122,9 +122,9 @@ class ExposeMixin:
     def load_nginx_url(
             self: "BaseContainer", key: "ConfigKeyType",
             *path: str, queries: "QueryType | None" = None, 
-            proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-            proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__,
+            proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
+            proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
+            https_enable: bool = MISSING, waf_enable: bool = MISSING,
             auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
     ):
 
@@ -134,7 +134,7 @@ class ExposeMixin:
         def make_url():
             domain = self.get_config(key, type=str, default=None)
             if domain:
-                _https = True if https_enable is __missing__ else https_enable
+                _https = True if https_enable is MISSING else https_enable
                 _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
                 scheme = "https" if _https else "http"
                 port = self.get_config("NGINX_HTTPS_PORT" if _https else "NGINX_HTTP_PORT")
@@ -145,10 +145,10 @@ class ExposeMixin:
             domain = self.get_config(key, type=str, default=None)
             if domain:
 
-                _https = True if https_enable is __missing__ else https_enable
+                _https = True if https_enable is MISSING else https_enable
                 _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
 
-                _waf = True if waf_enable is __missing__ else waf_enable
+                _waf = True if waf_enable is MISSING else waf_enable
                 _waf = _waf and self.get_config("NGINX_WAF_ENABLE")
 
                 self.write_nginx_conf(
@@ -204,10 +204,10 @@ class NginxMixin:
 
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,
-            proxy_name: str = __missing__, proxy_domain_name: str = __missing__,
-            proxy_conf: "PathType" = __missing__, proxy_url: str = __missing__,
-            https_enable: bool = __missing__, waf_enable: bool = __missing__,
-            auth_enable: bool = False, auth_extra: "dict[str, Any]" = __missing__,
+            proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
+            proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
+            https_enable: bool = MISSING, waf_enable: bool = MISSING,
+            auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
     ):
 
         nginx = self.manager.containers["nginx"]
@@ -597,10 +597,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             settings.set("mount_paths", mount_paths)
             self.logger.info(f"remove {mount_path}")
 
-    def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
+    def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
         return self.manager.env_config.get(key, type=type, default=default)
 
-    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = __missing__) -> "T":
+    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.manager.env_config.get, key, type=type, default=default)
 
     def _make_exec_context(self, commands) -> "EventContext":
