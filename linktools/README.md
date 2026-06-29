@@ -39,11 +39,14 @@ linktools 核心包目录：
 linktools/src/linktools/
 ├── core/           — 核心模块：environ、Config、Tool、Capability
 ├── cli/            — 命令行框架：BaseCommand、BaseCommandGroup、CommandParser
-├── utils/          — 通用工具函数：类型转换、文件、网络、进程、端口等
+├── runtime/        — 运行时机制：Process、Reactor、Proxy、EventHandlerMixin
+├── utils/          — 通用工具函数：类型转换、哈希、文件、URL 等
 ├── assets/         — 静态资源：工具定义（tools.yml）等
 ├── references/     — 内联的第三方库，避免引入额外依赖（如 fake_useragent）
 ├── decorator.py    — 常用装饰器：@singleton、@cached_property、@try_except 等
-├── types.py        — 公共类型与异常体系：Timeout、Stoppable、Error 等
+├── types.py        — 公共类型与哨兵值：Timeout、Stoppable、T、PathType、MISSING
+├── errors.py       — 异常体系：Error、ConfigError、ToolError 等
+├── platform.py     — 系统/网络辅助函数：get_system、get_lan_ip、get_free_port 等
 └── rich.py         — 终端 UI：日志、进度条、prompt/confirm/choose
 ```
 
@@ -192,12 +195,6 @@ proc = tool.popen("d", "app.apk")
 ```python
 from linktools import utils
 
-# 系统信息
-utils.get_system()       # 'darwin' / 'linux' / 'windows'
-utils.get_machine()      # 'x86_64' / 'arm64' / ...
-utils.get_lan_ip()
-utils.get_wan_ip()
-
 # 文件操作
 utils.get_file_md5("path/to/file")
 utils.read_file("path/to/file")
@@ -207,14 +204,39 @@ utils.write_file("path/to/file", "content")
 utils.make_url("https://example.com", path="/api", key="val")
 utils.guess_file_name("https://example.com/foo.zip")
 
-# 进程
-proc = utils.popen("adb", "devices")
-utils.get_free_port()    # 获取可用端口
-
 # 类型转换
 utils.cast(int, "42", default=0)
 utils.bool("true")
 utils.coalesce(None, None, "fallback")  # → "fallback"
+```
+
+### platform — 系统/网络辅助函数
+
+```python
+from linktools import platform
+
+platform.get_system()       # 'darwin' / 'linux' / 'windows'
+platform.get_machine()      # 'x86_64' / 'arm64' / ...
+platform.get_lan_ip()
+platform.get_wan_ip()
+platform.get_free_port()    # 获取可用端口
+```
+
+### runtime — 进程 / 事件 / 代理
+
+```python
+from linktools.runtime import popen, Reactor, EventHandlerMixin
+
+# 子进程封装
+proc = popen("adb", "devices")
+
+# 事件分发 Mixin，子类可直接 on/off/once/trigger
+class MyDevice(EventHandlerMixin):
+    pass
+
+device = MyDevice()
+device.on("change", lambda *args: print("changed", args))
+device.trigger("change", 1, 2)
 ```
 
 ### decorator — 常用装饰器
@@ -236,26 +258,39 @@ def risky():
     ...
 ```
 
-### types — 公共类型与异常
+### types — 公共类型与哨兵值
 
 ```python
-from linktools.types import Timeout, Stoppable, Error, ToolError
+from linktools.types import Timeout, Stoppable, MISSING
 
 # 超时管理
 timeout = Timeout(30)
 timeout.remain   # 剩余秒数
 
-# 可停止资源（实现 __stop__ 即可配合 with 使用）
+# 可停止资源（实现 stop() 即可配合 with 使用）
 class MyResource(Stoppable):
-    def __stop__(self):
+    def stop(self):
         ...
 
-# 异常体系
+# MISSING：区分"未传参数"与"传入 None"的哨兵值
+def get(key, default=MISSING):
+    if default is MISSING:
+        raise KeyError(key)
+    return default
+```
+
+### errors — 异常体系
+
+```python
+from linktools.errors import Error, ConfigError, ToolError, ToolNotFound
+
 # Error → ConfigError
 #       → ToolError → ToolNotFound
 #                   → ToolNotSupport
 #                   → ToolExecError
-#       → DownloadError
+#       → DownloadError → DownloadHttpError
+#       → ExecError
+#       → GitError
 ```
 
 ## 相关链接
