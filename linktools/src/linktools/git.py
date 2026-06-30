@@ -110,6 +110,16 @@ class GitRepository:
         self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
         self.git = _GitProxy(self._path)
 
+    def close(self) -> None:
+        """Release the underlying repository handle (open pack files, etc.)."""
+        self._repo.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        self.close()
+
     @property
     def heads(self) -> "list[str]":
         """Return the names of all local branches."""
@@ -264,9 +274,9 @@ class GitRepository:
             kwargs["branch"] = branch
         with create_progress("message") as progress:
             porcelain.clone(
-                url, 
-                repo_path, 
-                depth=1, 
-                errstream=_ProgressStream(progress), 
+                url,
+                repo_path,
+                depth=1,
+                errstream=_ProgressStream(progress),
                 **kwargs
-            )
+            ).close()
