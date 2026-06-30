@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
-from linktools.runtime import Process, list2cmdline
+from linktools.runtime import Process
 from linktools.types import Stoppable
 from .adb import AdbDevice, AdbError
 from ...capabilities.mobile import __cap_mobile__
@@ -431,7 +431,7 @@ class ScrcpyServer(Stoppable):
             )
             self._process = self._device.popen(
                 "shell",
-                list2cmdline([
+                utils.list2cmdline([
                     f"CLASSPATH={remote_path}", "app_process", "/", "com.genymobile.scrcpy.Server", server_version,
                     *[str(arg) for arg in args]
                 ]),

@@ -7,7 +7,6 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, timeoutable
-from linktools.runtime import list2cmdline
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -131,7 +130,7 @@ class HdcDevice(BaseDevice):
         :param args: shell命令
         :return: hdc命令参数
         """
-        cmd = list2cmdline([str(arg) for arg in args])
+        cmd = utils.list2cmdline([str(arg) for arg in args])
         return ["shell", cmd]
 
     @timeoutable

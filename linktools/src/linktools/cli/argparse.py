@@ -35,7 +35,6 @@ import typing
 from .. import utils
 from ..decorator import cached_classproperty
 from ..types import MISSING
-from ..runtime import list2cmdline
 
 if typing.TYPE_CHECKING:
     from .command import CommandParser
@@ -352,7 +351,7 @@ class ArgParseComplete:
                 return completions
 
             finder = argcomplete.CompletionFinder(self.get_parser())
-            cmdline = f"{list2cmdline(args)} "
+            cmdline = f"{utils.list2cmdline(args)} "
 
             state = 0
             while True:

@@ -19,7 +19,6 @@ from linktools import utils
 from linktools.core import environ
 from linktools.platform import get_free_port, is_unix_like, is_windows
 from linktools.rich import prompt, create_progress
-from linktools.runtime import list2cmdline
 from linktools.types import Stoppable
 from linktools.utils import ignore_errors
 
@@ -110,7 +109,7 @@ class SSHClient(paramiko.SSHClient):
         """
         if len(args) > 0:
             stdin, stdout, stderr = self.exec_command(
-                list2cmdline([str(arg) for arg in args]),
+                utils.list2cmdline([str(arg) for arg in args]),
                 get_pty=True
             )
 

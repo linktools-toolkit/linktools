@@ -36,6 +36,7 @@ from ._common import (
     gzip_compress,
     parse_version, get_char_width,
     let, also,
+    list2cmdline, cmdline2list,
 )
 
 from ._hash import (

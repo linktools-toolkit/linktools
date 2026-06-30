@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Tuple, List
 from linktools import utils
 from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
 from linktools.platform import get_interpreter, get_interpreter_ident, get_shell_path, get_system
-from linktools.runtime import Process, list2cmdline, popen
+from linktools.runtime import Process, popen
 from linktools.decorator import cached_property, timeoutable
 from linktools.types import MISSING
 
@@ -547,7 +547,7 @@ class Tool(metaclass=ToolMeta):
             str: The operation result.
         """
         from ..cli import env
-        return list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
+        return utils.list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
 
 
 class Tools(object):

@@ -55,7 +55,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
     from .. import utils, metadata
     from ..core import environ as _environ
     from ..platform import get_interpreter, get_interpreter_ident
-    from ..runtime import list2cmdline, popen
+    from ..runtime import popen
     from .command import SubCommand, CommandError, iter_entry_points_capabilities
 
     commands: "list[SubCommand]" = []
@@ -173,7 +173,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         names.append(temp.command_name)
                     executable = "-".join(reversed(names))
                     stub = ToolStub(stub_path, executable, environ=environ)
-                    stub.create(list2cmdline([get_interpreter(), "-m", command_info.module]))
+                    stub.create(utils.list2cmdline([get_interpreter(), "-m", command_info.module]))
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
                     executables.append(executable)
 

@@ -37,7 +37,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
 from linktools.platform import get_free_port, is_port_free, wait_process
-from linktools.runtime import Process, list2cmdline
+from linktools.runtime import Process
 from linktools.types import Stoppable, Timeout
 
 if TYPE_CHECKING:
@@ -123,7 +123,7 @@ class GoIOS(Bridge):
             if code is None:
                 timeout.ensure(
                     self._error_type,
-                    f"Timeout when executing command: {list2cmdline(process.args)}"
+                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
                 )
 
         if isinstance(result, bytes):

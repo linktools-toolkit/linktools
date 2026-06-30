@@ -8,7 +8,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable
 from linktools.errors import Error
-from linktools.runtime import Process, list2cmdline
+from linktools.runtime import Process
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
@@ -119,7 +119,7 @@ class Bridge(Generic[DeviceType], metaclass=ABCMeta):
             if code is None:
                 timeout.ensure(
                     self._error_type,
-                    f"Timeout when executing command: {list2cmdline(process.args)}"
+                    f"Timeout when executing command: {utils.list2cmdline(process.args)}"
                 )
             if code not in (0, None):
                 if isinstance(err, bytes):

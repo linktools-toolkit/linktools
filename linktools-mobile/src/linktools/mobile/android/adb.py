@@ -37,7 +37,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
 from linktools.platform import get_free_port
-from linktools.runtime import Process, list2cmdline
+from linktools.runtime import Process
 from linktools.types import Stoppable
 from linktools.utils import get_hash_ident
 from .types import App, UnixSocket, InetSocket, Process as ProcessInfo, File, SystemService
@@ -185,7 +185,7 @@ class AdbDevice(BaseDevice):
         :param user: 以指定user运行
         :return: 参数列表
         """
-        cmd = list2cmdline([str(arg) for arg in args])
+        cmd = utils.list2cmdline([str(arg) for arg in args])
         if privilege and self.uid != 0:
             args = ["shell", "su", "-c", cmd]
         elif user:

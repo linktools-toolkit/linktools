@@ -27,14 +27,15 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import gzip
-from typing import TYPE_CHECKING, Tuple, List, Set
+import subprocess
+from typing import TYPE_CHECKING
 
 from ..types import MISSING
 
 if TYPE_CHECKING:
     import logging
 
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from typing import Any, ParamSpec, TypeVar
 
     from ..core import Environ
@@ -297,7 +298,7 @@ def get_list_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "li
         Optional[List[T]]: The operation result.
     """
     objs = get_item(obj, *keys, default=None)
-    if objs is None or not isinstance(objs, (Tuple, List, Set)):
+    if objs is None or not isinstance(objs, (tuple, list, set)):
         return default
     result = []
     for obj in objs:
@@ -428,3 +429,12 @@ def also(value: "T", fn: "Callable[[T], Any]") -> "T":
     """
     fn(value)
     return value
+
+
+def list2cmdline(args: "Iterable[str]") -> str:
+    return subprocess.list2cmdline(args)
+
+
+def cmdline2list(cmdline: str) -> "Iterable[str]":
+    import shlex
+    return shlex.split(cmdline)

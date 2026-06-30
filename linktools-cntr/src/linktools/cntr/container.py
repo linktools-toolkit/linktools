@@ -42,7 +42,7 @@ from linktools.core import Config
 from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.errors import Error
-from linktools.runtime import cmdline2list, lazy_load, list2cmdline
+from linktools.runtime import lazy_load
 from linktools.rich import choose, confirm
 from linktools.types import MISSING
 from linktools.utils import get_md5
@@ -491,9 +491,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                 commands.extend(shell_command)
             commands.extend(["else", "sh", ";"])
             commands.append("fi")
-            commands = ("sh", "-c", list2cmdline(commands))
+            commands = ("sh", "-c", utils.list2cmdline(commands))
         else:
-            commands = cmdline2list(command)
+            commands = utils.cmdline2list(command)
 
         return self.manager.create_docker_process(
             "exec", "-it", *options, service.get("container_name"), *commands

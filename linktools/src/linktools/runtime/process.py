@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING
 from ..decorator import cached_property, timeoutable
 from ..errors import ExecError
 from ..platform import is_unix_like, wait_process
+from ..utils import list2cmdline
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator
     from typing import Any, AnyStr, Callable, IO
     from ..types import PathType, Timeout, TimeoutType
 
@@ -43,15 +44,6 @@ def _get_logger():
     if _logger is None:
         _logger = _get_environ().get_logger("process")
     return _logger
-
-
-def list2cmdline(args: "Iterable[str]") -> str:
-    return subprocess.list2cmdline(args)
-
-
-def cmdline2list(cmdline: str) -> "list[str]":
-    import shlex
-    return shlex.split(cmdline)
 
 
 if is_unix_like():
