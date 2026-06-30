@@ -38,7 +38,7 @@ if _t.TYPE_CHECKING:
     from .core._config import ConfigDict, Config, ConfigKeyType, ConfigLiteralType, ConfigType, ConfigTypeMap  # noqa
     from .core._tools import Tools, Tool, ToolExecError  # noqa
     from .core._url import UrlFile, UrlFileValidatorType  # noqa
-    from .core import BaseEnviron as _BaseEnviron  # noqa
+    from .core._environ import BaseEnviron as _BaseEnviron  # noqa
 
     P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)

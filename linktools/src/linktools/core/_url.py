@@ -41,17 +41,16 @@ from linktools.utils import ignore_errors, parse_header, guess_file_name, user_a
 from linktools.utils import get_file_hash, get_hash_ident
 
 if TYPE_CHECKING:
-    from typing import Literal
-    from ._environ import BaseEnviron
-    from linktools.types import PathType, Timeout, TimeoutType
+    from typing import Literal, Union
+    from linktools.types import PathType, Timeout, TimeoutType, EnvironType
 
-    UrlFileValidatorType = Union["UrlFile.Validator", Iterable["UrlFile.Validator"]]
+    UrlFileValidatorType = Union["UrlFile.Validator" | Iterable["UrlFile.Validator"]]
 
 
 class UrlFile(metaclass=abc.ABCMeta):
     """UrlFile."""
 
-    def __init__(self, environ: "BaseEnviron", url: str, is_local: bool):
+    def __init__(self, environ: "EnvironType", url: str, is_local: bool):
         self._url = url
         self._environ = environ
         self._ident = f"{get_hash_ident(url)}_{guess_file_name(url)[-100:]}"
@@ -196,7 +195,7 @@ class UrlFile(metaclass=abc.ABCMeta):
 class LocalFile(UrlFile):
 
     """UrlFile implementation for local filesystem paths."""
-    def __init__(self, environ: "BaseEnviron", url: str):
+    def __init__(self, environ: "EnvironType", url: str):
         super().__init__(
             environ,
             os.path.abspath(os.path.expanduser(url)),
@@ -222,7 +221,7 @@ class LocalFile(UrlFile):
 class HttpFile(UrlFile):
 
     """UrlFile implementation for HTTP and HTTPS resources."""
-    def __init__(self, environ: "BaseEnviron", url: str):
+    def __init__(self, environ: "EnvironType", url: str):
         super().__init__(environ, url, is_local=False)
         self._root_path = self._environ.get_temp_path("download", "data", self._ident)
         self._local_path = os.path.join(self._root_path, "file")
@@ -311,14 +310,14 @@ class HttpContext:
     """Context manager for temporary HTTP download options."""
     url: "str | None" = HttpContextVar("Url")
     user_agent: "str | None" = HttpContextVar("UserAgent")
-    headers: "dict | None" = HttpContextVar("Headers")
+    headers: "dict[str, str] | None" = HttpContextVar("Headers")
     file_path: "str | None" = HttpContextVar("FilePath")
     file_size: "int | None" = HttpContextVar("FileSize")
     file_name: "str | None" = HttpContextVar("FileName")
     completed: bool = HttpContextVar("IsCompleted", False)
     content_encoding: str = HttpContextVar("ContentEncoding", "")
 
-    def __init__(self, environ: "BaseEnviron", path: str):
+    def __init__(self, environ: "EnvironType", path: str):
         self._environ = environ
         self._db = shelve.open(path)
 

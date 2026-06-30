@@ -16,16 +16,16 @@ class DownloadError(Error):
     """Base exception for download failures."""
 
 
-class ExecError(Error):
-    """Base exception for process execution failures."""
-
-
 class DownloadHttpError(DownloadError):
     """Download error that carries an HTTP status code."""
 
     def __init__(self, code, e):
         super().__init__(e)
         self.code = code
+
+
+class ExecError(Error):
+    """Base exception for process execution failures."""
 
 
 class ConfigError(Error):
