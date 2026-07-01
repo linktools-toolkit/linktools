@@ -1,4 +1,5 @@
-dependencies: []
+dependencies:
+  - pydantic-ai-slim[mcp,openai]>=1.107,<2
 
 dev-dependencies:
   - pytest-asyncio
