@@ -41,6 +41,7 @@ from linktools.platform import get_gid, get_lan_ip, get_machine, get_system, get
 from linktools.core import Config
 from linktools.cache import FileCache
 from linktools.decorator import cached_property
+from linktools.errors import GitDivergedError
 from linktools.git import GitRepository
 from linktools.types import MISSING
 from linktools.runtime import Process, import_module_file, popen
@@ -641,7 +642,15 @@ class ContainerManager:
                         new_branch = repo.create_head(branch)
                         new_branch.checkout()
 
-                repo.pull(reset=reset)
+                try:
+                    repo.pull(reset=reset)
+                except GitDivergedError:
+                    if reset:
+                        raise
+                    self.logger.warning(
+                        f"Repository `{url}` has diverged from the remote, force resetting ..."
+                    )
+                    repo.pull(reset=True)
 
             finally:
                 if is_stash:

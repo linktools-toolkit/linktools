@@ -8,7 +8,7 @@ from dulwich.repo import Repo as DulwichRepo
 
 from linktools import utils
 from linktools.core import environ
-from linktools.errors import GitError
+from linktools.errors import GitError, GitDivergedError
 from linktools.rich import create_progress
 from linktools.types import PathType
 
@@ -225,9 +225,8 @@ class GitRepository:
                     errstream=_ProgressStream(progress),
                 )
             except porcelain.DivergedBranches:
-                raise GitError(
-                    "Local branch has diverged from the remote and cannot be "
-                    "fast-forwarded. Re-run with force reset enabled to reset it to the remote."
+                raise GitDivergedError(
+                    "Local branch has diverged from the remote and cannot be fast-forwarded."
                 )
 
     def _branch_ref(self, branch: str) -> bytes:

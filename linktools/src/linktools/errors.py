@@ -54,3 +54,7 @@ class NoFreePortFoundError(Error):
 
 class GitError(Error):
     """Raised when a git repository operation fails."""
+
+
+class GitDivergedError(GitError):
+    """Raised when a local branch has diverged from its remote and cannot be fast-forwarded."""

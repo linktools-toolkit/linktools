@@ -605,7 +605,7 @@ def _create_prompt_class(type: "type[PromptResultType]", allow_empty: bool) -> "
 
 def _plain_prompt(
         prompt_text: str,
-        type: "Type" = str,
+        type: "type" = str,
         default=MISSING,
         allow_empty: bool = False,
         choices: "list[str] | None" = None,
@@ -737,7 +737,7 @@ def prompt(
 
     Args:
         prompt (str): The prompt value.
-        type (Type[PromptResultType]): Target type used to cast the value.
+        type (type[PromptResultType]): Target type used to cast the value.
         default (PromptResultType): Value returned when no explicit value is available.
         allow_empty (bool): The allow_empty value.
         choices (Optional[List[str]]): The choices value.
