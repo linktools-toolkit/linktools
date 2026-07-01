@@ -10,9 +10,13 @@ class _MinimalEnv:
         self.hooks = HookRegistry()
         self.env = "stg"
         self.config_root = Path("/tmp/config")
+        self.workspace_root = Path("/tmp/workspace")
 
     def get_logger(self, name: str) -> logging.Logger:
         return logging.getLogger(name)
+
+    def trace_root(self, trace_id: str) -> Path:
+        return self.workspace_root / trace_id
 
 
 def test_minimal_env_satisfies_protocol():

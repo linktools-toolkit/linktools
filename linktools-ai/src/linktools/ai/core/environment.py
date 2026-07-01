@@ -28,6 +28,13 @@ class AgentEnvironment(Protocol):
       `build_model(self.environ, model_type)`, which calls
       `load_runtime_model_config(env, model_type)`, which reads
       `env.config_root / f"config.{env.env}.yaml"`.
+
+    Extended during Task 7 migration of `engine/agent/session.py` (re-verified against the
+    full file, not just a grep) — `FileSession.create`/`DbSession.create` dereference two
+    more members not caught by Task 5's grep from outside the file:
+    - `workspace_root`: `environ.workspace_root`, the root passed to `RunContext`.
+    - `trace_root(trace_id)`: `environ.trace_root(spec.trace_id)`, used to derive the
+      per-trace runtime/session directories.
     """
 
     hooks: "HookRegistry | None"
@@ -36,4 +43,8 @@ class AgentEnvironment(Protocol):
 
     config_root: Path
 
+    workspace_root: Path
+
     def get_logger(self, name: str) -> logging.Logger: ...
+
+    def trace_root(self, trace_id: str) -> Path: ...
