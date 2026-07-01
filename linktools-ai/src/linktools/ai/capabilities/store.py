@@ -1039,7 +1039,7 @@ class CapabilityStore:
             # exception class name (rather than importing the redis package's
             # exception type) to keep this module free of a hard Redis dependency —
             # any CapabilityCacheProtocol implementation can signal this the same way.
-            if type(exc).__name__ != "ResponseError" or "not an integer" not in str(exc).lower():
+            if not (type(exc).__module__ == "redis.exceptions" and type(exc).__name__ == "ResponseError") or "not an integer" not in str(exc).lower():
                 logger.warning("capability_store: redis version bump failed (transient): %s", exc)
                 return
             logger.warning("capability_store: redis version key has non-integer value, resetting: %s", exc)
