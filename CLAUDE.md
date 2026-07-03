@@ -126,3 +126,13 @@ Sub-packages register commands and capabilities via Python entry points declared
 ## Release / CI
 
 On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels, then publishes to PyPI. The built artifacts and `.version` files are committed back to the repo automatically.
+
+## Python Code Style (All Sub-packages)
+
+- **Python ≥3.10 minimum** — no `from __future__ import annotations` (PEP 585/604 supported natively)
+- **Type annotations**: Quote any annotation containing `|` (unions, e.g. `"float | None"`) or `[...]` (generics, e.g. `"list[str]"`, `"dict[str, Any]"`). Bare simple names stay unquoted (`kernel: AgentKernel`, `path: str`)
+- **File headers**: Every `.py` must start with:
+  ```python
+  #!/usr/bin/env python3
+  # -*- coding: utf-8 -*-
+  ```
