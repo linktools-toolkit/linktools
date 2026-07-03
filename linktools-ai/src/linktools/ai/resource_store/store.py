@@ -79,12 +79,12 @@ class ResourceStore:
         return await self._backends[0].get_revision()
 
     async def refresh(self) -> None:
-        """Pass-through to the primary backend's own internal resync, if it has one.
+        """Read the primary backend's revision counter; no other side effect.
 
-        ResourceStore holds no cache of its own to invalidate -- every backend is
-        responsible for its own freshness (DatabaseBackend checks get_revision()
-        internally on every read; InMemoryResourceBackend/FileBackend have no
-        staleness concept at all). This just gives callers a single place to nudge
-        that check explicitly rather than waiting for the next read.
+        ResourceStore holds no cache of its own to invalidate. get_revision() alone
+        does not trigger a resync on any backend (DatabaseBackend only resyncs
+        lazily, inside _ensure_fresh(), on the next actual read call) -- this method
+        is a placeholder for callers that want an explicit freshness nudge, but
+        today it does not force one. No in-repo caller currently uses it.
         """
         await self._backends[0].get_revision()
