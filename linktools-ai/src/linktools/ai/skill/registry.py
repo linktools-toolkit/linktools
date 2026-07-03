@@ -54,6 +54,8 @@ class SkillRegistry(BaseRegistry[SkillSpec]):
         super().__init__(*paths)
         self._cap_store = cap_store
         self._capabilities_root = capabilities_root
+        if cap_store is not None:
+            cap_store.register_primary("skill", "SKILL.md")
 
     async def _load(self) -> "dict[str, SkillSpec]":
         result: "dict[str, SkillSpec]" = {}

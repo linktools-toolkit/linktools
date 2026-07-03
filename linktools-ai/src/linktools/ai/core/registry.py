@@ -231,7 +231,10 @@ class MarkdownAgentRegistry(BaseRegistry[_AgentSpecT]):
         super().__init__(*paths)
         self._cap_store = cap_store
         self._capabilities_root = capabilities_root  # source caps root for agent-group.yaml lookup
-        self._cap_kind = cap_kind  # DB kind string e.g. "worker", "stage", "subagent"
+        self._cap_kind = cap_kind  # DB kind string, e.g. "subagent" -- must match the kind
+        # capability registrations were saved under
+        if cap_store is not None and cap_kind is not None:
+            cap_store.register_primary(cap_kind, "agent.md")
 
     async def _load(self) -> "dict[str, _AgentSpecT]":
         result: "dict[str, _AgentSpecT]" = {}

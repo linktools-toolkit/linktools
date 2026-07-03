@@ -61,6 +61,8 @@ class MCPRegistry(BaseRegistry[MCPServerSpec]):
     def __init__(self, *paths: Path, cap_store: "CapabilityStore | None" = None) -> None:
         super().__init__(*paths)
         self._cap_store = cap_store
+        if cap_store is not None:
+            cap_store.register_primary("mcp", "mcp.yaml")
 
     async def _load(self) -> "dict[str, MCPServerSpec]":
         result: "dict[str, MCPServerSpec]" = {}
