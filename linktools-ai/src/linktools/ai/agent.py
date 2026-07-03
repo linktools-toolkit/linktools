@@ -782,7 +782,7 @@ class LlmAgent(BaseAgent):
     @property
     def _runtime_prompt_dir(self) -> "Path | None":
         """Working directory advertised to the model in the prompt; None = no execution
-        environment (conversational). RuntimeAgent returns the session runtime dir."""
+        environment (conversational). RuntimeAgent returns the agent's workdir."""
         return None
 
     def snapshot(self) -> "dict[str, object]":

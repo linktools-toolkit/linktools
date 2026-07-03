@@ -5,6 +5,7 @@ until it's drained. Mirrors AgentKernel.start_background's construction
 pattern (core/runtime.py) for spinning up a SubAgent programmatically."""
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..subagent.registry import SubagentSpec
@@ -27,7 +28,7 @@ class SwarmCoordinator:
         self.task_queue = task_queue
         self.model_config_resolver = model_config_resolver
 
-    async def run(self, spec: SubagentSpec, session: "Session", *, agent_count: int) -> "list[Task]":
+    async def run(self, spec: SubagentSpec, session: "Session", *, agent_count: int, workdir: Path) -> "list[Task]":
         # Deferred import: agent.py imports AgentKernel from core/runtime.py
         # at module level, so importing SubAgent here at module level would be
         # circular (same hazard AgentKernel.start_background already works around).
@@ -42,7 +43,10 @@ class SwarmCoordinator:
                     child_context = self.kernel.build_context(
                         spec, session, builtin_tool_names=SubAgent._BUILTIN_TOOL_NAMES,
                     )
-                    agent = SubAgent(spec, session, execution_context=child_context, model_config_resolver=self.model_config_resolver)
+                    agent = SubAgent(
+                        spec, session, execution_context=child_context,
+                        model_config_resolver=self.model_config_resolver, workdir=workdir,
+                    )
                     result = await agent.generate(task.payload, call_id=task.task_id)
                     await self.task_queue.complete(task.task_id, result)
                 except Exception as exc:

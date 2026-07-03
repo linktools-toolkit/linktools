@@ -84,7 +84,7 @@ def _trim_messages(messages: "list[ModelMessage]") -> "list[ModelMessage]":
 def write_session_context(session_dir: Path, snapshot: SessionContextSnapshot) -> None:
     """Persist message history + per-call metadata to `context.json`.
 
-    Preserves the legacy schema (trace_id/session_id/llm_calls/messages/...) so
+    Preserves the legacy schema (session_id/llm_calls/messages/...) so
     downstream readers and `_next_llm_seq` keep working.
     """
     path = session_dir / "context.json"
