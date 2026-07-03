@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 from linktools.ai.resource_store.database import DatabaseBackend, _RawRow
 from linktools.ai.resource_store.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
