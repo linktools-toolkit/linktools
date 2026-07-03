@@ -33,13 +33,6 @@ _SYNC_LOOKBACK = timedelta(minutes=1)
 _LRU_MAX_FILES = 256  # upper bound for supplementary-file content / row caches
 _MAX_CACHE_BYTES = 1 * 1024 * 1024  # 1 MiB: larger supplementary/historical files are served from disk/DB, never held in memory
 
-_PRIMARY_REL: "dict[str, str]" = {
-    "subagent": "agent.md",
-    "skill": "SKILL.md",
-    "mcp": "mcp.yaml",
-}
-
-
 def _exceeds_cache_limit(content: str) -> bool:
     """True when content is too large to hold in memory.
 
@@ -68,35 +61,11 @@ def _mem_prefix(kind: str, capability_id: str) -> str:
     return f"{kind}/{capability_id}/"
 
 
-def _extract_rel(kind: str, capability_id: str, file_path: str) -> str:
+def _extract_rel(capability_id: str, file_path: str) -> str:
     id_prefix = _db_prefix(capability_id)
     if file_path.startswith(id_prefix):
         return file_path[len(id_prefix):]
-    source_root = {
-        "subagent": "subagent",
-        "skill": "skill",
-        "mcp": "adapter",
-    }.get(kind, kind)
-    source_prefix = f"{source_root}/{capability_id}/"
-    if file_path.startswith(source_prefix):
-        return file_path[len(source_prefix):]
     return file_path
-
-
-def _legacy_display_rel(kind: str, capability_id: str, file_path: str, rel_path: str) -> "str | None":
-    if file_path == rel_path:
-        return None
-    id_prefix = _db_prefix(capability_id)
-    if file_path.startswith(id_prefix):
-        return None
-    source_root = {
-        "subagent": "subagent",
-        "skill": "skill",
-        "mcp": "adapter",
-    }.get(kind, kind)
-    if file_path.startswith(f"{source_root}/{capability_id}/"):
-        return file_path
-    return None
 
 
 def _split_db_path(db_path: str) -> "tuple[str, str] | None":
@@ -182,6 +151,19 @@ class CapabilityStore:
         # so cached entries never go stale — spares repeated disk reads of old versions.
         self._hist: "OrderedDict[tuple[int, int], str]" = OrderedDict()
         self._cap_locks: "dict[str, asyncio.Lock]" = {}
+        # kind -> primary filename (e.g. "skill" -> "SKILL.md"), populated by each capability
+        # registry via register_primary() when it's wired up -- this store has no built-in
+        # knowledge of any specific kind.
+        self._primary_rel: "dict[str, str]" = {}
+
+    def register_primary(self, kind: str, primary_rel: str) -> None:
+        """Declare which relative path is `kind`'s primary file (kept resident in cache).
+
+        Called once by each capability registry that owns a `kind`, at wiring time (when
+        it receives a `cap_store`). Idempotent: re-registering the same kind simply
+        overwrites the mapping.
+        """
+        self._primary_rel[kind] = primary_rel
 
     # ── Content cache helpers (mem: primary resident + supplementary LRU) ──
 
@@ -300,8 +282,7 @@ class CapabilityStore:
     ) -> bool:
         """Persist any capability file to MySQL. Returns True if content changed."""
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        rel = _extract_rel(kind, capability_id, file_path)
-        legacy_rel = _legacy_display_rel(kind, capability_id, file_path, rel)
+        rel = _extract_rel(capability_id, file_path)
         db_fp = _db_path(capability_id, rel)
         fp = _mem_key(kind, capability_id, rel)
         file_id, version, changed = await self.repo.upsert_file(
@@ -309,30 +290,12 @@ class CapabilityStore:
             content=content, checksum=checksum,
             updated_by=updated_by,
         )
-        legacy_changed = False
-        if legacy_rel is not None:
-            try:
-                legacy_changed = await self.repo.tombstone_file(
-                    kind, _db_path(capability_id, legacy_rel),
-                    checksum=hashlib.sha256(b"").hexdigest(),
-                    updated_by=updated_by,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "capability legacy path cleanup failed (%s/%s/%s): %s",
-                    kind, capability_id, legacy_rel, exc,
-                )
-            legacy_fp = _mem_key(kind, capability_id, legacy_rel)
-            self._mem_versions.pop(legacy_fp, None)
-            self._content_pop(legacy_fp)
-            self._mem_rows.pop(legacy_fp, None)
-            self._deleted.add(legacy_fp)
         self._mem_versions[fp] = (file_id, version)
         self._deleted.discard(fp)
-        self._content_put(fp, content, primary=rel == _PRIMARY_REL.get(kind))
+        self._content_put(fp, content, primary=rel == self._primary_rel.get(kind))
         self._mem_rows.pop(fp, None)
         self._write_workspace(file_id, version, content, kind=kind, capability_id=capability_id, rel_path=rel, checksum=checksum)
-        if changed or legacy_changed:
+        if changed:
             await self._bump_redis_version()
             logger.info("capability saved: kind=%s capability_id=%s file=%s", kind, capability_id, fp)
         return changed
@@ -350,7 +313,7 @@ class CapabilityStore:
         )
         self._mem_versions[fp] = (file_id, version)
         self._deleted.discard(fp)
-        self._content_put(fp, content, primary=rel_path == _PRIMARY_REL.get(kind))
+        self._content_put(fp, content, primary=rel_path == self._primary_rel.get(kind))
         self._mem_rows.pop(fp, None)
         self._write_workspace(file_id, version, content, kind=kind, capability_id=capability_id, rel_path=rel_path, checksum=checksum)
         if changed:
@@ -433,7 +396,7 @@ class CapabilityStore:
 
         fp = _mem_key(kind, capability_id, rel_path)
         db_fp = _db_path(capability_id, rel_path)
-        primary = rel_path == _PRIMARY_REL.get(kind)
+        primary = rel_path == self._primary_rel.get(kind)
 
         # State 3: mem hit (sync evicts stale entries, so a hit is current).
         cached = self._content_get(fp)
@@ -703,7 +666,7 @@ class CapabilityStore:
 
     async def iter_primaries(self, kind: str) -> "list[tuple[str, str, str]]":
         """Return (capability_id, file_path, content) for all primary files of a kind."""
-        primary_rel = _PRIMARY_REL.get(kind)
+        primary_rel = self._primary_rel.get(kind)
         prefix = f"{kind}/"
 
         await self._ensure_fresh()
@@ -940,7 +903,7 @@ class CapabilityStore:
         self._mem_versions[fp] = (file_id, new_ver)
         self._deleted.discard(fp)
         self._write_workspace(file_id, new_ver, content, kind=kind, capability_id=cap_id, rel_path=rel, checksum=row.get("checksum"))
-        if rel == _PRIMARY_REL.get(kind):
+        if rel == self._primary_rel.get(kind):
             self._mem[fp] = content  # primary: resident
         else:
             self._lru.pop(fp, None)  # supplementary: drop stale, load lazily from disk
