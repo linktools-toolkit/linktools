@@ -78,19 +78,19 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
         self._rows[path] = _RawRow(row_id=existing.row_id, path=path, content=existing.content, version=existing.version + 1, status="deleted", updated_at=datetime.now())
         return True
 
-    async def _raw_move(self, src_path: str, dst_path: str, updated_by: str) -> "tuple[int, int] | None":
+    async def _raw_move(self, src_path: str, dst_path: str, updated_by: str) -> "tuple[int, int, bool] | None":
         src = self._rows.get(src_path)
         dst = self._rows.get(dst_path)
         src_active = src is not None and src.status == "active"
         dst_active = dst is not None and dst.status == "active"
         if dst_active and not src_active:
-            return dst.row_id, dst.version
+            return dst.row_id, dst.version, False
         if not src_active:
             return None
         new_version = src.version + 1
         self._rows[dst_path] = _RawRow(row_id=src.row_id, path=dst_path, content=src.content, version=new_version, status="active", updated_at=datetime.now())
         self._rows[src_path] = _RawRow(row_id=src.row_id, path=src_path, content=src.content, version=src.version, status="deleted", updated_at=datetime.now())
-        return src.row_id, new_version
+        return src.row_id, new_version, True
 
     async def _raw_list_since(self, since) -> "list[_RawRow]":
         if since is None:
@@ -160,6 +160,64 @@ def test_move_already_applied_is_idempotent():
         second = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
         assert second is not None
         assert second.content == "hello"
+
+    asyncio.run(run())
+
+
+def test_move_already_applied_does_not_bump_revision():
+    async def run():
+        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        await backend.put("/skill/a/SKILL.md", "hello")
+        await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
+        revision_after_first_move = await backend.get_revision()
+
+        second = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
+        assert second is not None
+
+        revision_after_second_move = await backend.get_revision()
+        assert revision_after_second_move == revision_after_first_move
+
+    asyncio.run(run())
+
+
+def test_move_commits_destination_state_before_returning():
+    async def run():
+        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        await backend.put("/skill/a/SKILL.md", "hello")
+        moved = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
+        assert moved is not None
+
+        # By the time move() returns, dst_path's index/cache/underlying store must
+        # already fully agree -- this is what locking both src and dst protects.
+        fetched = await backend.get("/skill/b/SKILL.md")
+        assert fetched is not None
+        assert fetched.content == "hello"
+        assert fetched.version == moved.version
+        assert backend._index["/skill/b/SKILL.md"][1] == moved.version
+        assert "/skill/a/SKILL.md" not in backend._index
+
+    asyncio.run(run())
+
+
+def test_move_locks_both_src_and_dst_paths():
+    async def run():
+        held_paths_during_move: "list[set[str]]" = []
+
+        class _InstrumentedBackend(_InMemoryDatabaseBackend):
+            async def _raw_move(self, src_path, dst_path, updated_by):
+                # Snapshot which write locks are currently held (locked) while inside
+                # the raw move call -- this is the window Finding 2's fix protects.
+                held_paths_during_move.append(
+                    {p for p, lock in self._write_locks.items() if lock.locked()}
+                )
+                return await super()._raw_move(src_path, dst_path, updated_by)
+
+        backend = _InstrumentedBackend(_FakeRedis())
+        await backend.put("/skill/a/SKILL.md", "hello")
+        await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
+
+        assert held_paths_during_move
+        assert held_paths_during_move[-1] == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
 
     asyncio.run(run())
 

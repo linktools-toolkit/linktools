@@ -103,7 +103,15 @@ class DatabaseBackend(ABC):
     async def _raw_delete(self, path: str, updated_by: str) -> bool: ...
 
     @abstractmethod
-    async def _raw_move(self, src_path: str, dst_path: str, updated_by: str) -> "tuple[int, int] | None": ...
+    async def _raw_move(self, src_path: str, dst_path: str, updated_by: str) -> "tuple[int, int, bool] | None":
+        """Move src_path's content to dst_path.
+
+        Returns (row_id, new_version, changed) on success -- `changed` is False when
+        this call is an idempotent retry of an already-applied move (dst already holds
+        the content, src is already gone), True for a genuine move. Returns None only
+        when src_path does not exist and dst_path does not already hold its content
+        (i.e. there is nothing to move and nothing already moved)."""
+        ...
 
     @abstractmethod
     async def _raw_list_since(self, since: "datetime | None") -> "list[_RawRow]": ...
@@ -384,11 +392,22 @@ class DatabaseBackend(ABC):
             return changed
 
     async def move(self, src_path: str, dst_path: str, *, updated_by: str = "engine") -> "ResourceFile | None":
-        async with self.write_lock(src_path):
+        if src_path == dst_path:
+            paths_to_lock = [src_path]
+        else:
+            paths_to_lock = sorted([src_path, dst_path])
+
+        async def _do_move() -> "ResourceFile | None":
             result = await self._raw_move(src_path, dst_path, updated_by)
             if result is None:
                 return None
-            row_id, new_version = result
+            row_id, new_version, changed = result
+            if not changed:
+                # Already-applied idempotent retry -- no cache/index mutation, no revision bump.
+                cached = self._content_get(dst_path)
+                if cached is not None:
+                    return ResourceFile(path=dst_path, content=cached, version=new_version)
+                return await self.get(dst_path)
             content = self._content_get(src_path)
             self._content_pop(src_path)
             self._index.pop(src_path, None)
@@ -402,6 +421,13 @@ class DatabaseBackend(ABC):
             fetched = await self.get(dst_path)
             await self._bump_revision()
             return fetched
+
+        if len(paths_to_lock) == 1:
+            async with self.write_lock(paths_to_lock[0]):
+                return await _do_move()
+        async with self.write_lock(paths_to_lock[0]):
+            async with self.write_lock(paths_to_lock[1]):
+                return await _do_move()
 
     async def list_since(self, since: "datetime | None") -> "list[ResourceFile]":
         rows = await self._raw_list_since(since)
