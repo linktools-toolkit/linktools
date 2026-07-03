@@ -34,6 +34,7 @@ class _FakeExecutionContext:
     # `execution_context` is required (no None fallback) on `BaseAgent.__init__`,
     # so any non-None object with a `.kernel` attribute works here.
     kernel = object()
+    context: "dict" = {}
     capabilities = CapabilityBundle(
         builtin_tools=[],
         skills=[],
@@ -45,7 +46,7 @@ class _FakeExecutionContext:
 
 class _FakeSession:
     session_id = "fake-session-id"
-    workspace_root = Path("/tmp/fake-workspace-root")
+    root = Path("/tmp/fake-workspace-root")
 
 
 class _FakeSpec:
@@ -56,7 +57,7 @@ class _FakeSpec:
 
 
 def _construct(**toggles) -> SubAgent:
-    # `session` only needs `session_id`/`workspace_root` (both provided by
+    # `session` only needs `session_id`/`root` (both provided by
     # `_FakeSession`), since enable_plan_mode/enable_memory read those off
     # `self.session`. `spec` needs `name` (see `_FakeSpec`).
     return SubAgent(

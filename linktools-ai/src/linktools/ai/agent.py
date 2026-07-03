@@ -126,10 +126,6 @@ class BaseAgent(metaclass=abc.ABCMeta):
     def session_id(self) -> str:
         return self.session.session_id
 
-    @property
-    def trace_id(self) -> str:
-        return self.session.trace_id
-
     @abc.abstractmethod
     async def generate(
         self,
@@ -504,19 +500,21 @@ class LlmAgent(BaseAgent):
         )
 
     def _emit_call_started(self, ctx: LlmCallContext, *, image_inputs: "list[str] | None" = None) -> None:
+        from .session.types import FileSession
+
         kernel = self.kernel
         mcp_servers = sorted({s.server_name or s.name for s in ctx.mcp_specs}) or None
         kernel.trigger(
             "llm_call_start",
-            trace_id=self.session.trace_id,
+            **self.execution_context.context,
             agent_id=self.agent_id,
             model_type=ctx.model_type,
             session_id=self.session.session_id,
-            session_dir=str(self.session.run.session_dir.relative_to(self.session.run.trace_root)),
             system_prompt=ctx.system_prompt,
             prompt=ctx.prompt,
             call_id=ctx.llm_call_id,
             parent_call_id=ctx.parent_call_id,
+            **({"session_dir": str(self.session.root)} if isinstance(self.session, FileSession) else {}),
             **({"mcp_servers": mcp_servers} if mcp_servers else {}),
             **({"images": image_inputs} if image_inputs is not None else {}),
         )
@@ -558,15 +556,15 @@ class LlmAgent(BaseAgent):
     def _default_checkpoint_store(self) -> "CheckpointStore":
         from .checkpoint.local import FileCheckpointStore
 
-        return FileCheckpointStore(root=self.session.workspace_root / "checkpoints")
+        return FileCheckpointStore(root=self.session.root / "checkpoints")
 
     def _plan_artifact_store(self) -> "AgentArtifactStore":
         from .session.local import LocalAgentArtifactStore
 
-        return LocalAgentArtifactStore(root=self.session.workspace_root / "artifacts")
+        return LocalAgentArtifactStore(root=self.session.root / "artifacts")
 
     def _memory_root(self) -> Path:
-        return self.session.workspace_root / "memory"
+        return self.session.root / "memory"
 
     def _build_feature_capabilities(self) -> "list[Any]":
         """Feature-toggle-driven capabilities, in a fixed order, for `_build_model_agent`
@@ -602,19 +600,21 @@ class LlmAgent(BaseAgent):
         from .session.types import FileSession
 
         if isinstance(self.session, FileSession):
-            return await asyncio.to_thread((self.session.session_dir / "context.json").read_bytes)
+            return await asyncio.to_thread((self.session.root / "context.json").read_bytes)
         raise NotImplementedError(
             f"checkpointing is only implemented for FileSession, got {type(self.session).__name__}"
         )
 
     def _emit_call_finished(self, ctx: LlmCallContext, outcome: LlmCallOutcome) -> None:
+        from .session.types import FileSession
+
         self.kernel.trigger(
             "post_llm_call",
-            trace_id=self.session.trace_id,
+            **self.execution_context.context,
             agent_id=self.agent_id,
             model_type=ctx.model_type,
             session_id=self.session.session_id,
-            session_dir=str(self.session.run.session_dir.relative_to(self.session.run.trace_root)),
+            **({"session_dir": str(self.session.root)} if isinstance(self.session, FileSession) else {}),
             duration_ms=round((time.monotonic() - outcome.started_at) * 1000, 2),
             success=outcome.success,
             response=outcome.response,
@@ -636,14 +636,15 @@ class LlmAgent(BaseAgent):
         builtin_toolset = build_builtin_toolset(
             BuiltinToolContext(
                 backend=LocalExecutionBackend(
-                    runtime_dir=self.session.run.runtime_dir,
+                    runtime_dir=getattr(self, "workdir", None) or Path.cwd(),
                     base_dirs=[self.spec.base_dir] if self.spec.base_dir else [],
                 ),
                 enabled_tools=set(self.tools),
             )
         )
         kernel = self.kernel
-        builtin_toolset = HookedBuiltinToolset(builtin_toolset, kernel, self.session.trace_id, request.parent_call_id)
+        hook_context = self.execution_context.context
+        builtin_toolset = HookedBuiltinToolset(builtin_toolset, kernel, hook_context, request.parent_call_id)
         mcp_specs = self.execution_context.capabilities.mcp_servers
         prompt = request.prompt
         if note := unavailable_adapters_note(self.execution_context.capabilities.missing_mcp_sources):
@@ -658,13 +659,13 @@ class LlmAgent(BaseAgent):
         if request.skills:
             capabilities.append(SkillCapability(
                 skill_view_fn=lambda arguments: self._read_skill(request.skills, arguments),
-                kernel=kernel, trace_id=self.session.trace_id, parent_call_id=request.parent_call_id,
+                kernel=kernel, context=hook_context, parent_call_id=request.parent_call_id,
             ))
         if request.subagents:
             capabilities.append(SubagentCapability(
                 run_subagent_fn=self._invoke_subagent,
                 allowed_subagents={s.name for s in request.subagents},
-                kernel=kernel, trace_id=self.session.trace_id, parent_call_id=request.parent_call_id,
+                kernel=kernel, context=hook_context, parent_call_id=request.parent_call_id,
             ))
         for spec in mcp_specs:
             inner_mcp = MCP(
@@ -675,7 +676,7 @@ class LlmAgent(BaseAgent):
             )
             capabilities.append(HookedMCPCapability(
                 wrapped=inner_mcp, server_name=spec.server_name or spec.name,
-                kernel=kernel, trace_id=self.session.trace_id, parent_call_id=request.parent_call_id,
+                kernel=kernel, context=hook_context, parent_call_id=request.parent_call_id,
             ))
 
         agent = Agent(
@@ -740,9 +741,9 @@ class LlmAgent(BaseAgent):
         *,
         call_id: str,
     ) -> "dict[str, Any]":
-        trace_id = self.session.trace_id
+        hook_context = self.execution_context.context
         t = time.monotonic()
-        self.kernel.trigger("subagent_start", trace_id=trace_id, parent_agent_id=self.agent_id, subagent_id=subagent_id, call_id=call_id)
+        self.kernel.trigger("subagent_start", **hook_context, parent_agent_id=self.agent_id, subagent_id=subagent_id, call_id=call_id)
         success = True
         try:
             child_spec = next(
@@ -754,19 +755,21 @@ class LlmAgent(BaseAgent):
                 child_spec,
                 child_session,
                 builtin_tool_names=SubAgent._BUILTIN_TOOL_NAMES,
+                context=hook_context,
             )
             child_agent = SubAgent(
                 child_spec,
                 child_session,
                 execution_context=child_context,
                 model_config_resolver=self.model_config_resolver,
+                workdir=getattr(self, "workdir", None),
             )
             return await child_agent.generate(input_data, call_id=call_id)
         except Exception:
             success = False
             raise
         finally:
-            self.kernel.trigger("subagent_end", trace_id=trace_id, parent_agent_id=self.agent_id, subagent_id=subagent_id, duration_ms=round((time.monotonic() - t) * 1000, 2), status="completed" if success else "failed", call_id=call_id)
+            self.kernel.trigger("subagent_end", **hook_context, parent_agent_id=self.agent_id, subagent_id=subagent_id, duration_ms=round((time.monotonic() - t) * 1000, 2), status="completed" if success else "failed", call_id=call_id)
 
     # ------------------------------------------------------------------
     # Supported capabilities
@@ -859,16 +862,32 @@ class RuntimeAgent(LlmAgent):
     Adds file/terminal builtin tools (gated by `allowed_tools`) and advertises a runtime
     working directory in the prompt, plus `_write_runtime_json` for trace-file output.
     Used by workers and stage agents that read/write trace files or run commands.
-    """
+
+    `workdir` belongs to the agent, not the session -- it's the directory
+    file/bash tools execute in, decoupled from wherever the session's own
+    history/artifacts are stored (`FileSession.root`, if any). Defaults to
+    the process's current working directory."""
 
     _BUILTIN_TOOL_NAMES: "frozenset[str]" = frozenset({"file", "terminal"})
 
+    def __init__(
+        self,
+        spec: AgentSpec,
+        session: Session,
+        execution_context: AgentExecutionContext,
+        *,
+        workdir: "Path | None" = None,
+        **feature_toggles: Any,
+    ) -> None:
+        super().__init__(spec, session, execution_context, **feature_toggles)
+        self.workdir = workdir or Path.cwd()
+
     @property
     def _runtime_prompt_dir(self) -> "Path | None":
-        return self.session.run.runtime_dir
+        return self.workdir
 
     def _write_runtime_json(self, rel_path: str, payload: object) -> None:
-        path: Path = self.session.run.runtime_dir / rel_path
+        path: Path = self.workdir / rel_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
