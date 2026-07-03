@@ -182,11 +182,9 @@ class RemoteHistoryStore:
         await self._store.save(
             SessionTranscriptWrite(
                 session_id=session.session_id,
-                trace_id=session.trace_id,
                 events=events,
                 head=SessionTranscriptHead(
-                    trace_id=session.trace_id,
-                    session_kind=session.session_dir.name,
+                    session_kind=type(session).__name__,
                     parent_session_id=session.parent_session_id,
                     head_seq=head_seq,
                     snapshot_seq=snapshot_boundary_seq,

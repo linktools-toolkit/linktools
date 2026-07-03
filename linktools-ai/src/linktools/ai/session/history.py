@@ -36,7 +36,6 @@ _CONTEXT_MAX_CHARS = 160000
 
 @dataclass(frozen=True, slots=True)
 class SessionContextSnapshot:
-    trace_id: str
     session_id: str
     messages: "list[ModelMessage]"
     model: RuntimeModelConfig
@@ -102,7 +101,6 @@ def write_session_context(session_dir: Path, snapshot: SessionContextSnapshot) -
     llm_calls.append(snapshot.llm_call)
 
     payload = {
-        "trace_id": snapshot.trace_id,
         "session_id": snapshot.session_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "current_model": {"model_type": snapshot.model.model_type, "model": snapshot.model.model},

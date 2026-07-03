@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelMessage
 
@@ -19,7 +19,7 @@ from .history import (
     write_call_prompt,
     write_session_context,
 )
-from .protocols import ArtifactStore, RunStatus, SessionStatusInfo
+from .protocols import RunStatus, SessionStatusInfo
 
 if TYPE_CHECKING:
     from .types import Session, SessionTurn
@@ -41,14 +41,13 @@ class InMemorySessionStatusStore:
 
 class FileHistoryStore:
     async def load(self, session: "Session") -> "list[ModelMessage]":
-        return await asyncio.to_thread(load_message_history, session.session_dir)
+        return await asyncio.to_thread(load_message_history, session.root)
 
     async def persist(self, session: "Session", turn: "SessionTurn") -> None:
         await asyncio.to_thread(
             write_session_context,
-            session.session_dir,
+            session.root,
             SessionContextSnapshot(
-                trace_id=session.trace_id,
                 session_id=session.session_id,
                 messages=turn.all_messages,
                 model=turn.model,
@@ -62,19 +61,12 @@ class LocalArtifactStore:
     async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None:
         await asyncio.to_thread(
             write_call_prompt,
-            session.session_dir,
+            session.root,
             CallPromptSnapshot(
                 call_id=str(turn.llm_call.get("call_id") or ""),
                 messages=new_call_messages(turn.history, turn.all_messages, system_prompt=turn.system_prompt),
             ),
         )
-
-    async def finalize(self, session: "Session") -> "dict[str, Any] | None":
-        del session
-        return None
-
-    async def restore(self, session: "Session") -> "Path | None":
-        return session.trace_root
 
 
 class ReadOnlyArtifactStore:
@@ -82,28 +74,6 @@ class ReadOnlyArtifactStore:
 
     async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None:
         pass
-
-    async def finalize(self, session: "Session") -> "dict[str, Any] | None":
-        del session
-        return None
-
-    async def restore(self, session: "Session") -> "Path | None":
-        return session.trace_root
-
-
-class ArchiveArtifactStore:
-    def __init__(self, archive_service: Any, *, fallback: "ArtifactStore | None" = None) -> None:
-        self._archive_service = archive_service
-        self._fallback = fallback or LocalArtifactStore()
-
-    async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None:
-        await self._fallback.persist_call_sidecar(session, turn)
-
-    async def finalize(self, session: "Session") -> "dict[str, Any] | None":
-        return await self._archive_service.finalize(session.trace_id)
-
-    async def restore(self, session: "Session") -> "Path | None":
-        return await self._archive_service.restore(session.trace_id)
 
 
 class InMemoryRunStatusStore:

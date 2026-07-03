@@ -5,12 +5,11 @@ modules directly rather than the full `Session`/`Agent` stack.
 """
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from linktools.ai.session.local import ArchiveArtifactStore, InMemorySessionStatusStore
+from linktools.ai.session.local import InMemorySessionStatusStore
 from linktools.ai.session.protocols import ArtifactStore, HistoryStore, TranscriptStore
 from linktools.ai.session.remote import _estimate_model_messages
 
@@ -42,56 +41,6 @@ def test_session_status_store_keeps_sessions_independent():
     other = asyncio.run(status_store.get("session-2"))
 
     assert other.type == "idle"
-
-
-def test_archive_artifact_store_wraps_archive_service(tmp_path):
-    class StubArchiveService:
-        def __init__(self):
-            self.finalized = []
-            self.restored = []
-
-        async def finalize(self, trace_id: str):
-            self.finalized.append(trace_id)
-            return {"trace_id": trace_id}
-
-        async def restore(self, trace_id: str):
-            self.restored.append(trace_id)
-            return tmp_path / trace_id
-
-    service = StubArchiveService()
-    store = ArchiveArtifactStore(service)
-    session = SimpleNamespace(trace_id="TRC-1")
-
-    finalized = asyncio.run(store.finalize(session))
-    restored = asyncio.run(store.restore(session))
-
-    assert finalized == {"trace_id": "TRC-1"}
-    assert restored == tmp_path / "TRC-1"
-    assert service.finalized == ["TRC-1"]
-    assert service.restored == ["TRC-1"]
-
-
-def test_archive_artifact_store_delegates_sidecar_persistence_to_fallback():
-    calls = []
-
-    class StubFallback:
-        async def persist_call_sidecar(self, session, turn):
-            calls.append((session, turn))
-
-        async def finalize(self, session):
-            return None
-
-        async def restore(self, session):
-            return None
-
-    fallback = StubFallback()
-    store = ArchiveArtifactStore(archive_service=SimpleNamespace(), fallback=fallback)
-    session = SimpleNamespace(trace_id="TRC-2")
-    turn = SimpleNamespace()
-
-    asyncio.run(store.persist_call_sidecar(session, turn))
-
-    assert calls == [(session, turn)]
 
 
 def test_estimate_model_messages_is_zero_for_empty_history():
@@ -132,12 +81,6 @@ def test_history_store_and_artifact_store_are_plain_non_runtime_checkable_protoc
 
     class FakeArtifactStore:
         async def persist_call_sidecar(self, session, turn):
-            raise NotImplementedError
-
-        async def finalize(self, session):
-            raise NotImplementedError
-
-        async def restore(self, session):
             raise NotImplementedError
 
     # isinstance() against a non-@runtime_checkable Protocol raises TypeError;

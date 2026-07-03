@@ -4,7 +4,6 @@
 SessionStatusStore."""
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic_ai.messages import ModelMessage
@@ -54,12 +53,6 @@ class ArtifactStore(Protocol):
     """Persistence backend for non-history session artifacts."""
 
     async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None: ...
-
-    async def finalize(self, session: "Session") -> "dict[str, Any] | None":
-        ...
-
-    async def restore(self, session: "Session") -> "Path | None":
-        ...
 
 
 SessionStatus = Literal["idle", "busy", "retry", "error"]
