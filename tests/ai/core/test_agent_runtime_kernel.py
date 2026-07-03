@@ -25,7 +25,6 @@ from linktools.ai.session.types import (
     FileSessionSpec,
     RemoteSession,
     RemoteSessionSpec,
-    RunContext,
     Session,
     SessionTranscript,
     SessionTranscriptHead,
@@ -126,9 +125,6 @@ class _FakeAgentEnv:
         self.trace_store_calls += 1
         return object()
 
-    def trace_root(self, trace_id: str) -> Path:
-        return self.workspace_root / trace_id
-
 
 class _MinimalAgentRuntime:
     """Local stand-in for `engine.secops.runtime.AgentRuntime` (secops-specific, stays in
@@ -176,9 +172,8 @@ class _MinimalAgentRuntime:
 
     def session(self, trace_id: str, session_id: str = "main") -> Session:
         return Session.create(
-            self.env.workspace_root,
-            self.env.trace_root(trace_id),
-            FileSessionSpec(trace_id=trace_id, session_id=session_id),
+            self.env.workspace_root / trace_id,
+            FileSessionSpec(session_id=session_id),
         )
 
     def db_session(self, session_id: str, store) -> Session:
@@ -187,24 +182,13 @@ class _MinimalAgentRuntime:
             store=store,
             coordination=coordinator_for_store(store),
         )
-        return Session.create_db(
-            self.env.workspace_root,
-            self.env.trace_root(spec.trace_id or session_id),
-            spec,
-        )
+        return Session.create_db(spec)
 
 
 def _make_session(tmp_path: Path):
-    trace_root = tmp_path / "TRC"
     return FileSession(
         session_id="sess",
-        trace_id="trace-1",
-        run=RunContext(
-            workspace_root=tmp_path,
-            trace_root=trace_root,
-            runtime_dir=trace_root / "runtime",
-            session_dir=trace_root / "session" / "sess",
-        ),
+        root=tmp_path / "TRC" / "session" / "sess",
         status_store=InMemorySessionStatusStore(),
     )
 

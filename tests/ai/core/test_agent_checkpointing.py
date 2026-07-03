@@ -23,6 +23,7 @@ class _FakeExecutionContext:
     # itself is falsy), constructing a real `AgentKernel(environ.get_skill_registry(),
     # ...)` that would call methods `_FakeAgentEnv` below doesn't have.
     kernel = object()
+    context: "dict" = {}
     capabilities = CapabilityBundle(builtin_tools=[], skills=[], subagents=[], mcp_servers=[], missing_mcp_sources=[])
 
 
@@ -35,24 +36,17 @@ class _FakeAgentEnv:
         import logging
         return logging.getLogger(name)
 
-    def trace_root(self, trace_id: str) -> Path:
-        return self.workspace_root / "traces" / trace_id
-
 
 def _make_agent(tmp_path: Path, **toggles) -> SubAgent:
-    """Constructs a real FileSession + SubAgent, and pre-populates session_dir/context.json
+    """Constructs a real FileSession + SubAgent, and pre-populates root/context.json
     the way self.session.persist(...) would have by the time _maybe_save_checkpoint runs
     -- this test intentionally doesn't call persist() itself, since that needs a real
     SessionTurn/RuntimeModelConfig this task has no reason to construct."""
     env = _FakeAgentEnv(tmp_path)
-    spec_kwargs = FileSessionSpec(session_id="s1", trace_id="t1", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
-    session = FileSession.create(
-        env.workspace_root,
-        env.trace_root(spec_kwargs.trace_id),
-        spec_kwargs,
-    )
-    session.session_dir.mkdir(parents=True, exist_ok=True)
-    (session.session_dir / "context.json").write_bytes(b'{"messages": []}')
+    spec_kwargs = FileSessionSpec(session_id="s1", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
+    session = FileSession.create(env.workspace_root / "s1", spec_kwargs)
+    session.root.mkdir(parents=True, exist_ok=True)
+    (session.root / "context.json").write_bytes(b'{"messages": []}')
     spec = AgentSpec.from_dict({"description": "test"}, SpecSource(name="a1", path=tmp_path / "agent.md", base_dir=tmp_path))
     return SubAgent(
         spec=spec,
@@ -72,7 +66,7 @@ def test_no_checkpoint_saved_when_disabled(tmp_path):
 def test_checkpoint_saved_when_enabled(tmp_path):
     agent = _make_agent(tmp_path, enable_checkpointing=True)
     asyncio.run(agent._maybe_save_checkpoint())
-    checkpoints_root = tmp_path / "checkpoints"
+    checkpoints_root = agent.session.root / "checkpoints"
     assert checkpoints_root.exists()
     saved = list(checkpoints_root.rglob("*.bin"))
     assert len(saved) == 1
@@ -81,8 +75,8 @@ def test_checkpoint_saved_when_enabled(tmp_path):
 def test_checkpoint_content_matches_context_json(tmp_path):
     agent = _make_agent(tmp_path, enable_checkpointing=True)
     asyncio.run(agent._maybe_save_checkpoint())
-    context_json = (agent.session.session_dir / "context.json").read_bytes()
-    checkpoints_root = tmp_path / "checkpoints"
+    context_json = (agent.session.root / "context.json").read_bytes()
+    checkpoints_root = agent.session.root / "checkpoints"
     saved_file = next(checkpoints_root.rglob("*.bin"))
     assert saved_file.read_bytes() == context_json
 
@@ -92,7 +86,7 @@ def test_custom_checkpoint_store_is_used(tmp_path):
     custom_store = FileCheckpointStore(root=custom_root)
     agent = _make_agent(tmp_path, enable_checkpointing=True, checkpoint_store=custom_store)
     asyncio.run(agent._maybe_save_checkpoint())
-    assert not (tmp_path / "checkpoints").exists()
+    assert not (agent.session.root / "checkpoints").exists()
     assert list(custom_root.rglob("*.bin"))
 
 
@@ -100,5 +94,5 @@ def test_repeated_calls_increment_seq(tmp_path):
     agent = _make_agent(tmp_path, enable_checkpointing=True)
     asyncio.run(agent._maybe_save_checkpoint())
     asyncio.run(agent._maybe_save_checkpoint())
-    saved = list((tmp_path / "checkpoints").rglob("*.bin"))
+    saved = list((agent.session.root / "checkpoints").rglob("*.bin"))
     assert {p.stem for p in saved} == {"1", "2"}

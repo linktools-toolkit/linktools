@@ -52,17 +52,10 @@ class _FakeAgentEnv:
         import logging
         return logging.getLogger(name)
 
-    def trace_root(self, trace_id: str) -> Path:
-        return self.workspace_root / "traces" / trace_id
-
 
 def _make_session(tmp_path: Path, env: _FakeAgentEnv) -> FileSession:
-    spec = FileSessionSpec(session_id="parent", trace_id="t1", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
-    return FileSession.create(
-        env.workspace_root,
-        env.trace_root(spec.trace_id),
-        spec,
-    )
+    spec = FileSessionSpec(session_id="parent", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
+    return FileSession.create(env.workspace_root / "parent", spec)
 
 
 def _make_subagent_spec(tmp_path: Path) -> SubagentSpec:
@@ -85,23 +78,24 @@ def test_fork_coordinator_runs_isolated_branches(tmp_path):
         mcp_registry=env.get_mcp_registry(),
     )
     session = _make_session(tmp_path, env)
-    session.runtime_dir.mkdir(parents=True, exist_ok=True)
-    (session.runtime_dir / "shared.txt").write_text("original")
+    workdir = tmp_path / "runtime"
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "shared.txt").write_text("original")
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
         coordinator = ForkCoordinator(kernel, model_config_resolver=lambda model_type: None)
-        return await coordinator.run(spec, session, {"x": 1}, branch_count=3)
+        return await coordinator.run(spec, session, {"x": 1}, branch_count=3, workdir=workdir)
 
     results = asyncio.run(_run())
     assert len(results) == 3
     branch_ids = {r["branch_id"] for r in results}
     assert len(branch_ids) == 3
     assert all(r["status"] in ("done", "failed") for r in results)
-    # The parent's runtime_dir file must be untouched by branch execution.
-    assert (session.runtime_dir / "shared.txt").read_text() == "original"
+    # The parent's workdir file must be untouched by branch execution.
+    assert (workdir / "shared.txt").read_text() == "original"
     for r in results:
-        forked_file = tmp_path / "forks" / "parent" / r["branch_id"] / "shared.txt"
+        forked_file = workdir / "forks" / "parent" / r["branch_id"] / "shared.txt"
         assert forked_file.read_text() == "original"
 
 
@@ -113,12 +107,13 @@ def test_fork_coordinator_returns_empty_list_for_zero_branches(tmp_path):
         mcp_registry=env.get_mcp_registry(),
     )
     session = _make_session(tmp_path, env)
-    session.runtime_dir.mkdir(parents=True, exist_ok=True)
+    workdir = tmp_path / "runtime"
+    workdir.mkdir(parents=True, exist_ok=True)
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
         coordinator = ForkCoordinator(kernel, model_config_resolver=lambda model_type: None)
-        return await coordinator.run(spec, session, {"x": 1}, branch_count=0)
+        return await coordinator.run(spec, session, {"x": 1}, branch_count=0, workdir=workdir)
 
     results = asyncio.run(_run())
     assert results == []

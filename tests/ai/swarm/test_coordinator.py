@@ -54,17 +54,10 @@ class _FakeAgentEnv:
         import logging
         return logging.getLogger(name)
 
-    def trace_root(self, trace_id: str) -> Path:
-        return self.workspace_root / "traces" / trace_id
-
 
 def _make_session(tmp_path: Path, env: _FakeAgentEnv) -> FileSession:
-    spec = FileSessionSpec(session_id="s1", trace_id="t1", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
-    return FileSession.create(
-        env.workspace_root,
-        env.trace_root(spec.trace_id),
-        spec,
-    )
+    spec = FileSessionSpec(session_id="s1", coordination=InMemorySessionCoordinator(), status_store=InMemorySessionStatusStore())
+    return FileSession.create(env.workspace_root / "s1", spec)
 
 
 def _make_subagent_spec(tmp_path: Path) -> SubagentSpec:
