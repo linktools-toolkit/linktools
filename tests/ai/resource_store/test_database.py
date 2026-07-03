@@ -46,14 +46,21 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
     def __init__(self, redis) -> None:
         super().__init__(redis=redis, workspace_root=None)
         self._rows: "dict[str, _RawRow]" = {}
+        self._history: "dict[str, dict[int, _RawRow]]" = {}
         self._next_id = 1
 
     def _checksum(self, content: str) -> str:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
+    def _record_version(self, row: "_RawRow") -> None:
+        self._history.setdefault(row.path, {})[row.version] = row
+
     async def _raw_get(self, path: str) -> "_RawRow | None":
         row = self._rows.get(path)
         return row if row is not None and row.status == "active" else None
+
+    async def _raw_get_at_version(self, path: str, version: int) -> "_RawRow | None":
+        return self._history.get(path, {}).get(version)
 
     async def _raw_get_by_name(self, namespace: str, name: str) -> "list[_RawRow]":
         prefix, suffix = f"/{namespace}/", f"/{name}"
@@ -68,6 +75,7 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
             self._next_id += 1
         version = (existing.version + 1) if existing else 1
         self._rows[path] = _RawRow(row_id=row_id, path=path, content=content, version=version, status="active", updated_at=datetime.now())
+        self._record_version(self._rows[path])
         return row_id, version, True
 
     async def _raw_delete(self, path: str, updated_by: str) -> bool:
@@ -75,6 +83,7 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
         if existing is None or existing.status != "active":
             return False
         self._rows[path] = _RawRow(row_id=existing.row_id, path=path, content=existing.content, version=existing.version + 1, status="deleted", updated_at=datetime.now())
+        self._record_version(self._rows[path])
         return True
 
     async def _raw_move(self, src_path: str, dst_path: str, updated_by: str) -> "tuple[int, int, bool] | None":
@@ -89,6 +98,8 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
         new_version = src.version + 1
         self._rows[dst_path] = _RawRow(row_id=src.row_id, path=dst_path, content=src.content, version=new_version, status="active", updated_at=datetime.now())
         self._rows[src_path] = _RawRow(row_id=src.row_id, path=src_path, content=src.content, version=src.version, status="deleted", updated_at=datetime.now())
+        self._record_version(self._rows[dst_path])
+        self._record_version(self._rows[src_path])
         return src.row_id, new_version, True
 
     async def _raw_list_since(self, since) -> "list[_RawRow]":
@@ -96,7 +107,7 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
             return list(self._rows.values())
         return [r for r in self._rows.values() if r.updated_at >= since]
 
-    async def _raw_apply_batch(self, ops, *, expected_revision, updated_by) -> "tuple[str, list[_RawRow]]":
+    async def _raw_apply_batch(self, ops, *, expected_revision, updated_by) -> "tuple[str, list[_RawRow], bool]":
         # Return only the rows touched by THIS batch's ops -- not the whole table.
         # (Old CapabilityStore.save_batch's `final_rows` returned everything under one
         # capability_id, including untouched files, because its batch was scoped to a
@@ -104,17 +115,22 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
         # "the complete state of one capability" no longer has a clean analog -- only
         # per-op results generalize.)
         touched_paths = set()
+        changed = False
         for op in ops:
             if isinstance(op, PutOp):
-                await self._raw_upsert(op.path, op.content, self._checksum(op.content), updated_by)
+                _, _, op_changed = await self._raw_upsert(op.path, op.content, self._checksum(op.content), updated_by)
+                changed = changed or op_changed
                 touched_paths.add(op.path)
             elif isinstance(op, DeleteOp):
-                await self._raw_delete(op.path, updated_by)
+                op_changed = await self._raw_delete(op.path, updated_by)
+                changed = changed or op_changed
                 touched_paths.add(op.path)
             elif isinstance(op, MoveOp):
-                await self._raw_move(op.src_path, op.dst_path, updated_by)
+                result = await self._raw_move(op.src_path, op.dst_path, updated_by)
+                if result is not None:
+                    changed = changed or result[2]
                 touched_paths.add(op.dst_path)
-        return "rev-1", [self._rows[p] for p in touched_paths if p in self._rows]
+        return "rev-1", [self._rows[p] for p in touched_paths if p in self._rows], changed
 
 
 def test_backend_satisfies_protocol():
@@ -271,5 +287,32 @@ def test_get_at_version_returns_historical_content_via_disk_cache(tmp_path):
         v1 = await backend.get_at_version("/skill/a/SKILL.md", 1)
         assert v1 is not None
         assert v1.content == "v1"
+
+    asyncio.run(run())
+
+
+def test_get_at_version_falls_back_to_raw_storage_when_caches_miss():
+    async def run():
+        # Write two versions with one backend instance (this populates the real
+        # backing store via _raw_upsert, which _record_version mirrors into history).
+        writer = _InMemoryDatabaseBackend(_FakeRedis())
+        await writer.put("/skill/a/SKILL.md", "v1")
+        await writer.put("/skill/a/SKILL.md", "v2")
+
+        # Fresh backend instance sharing the same underlying rows/history dicts, but
+        # with empty in-memory caches (_hist, _index) and no workspace_root (disk L2
+        # absent) -- this forces both the hist-LRU tier and disk-L2 tier to miss, so
+        # the older version can only come back via the new _raw_get_at_version tier.
+        reader = _InMemoryDatabaseBackend(_FakeRedis())
+        reader._rows = writer._rows
+        reader._history = writer._history
+
+        v1 = await reader.get_at_version("/skill/a/SKILL.md", 1)
+        assert v1 is not None
+        assert v1.content == "v1"
+        assert v1.version == 1
+
+        # And it should now be cached in the hist-LRU for next time.
+        assert reader._hist_get(reader._rows["/skill/a/SKILL.md"].row_id, 1) == "v1"
 
     asyncio.run(run())

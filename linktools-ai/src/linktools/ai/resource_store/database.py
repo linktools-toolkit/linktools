@@ -84,7 +84,6 @@ class DatabaseBackend(ABC):
         self._resident: "dict[str, str]" = {}
         self._lru: "OrderedDict[str, str]" = OrderedDict()
         self._index: "dict[str, tuple[int, int]]" = {}  # path -> (row_id, version)
-        self._deleted: "set[str]" = set()
         self._hist: "OrderedDict[tuple[int, int], str]" = OrderedDict()
         self._write_locks: "dict[str, asyncio.Lock]" = {}
 
@@ -92,6 +91,9 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     async def _raw_get(self, path: str) -> "_RawRow | None": ...
+
+    @abstractmethod
+    async def _raw_get_at_version(self, path: str, version: int) -> "_RawRow | None": ...
 
     @abstractmethod
     async def _raw_get_by_name(self, namespace: str, name: str) -> "list[_RawRow]": ...
@@ -117,13 +119,16 @@ class DatabaseBackend(ABC):
     async def _raw_list_since(self, since: "datetime | None") -> "list[_RawRow]": ...
 
     @abstractmethod
-    async def _raw_apply_batch(self, ops: "list[Operation]", *, expected_revision: str, updated_by: str) -> "tuple[str, list[_RawRow]]":
+    async def _raw_apply_batch(self, ops: "list[Operation]", *, expected_revision: str, updated_by: str) -> "tuple[str, list[_RawRow], bool]":
         """Apply every op transactionally; raise on `expected_revision` mismatch.
 
         Return only the rows touched by these ops (one per distinct path written or
         deleted) -- not the full table. A batch here can span arbitrary, unrelated
         paths, unlike the old capability-scoped save_batch, so "the complete state of
-        one capability" has no analog; only per-op results generalize."""
+        one capability" has no analog; only per-op results generalize. `changed` is
+        False when every op in the batch was a content-identical no-op (matching the
+        idempotency semantics of `_raw_upsert`/`_raw_move`), True if any op actually
+        mutated state."""
         ...
 
     # ── Content cache tiers ──
@@ -277,7 +282,6 @@ class DatabaseBackend(ABC):
                 self._resident.clear()
                 self._lru.clear()
                 self._index.clear()
-                self._deleted.clear()
             max_updated_at = self._last_sync_at
             for row in rows:
                 self._apply_row(row)
@@ -291,10 +295,8 @@ class DatabaseBackend(ABC):
         if row.status == "deleted":
             self._content_pop(row.path)
             self._index.pop(row.path, None)
-            self._deleted.add(row.path)
             return
         self._index[row.path] = (row.row_id, row.version)
-        self._deleted.discard(row.path)
         self._write_workspace(row.row_id, row.version, row.content)
         # Sync doesn't know which paths were reached via get_by_name -- only promote
         # to resident if this path is already there; otherwise route through the LRU.
@@ -336,7 +338,11 @@ class DatabaseBackend(ABC):
             if disk_content is not None:
                 self._hist_put(row_id, version, disk_content)
                 return ResourceFile(path=path, content=disk_content, version=version)
-        return None
+        row = await self._raw_get_at_version(path, version)
+        if row is None:
+            return None
+        self._hist_put(row.row_id, row.version, row.content)
+        return ResourceFile(path=row.path, content=row.content, version=row.version)
 
     async def get_by_name(self, namespace: str, name: str) -> "list[ResourceFile]":
         await self._ensure_fresh()
@@ -347,7 +353,10 @@ class DatabaseBackend(ABC):
                 if path.startswith(prefix) and path.endswith(suffix):
                     content = self._content_get(path)
                     if content is None:
-                        content = self._read_workspace(row_id, version) or ""
+                        content = self._read_workspace(row_id, version)
+                    if content is None:
+                        row = await self._raw_get(path)
+                        content = row.content if row is not None else ""
                     self._content_put(path, content, resident=True)
                     results.append(ResourceFile(path=path, content=content, version=version))
             return results
@@ -374,7 +383,6 @@ class DatabaseBackend(ABC):
             checksum = _checksum(content)
             row_id, version, changed = await self._raw_upsert(path, content, checksum, updated_by)
             self._index[path] = (row_id, version)
-            self._deleted.discard(path)
             self._content_put(path, content, resident=path in self._resident)
             self._write_workspace(row_id, version, content)
             if changed:
@@ -387,7 +395,6 @@ class DatabaseBackend(ABC):
             if changed:
                 self._content_pop(path)
                 self._index.pop(path, None)
-                self._deleted.add(path)
                 await self._bump_revision()
             return changed
 
@@ -411,7 +418,6 @@ class DatabaseBackend(ABC):
             content = self._content_get(src_path)
             self._content_pop(src_path)
             self._index.pop(src_path, None)
-            self._deleted.add(src_path)
             self._index[dst_path] = (row_id, new_version)
             if content is not None:
                 self._content_put(dst_path, content, resident=False)
@@ -435,8 +441,9 @@ class DatabaseBackend(ABC):
 
     async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "engine") -> "list[ResourceFile]":
         expected_revision = str(await self.get_revision())
-        _, rows = await self._raw_apply_batch(ops, expected_revision=expected_revision, updated_by=updated_by)
+        _, rows, changed = await self._raw_apply_batch(ops, expected_revision=expected_revision, updated_by=updated_by)
         for row in rows:
             self._apply_row(row)
-        await self._bump_revision()
+        if changed:
+            await self._bump_revision()
         return [ResourceFile(path=r.path, content=r.content, version=r.version) for r in rows if r.status == "active"]
