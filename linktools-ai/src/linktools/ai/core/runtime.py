@@ -5,7 +5,7 @@
 
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 from linktools.runtime import EventHandlerMixin
@@ -39,6 +39,7 @@ class AgentExecutionContext:
     session: Session
     capabilities: CapabilityBundle
     kernel: "AgentKernel"
+    context: "dict[str, Any]" = field(default_factory=dict)
 
 
 class AgentKernel(EventHandlerMixin):
@@ -63,11 +64,13 @@ class AgentKernel(EventHandlerMixin):
         session: Session,
         *,
         builtin_tool_names: "frozenset[str]",
+        context: "dict[str, Any] | None" = None,
     ) -> AgentExecutionContext:
         return AgentExecutionContext(
             session=session,
             capabilities=self.resolve_capabilities(spec, builtin_tool_names=builtin_tool_names),
             kernel=self,
+            context=context or {},
         )
 
     def resolve_capabilities(

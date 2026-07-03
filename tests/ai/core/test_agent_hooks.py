@@ -89,3 +89,33 @@ def test_subagent_capability_fires_subagent_events_not_mcp_events():
     assert "subagent_id" in start_kwargs or "parent_agent_id" in start_kwargs
     assert "server" not in start_kwargs
     assert "tool_name" not in start_kwargs
+
+
+def test_build_context_stores_caller_supplied_context_dict():
+    from linktools.ai.core.registry import AgentSpec
+
+    kernel = _kernel()
+    spec = AgentSpec(name="a", path=None, base_dir=None, enabled=True, model="standard")
+
+    class _FakeSession:
+        pass
+
+    ctx = kernel.build_context(
+        spec, _FakeSession(), builtin_tool_names=frozenset(), context={"trace_id": "T1", "tenant": "acme"},
+    )
+
+    assert ctx.context == {"trace_id": "T1", "tenant": "acme"}
+
+
+def test_build_context_defaults_context_to_empty_dict():
+    from linktools.ai.core.registry import AgentSpec
+
+    kernel = _kernel()
+    spec = AgentSpec(name="a", path=None, base_dir=None, enabled=True, model="standard")
+
+    class _FakeSession:
+        pass
+
+    ctx = kernel.build_context(spec, _FakeSession(), builtin_tool_names=frozenset())
+
+    assert ctx.context == {}
