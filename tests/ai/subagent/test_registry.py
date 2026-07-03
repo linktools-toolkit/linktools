@@ -1,30 +1,35 @@
+from linktools.ai.resource_store.local import InMemoryResourceBackend
+from linktools.ai.resource_store.store import ResourceStore
 from linktools.ai.subagent.registry import SubagentRegistry
 
 
-class _RecordingCapStore:
-    def __init__(self) -> None:
-        self.registered: "list[tuple[str, str]]" = []
+def test_subagent_registry_loads_from_resource_store(tmp_path):
+    async def run():
+        backend = InMemoryResourceBackend()
+        await backend.put("/subagent/db-agent/agent.md", "---\nname: db-agent\n---\ninstructions")
+        store = ResourceStore(backends=[backend])
+        registry = SubagentRegistry(tmp_path, resource_store=store, capabilities_root=tmp_path, cap_kind="subagent")
+        await registry.preload()
+        spec = registry.get("db-agent")
+        assert spec is not None
+        assert spec.name == "db-agent"
 
-    def register_primary(self, kind: str, primary_rel: str) -> None:
-        self.registered.append((kind, primary_rel))
-
-    async def iter_primaries(self, kind: str):
-        return []
-
-
-def test_subagent_registry_registers_its_primary_filename_with_cap_store(tmp_path):
-    cap_store = _RecordingCapStore()
-    SubagentRegistry(tmp_path, cap_store=cap_store, capabilities_root=tmp_path, cap_kind="subagent")
-    assert cap_store.registered == [("subagent", "agent.md")]
+    import asyncio
+    asyncio.run(run())
 
 
-def test_markdown_agent_registry_does_not_register_without_cap_kind(tmp_path):
-    # cap_store given but cap_kind omitted -- MarkdownAgentRegistry has no kind to register under.
-    cap_store = _RecordingCapStore()
-    SubagentRegistry(tmp_path, cap_store=cap_store, capabilities_root=tmp_path)
-    assert cap_store.registered == []
+def test_subagent_registry_does_not_register_without_cap_kind(tmp_path):
+    async def run():
+        backend = InMemoryResourceBackend()
+        store = ResourceStore(backends=[backend])
+        registry = SubagentRegistry(tmp_path, resource_store=store, capabilities_root=tmp_path)
+        await registry.preload()
+        assert "anything" not in registry
+
+    import asyncio
+    asyncio.run(run())
 
 
-def test_subagent_registry_does_not_touch_cap_store_when_none(tmp_path):
+def test_subagent_registry_does_not_touch_resource_store_when_none(tmp_path):
     registry = SubagentRegistry(tmp_path)
     assert registry is not None

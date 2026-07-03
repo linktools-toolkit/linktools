@@ -1,24 +1,23 @@
+from linktools.ai.resource_store.local import InMemoryResourceBackend
+from linktools.ai.resource_store.store import ResourceStore
 from linktools.ai.skill.registry import SkillRegistry
 
 
-class _RecordingCapStore:
-    def __init__(self) -> None:
-        self.registered: "list[tuple[str, str]]" = []
+def test_skill_registry_loads_from_resource_store(tmp_path):
+    async def run():
+        backend = InMemoryResourceBackend()
+        await backend.put("/skill/db-skill/SKILL.md", "---\nname: db-skill\n---\ninstructions")
+        store = ResourceStore(backends=[backend])
+        registry = SkillRegistry(tmp_path, resource_store=store)
+        await registry.preload()
+        spec = registry.get("db-skill")
+        assert spec is not None
+        assert spec.name == "db-skill"
 
-    def register_primary(self, kind: str, primary_rel: str) -> None:
-        self.registered.append((kind, primary_rel))
-
-    async def iter_primaries(self, kind: str):
-        return []
-
-
-def test_skill_registry_registers_its_primary_filename_with_cap_store(tmp_path):
-    cap_store = _RecordingCapStore()
-    SkillRegistry(tmp_path, cap_store=cap_store)
-    assert cap_store.registered == [("skill", "SKILL.md")]
+    import asyncio
+    asyncio.run(run())
 
 
-def test_skill_registry_does_not_touch_cap_store_when_none(tmp_path):
-    # No cap_store supplied -- constructing the registry must not raise.
+def test_skill_registry_does_not_touch_resource_store_when_none(tmp_path):
     registry = SkillRegistry(tmp_path)
     assert registry is not None

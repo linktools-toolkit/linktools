@@ -27,7 +27,7 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..registry_store.store import CapabilityStore
+    from ..resource_store.store import ResourceStore
 
 
 logger = logging.getLogger("linktools.ai.core.registry")
@@ -224,17 +224,15 @@ class MarkdownAgentRegistry(BaseRegistry[_AgentSpecT]):
     def __init__(
         self,
         *paths: Path,
-        cap_store: "CapabilityStore | None" = None,
+        resource_store: "ResourceStore | None" = None,
         capabilities_root: "Path | None" = None,
         cap_kind: "str | None" = None,
     ) -> None:
         super().__init__(*paths)
-        self._cap_store = cap_store
+        self._resource_store = resource_store
         self._capabilities_root = capabilities_root  # source caps root for agent-group.yaml lookup
-        self._cap_kind = cap_kind  # DB kind string, e.g. "subagent" -- must match the kind
-        # capability registrations were saved under
-        if cap_store is not None and cap_kind is not None:
-            cap_store.register_primary(cap_kind, "agent.md")
+        self._cap_kind = cap_kind  # namespace string, e.g. "subagent" -- must match the
+        # namespace capability registrations were saved under
 
     async def _load(self) -> "dict[str, _AgentSpecT]":
         result: "dict[str, _AgentSpecT]" = {}
@@ -255,8 +253,10 @@ class MarkdownAgentRegistry(BaseRegistry[_AgentSpecT]):
                 result[spec.name] = spec
                 logger.debug("%s loaded: name=%s path=%s", self._kind, spec.name, markdown)
         # Load DB-managed capabilities from memory store (overrides source)
-        if self._cap_store is not None and self._capabilities_root is not None and self._cap_kind is not None:
-            for capability_id, _, content in await self._cap_store.iter_primaries(self._cap_kind):
+        if self._resource_store is not None and self._capabilities_root is not None and self._cap_kind is not None:
+            for resource in await self._resource_store.get_by_name(self._cap_kind, "agent.md"):
+                capability_id = resource.path.split("/")[2]
+                content = resource.content
                 base_dir = self._capabilities_root / self._cap_kind / capability_id
                 spec = self._load_spec_from_content(capability_id, content, base_dir)
                 if not spec.enabled:

@@ -1,23 +1,23 @@
 from linktools.ai.mcp.registry import MCPRegistry
+from linktools.ai.resource_store.local import InMemoryResourceBackend
+from linktools.ai.resource_store.store import ResourceStore
 
 
-class _RecordingCapStore:
-    def __init__(self) -> None:
-        self.registered: "list[tuple[str, str]]" = []
+def test_mcp_registry_loads_from_resource_store(tmp_path):
+    async def run():
+        backend = InMemoryResourceBackend()
+        await backend.put("/mcp/db-mcp/mcp.yaml", "name: db-mcp\nmcp:\n  type: stdio\n  command: echo\n")
+        store = ResourceStore(backends=[backend])
+        registry = MCPRegistry(tmp_path, resource_store=store)
+        await registry.preload()
+        spec = registry.get("db-mcp")
+        assert spec is not None
+        assert spec.name == "db-mcp"
 
-    def register_primary(self, kind: str, primary_rel: str) -> None:
-        self.registered.append((kind, primary_rel))
-
-    async def iter_primaries(self, kind: str):
-        return []
-
-
-def test_mcp_registry_registers_its_primary_filename_with_cap_store(tmp_path):
-    cap_store = _RecordingCapStore()
-    MCPRegistry(tmp_path, cap_store=cap_store)
-    assert cap_store.registered == [("mcp", "mcp.yaml")]
+    import asyncio
+    asyncio.run(run())
 
 
-def test_mcp_registry_does_not_touch_cap_store_when_none(tmp_path):
+def test_mcp_registry_does_not_touch_resource_store_when_none(tmp_path):
     registry = MCPRegistry(tmp_path)
     assert registry is not None

@@ -14,7 +14,7 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..registry_store.store import CapabilityStore
+    from ..resource_store.store import ResourceStore
 
 logger = logging.getLogger("linktools.ai.skill.registry")
 
@@ -48,14 +48,12 @@ class SkillRegistry(BaseRegistry[SkillSpec]):
     def __init__(
         self,
         *paths: Path,
-        cap_store: "CapabilityStore | None" = None,
+        resource_store: "ResourceStore | None" = None,
         capabilities_root: "Path | None" = None,
     ) -> None:
         super().__init__(*paths)
-        self._cap_store = cap_store
+        self._resource_store = resource_store
         self._capabilities_root = capabilities_root
-        if cap_store is not None:
-            cap_store.register_primary("skill", "SKILL.md")
 
     async def _load(self) -> "dict[str, SkillSpec]":
         result: "dict[str, SkillSpec]" = {}
@@ -75,8 +73,10 @@ class SkillRegistry(BaseRegistry[SkillSpec]):
                         logger.warning("Skill '%s' from %s overrides existing registration", spec.name, child)
                     result[spec.name] = spec
                     logger.debug("skill loaded: name=%s category=%s path=%s", spec.name, spec.category, child)
-        if self._cap_store is not None:
-            for capability_id, _, content in await self._cap_store.iter_primaries("skill"):
+        if self._resource_store is not None:
+            for resource in await self._resource_store.get_by_name("skill", "SKILL.md"):
+                capability_id = resource.path.split("/")[2]
+                content = resource.content
                 base_dir = self._capabilities_root / "skill" / capability_id if self._capabilities_root else None
                 spec = self._load_spec_from_content(
                     capability_id,

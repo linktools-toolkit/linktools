@@ -14,7 +14,7 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..registry_store.store import CapabilityStore
+    from ..resource_store.store import ResourceStore
 
 logger = logging.getLogger("linktools.ai.mcp.registry")
 
@@ -58,11 +58,9 @@ class MCPServerSpec(BaseSpec):
 class MCPRegistry(BaseRegistry[MCPServerSpec]):
     """Scan MCP directories and load MCPServerSpec objects keyed by server_id."""
 
-    def __init__(self, *paths: Path, cap_store: "CapabilityStore | None" = None) -> None:
+    def __init__(self, *paths: Path, resource_store: "ResourceStore | None" = None) -> None:
         super().__init__(*paths)
-        self._cap_store = cap_store
-        if cap_store is not None:
-            cap_store.register_primary("mcp", "mcp.yaml")
+        self._resource_store = resource_store
 
     async def _load(self) -> "dict[str, MCPServerSpec]":
         result: "dict[str, MCPServerSpec]" = {}
@@ -82,8 +80,10 @@ class MCPRegistry(BaseRegistry[MCPServerSpec]):
                         logger.warning("MCP server '%s' from %s overrides existing registration", spec.name, child)
                     result[spec.name] = spec
                     logger.debug("mcp loaded: name=%s path=%s", spec.name, child)
-        if self._cap_store is not None:
-            for capability_id, _, content in await self._cap_store.iter_primaries("mcp"):
+        if self._resource_store is not None:
+            for resource in await self._resource_store.get_by_name("mcp", "mcp.yaml"):
+                capability_id = resource.path.split("/")[2]
+                content = resource.content
                 payload = _load_yaml_text(content, source=f"<db:{capability_id}>")
                 base_dir = next(
                     (p / capability_id for p in self._paths if (p / capability_id).is_dir()), None
