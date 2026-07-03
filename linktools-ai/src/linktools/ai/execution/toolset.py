@@ -24,10 +24,10 @@ class HookedBuiltinToolset(WrapperToolset):
     for their own tool categories.
     """
 
-    def __init__(self, wrapped, kernel, trace_id: str, parent_call_id: "str | None"):
+    def __init__(self, wrapped, kernel, context: "dict[str, Any]", parent_call_id: "str | None"):
         super().__init__(wrapped)
         self._kernel = kernel
-        self._trace_id = trace_id
+        self._context = context
         self._parent_call_id = parent_call_id
 
     async def call_tool(self, name, tool_args, ctx, tool):
@@ -38,7 +38,7 @@ class HookedBuiltinToolset(WrapperToolset):
         if self._kernel:
             self._kernel.trigger(
                 "mcp_call_start",
-                trace_id=self._trace_id,
+                **self._context,
                 server="builtin",
                 tool_name=name,
                 arguments=tool_args,
@@ -56,7 +56,7 @@ class HookedBuiltinToolset(WrapperToolset):
             if self._kernel:
                 self._kernel.trigger(
                     "post_mcp_call",
-                    trace_id=self._trace_id,
+                    **self._context,
                     server="builtin",
                     tool_name=name,
                     duration_ms=round((time.monotonic() - t) * 1000, 2),

@@ -16,7 +16,7 @@ class SubagentCapability(AbstractCapability[None]):
     run_subagent_fn: "Callable[..., Awaitable[dict[str, Any]]]" = None  # type: ignore[assignment]
     allowed_subagents: "set[str]" = field(default_factory=set)
     kernel: Any = None
-    trace_id: str = ""
+    context: "dict[str, Any]" = field(default_factory=dict)
     parent_call_id: "str | None" = None
 
     def get_toolset(self) -> FunctionToolset:
@@ -40,7 +40,7 @@ class SubagentCapability(AbstractCapability[None]):
         if self.kernel:
             self.kernel.trigger(
                 "subagent_start",
-                trace_id=self.trace_id,
+                **self.context,
                 subagent_id=subagent_id,
                 call_id=call.tool_call_id,
                 parent_call_id=self.parent_call_id,
@@ -55,7 +55,7 @@ class SubagentCapability(AbstractCapability[None]):
             if self.kernel:
                 self.kernel.trigger(
                     "subagent_end",
-                    trace_id=self.trace_id,
+                    **self.context,
                     subagent_id=subagent_id,
                     duration_ms=round((time.monotonic() - t) * 1000, 2),
                     status="completed" if success else "failed",

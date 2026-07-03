@@ -3,7 +3,7 @@
 """SkillCapability: skill_view as an independent AgentCapability (Section: skill/subagent/MCP -> AbstractCapability)."""
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -14,7 +14,7 @@ from pydantic_ai.toolsets import FunctionToolset
 class SkillCapability(AbstractCapability[None]):
     skill_view_fn: "Callable[[dict[str, Any]], dict[str, Any]]" = None  # type: ignore[assignment]
     kernel: Any = None
-    trace_id: str = ""
+    context: "dict[str, Any]" = field(default_factory=dict)
     parent_call_id: "str | None" = None
 
     def get_toolset(self) -> FunctionToolset:
@@ -36,7 +36,7 @@ class SkillCapability(AbstractCapability[None]):
         if self.kernel:
             self.kernel.trigger(
                 "mcp_call_start",
-                trace_id=self.trace_id,
+                **self.context,
                 server="builtin",
                 tool_name=tool_def.name,
                 arguments=args,
@@ -54,7 +54,7 @@ class SkillCapability(AbstractCapability[None]):
             if self.kernel:
                 self.kernel.trigger(
                     "post_mcp_call",
-                    trace_id=self.trace_id,
+                    **self.context,
                     server="builtin",
                     tool_name=tool_def.name,
                     duration_ms=round((time.monotonic() - t) * 1000, 2),

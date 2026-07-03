@@ -10,7 +10,7 @@ wrap_tool_execute infeasible for the combined builtin+MCP toolset case.
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_ai.capabilities import WrapperCapability
@@ -41,7 +41,7 @@ def _normalize_mcp_payload(server: str, raw: Any) -> Any:
 class HookedMCPCapability(WrapperCapability):
     server_name: str = ""
     kernel: Any = None
-    trace_id: str = ""
+    context: "dict[str, Any]" = field(default_factory=dict)
     parent_call_id: "str | None" = None
 
     async def wrap_tool_execute(self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any) -> Any:
@@ -53,7 +53,7 @@ class HookedMCPCapability(WrapperCapability):
         if self.kernel:
             self.kernel.trigger(
                 "mcp_call_start",
-                trace_id=self.trace_id,
+                **self.context,
                 server=self.server_name,
                 tool_name=tool_def.name,
                 arguments=args,
@@ -74,7 +74,7 @@ class HookedMCPCapability(WrapperCapability):
             if self.kernel:
                 self.kernel.trigger(
                     "post_mcp_call",
-                    trace_id=self.trace_id,
+                    **self.context,
                     server=self.server_name,
                     tool_name=tool_def.name,
                     duration_ms=round((time.monotonic() - t) * 1000, 2),

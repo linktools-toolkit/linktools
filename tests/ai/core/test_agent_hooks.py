@@ -65,7 +65,7 @@ def test_subagent_capability_fires_subagent_events_not_mcp_events():
         run_subagent_fn=run_subagent_fn,
         allowed_subagents={"child"},
         kernel=kernel,
-        trace_id="t1",
+        context={"trace_id": "t1"},
         parent_call_id=None,
     )
 
