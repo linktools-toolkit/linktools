@@ -118,17 +118,19 @@ class InMemoryResourceBackend:
         ]
 
     async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "engine") -> "list[ResourceFile]":
-        results: "list[ResourceFile]" = []
+        results: "dict[str, ResourceFile]" = {}
         for op in ops:
             if isinstance(op, PutOp):
-                results.append(await self.put(op.path, op.content, updated_by=updated_by))
+                results[op.path] = await self.put(op.path, op.content, updated_by=updated_by)
             elif isinstance(op, DeleteOp):
                 await self.delete(op.path, updated_by=updated_by)
+                results.pop(op.path, None)
             elif isinstance(op, MoveOp):
                 moved = await self.move(op.src_path, op.dst_path, updated_by=updated_by)
+                results.pop(op.src_path, None)
                 if moved is not None:
-                    results.append(moved)
-        return results
+                    results[op.dst_path] = moved
+        return list(results.values())
 
     async def get_revision(self) -> int:
         return self._revision
