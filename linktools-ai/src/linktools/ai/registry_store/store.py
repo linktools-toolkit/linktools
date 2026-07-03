@@ -34,12 +34,9 @@ _LRU_MAX_FILES = 256  # upper bound for supplementary-file content / row caches
 _MAX_CACHE_BYTES = 1 * 1024 * 1024  # 1 MiB: larger supplementary/historical files are served from disk/DB, never held in memory
 
 _PRIMARY_REL: "dict[str, str]" = {
-    "worker": "agent.md",
-    "stage": "agent.md",
     "subagent": "agent.md",
     "skill": "SKILL.md",
     "mcp": "mcp.yaml",
-    "plugin": "plugin.yaml",
 }
 
 
@@ -76,12 +73,9 @@ def _extract_rel(kind: str, capability_id: str, file_path: str) -> str:
     if file_path.startswith(id_prefix):
         return file_path[len(id_prefix):]
     source_root = {
-        "worker": "worker",
-        "stage": "stage",
         "subagent": "subagent",
         "skill": "skill",
         "mcp": "adapter",
-        "plugin": "plugin",
     }.get(kind, kind)
     source_prefix = f"{source_root}/{capability_id}/"
     if file_path.startswith(source_prefix):
@@ -96,12 +90,9 @@ def _legacy_display_rel(kind: str, capability_id: str, file_path: str, rel_path:
     if file_path.startswith(id_prefix):
         return None
     source_root = {
-        "worker": "worker",
-        "stage": "stage",
         "subagent": "subagent",
         "skill": "skill",
         "mcp": "adapter",
-        "plugin": "plugin",
     }.get(kind, kind)
     if file_path.startswith(f"{source_root}/{capability_id}/"):
         return file_path
