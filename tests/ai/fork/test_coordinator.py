@@ -95,7 +95,7 @@ def test_fork_coordinator_runs_isolated_branches(tmp_path):
     # The parent's workdir file must be untouched by branch execution.
     assert (workdir / "shared.txt").read_text() == "original"
     for r in results:
-        forked_file = workdir / "forks" / "parent" / r["branch_id"] / "shared.txt"
+        forked_file = workdir.parent / ".runtime.forks" / "parent" / r["branch_id"] / "shared.txt"
         assert forked_file.read_text() == "original"
 
 
