@@ -130,10 +130,10 @@ class CapabilityStore:
     One instance per worker process; asyncio-safe.
     """
 
-    def __init__(self, repo: "CapabilityRepositoryProtocol", redis: "CapabilityCacheProtocol", workspace_root: "Path | None" = None) -> None:
+    def __init__(self, repo: "CapabilityRepositoryProtocol", cache: "CapabilityCacheProtocol", root: "Path | None" = None) -> None:
         self.repo = repo
-        self.redis = redis
-        self._workspace_root = workspace_root
+        self.cache = cache
+        self._root = root
         self._local_version: int = 0
         self._last_sync_at: "datetime | None" = None
         self._initialized: bool = False
@@ -225,7 +225,7 @@ class CapabilityStore:
         if not self._initialized:
             await self.sync_if_stale()
             return
-        if not self.redis.config.enabled:
+        if not self.cache.config.enabled:
             return
         if await self._remote_version() != self._local_version:
             await self.sync_if_stale()
@@ -239,7 +239,7 @@ class CapabilityStore:
         Falls back to asyncio.Lock when Redis is disabled (single-instance dev).
         Retries for up to 10s before raising TimeoutError.
         """
-        if not self.redis.config.enabled:
+        if not self.cache.config.enabled:
             key = _mem_prefix(kind, capability_id)
             if key not in self._cap_locks:
                 self._cap_locks[key] = asyncio.Lock()
@@ -253,7 +253,7 @@ class CapabilityStore:
 
         acquired = False
         for _ in range(100):  # 100 × 0.1s = 10s max wait
-            if await self.redis.try_acquire(lock_key, lock_val, ttl):
+            if await self.cache.try_acquire(lock_key, lock_val, ttl):
                 acquired = True
                 break
             await asyncio.sleep(0.1)
@@ -265,7 +265,7 @@ class CapabilityStore:
             yield
         finally:
             try:
-                await self.redis.release_if_owner(lock_key, lock_val)
+                await self.cache.release_if_owner(lock_key, lock_val)
             except Exception as exc:
                 logger.warning("cap_write_lock release failed (%s/%s): %s", kind, capability_id, exc)
 
@@ -513,9 +513,9 @@ class CapabilityStore:
 
         The file is written there by every sync, so it is a stable symlink target.
         """
-        if self._workspace_root is None:
+        if self._root is None:
             return None
-        return self._workspace_root / f"{file_id}.v{version}"
+        return self._root / f"{file_id}.v{version}"
 
     def db_managed_ids(self, kind: str) -> "set[str]":
         """Capability ids with at least one primary file in memory cache."""
@@ -560,7 +560,10 @@ class CapabilityStore:
             ]
             return sorted(active + deleted, key=lambda item: (str(item["rel_path"]), str(item["status"])))
         try:
-            return await self.repo.list_file_states(kind, capability_id)
+            # No dedicated repo method for this -- list_files and "file states" are the
+            # same query pre-sync (both return the full DB row set for a capability); the
+            # active/deleted split above only matters once memory is populated.
+            return await self.repo.list_files(kind, capability_id)
         except Exception as exc:
             logger.warning("capability_store.list_file_states failed (%s/%s): %s", kind, capability_id, exc)
             return []
@@ -609,12 +612,12 @@ class CapabilityStore:
         checksum: "str | None" = None,
     ) -> None:
         """Write content file plus .meta.json with checksum (reuses caller's checksum if given)."""
-        if self._workspace_root is None:
+        if self._root is None:
             return
-        dest = self._workspace_root / f"{file_id}.v{version}"
-        meta = self._workspace_root / f"{file_id}.v{version}.meta.json"
+        dest = self._root / f"{file_id}.v{version}"
+        meta = self._root / f"{file_id}.v{version}.meta.json"
         try:
-            self._workspace_root.mkdir(parents=True, exist_ok=True)
+            self._root.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             if checksum is None:
                 checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -636,10 +639,10 @@ class CapabilityStore:
         A mismatch means a corrupt/partial write — the pair is removed so the caller
         falls through to the DB and rewrites it.
         """
-        if self._workspace_root is None:
+        if self._root is None:
             return None
-        dest = self._workspace_root / f"{file_id}.v{version}"
-        meta = self._workspace_root / f"{file_id}.v{version}.meta.json"
+        dest = self._root / f"{file_id}.v{version}"
+        meta = self._root / f"{file_id}.v{version}.meta.json"
         try:
             if not dest.exists() or not meta.exists():
                 return None
@@ -656,11 +659,11 @@ class CapabilityStore:
             return None
 
     def _delete_workspace(self, file_id: int, version: int) -> None:
-        if self._workspace_root is None:
+        if self._root is None:
             return
         for name in (f"{file_id}.v{version}", f"{file_id}.v{version}.meta.json"):
             try:
-                (self._workspace_root / name).unlink(missing_ok=True)
+                (self._root / name).unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("capability_store: workspace delete failed (%s): %s", name, exc)
 
@@ -710,7 +713,7 @@ class CapabilityStore:
     # ── Delete / Rename ───────────────────────────────────────────────────
 
     async def delete(self, kind: str, capability_id: str) -> bool:
-        if await self.repo.delete_files_all(kind, capability_id) == 0:
+        if await self.repo.delete_capability(kind, capability_id) == 0:
             return False
         prefix = _mem_prefix(kind, capability_id)
         keys = [k for k in self._mem_versions if k.startswith(prefix)]
@@ -743,7 +746,7 @@ class CapabilityStore:
 
     async def rename(self, kind: str, old_capability_id: str, new_capability_id: str) -> bool:
         try:
-            if await self.repo.move_files(kind, old_capability_id, new_capability_id) == 0:
+            if await self.repo.rename_capability(kind, old_capability_id, new_capability_id) == 0:
                 return False
         except ValueError as exc:
             logger.warning("capability_store.rename rejected: %s", exc)
@@ -776,8 +779,15 @@ class CapabilityStore:
         return True
 
     async def rename_already_applied(self, kind: str, old_capability_id: str, new_capability_id: str) -> bool:
+        """True if `new_capability_id` already exists and `old_capability_id` no longer does.
+
+        Composed from capability_exists() rather than a dedicated repo method -- a rename
+        is "already applied" exactly when its two endpoints are in their post-rename state.
+        """
         try:
-            return await self.repo.was_capability_renamed(kind, old_capability_id, new_capability_id)
+            if not await self.repo.capability_exists(kind, new_capability_id):
+                return False
+            return not await self.repo.capability_exists(kind, old_capability_id)
         except Exception as exc:
             logger.warning(
                 "capability_store.rename_already_applied failed (%s/%s→%s): %s",
@@ -972,19 +982,19 @@ class CapabilityStore:
         return await self._remote_version()
 
     async def _remote_version(self) -> int:
-        if not self.redis.config.enabled:
+        if not self.cache.config.enabled:
             return 0
         try:
-            return _load_version(await self.redis.get(_REDIS_VERSION_KEY))
+            return _load_version(await self.cache.get(_REDIS_VERSION_KEY))
         except Exception as exc:
             logger.warning("capability_store: redis get failed, forcing DB sync: %s", exc)
             return self._local_version + 1
 
     async def _bump_redis_version(self) -> None:
-        if not self.redis.config.enabled:
+        if not self.cache.config.enabled:
             return
         try:
-            await self.redis.incr(_REDIS_VERSION_KEY)
+            await self.cache.incr(_REDIS_VERSION_KEY)
         except Exception as exc:
             # Only reset key when the cache backend explicitly says the value is not an
             # integer (e.g. a legacy JSON string, surfaced by real Redis as a
@@ -998,7 +1008,7 @@ class CapabilityStore:
                 return
             logger.warning("capability_store: redis version key has non-integer value, resetting: %s", exc)
             try:
-                await self.redis.delete(_REDIS_VERSION_KEY)
-                await self.redis.incr(_REDIS_VERSION_KEY)
+                await self.cache.delete(_REDIS_VERSION_KEY)
+                await self.cache.incr(_REDIS_VERSION_KEY)
             except Exception as reset_exc:
                 logger.warning("capability_store: redis version reset failed: %s", reset_exc)

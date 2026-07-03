@@ -70,15 +70,12 @@ class InMemoryCapabilityRepository:
         prefix = f"{capability_id}/"
         return [row for (k, fp), row in self.rows.items() if k == kind and fp.startswith(prefix)]
 
-    async def list_file_states(self, kind, capability_id):
-        return await self.list_files(kind, capability_id)
-
     async def list_files_since(self, since):
         if since is None:
             return list(self.rows.values())
         return [row for row in self.rows.values() if row["updated_at"] >= since]
 
-    async def delete_files_all(self, kind, capability_id):
+    async def delete_capability(self, kind, capability_id):
         prefix = f"{capability_id}/"
         keys = [k for k in self.rows if k[0] == kind and k[1].startswith(prefix)]
         for k in keys:
@@ -88,7 +85,7 @@ class InMemoryCapabilityRepository:
     async def restore_builtin_files(self, kind, capability_id):
         return 0
 
-    async def move_files(self, kind, old_capability_id, new_capability_id):
+    async def rename_capability(self, kind, old_capability_id, new_capability_id):
         old_prefix, new_prefix = f"{old_capability_id}/", f"{new_capability_id}/"
         keys = [k for k in self.rows if k[0] == kind and k[1].startswith(old_prefix)]
         for k in keys:
@@ -97,9 +94,6 @@ class InMemoryCapabilityRepository:
             row["file_path"] = new_fp
             self.rows[(kind, new_fp)] = row
         return len(keys)
-
-    async def was_capability_renamed(self, kind, old_capability_id, new_capability_id):
-        return False
 
     async def delete_file(self, kind, file_path):
         return self.rows.pop((kind, file_path), None) is not None
