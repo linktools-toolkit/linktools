@@ -72,11 +72,16 @@ RuntimeAgent(
 ```
 
 There's no bundled environment object — every value an agent needs
-(`workspace_root`/`trace_root` for `Session.create`, the three registries for
-`AgentKernel`, `model_config_resolver` for model config) is an explicit
-constructor param supplied by the caller. See `core/runtime.py`'s
-`AgentKernel` and `session/types.py`'s `Session.create` for the exact
-signatures.
+(`root` for `Session.create`, the three registries for `AgentKernel`,
+`model_config_resolver` for model config, `workdir` for `RuntimeAgent`) is
+an explicit constructor param supplied by the caller. `Session` carries no
+path or trace concept at all — `FileSession` has its own `root: Path`;
+`RemoteSession` has none. Hook events carry whatever a caller puts in the
+`context: dict` passed to `AgentKernel.build_context(..., context={...})`
+— the framework has no opinion about what keys it contains (`trace_id` is
+just a convention, not a reserved field). See `core/runtime.py`'s
+`AgentKernel` and `session/types.py`'s `Session.create`/`agent.py`'s
+`RuntimeAgent.__init__` for the exact signatures.
 
 Every other toggle defaults to off/`None`/empty and leaves existing behavior
 unchanged; enabling one attaches the corresponding capability, nothing else.
