@@ -218,8 +218,9 @@ async def build_runtime_agent(
     model_registry.register(model_type, config=model_config, model=model)
 
     if session is None:
-        temp_root = environ.get_temp_path("ai", "sessions", create_parent=True)
-        session = FileSession.create(temp_root, FileSessionSpec(session_id=""))
+        session_id = str(uuid.uuid1())
+        temp_root = environ.get_temp_path("ai", "sessions", session_id, create_parent=True)
+        session = FileSession.create(temp_root, FileSessionSpec(session_id=session_id))
 
     skill_registry = SkillRegistry(*skill_paths, resource=resource, capabilities_root=capabilities_root)
     subagent_registry = SubagentRegistry(

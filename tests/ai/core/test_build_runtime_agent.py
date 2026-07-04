@@ -65,6 +65,18 @@ def test_build_runtime_agent_without_session_creates_ephemeral_file_session(tmp_
     assert agent.session.session_id
 
 
+def test_build_runtime_agent_ephemeral_sessions_get_distinct_roots(tmp_path, monkeypatch):
+    monkeypatch.setattr(environ, "get_temp_path", lambda *paths, **kw: tmp_path / Path(*paths))
+
+    async def _run():
+        first = await build_runtime_agent(model=_fake_model(), model_type="standard")
+        second = await build_runtime_agent(model=_fake_model(), model_type="standard")
+        return first, second
+
+    first, second = asyncio.run(_run())
+    assert first.session.root != second.session.root
+
+
 def test_build_runtime_agent_respects_workdir_and_allowed_tools(tmp_path):
     session = local_session("test-session-2")
     try:
