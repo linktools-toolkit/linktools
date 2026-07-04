@@ -9,9 +9,11 @@ replaced by pydantic-ai (see `base.py`). This module now owns:
 - the shared error types raised/caught across the pipeline
   (`ModelClientUnavailable`, `ModelOutputError`, `ModelTurnLimitExceeded`);
 - the `RuntimeModelConfig` dataclass, resolved by callers however they see fit
-  (file, env vars, secrets manager, hardcoded for tests) and handed to `build_model`;
-- `build_model`/`ModelBundle`, the pydantic-ai model factory built on top of
-  `RuntimeModelConfig`.
+  (file, env vars, secrets manager, hardcoded for tests) and handed to
+  `_bundle_from_config`;
+- `_bundle_from_config`/`ModelBundle`, the pydantic-ai model factory built on top of
+  `RuntimeModelConfig`; `ModelRegistry` also accepts a pre-built `Model` directly via
+  `register(model_type, model=...)`.
 
 `build_mcp_toolset`, mapping `MCPServerSpec` onto pydantic-ai `MCPToolset`s, now
 lives in `..mcp.client` alongside the rest of the MCP wiring.
@@ -23,6 +25,7 @@ Session history persistence (context.json / per-call prompt sidecars) now lives 
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -73,32 +76,6 @@ class RuntimeModelConfig:
         return self.auth_token or self.api_key
 
 
-class ModelRegistry:
-    """Process-wide model_type -> RuntimeModelConfig registry. Callers register every
-    model_type an agent might request (file, env vars, secrets manager, hardcoded for
-    tests) at startup; agents look configs up by model_type instead of resolving them
-    on demand per call."""
-
-    def __init__(self) -> None:
-        self._configs: "dict[str, RuntimeModelConfig]" = {}
-
-    def register(self, model_type: str, config: RuntimeModelConfig) -> None:
-        self._configs[model_type] = config
-
-    def get(self, model_type: str) -> RuntimeModelConfig:
-        try:
-            return self._configs[model_type]
-        except KeyError:
-            raise ModelClientUnavailable(f"no RuntimeModelConfig registered for model_type '{model_type}'") from None
-
-
-model_registry = ModelRegistry()
-
-
-# ---------------------------------------------------------------------------
-# pydantic-ai model factory
-# ---------------------------------------------------------------------------
-
 @dataclass(slots=True)
 class ModelBundle:
     """A configured model plus the per-call execution limits derived from config."""
@@ -109,6 +86,56 @@ class ModelBundle:
     usage_limits: UsageLimits
 
 
+class ModelRegistry:
+    """Process-wide model_type -> ModelBundle registry. Callers register every
+    model_type an agent might request at startup — either a `RuntimeModelConfig`
+    (resolved from file, env vars, secrets manager, or hardcoded for tests) or an
+    already-constructed `Model` — and agents look up the resulting `ModelBundle` by
+    model_type instead of resolving/building it on demand per call."""
+
+    def __init__(self) -> None:
+        self._bundles: "dict[str, ModelBundle]" = {}
+
+    def register(
+        self,
+        model_type: str,
+        *,
+        config: "RuntimeModelConfig | None" = None,
+        model: "Model | None" = None,
+        settings: "ModelSettings | None" = None,
+        usage_limits: "UsageLimits | None" = None,
+    ) -> None:
+        if (config is None) == (model is None):
+            raise ValueError("register() requires exactly one of `config` or `model`")
+        if config is not None:
+            bundle = _bundle_from_config(config)
+        else:
+            bundle = ModelBundle(
+                config=RuntimeModelConfig(
+                    model_type=model_type, protocol="prebuilt", model=None,
+                    base_url=None, api_key=None, auth_token=None,
+                    timeout_seconds=300, raw={},
+                ),
+                model=model,
+                settings=settings or ModelSettings(max_tokens=4096, timeout=300.0, parallel_tool_calls=True),
+                usage_limits=usage_limits or UsageLimits(request_limit=10),
+            )
+        self._bundles[model_type] = bundle
+
+    def get(self, model_type: str) -> "ModelBundle":
+        try:
+            return self._bundles[model_type]
+        except KeyError:
+            raise ModelClientUnavailable(f"no model registered for model_type '{model_type}'") from None
+
+
+model_registry = ModelRegistry()
+
+
+# ---------------------------------------------------------------------------
+# pydantic-ai model factory
+# ---------------------------------------------------------------------------
+
 def _normalize_base_url(config: RuntimeModelConfig) -> str:
     base = (config.base_url or "").rstrip("/").removesuffix("/v1")
     if not base:
@@ -118,7 +145,7 @@ def _normalize_base_url(config: RuntimeModelConfig) -> str:
     return f"{base}/v1"
 
 
-def build_model(config: RuntimeModelConfig) -> ModelBundle:
+def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
     """Build an `OpenAIChatModel` (+ settings/limits) for an already-resolved
     `RuntimeModelConfig`. Callers resolve configuration however they want (file,
     env vars, secrets manager, hardcoded for tests) and hand in the config directly

@@ -3,10 +3,9 @@ from pathlib import Path
 
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
-from linktools.ai.core.model_runtime import ModelBundle, RuntimeModelConfig, model_registry
+from linktools.ai.core.model_runtime import model_registry
 from linktools.ai.core.registry import SpecSource
 from linktools.ai.core.runtime import AgentKernel
 from linktools.ai.session.coordination import InMemorySessionCoordinator
@@ -158,25 +157,12 @@ def test_swarm_coordinator_returns_empty_list_for_empty_queue(tmp_path):
     assert results == []
 
 
-def test_swarm_coordinator_workers_write_files_under_the_given_workdir(tmp_path, monkeypatch):
+def test_swarm_coordinator_workers_write_files_under_the_given_workdir(tmp_path):
     # Regression test: SwarmCoordinator.run() must thread its `workdir` param into
     # each worker's SubAgent, otherwise RuntimeAgent.__init__ defaults workdir to
     # Path.cwd() and file-tool calls silently land outside the caller-controlled
-    # directory. build_model() normally constructs a real OpenAIChatModel, so it's
-    # monkeypatched (at the `linktools.ai.agent` import site) to return a
+    # directory. The "standard" model_type is registered directly with a
     # FunctionModel-backed bundle that drives one write_file tool call.
-    import linktools.ai.agent as agent_module
-
-    def _fake_build_model(config) -> ModelBundle:
-        return ModelBundle(
-            config=config,
-            model=FunctionModel(_drive_single_write_file_call("marker.txt", "hello from swarm")),
-            settings=ModelSettings(max_tokens=4096),
-            usage_limits=UsageLimits(request_limit=5),
-        )
-
-    monkeypatch.setattr(agent_module, "build_model", _fake_build_model)
-
     env = _FakeAgentEnv(tmp_path)
     kernel = AgentKernel(
         skill_registry=env.get_skill_registry(),
@@ -188,11 +174,11 @@ def test_swarm_coordinator_workers_write_files_under_the_given_workdir(tmp_path,
     queue = InMemoryTaskQueue()
     workdir = tmp_path / "swarm_run"
 
-    fake_config = RuntimeModelConfig(
-        model_type="standard", protocol="openai", model="fake", base_url=None,
-        api_key=None, auth_token=None, timeout_seconds=300, raw={"max_retries": 1},
+    model_registry.register(
+        "standard",
+        model=FunctionModel(_drive_single_write_file_call("marker.txt", "hello from swarm")),
+        usage_limits=UsageLimits(request_limit=5),
     )
-    model_registry.register("standard", fake_config)
 
     async def _run():
         await queue.add([Task(task_id="t1", payload={"x": 1})])

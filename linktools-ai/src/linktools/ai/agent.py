@@ -29,7 +29,6 @@ from .session.types import Session, SessionTurn, build_input_display_entries
 from .core.model_runtime import (
     ModelOutputError,
     ModelTurnLimitExceeded,
-    build_model,
     model_registry,
 )
 from .mcp.client import build_mcp_toolset
@@ -629,7 +628,7 @@ class LlmAgent(BaseAgent):
         always the RuntimeRunCapability instance (file/terminal + instructions/settings/
         on_run_error) — callers read `.last_error_detail` off it; skill/subagent/MCP each
         get their own capability instance appended to the list, not tracked individually."""
-        bundle = build_model(model_registry.get(request.model_type))
+        bundle = model_registry.get(request.model_type)
         builtin_toolset = build_builtin_toolset(
             BuiltinToolContext(
                 backend=LocalExecutionBackend(
