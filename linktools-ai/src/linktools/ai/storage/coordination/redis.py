@@ -8,6 +8,14 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+_RELEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
 
 class RedisResourceCoordinator:
     def __init__(self, *, redis, key_prefix: str = "linktools:ai:resource") -> None:
@@ -36,6 +44,4 @@ class RedisResourceCoordinator:
         try:
             yield
         finally:
-            current = await self._redis.get(lock_key)
-            if current == token.encode() or current == token:
-                await self._redis.delete(lock_key)
+            await self._redis.eval(_RELEASE_SCRIPT, 1, lock_key, token)
