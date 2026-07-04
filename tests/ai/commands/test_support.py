@@ -6,7 +6,7 @@ from unittest import mock
 
 from linktools.cli import CommandError
 from linktools.ai.core.model_runtime import RuntimeModelConfig
-from linktools.commands.ai.support import resolve_model_config
+from linktools.commands.ai.support import resolve_model_config, validate_session_id
 
 
 class TestResolveModelConfig(unittest.TestCase):
@@ -49,6 +49,37 @@ class TestResolveModelConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(CommandError):
                 resolve_model_config(model="m", base_url="https://example.com", api_key=None)
+
+
+class TestValidateSessionId(unittest.TestCase):
+
+    def test_normal_session_id_passes_through_unchanged(self):
+        self.assertEqual(validate_session_id("main"), "main")
+        self.assertEqual(validate_session_id("my-session_1"), "my-session_1")
+
+    def test_empty_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id("")
+
+    def test_dot_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id(".")
+
+    def test_dotdot_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id("..")
+
+    def test_dotdot_segment_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id("../evil")
+
+    def test_forward_slash_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id("a/b")
+
+    def test_backslash_raises_command_error(self):
+        with self.assertRaises(CommandError):
+            validate_session_id("a\\b")
 
 
 if __name__ == '__main__':

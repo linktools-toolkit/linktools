@@ -42,3 +42,21 @@ def resolve_model_config(
         timeout_seconds=300,
         raw={},
     )
+
+
+def validate_session_id(session_id: str) -> str:
+    """Reject session ids that could escape the sessions directory when joined
+    into a filesystem path. Raises CommandError with a clear message; returns
+    session_id unchanged if it's safe.
+    """
+    is_unsafe = (
+        not session_id
+        or "/" in session_id
+        or "\\" in session_id
+        or session_id in (".", "..")
+    )
+    if is_unsafe:
+        raise CommandError(
+            f'invalid --session value "{session_id}": must not contain path separators or ".."'
+        )
+    return session_id

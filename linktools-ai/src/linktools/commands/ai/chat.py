@@ -23,7 +23,7 @@ from linktools.ai.mcp.registry import MCPRegistry
 from linktools.ai.session.types import FileSessionSpec, Session
 from linktools.ai.agent import RuntimeAgent
 
-from .support import resolve_model_config
+from .support import resolve_model_config, validate_session_id
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -90,8 +90,9 @@ class Command(BaseCommand):
             subagent_registry=subagent_registry,
             mcp_registry=mcp_registry,
         )
-        session_root = environ.get_data_path("ai", "sessions", args.session, create_parent=True)
-        session = Session.create(session_root, FileSessionSpec(session_id=args.session))
+        session_id = validate_session_id(args.session)
+        session_root = environ.get_data_path("ai", "sessions", session_id, create_parent=True)
+        session = Session.create(session_root, FileSessionSpec(session_id=session_id))
         context = kernel.build_context(
             spec, session, builtin_tool_names=frozenset({"file", "terminal"}),
         )
@@ -100,7 +101,7 @@ class Command(BaseCommand):
             workdir=Path(args.workdir) if args.workdir else Path.cwd(),
         )
 
-        self.logger.info(f"session: {args.session} (workdir: {agent.workdir})")
+        self.logger.info(f"session: {session_id} (workdir: {agent.workdir})")
         while True:
             try:
                 line = await asyncio.to_thread(input, "> ")
