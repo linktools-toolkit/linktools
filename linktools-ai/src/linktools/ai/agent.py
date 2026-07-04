@@ -54,7 +54,7 @@ from .swarm.capability import SwarmCapability
 
 if TYPE_CHECKING:
     from .checkpoint.protocols import CheckpointStore
-    from .session.artifact import AgentArtifactStore
+    from .resource.protocols import AgentArtifactStore
     from .swarm.protocols import TaskQueue
 
 
@@ -555,7 +555,7 @@ class LlmAgent(BaseAgent):
         return FileCheckpointStore(root=self.session.root / "checkpoints")
 
     def _plan_artifact_store(self) -> "AgentArtifactStore":
-        from .session.local import LocalAgentArtifactStore
+        from .resource.local import LocalAgentArtifactStore
 
         return LocalAgentArtifactStore(root=self.session.root / "artifacts")
 

@@ -1,7 +1,7 @@
 import asyncio
 
-from linktools.ai.session.artifact import AgentArtifactStore, ArtifactRef
-from linktools.ai.session.local import LocalAgentArtifactStore
+from linktools.ai.resource.protocols import AgentArtifactStore, ArtifactRef
+from linktools.ai.resource.local import LocalAgentArtifactStore
 
 
 def test_satisfies_protocol(tmp_path):

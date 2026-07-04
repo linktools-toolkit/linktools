@@ -8,13 +8,24 @@ InMemoryCapabilityCache) into one backend -- ResourceBackend no longer separates
 production use: no persistence, no concurrency control.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from fnmatch import fnmatch
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
-from .protocols import DeleteOp, MoveOp, Operation, PutOp, ResourceBackend, ResourceFile
+from .protocols import (
+    ArtifactMeta,
+    ArtifactRef,
+    DeleteOp,
+    MoveOp,
+    Operation,
+    PutOp,
+    ResourceBackend,
+    ResourceFile,
+)
 
 
 @dataclass
@@ -121,3 +132,33 @@ class InMemoryResourceBackend(ResourceBackend):
 
     async def revision(self) -> int:
         return self._revision
+
+
+class LocalAgentArtifactStore:
+    """Local filesystem implementation of `AgentArtifactStore` (resource/protocols.py) --
+    that Protocol had zero implementations before this. Files live at
+    `root / ref.key`, which `ArtifactRef.key` already produces as a safe relative path."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def get(self, ref: ArtifactRef) -> "bytes | None":
+        path = self.root / ref.key
+        if not await asyncio.to_thread(path.exists):
+            return None
+        return await asyncio.to_thread(path.read_bytes)
+
+    async def put(self, ref: ArtifactRef, content: bytes, *, idempotency_key: str) -> ArtifactMeta:
+        path = self.root / ref.key
+        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(path.write_bytes, content)
+        checksum = sha256(content).hexdigest()
+        return ArtifactMeta(
+            ref=ref,
+            checksum=checksum,
+            size_bytes=len(content),
+            backend="local",
+            location=str(path),
+            status="stored",
+            metadata={"idempotency_key": idempotency_key},
+        )

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session store Protocols: TranscriptStore / HistoryStore / ArtifactStore /
-SessionStatusStore."""
+"""Session store Protocols: TranscriptStore / HistoryStore / SessionStatusStore."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -47,12 +46,6 @@ class HistoryStore(Protocol):
         ...
 
     async def persist(self, session: "Session", turn: "SessionTurn") -> None: ...
-
-
-class ArtifactStore(Protocol):
-    """Persistence backend for non-history session artifacts."""
-
-    async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None: ...
 
 
 SessionStatus = Literal["idle", "busy", "retry", "error"]

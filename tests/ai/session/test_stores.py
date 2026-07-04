@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.session.local import InMemorySessionStatusStore
-from linktools.ai.session.protocols import ArtifactStore, HistoryStore, TranscriptStore
+from linktools.ai.session.protocols import HistoryStore, TranscriptStore
 from linktools.ai.session.remote import _estimate_model_messages
 
 
@@ -55,8 +55,8 @@ def test_estimate_model_messages_is_positive_for_nonempty_history():
 
 def test_transcript_store_protocol_is_runtime_checkable():
     # Only `TranscriptStore` is declared with `@runtime_checkable`; `HistoryStore`
-    # and `ArtifactStore` are plain `Protocol` (structural typing checked
-    # statically, not via `isinstance`).
+    # is a plain `Protocol` (structural typing checked statically, not via
+    # `isinstance`).
     class FakeTranscriptStore:
         async def head(self, session_id):
             raise NotImplementedError
@@ -71,7 +71,7 @@ def test_transcript_store_protocol_is_runtime_checkable():
     assert not isinstance(object(), TranscriptStore)
 
 
-def test_history_store_and_artifact_store_are_plain_non_runtime_checkable_protocols():
+def test_history_store_is_a_plain_non_runtime_checkable_protocol():
     class FakeHistoryStore:
         async def load(self, session):
             raise NotImplementedError
@@ -79,13 +79,7 @@ def test_history_store_and_artifact_store_are_plain_non_runtime_checkable_protoc
         async def persist(self, session, turn):
             raise NotImplementedError
 
-    class FakeArtifactStore:
-        async def persist_call_sidecar(self, session, turn):
-            raise NotImplementedError
-
     # isinstance() against a non-@runtime_checkable Protocol raises TypeError;
-    # this pins that these two Protocols were not upgraded silently.
+    # this pins that this Protocol was not upgraded silently.
     with pytest.raises(TypeError):
         isinstance(FakeHistoryStore(), HistoryStore)
-    with pytest.raises(TypeError):
-        isinstance(FakeArtifactStore(), ArtifactStore)

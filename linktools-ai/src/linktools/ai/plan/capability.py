@@ -3,10 +3,8 @@
 
 """PlanCapability: self-directed TODO/subtask tracking, exposed as tools.
 
-Persists via AgentArtifactStore (session/artifact.py), NOT the session
-ArtifactStore Protocol (session/protocols.py) -- that one only has
-persist_call_sidecar/finalize/restore, no arbitrary read/write. This is the
-first real consumer of AgentArtifactStore beyond its own tests."""
+Persists via AgentArtifactStore (resource/protocols.py) -- a general
+content-addressable store, not session-turn history."""
 
 import json
 import uuid
@@ -16,10 +14,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..session.artifact import ArtifactRef
+from ..resource.protocols import ArtifactRef
 
 if TYPE_CHECKING:
-    from ..session.artifact import AgentArtifactStore
+    from ..resource.protocols import AgentArtifactStore
 
 
 @dataclass

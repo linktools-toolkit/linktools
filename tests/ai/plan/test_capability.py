@@ -4,7 +4,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.plan.capability import PlanCapability
-from linktools.ai.session.local import LocalAgentArtifactStore
+from linktools.ai.resource.local import LocalAgentArtifactStore
 
 
 def _drive_single_tool_call(tool_name: str, args: dict):

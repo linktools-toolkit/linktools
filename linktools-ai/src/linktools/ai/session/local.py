@@ -3,20 +3,14 @@
 """Local (file / in-memory) session store implementations."""
 
 import asyncio
-import hashlib
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelMessage
 
-from .artifact import ArtifactMeta, ArtifactRef
 from .history import (
-    CallPromptSnapshot,
     SessionContextSnapshot,
     load_message_history,
-    new_call_messages,
-    write_call_prompt,
     write_session_context,
 )
 from .protocols import RunStatus, SessionStatusInfo
@@ -57,25 +51,6 @@ class FileHistoryStore:
         )
 
 
-class LocalArtifactStore:
-    async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None:
-        await asyncio.to_thread(
-            write_call_prompt,
-            session.root,
-            CallPromptSnapshot(
-                call_id=str(turn.llm_call.get("call_id") or ""),
-                messages=new_call_messages(turn.history, turn.all_messages, system_prompt=turn.system_prompt),
-            ),
-        )
-
-
-class ReadOnlyArtifactStore:
-    """ArtifactStore that makes no writes — use when a session reads an existing trace."""
-
-    async def persist_call_sidecar(self, session: "Session", turn: "SessionTurn") -> None:
-        pass
-
-
 class InMemoryRunStatusStore:
     def __init__(self) -> None:
         self._statuses: "dict[str, RunStatus]" = {}
@@ -90,31 +65,3 @@ class InMemoryRunStatusStore:
         return self._statuses[run_id]
 
 
-class LocalAgentArtifactStore:
-    """Local filesystem implementation of `AgentArtifactStore` (session/artifact.py) --
-    that Protocol had zero implementations before this. Files live at
-    `root / ref.key`, which `ArtifactRef.key` already produces as a safe relative path."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-
-    async def get(self, ref: ArtifactRef) -> "bytes | None":
-        path = self.root / ref.key
-        if not await asyncio.to_thread(path.exists):
-            return None
-        return await asyncio.to_thread(path.read_bytes)
-
-    async def put(self, ref: ArtifactRef, content: bytes, *, idempotency_key: str) -> ArtifactMeta:
-        path = self.root / ref.key
-        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(path.write_bytes, content)
-        checksum = hashlib.sha256(content).hexdigest()
-        return ArtifactMeta(
-            ref=ref,
-            checksum=checksum,
-            size_bytes=len(content),
-            backend="local",
-            location=str(path),
-            status="stored",
-            metadata={"idempotency_key": idempotency_key},
-        )

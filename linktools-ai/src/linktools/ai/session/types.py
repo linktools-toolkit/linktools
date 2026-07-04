@@ -6,7 +6,6 @@
 A `Session` is the canonical execution context for one agent instance. It coordinates:
 
 - multi-turn history through an injected `HistoryStore`
-- sidecars (FileSession only) through an injected `ArtifactStore`
 
 `FileSession` and `RemoteSession` remain as compatibility construction helpers for the two
 current assembly modes:
@@ -41,14 +40,14 @@ from .window import (
 )
 from .coordination import InMemorySessionCoordinator, SessionCoordinator, coordinator_for_store
 from .protocols import (
-    ArtifactStore,
     HistoryStore,
     SessionStatus,
     SessionStatusInfo,
     SessionStatusStore,
     TranscriptStore,
 )
-from .local import FileHistoryStore, LocalArtifactStore
+from .history import CallPromptSnapshot, new_call_messages, write_call_prompt
+from .local import FileHistoryStore
 from .remote import RemoteHistoryStore
 
 logger = environ.get_logger("ai.session.types")
@@ -70,7 +69,6 @@ class SessionTurn:
 class FileSessionSpec:
     session_id: str
     history_store: "HistoryStore | None" = None
-    artifact_store: "ArtifactStore | None" = None
     status_store: "SessionStatusStore | None" = None
     coordination: Any = _AUTO_COORDINATION
     window_policy: SessionWindowPolicy = field(default_factory=RecentWindowPolicy)
@@ -212,7 +210,7 @@ class Session(abc.ABC):
     `Session` is the stable agent-facing API. `FileSession` and `RemoteSession` remain as
     compatibility wrappers around the two current backend assembly modes. `Session` itself
     does no file I/O and knows nothing about "traces" or working directories -- only
-    `FileSession` (via its own `root`/`artifact_store`) and `RuntimeAgent` (via its own
+    `FileSession` (via its own `root`) and `RuntimeAgent` (via its own
     `workdir`) touch the filesystem.
     """
 
@@ -299,7 +297,6 @@ class FileSession(Session):
     root: Path
     parent_session_id: "str | None" = None
     history_store: HistoryStore = field(default_factory=FileHistoryStore, repr=False)
-    artifact_store: ArtifactStore = field(default_factory=LocalArtifactStore, repr=False)
     status_store: "SessionStatusStore | None" = field(default=None, repr=False)
     coordination: "SessionCoordinator | None" = field(default_factory=InMemorySessionCoordinator, repr=False)
     window_policy: SessionWindowPolicy = field(default_factory=RecentWindowPolicy, repr=False)
@@ -311,7 +308,6 @@ class FileSession(Session):
             session_id=session_id,
             root=root,
             history_store=spec.history_store or FileHistoryStore(),
-            artifact_store=spec.artifact_store or LocalArtifactStore(),
             status_store=spec.status_store,
             coordination=(
                 InMemorySessionCoordinator()
@@ -328,7 +324,6 @@ class FileSession(Session):
             root=root if root is not None else self.root / session_id,
             parent_session_id=self.session_id,
             history_store=self.history_store,
-            artifact_store=self.artifact_store,
             status_store=self.status_store,
             coordination=self.coordination,
             window_policy=self.window_policy,
@@ -345,7 +340,7 @@ class FileSession(Session):
         if coordination is None:
             await asyncio.gather(
                 self.history_store.persist(self, turn),
-                self.artifact_store.persist_call_sidecar(self, turn),
+                self._write_call_sidecar(turn),
             )
             return
         idempotency_key = _persist_idempotency_key(turn)
@@ -358,7 +353,7 @@ class FileSession(Session):
             if not history_committed:
                 await self.history_store.persist(self, turn)
                 history_committed = True
-            await self.artifact_store.persist_call_sidecar(self, turn)
+            await self._write_call_sidecar(turn)
             completed = True
         finally:
             await coordination.complete_persist(
@@ -368,11 +363,21 @@ class FileSession(Session):
                 completed=completed,
             )
 
+    async def _write_call_sidecar(self, turn: SessionTurn) -> None:
+        await asyncio.to_thread(
+            write_call_prompt,
+            self.root,
+            CallPromptSnapshot(
+                call_id=str(turn.llm_call.get("call_id") or ""),
+                messages=new_call_messages(turn.history, turn.all_messages, system_prompt=turn.system_prompt),
+            ),
+        )
+
 @dataclass(slots=True)
 class RemoteSession(Session):
     """DB-backed session for conversational lines: the durable multi-turn history persists
     to a `TranscriptStore` keyed by `session_id`, so chat survives pod loss and works on
-    any pod. No file I/O of any kind -- no `root`, no `artifact_store`."""
+    any pod. No file I/O of any kind -- no `root`."""
 
     session_id: str
     store: TranscriptStore = field(repr=False)
