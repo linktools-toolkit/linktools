@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""tests/ai/storage/resource/test_file_backend.py"""
+import pytest
+
+from linktools.ai.storage.resource.file import FileResourceBackend
+from linktools.ai.storage.resource.models import Found, Missing, Masked, Depth, IdempotencyRecord
+from linktools.ai.storage.resource.path import ResourcePath
+
+
+@pytest.mark.asyncio
+async def test_put_then_get_roundtrip_persists_to_disk(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    info = await backend.raw_put(ResourcePath("/a/b.txt"), b"hello", content_type="text/plain", metadata={"k": "v"})
+    assert info.version == 1
+
+    reopened = FileResourceBackend(root=tmp_path)
+    lookup = await reopened.raw_get(ResourcePath("/a/b.txt"))
+    assert isinstance(lookup, Found)
+    assert lookup.resource.content == b"hello"
+    assert lookup.resource.info.metadata == {"k": "v"}
+
+
+@pytest.mark.asyncio
+async def test_get_missing_returns_missing(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    assert isinstance(await backend.raw_get(ResourcePath("/nope")), Missing)
+
+
+@pytest.mark.asyncio
+async def test_delete_masks_and_survives_reopen(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/a/b.txt"), b"hello", content_type=None, metadata={})
+    await backend.raw_delete(ResourcePath("/a/b.txt"))
+
+    reopened = FileResourceBackend(root=tmp_path)
+    assert isinstance(await reopened.raw_get(ResourcePath("/a/b.txt")), Masked)
+
+
+@pytest.mark.asyncio
+async def test_readonly_backend_still_supports_reads(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/a.txt"), b"x", content_type=None, metadata={})
+
+    ro = FileResourceBackend(root=tmp_path, readonly=True)
+    assert ro.readonly is True
+    lookup = await ro.raw_get(ResourcePath("/a.txt"))
+    assert isinstance(lookup, Found)
+
+
+@pytest.mark.asyncio
+async def test_atomic_replace_leaves_no_temp_file_on_disk(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/a.txt"), b"x", content_type=None, metadata={})
+    leftovers = list((tmp_path / "data").glob("*.tmp*"))
+    assert leftovers == []
+
+
+@pytest.mark.asyncio
+async def test_revision_persists_across_reopen(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/a.txt"), b"x", content_type=None, metadata={})
+    reopened = FileResourceBackend(root=tmp_path)
+    assert await reopened.revision() == 1
+
+
+@pytest.mark.asyncio
+async def test_propfind_depth_one(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/agents/a.md"), b"1", content_type=None, metadata={})
+    await backend.raw_put(ResourcePath("/agents/b.md"), b"2", content_type=None, metadata={})
+    await backend.raw_put(ResourcePath("/other/c.md"), b"3", content_type=None, metadata={})
+    page = await backend.raw_propfind(ResourcePath("/agents"), depth=Depth.ONE, limit=100, cursor=None)
+    assert {i.path.value for i in page.items} == {"/agents/a.md", "/agents/b.md"}
+
+
+@pytest.mark.asyncio
+async def test_idempotency_record_persists_across_reopen(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.put_idempotency(IdempotencyRecord(key="k1", request_hash="h1", result=None))
+    reopened = FileResourceBackend(root=tmp_path)
+    fetched = await reopened.get_idempotency("k1")
+    assert fetched.key == "k1" and fetched.request_hash == "h1"
+
+
+@pytest.mark.asyncio
+async def test_move_reads_writes_and_masks(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/src.txt"), b"data", content_type=None, metadata={})
+    info = await backend.raw_move(ResourcePath("/src.txt"), ResourcePath("/dst.txt"))
+    assert info.path == ResourcePath("/dst.txt")
+    assert isinstance(await backend.raw_get(ResourcePath("/src.txt")), Masked)
+    dst_lookup = await backend.raw_get(ResourcePath("/dst.txt"))
+    assert isinstance(dst_lookup, Found)
+    assert dst_lookup.resource.content == b"data"
