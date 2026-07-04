@@ -38,3 +38,4 @@ file = ".version"
 file = "requirements.yml"
 [tool.linktools.scripts]
 capability = "linktools.capabilities.ai:__cap_ai__"
+console = {path = "src/linktools/commands", module = "linktools.commands"}
