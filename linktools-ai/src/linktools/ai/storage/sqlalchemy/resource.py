@@ -52,9 +52,12 @@ class SqlAlchemyResourceBackend:
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
         prefix = path.value.rstrip("/") + "/"
+        escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         async with self._session_factory() as session:
             result = await session.execute(
-                select(ResourceRow).where(ResourceRow.path.like(f"{prefix}%")).where(ResourceRow.deleted_at.is_(None))
+                select(ResourceRow)
+                .where(ResourceRow.path.like(f"{escaped_prefix}%", escape="\\"))
+                .where(ResourceRow.deleted_at.is_(None))
             )
             items = []
             for row in result.scalars():

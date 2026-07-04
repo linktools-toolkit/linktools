@@ -232,6 +232,16 @@ async def test_propfind_merges_primary_and_overlay_primary_wins(backend_factory)
 
 
 @pytest.mark.asyncio
+async def test_propfind_prefix_does_not_treat_underscore_as_wildcard(backend_factory):
+    store = ResourceStore(primary=backend_factory())
+    await store.put(ResourcePath("/folder_1/a.txt"), b"real match")
+    await store.put(ResourcePath("/folderA1/b.txt"), b"must not match")
+    page = await store.propfind(ResourcePath("/folder_1"), depth=Depth.ONE, limit=100, cursor=None)
+    paths = {i.path.value for i in page.items}
+    assert paths == {"/folder_1/a.txt"}
+
+
+@pytest.mark.asyncio
 async def test_put_identical_to_overlay_content_still_writes_primary(backend_factory):
     overlay = backend_factory(readonly=True)
     await overlay.raw_put(ResourcePath("/x.txt"), b"same", content_type=None, metadata={})
