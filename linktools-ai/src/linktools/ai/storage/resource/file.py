@@ -138,8 +138,6 @@ class FileResourceBackend:
         return ResourcePage(items=tuple(items[:limit]), cursor=None)
 
     async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
-        if self.readonly:
-            raise ResourceReadOnlyError(f"backend is read-only: {path}")
         prior = self._load_info(path)
         whiteout_path = self._whiteout_path(path)
         prior_whiteout_version = 0
@@ -165,8 +163,6 @@ class FileResourceBackend:
         return info
 
     async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
-        if self.readonly:
-            raise ResourceReadOnlyError(f"backend is read-only: {path}")
         info = self._load_info(path)
         prior_version = info.version if info else 0
         if info is not None:
