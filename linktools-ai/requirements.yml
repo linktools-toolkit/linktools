@@ -8,9 +8,12 @@ dependencies:
 
 dev-dependencies:
   - pytest-asyncio
+  - fakeredis>=2,<3
 
 release-dependencies: []
 
 optional-dependencies:
   postgres:
     - asyncpg>=0.29,<1
+  redis:
+    - redis>=5,<6
