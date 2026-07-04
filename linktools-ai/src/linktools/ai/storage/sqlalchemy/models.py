@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""SQLAlchemy table models for Resource storage. deleted_at/whiteout_version on
+ResourceRow encode the whiteout tombstone in the same row/table as live resources,
+rather than a separate whiteouts table, so the unique path constraint naturally
+covers both live and deleted state."""
+
+from datetime import datetime
+
+from sqlalchemy import LargeBinary, String, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ResourceRow(Base):
+    __tablename__ = "ai_resources"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    path: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    etag: Mapped[str] = mapped_column(String(64))
+    version: Mapped[int]
+    content_type: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    size: Mapped[int]
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    modified_at: Mapped[datetime]
+    metadata_json: Mapped[str] = mapped_column(Text)
+    deleted_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    whiteout_version: Mapped["int | None"] = mapped_column(nullable=True)
+
+
+class IdempotencyRow(Base):
+    __tablename__ = "ai_resource_idempotency"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+
+
+class RevisionRow(Base):
+    __tablename__ = "ai_resource_revision"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    value: Mapped[int]
