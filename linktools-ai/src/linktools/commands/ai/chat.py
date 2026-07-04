@@ -8,19 +8,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
-from linktools.core import environ
 from linktools.ai.core.model_runtime import (
     ModelClientUnavailable,
     ModelOutputError,
     ModelTurnLimitExceeded,
-    model_registry,
 )
-from linktools.ai.core.registry import AgentSpec
-from linktools.ai.core.runtime import AgentKernel
-from linktools.ai.skill.registry import SkillRegistry
-from linktools.ai.subagent.registry import SubagentRegistry
-from linktools.ai.mcp.registry import MCPRegistry
-from linktools.ai.session.types import FileSessionSpec, Session
+from linktools.ai.core.runtime import build_runtime_agent
+from linktools.ai.session.local import local_session
 from linktools.ai.agent import RuntimeAgent
 
 from .support import resolve_model_config, validate_session_id
@@ -61,44 +55,13 @@ class Command(BaseCommand):
 
     async def _run_async(self, args: "Namespace") -> "int | None":
         config = resolve_model_config(args.model, args.base_url, args.api_key)
-        model_registry.register(config.model_type, config)
-
-        skill_registry = SkillRegistry()
-        subagent_registry = SubagentRegistry()
-        mcp_registry = MCPRegistry()
-        await asyncio.gather(
-            skill_registry.preload(),
-            subagent_registry.preload(),
-            mcp_registry.preload(),
-        )
-
-        spec_dir = environ.get_data_path("ai", "spec", "chat", create_parent=True) / "agent.md"
-        spec = AgentSpec(
-            name="ai",
-            path=spec_dir,
-            base_dir=None,
-            enabled=True,
-            model=config.model_type,
-            allowed_tools=["file", "terminal"],
-            allowed_skills=[],
-            allowed_subagents=[],
-            system_prompt=_SYSTEM_PROMPT,
-        )
-
-        kernel = AgentKernel(
-            skill_registry=skill_registry,
-            subagent_registry=subagent_registry,
-            mcp_registry=mcp_registry,
-        )
         session_id = validate_session_id(args.session)
-        session_root = environ.get_data_path("ai", "sessions", session_id, create_parent=True)
-        session = Session.create(session_root, FileSessionSpec(session_id=session_id))
-        context = kernel.build_context(
-            spec, session, builtin_tool_names=frozenset({"file", "terminal"}),
-        )
-        agent = RuntimeAgent(
-            spec, session, execution_context=context,
-            workdir=Path(args.workdir) if args.workdir else Path.cwd(),
+        agent = await build_runtime_agent(
+            model_config=config,
+            session=local_session(session_id),
+            agent_name="ai",
+            system_prompt=_SYSTEM_PROMPT,
+            workdir=Path(args.workdir) if args.workdir else None,
         )
 
         self.logger.info(f"session: {session_id} (workdir: {agent.workdir})")
