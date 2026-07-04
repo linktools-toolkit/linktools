@@ -46,8 +46,12 @@ class MemoryResourceBackend:
     async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
         key = path.value
         self._revision += 1
-        prior_info = self._entries.get(key, (b"", None))[1]
-        version = (prior_info.version if prior_info else 0) + 1
+        prior_entry_version = self._entries.get(key, (b"", None))[1]
+        prior_version = max(
+            prior_entry_version.version if prior_entry_version else 0,
+            self._whiteouts.get(key, 0),
+        )
+        version = prior_version + 1
         info = ResourceInfo(
             path=path,
             kind=ResourceKind.FILE,

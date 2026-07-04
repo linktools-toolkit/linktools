@@ -99,3 +99,13 @@ async def test_idempotency_record_roundtrip():
     await backend.put_idempotency(record)
     fetched = await backend.get_idempotency("k1")
     assert fetched == record
+
+
+@pytest.mark.asyncio
+async def test_version_continues_monotonically_across_delete_and_recreate():
+    backend = MemoryResourceBackend()
+    first = await backend.raw_put(ResourcePath("/a.txt"), b"one", content_type=None, metadata={})
+    assert first.version == 1
+    await backend.raw_delete(ResourcePath("/a.txt"))
+    recreated = await backend.raw_put(ResourcePath("/a.txt"), b"two", content_type=None, metadata={})
+    assert recreated.version == 3
