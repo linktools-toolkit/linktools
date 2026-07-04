@@ -177,3 +177,35 @@ async def test_propfind_merges_primary_and_overlay_primary_wins(backend_factory)
     assert set(by_path) == {"/agents/shared.md", "/agents/only-overlay.md"}
     shared = await store.get(ResourcePath("/agents/shared.md"))
     assert shared.content == b"primary"
+
+
+@pytest.mark.asyncio
+async def test_put_identical_to_overlay_content_still_writes_primary(backend_factory):
+    overlay = backend_factory(readonly=True)
+    await overlay.raw_put(ResourcePath("/x.txt"), b"same", content_type=None, metadata={})
+    primary = backend_factory()
+    store = ResourceStore(primary=primary, overlays=(overlay,))
+    await store.put(ResourcePath("/x.txt"), b"same", options=WriteOptions(metadata={}))
+    primary_lookup = await primary.raw_get(ResourcePath("/x.txt"))
+    from linktools.ai.storage.resource.models import Found
+    assert isinstance(primary_lookup, Found)
+    assert primary_lookup.resource.content == b"same"
+
+
+@pytest.mark.asyncio
+async def test_propfind_hides_deleted_overlay_only_path(backend_factory):
+    overlay = backend_factory(readonly=True)
+    await overlay.raw_put(ResourcePath("/agents/only-overlay.md"), b"overlay-only", content_type=None, metadata={})
+    store = ResourceStore(primary=backend_factory(), overlays=(overlay,))
+    await store.delete(ResourcePath("/agents/only-overlay.md"))
+    page = await store.propfind(ResourcePath("/agents"), depth=Depth.ONE, limit=100, cursor=None)
+    assert "/agents/only-overlay.md" not in {i.path.value for i in page.items}
+
+
+@pytest.mark.asyncio
+async def test_move_forwards_if_none_match_to_destination_write(backend_factory):
+    store = ResourceStore(primary=backend_factory())
+    await store.put(ResourcePath("/src.txt"), b"data")
+    await store.put(ResourcePath("/dst.txt"), b"already here")
+    with pytest.raises(ResourcePreconditionFailedError):
+        await store.move(ResourcePath("/src.txt"), ResourcePath("/dst.txt"), options=WriteOptions(if_none_match=True))

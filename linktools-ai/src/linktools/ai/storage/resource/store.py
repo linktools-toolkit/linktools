@@ -55,8 +55,15 @@ class ResourceStore:
             for info in page.items:
                 merged[info.path.value] = info
         primary_page = await self._primary.raw_propfind(path, depth=depth, limit=limit, cursor=cursor)
+        primary_paths = {info.path.value for info in primary_page.items}
         for info in primary_page.items:
             merged[info.path.value] = info
+        for overlay_only_path in list(merged):
+            if overlay_only_path in primary_paths:
+                continue
+            primary_lookup = await self._primary.raw_get(ResourcePath(overlay_only_path), include_content=False)
+            if isinstance(primary_lookup, Masked):
+                del merged[overlay_only_path]
         items = tuple(merged[key] for key in sorted(merged))
         return ResourcePage(items=items[:limit], cursor=None)
 
@@ -95,8 +102,9 @@ class ResourceStore:
             if not isinstance(current, Found) or current.resource.info.etag != options.if_match:
                 raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
 
-        if isinstance(current, Found) and current.resource.content == content and dict(current.resource.info.metadata) == dict(options.metadata):
-            info = current.resource.info
+        primary_state = await self._primary.raw_get(path)
+        if isinstance(primary_state, Found) and primary_state.resource.content == content and dict(primary_state.resource.info.metadata) == dict(options.metadata):
+            info = primary_state.resource.info
         else:
             info = await self._primary.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
 
@@ -132,7 +140,14 @@ class ResourceStore:
         result = await self.put(
             dst,
             source.content,
-            options=WriteOptions(content_type=source.info.content_type, metadata=source.info.metadata, idempotency_key=options.idempotency_key, actor=options.actor),
+            options=WriteOptions(
+                content_type=source.info.content_type,
+                metadata=source.info.metadata,
+                idempotency_key=options.idempotency_key,
+                actor=options.actor,
+                if_match=options.if_match,
+                if_none_match=options.if_none_match,
+            ),
         )
         await self.delete(src)
         return result
