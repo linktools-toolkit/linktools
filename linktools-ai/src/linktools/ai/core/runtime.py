@@ -6,22 +6,25 @@
 import asyncio
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from linktools.core import environ
 from linktools.runtime import EventHandlerMixin
 
 from .registry import AgentSpec
-from ..mcp.registry import MCPServerSpec
-from ..skill.registry import SkillSpec
-from ..subagent.registry import SubagentSpec
-from ..session.types import Session
+from ..core.model_runtime import RuntimeModelConfig, model_registry
+from ..mcp.registry import MCPRegistry, MCPServerSpec
+from ..skill.registry import SkillRegistry, SkillSpec
+from ..subagent.registry import SubagentRegistry, SubagentSpec
+from ..session.types import FileSession, FileSessionSpec, Session
 from ..session.local import InMemoryRunStatusStore
 
 if TYPE_CHECKING:
+    from pydantic_ai.models import Model
+    from ..agent import RuntimeAgent
+    from ..resource.store import ResourceStore
     from ..session.protocols import RunStatus, RunStatusStore
-    from ..skill.registry import SkillRegistry
-    from ..subagent.registry import SubagentRegistry
-    from ..mcp.registry import MCPRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,3 +182,69 @@ class AgentKernel(EventHandlerMixin):
 
     async def check_background(self, run_id: str) -> "RunStatus":
         return await self.run_status_store.get(run_id)
+
+
+async def build_runtime_agent(
+    *,
+    model_type: str = "standard",
+    model_config: "RuntimeModelConfig | None" = None,
+    model: "Model | None" = None,
+    session: "Session | None" = None,
+    agent_name: str = "agent",
+    system_prompt: str = "",
+    allowed_tools: "list[str] | None" = None,
+    workdir: "Path | None" = None,
+    skill_paths: "tuple[Path, ...]" = (),
+    subagent_paths: "tuple[Path, ...]" = (),
+    mcp_paths: "tuple[Path, ...]" = (),
+    resource: "ResourceStore | None" = None,
+    capabilities_root: "Path | None" = None,
+) -> "RuntimeAgent":
+    """Build a fully-wired `RuntimeAgent` from flat parameters, collapsing model
+    registration, skill/subagent/MCP registry construction+preload, `AgentSpec`
+    construction, `AgentKernel` construction, and `build_context` into one call.
+
+    Exactly one of `model_config`/`model` is required (forwarded to
+    `model_registry.register`). If `session` is omitted, a throwaway ephemeral
+    `FileSession` is created under this package's temp directory. Passing no
+    `*_paths` and no `resource` (the default) produces empty, already-preloaded
+    skill/subagent/MCP registries.
+    """
+    # Deferred import: agent.py imports AgentKernel/AgentExecutionContext from
+    # this module at load time, so importing RuntimeAgent here at module level
+    # would be circular.
+    from ..agent import RuntimeAgent
+
+    model_registry.register(model_type, config=model_config, model=model)
+
+    if session is None:
+        temp_root = environ.get_temp_path("ai", "sessions", create_parent=True)
+        session = FileSession.create(temp_root, FileSessionSpec(session_id=""))
+
+    skill_registry = SkillRegistry(*skill_paths, resource=resource, capabilities_root=capabilities_root)
+    subagent_registry = SubagentRegistry(
+        *subagent_paths, resource=resource, capabilities_root=capabilities_root, cap_kind="subagent",
+    )
+    mcp_registry = MCPRegistry(*mcp_paths, resource=resource)
+    await asyncio.gather(
+        skill_registry.preload(), subagent_registry.preload(), mcp_registry.preload(),
+    )
+
+    resolved_tools = allowed_tools or ["file", "terminal"]
+    spec = AgentSpec(
+        name=agent_name,
+        path=Path(f"<in-memory>/{agent_name}/agent.md"),
+        base_dir=None,
+        enabled=True,
+        model=model_type,
+        allowed_tools=resolved_tools,
+        allowed_skills=None,
+        allowed_subagents=[],
+        system_prompt=system_prompt,
+    )
+
+    kernel = AgentKernel(
+        skill_registry=skill_registry, subagent_registry=subagent_registry, mcp_registry=mcp_registry,
+    )
+    context = kernel.build_context(spec, session, builtin_tool_names=frozenset(resolved_tools))
+    return RuntimeAgent(spec, session, execution_context=context, workdir=workdir or Path.cwd())

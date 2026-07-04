@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelMessage
 
+from linktools.core import environ
+
 from .history import (
     SessionContextSnapshot,
     load_message_history,
@@ -16,7 +18,17 @@ from .history import (
 from .protocols import RunStatus, SessionStatusInfo
 
 if TYPE_CHECKING:
-    from .types import Session, SessionTurn
+    from .types import FileSession, Session, SessionTurn
+
+
+def local_session(session_id: str) -> "FileSession":
+    """Persistent FileSession rooted under this package's local data directory,
+    keyed by `session_id` — the common case for CLI/local-tool callers who want
+    conversation history to survive across process invocations."""
+    from .types import FileSessionSpec, Session
+
+    root = environ.get_data_path("ai", "sessions", session_id, create_parent=True)
+    return Session.create(root, FileSessionSpec(session_id=session_id))
 
 
 class InMemorySessionStatusStore:
