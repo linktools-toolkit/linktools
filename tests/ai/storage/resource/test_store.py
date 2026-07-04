@@ -19,17 +19,69 @@ def _file_backend(tmp_path, **kwargs):
     return FileResourceBackend(root=tmp_path, **kwargs)
 
 
-@pytest.fixture(params=["memory", "file"])
+@pytest.fixture(params=["memory", "file", "sqlalchemy"])
 def backend_factory(request, tmp_path):
     if request.param == "memory":
         return lambda **kw: _memory_backend(**kw)
+    if request.param == "file":
+        counter = {"n": 0}
+
+        def file_factory(**kw):
+            counter["n"] += 1
+            return _file_backend(tmp_path / f"backend-{counter['n']}", **kw)
+
+        return file_factory
+
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.storage.sqlalchemy.resource import SqlAlchemyResourceBackend
+
     counter = {"n": 0}
+    engines = []
 
-    def factory(**kw):
+    def _run_in_new_loop(coro):
+        # backend_factory() is called synchronously from inside an already-running
+        # pytest-asyncio event loop (the async test function), so we cannot use
+        # asyncio.get_event_loop().run_until_complete() here -- that raises
+        # "This event loop is already running". Run the setup coroutine to
+        # completion on a separate thread with its own fresh event loop instead.
+        import asyncio
+        import threading
+
+        outcome = {}
+
+        def _runner():
+            try:
+                outcome["value"] = asyncio.run(coro)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread below
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=_runner)
+        thread.start()
+        thread.join()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome.get("value")
+
+    def sqlalchemy_factory(**kw):
         counter["n"] += 1
-        return _file_backend(tmp_path / f"backend-{counter['n']}", **kw)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/db-{counter['n']}.db")
+        engines.append(engine)
 
-    return factory
+        async def _create():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            # The connection pool otherwise holds a connection bound to this
+            # thread's event loop; dispose it so later operations (running on
+            # pytest-asyncio's loop) open fresh connections instead of reusing
+            # one tied to a loop that is about to be closed.
+            await engine.dispose()
+
+        _run_in_new_loop(_create())
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        return SqlAlchemyResourceBackend(session_factory=session_factory, **kw)
+
+    return sqlalchemy_factory
 
 
 @pytest.mark.asyncio
