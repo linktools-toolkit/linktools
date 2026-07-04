@@ -29,7 +29,7 @@ from typing import Any
 
 from pydantic_ai.messages import ModelMessage
 
-import logging
+from linktools.core import environ
 
 from ..core.model_runtime import RuntimeModelConfig
 from .window import (
@@ -51,7 +51,7 @@ from .protocols import (
 from .local import FileHistoryStore, LocalArtifactStore
 from .remote import RemoteHistoryStore
 
-logger = logging.getLogger("linktools.ai.session.types")
+logger = environ.get_logger("ai.session.types")
 _AUTO_COORDINATION = object()
 
 

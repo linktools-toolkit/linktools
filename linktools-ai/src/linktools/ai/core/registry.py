@@ -16,8 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Self, TypeVar, cast
 
-import logging
 from typing import TYPE_CHECKING
+
+from linktools.core import environ
 
 from ..support.config import (
     load_yaml_file as _load_yaml_file,
@@ -27,10 +28,10 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..resource_store.store import ResourceStore
+    from ..resource.store import ResourceStore
 
 
-logger = logging.getLogger("linktools.ai.core.registry")
+logger = environ.get_logger("ai.core.registry")
 
 
 def _get(payload: "Mapping[str, object]", key: str) -> object:
@@ -224,12 +225,12 @@ class MarkdownAgentRegistry(BaseRegistry[_AgentSpecT]):
     def __init__(
         self,
         *paths: Path,
-        resource_store: "ResourceStore | None" = None,
+        resource: "ResourceStore | None" = None,
         capabilities_root: "Path | None" = None,
         cap_kind: "str | None" = None,
     ) -> None:
         super().__init__(*paths)
-        self._resource_store = resource_store
+        self._resource = resource
         self._capabilities_root = capabilities_root  # source caps root for agent-group.yaml lookup
         self._cap_kind = cap_kind  # namespace string, e.g. "subagent" -- must match the
         # namespace capability registrations were saved under
@@ -253,8 +254,8 @@ class MarkdownAgentRegistry(BaseRegistry[_AgentSpecT]):
                 result[spec.name] = spec
                 logger.debug("%s loaded: name=%s path=%s", self._kind, spec.name, markdown)
         # Load DB-managed capabilities from memory store (overrides source)
-        if self._resource_store is not None and self._capabilities_root is not None and self._cap_kind is not None:
-            for resource in await self._resource_store.get_by_name(self._cap_kind, "agent.md"):
+        if self._resource is not None and self._capabilities_root is not None and self._cap_kind is not None:
+            for resource in await self._resource.list(pattern=f"/{self._cap_kind}/*/agent.md"):
                 capability_id = resource.path.split("/")[2]
                 content = resource.content
                 base_dir = self._capabilities_root / self._cap_kind / capability_id

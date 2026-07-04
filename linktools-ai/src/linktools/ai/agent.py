@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, PromptedOutput
@@ -29,8 +29,8 @@ from .session.types import Session, SessionTurn, build_input_display_entries
 from .core.model_runtime import (
     ModelOutputError,
     ModelTurnLimitExceeded,
-    RuntimeModelConfig,
     build_model,
+    model_registry,
 )
 from .mcp.client import build_mcp_toolset
 from .core.prompt import PromptContext, build_prompt, unavailable_adapters_note
@@ -71,7 +71,6 @@ class BaseAgent(metaclass=abc.ABCMeta):
     session: Session
     execution_context: AgentExecutionContext
     kernel: AgentKernel
-    model_config_resolver: "Callable[[str], RuntimeModelConfig]"
 
     def __init__(
         self,
@@ -79,7 +78,6 @@ class BaseAgent(metaclass=abc.ABCMeta):
         session: Session,
         execution_context: AgentExecutionContext,
         *,
-        model_config_resolver: "Callable[[str], RuntimeModelConfig]",
         enable_stuck_loop_detection: bool = False,
         enable_periodic_reminders: bool = False,
         enable_tool_search: bool = False,
@@ -100,7 +98,6 @@ class BaseAgent(metaclass=abc.ABCMeta):
         self.session = session
         self.execution_context = execution_context
         self.kernel = execution_context.kernel
-        self.model_config_resolver = model_config_resolver
         self.enable_stuck_loop_detection = enable_stuck_loop_detection
         self.enable_periodic_reminders = enable_periodic_reminders
         self.enable_tool_search = enable_tool_search
@@ -632,7 +629,7 @@ class LlmAgent(BaseAgent):
         always the RuntimeRunCapability instance (file/terminal + instructions/settings/
         on_run_error) — callers read `.last_error_detail` off it; skill/subagent/MCP each
         get their own capability instance appended to the list, not tracked individually."""
-        bundle = build_model(self.model_config_resolver(request.model_type))
+        bundle = build_model(model_registry.get(request.model_type))
         builtin_toolset = build_builtin_toolset(
             BuiltinToolContext(
                 backend=LocalExecutionBackend(
@@ -761,7 +758,6 @@ class LlmAgent(BaseAgent):
                 child_spec,
                 child_session,
                 execution_context=child_context,
-                model_config_resolver=self.model_config_resolver,
                 workdir=getattr(self, "workdir", None),
             )
             return await child_agent.generate(input_data, call_id=call_id)

@@ -4,12 +4,12 @@
 """Session history snapshots: context.json read/write and per-call prompt sidecars."""
 
 import json
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from linktools.core import environ
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -27,7 +27,7 @@ from pydantic_ai.messages import (
 from ..core.model_runtime import RuntimeModelConfig
 from ..support.utils import safe_filename
 
-logger = logging.getLogger("linktools.ai.session.history")
+logger = environ.get_logger("ai.session.history")
 
 # Mirror the legacy context.json trimming budget.
 _CONTEXT_MAX_MESSAGES = 80

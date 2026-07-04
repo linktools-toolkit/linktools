@@ -52,7 +52,6 @@ def _make_agent(tmp_path: Path, **toggles) -> SubAgent:
         spec=spec,
         session=session,
         execution_context=_FakeExecutionContext(),
-        model_config_resolver=lambda model_type: None,
         **toggles,
     )
 

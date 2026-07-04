@@ -5,6 +5,7 @@ import pytest
 
 from linktools.ai.core.model_runtime import (
     ModelClientUnavailable,
+    ModelRegistry,
     RuntimeModelConfig,
     build_model,
 )
@@ -41,3 +42,23 @@ def test_build_model_rejects_unsupported_protocol():
 def test_build_model_rejects_missing_base_url():
     with pytest.raises(ModelClientUnavailable, match="requires base_url"):
         build_model(_config(base_url=""))
+
+
+def test_model_registry_returns_registered_config():
+    registry = ModelRegistry()
+    config = _config()
+    registry.register("standard", config)
+    assert registry.get("standard") is config
+
+
+def test_model_registry_raises_for_unregistered_model_type():
+    registry = ModelRegistry()
+    with pytest.raises(ModelClientUnavailable, match="standard"):
+        registry.get("standard")
+
+
+def test_model_registry_register_overwrites_existing_entry():
+    registry = ModelRegistry()
+    registry.register("standard", _config(model="first"))
+    registry.register("standard", _config(model="second"))
+    assert registry.get("standard").model == "second"

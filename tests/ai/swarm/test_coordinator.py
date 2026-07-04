@@ -6,7 +6,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
-from linktools.ai.core.model_runtime import ModelBundle, RuntimeModelConfig
+from linktools.ai.core.model_runtime import ModelBundle, RuntimeModelConfig, model_registry
 from linktools.ai.core.registry import SpecSource
 from linktools.ai.core.runtime import AgentKernel
 from linktools.ai.session.coordination import InMemorySessionCoordinator
@@ -131,7 +131,7 @@ def test_swarm_coordinator_runs_all_tasks_to_a_terminal_state(tmp_path):
             Task(task_id="t2", payload={"x": 2}),
             Task(task_id="t3", payload={"x": 3}),
         ])
-        coordinator = SwarmCoordinator(kernel, queue, model_config_resolver=lambda model_type: None)
+        coordinator = SwarmCoordinator(kernel, queue)
         return await coordinator.run(spec, session, agent_count=2, workdir=tmp_path / "runtime")
 
     results = asyncio.run(_run())
@@ -151,7 +151,7 @@ def test_swarm_coordinator_returns_empty_list_for_empty_queue(tmp_path):
     queue = InMemoryTaskQueue()
 
     async def _run():
-        coordinator = SwarmCoordinator(kernel, queue, model_config_resolver=lambda model_type: None)
+        coordinator = SwarmCoordinator(kernel, queue)
         return await coordinator.run(spec, session, agent_count=3, workdir=tmp_path / "runtime")
 
     results = asyncio.run(_run())
@@ -192,10 +192,11 @@ def test_swarm_coordinator_workers_write_files_under_the_given_workdir(tmp_path,
         model_type="standard", protocol="openai", model="fake", base_url=None,
         api_key=None, auth_token=None, timeout_seconds=300, raw={"max_retries": 1},
     )
+    model_registry.register("standard", fake_config)
 
     async def _run():
         await queue.add([Task(task_id="t1", payload={"x": 1})])
-        coordinator = SwarmCoordinator(kernel, queue, model_config_resolver=lambda model_type: fake_config)
+        coordinator = SwarmCoordinator(kernel, queue)
         return await coordinator.run(spec, session, agent_count=1, workdir=workdir)
 
     results = asyncio.run(_run())

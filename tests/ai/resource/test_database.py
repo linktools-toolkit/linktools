@@ -1,41 +1,10 @@
 import asyncio
 import hashlib
-from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from fnmatch import fnmatch
 
-from linktools.ai.resource_store.database import DatabaseBackend, _RawRow
-from linktools.ai.resource_store.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
-
-
-@dataclass
-class _CacheConfig:
-    enabled: bool = False
-
-
-@dataclass
-class _FakeRedis:
-    """No-op stand-in -- disabled by default so tests exercise the redis-absent path
-    (matching how registry_store's own tests covered the same fallback)."""
-
-    config: _CacheConfig = field(default_factory=_CacheConfig)
-    _store: "dict[str, str]" = field(default_factory=dict)
-
-    async def get(self, key: str) -> "str | None":
-        return self._store.get(key)
-
-    async def incr(self, key: str) -> int:
-        value = int(self._store.get(key, "0")) + 1
-        self._store[key] = str(value)
-        return value
-
-    async def delete(self, key: str) -> None:
-        self._store.pop(key, None)
-
-    async def try_acquire(self, key: str, value: str, ttl: int) -> bool:
-        return True
-
-    async def release_if_owner(self, key: str, value: str) -> bool:
-        return True
+from linktools.ai.resource.database import DatabaseBackend, _RawRow
+from linktools.ai.resource.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
 
 
 class _InMemoryDatabaseBackend(DatabaseBackend):
@@ -43,8 +12,8 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
     file exercises DatabaseBackend's concrete cache/idempotency logic without a real
     SQL dependency."""
 
-    def __init__(self, redis) -> None:
-        super().__init__(redis=redis, workspace_root=None)
+    def __init__(self, cluster_lock) -> None:
+        super().__init__(cluster_lock=cluster_lock, cache_dir=None)
         self._rows: "dict[str, _RawRow]" = {}
         self._history: "dict[str, dict[int, _RawRow]]" = {}
         self._next_id = 1
@@ -55,16 +24,11 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
     def _record_version(self, row: "_RawRow") -> None:
         self._history.setdefault(row.path, {})[row.version] = row
 
-    async def _raw_get(self, path: str) -> "_RawRow | None":
-        row = self._rows.get(path)
-        return row if row is not None and row.status == "active" else None
-
-    async def _raw_get_at_version(self, path: str, version: int) -> "_RawRow | None":
+    async def _raw_get(self, path: str, version: "int | None" = None) -> "_RawRow | None":
+        if version is None:
+            row = self._rows.get(path)
+            return row if row is not None and row.status == "active" else None
         return self._history.get(path, {}).get(version)
-
-    async def _raw_get_by_name(self, namespace: str, name: str) -> "list[_RawRow]":
-        prefix, suffix = f"/{namespace}/", f"/{name}"
-        return [r for p, r in self._rows.items() if p.startswith(prefix) and p.endswith(suffix) and r.status == "active"]
 
     async def _raw_upsert(self, path: str, content: str, checksum: str, updated_by: str) -> "tuple[int, int, bool]":
         existing = self._rows.get(path)
@@ -102,10 +66,15 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
         self._record_version(self._rows[src_path])
         return src.row_id, new_version, True
 
-    async def _raw_list_since(self, since) -> "list[_RawRow]":
-        if since is None:
-            return list(self._rows.values())
-        return [r for r in self._rows.values() if r.updated_at >= since]
+    async def _raw_list(self, *, pattern=None, since=None, include_deleted=False) -> "list[_RawRow]":
+        rows = self._rows.values()
+        if pattern is not None:
+            rows = [r for r in rows if fnmatch(r.path, pattern)]
+        if since is not None:
+            rows = [r for r in rows if r.updated_at >= since]
+        if not include_deleted:
+            rows = [r for r in rows if r.status == "active"]
+        return list(rows)
 
     async def _raw_apply_batch(self, ops, *, expected_revision, updated_by) -> "tuple[str, list[_RawRow], bool]":
         # Return only the rows touched by THIS batch's ops -- not the whole table.
@@ -134,12 +103,12 @@ class _InMemoryDatabaseBackend(DatabaseBackend):
 
 
 def test_backend_satisfies_protocol():
-    assert isinstance(_InMemoryDatabaseBackend(_FakeRedis()), ResourceBackend)
+    assert isinstance(_InMemoryDatabaseBackend(None), ResourceBackend)
 
 
 def test_put_then_get_roundtrip():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         result = await backend.get("/skill/a/SKILL.md")
         assert result is not None
@@ -151,7 +120,7 @@ def test_put_then_get_roundtrip():
 
 def test_put_same_content_is_idempotent():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         second = await backend.put("/skill/a/SKILL.md", "hello")
         assert second.version == 1
@@ -161,7 +130,7 @@ def test_put_same_content_is_idempotent():
 
 def test_delete_nonexistent_path_is_idempotent_no_op():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         assert await backend.delete("/skill/never/SKILL.md") is False
 
     asyncio.run(run())
@@ -169,7 +138,7 @@ def test_delete_nonexistent_path_is_idempotent_no_op():
 
 def test_move_already_applied_is_idempotent():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
         second = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
@@ -181,15 +150,15 @@ def test_move_already_applied_is_idempotent():
 
 def test_move_already_applied_does_not_bump_revision():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
-        revision_after_first_move = await backend.get_revision()
+        revision_after_first_move = await backend.revision()
 
         second = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
         assert second is not None
 
-        revision_after_second_move = await backend.get_revision()
+        revision_after_second_move = await backend.revision()
         assert revision_after_second_move == revision_after_first_move
 
     asyncio.run(run())
@@ -197,7 +166,7 @@ def test_move_already_applied_does_not_bump_revision():
 
 def test_move_commits_destination_state_before_returning():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         moved = await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
         assert moved is not None
@@ -227,7 +196,7 @@ def test_move_locks_both_src_and_dst_paths():
                 )
                 return await super()._raw_move(src_path, dst_path, updated_by)
 
-        backend = _InstrumentedBackend(_FakeRedis())
+        backend = _InstrumentedBackend(None)
         await backend.put("/skill/a/SKILL.md", "hello")
         await backend.move("/skill/a/SKILL.md", "/skill/b/SKILL.md")
 
@@ -237,33 +206,33 @@ def test_move_locks_both_src_and_dst_paths():
     asyncio.run(run())
 
 
-def test_get_by_name_result_stays_resident_after_lru_pressure():
+def test_list_pattern_result_stays_resident_after_lru_pressure():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "primary content")
-        await backend.get_by_name("skill", "SKILL.md")  # touches the resident tier
+        await backend.list(pattern="/skill/*/SKILL.md")  # touches the resident tier
 
         for i in range(300):
             await backend.put(f"/skill/filler-{i}/notes.md", "x")
 
-        # A plain get() (not via get_by_name) for the filler files went through the
-        # bounded LRU (cap 256); the get_by_name-touched entry must survive regardless.
+        # A plain get() (not via list(pattern=...)) for the filler files went through
+        # the bounded LRU (cap 256); the list()-touched entry must survive regardless.
         assert backend._resident.get("/skill/a/SKILL.md") == "primary content"
         assert (await backend.get("/skill/a/SKILL.md")).content == "primary content"
 
     asyncio.run(run())
 
 
-def test_propfind_and_list_since_and_apply_batch_and_revision():
+def test_list_and_apply_batch_and_revision():
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
+        backend = _InMemoryDatabaseBackend(None)
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
 
-        listed = await backend.propfind("/skill/")
+        listed = await backend.list(pattern="/skill/*")
         assert {r.path for r in listed} == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
 
-        since = await backend.list_since(None)
+        since = await backend.list()
         assert len(since) == 2
 
         results = await backend.apply_batch([
@@ -272,19 +241,59 @@ def test_propfind_and_list_since_and_apply_batch_and_revision():
         ])
         assert {r.path for r in results} == {"/skill/c/SKILL.md"}
 
-        revision = await backend.get_revision()
+        revision = await backend.revision()
         assert isinstance(revision, int)
+
+    asyncio.run(run())
+
+
+def test_list_since_filters_older_rows():
+    async def run():
+        backend = _InMemoryDatabaseBackend(None)
+        await backend.put("/skill/a/SKILL.md", "a")
+        future = datetime.now() + timedelta(days=1)
+        results = await backend.list(since=future)
+        assert results == []
+
+    asyncio.run(run())
+
+
+def test_list_matches_glob_across_namespace_when_initialized():
+    async def run():
+        backend = _InMemoryDatabaseBackend(None)
+        await backend.put("/skill/a/SKILL.md", "a")
+        await backend.put("/mcp/b/mcp.yaml", "b")
+        await backend.put("/skill/b/notes.md", "not a match")
+        await backend.get("/skill/a/SKILL.md")  # forces _initialized via _ensure_fresh -> _sync
+
+        results = await backend.list(pattern="*/SKILL.md")
+        assert {r.path for r in results} == {"/skill/a/SKILL.md"}
+
+    asyncio.run(run())
+
+
+def test_list_falls_back_to_raw_storage_before_initialized():
+    async def run():
+        writer = _InMemoryDatabaseBackend(None)
+        await writer.put("/skill/a/SKILL.md", "a")
+        await writer.put("/mcp/b/mcp.yaml", "b")
+
+        reader = _InMemoryDatabaseBackend(None)
+        reader._rows = writer._rows
+
+        results = await reader.list(pattern="*/SKILL.md")
+        assert {r.path for r in results} == {"/skill/a/SKILL.md"}
 
     asyncio.run(run())
 
 
 def test_get_at_version_returns_historical_content_via_disk_cache(tmp_path):
     async def run():
-        backend = _InMemoryDatabaseBackend(_FakeRedis())
-        backend._workspace_root = tmp_path
+        backend = _InMemoryDatabaseBackend(None)
+        backend._cache_dir = tmp_path
         await backend.put("/skill/a/SKILL.md", "v1")
         await backend.put("/skill/a/SKILL.md", "v2")
-        v1 = await backend.get_at_version("/skill/a/SKILL.md", 1)
+        v1 = await backend.get("/skill/a/SKILL.md", 1)
         assert v1 is not None
         assert v1.content == "v1"
 
@@ -295,19 +304,19 @@ def test_get_at_version_falls_back_to_raw_storage_when_caches_miss():
     async def run():
         # Write two versions with one backend instance (this populates the real
         # backing store via _raw_upsert, which _record_version mirrors into history).
-        writer = _InMemoryDatabaseBackend(_FakeRedis())
+        writer = _InMemoryDatabaseBackend(None)
         await writer.put("/skill/a/SKILL.md", "v1")
         await writer.put("/skill/a/SKILL.md", "v2")
 
         # Fresh backend instance sharing the same underlying rows/history dicts, but
-        # with empty in-memory caches (_hist, _index) and no workspace_root (disk L2
+        # with empty in-memory caches (_hist, _index) and no cache_dir (disk L2
         # absent) -- this forces both the hist-LRU tier and disk-L2 tier to miss, so
-        # the older version can only come back via the new _raw_get_at_version tier.
-        reader = _InMemoryDatabaseBackend(_FakeRedis())
+        # the older version can only come back via the new _raw_get(path, version) tier.
+        reader = _InMemoryDatabaseBackend(None)
         reader._rows = writer._rows
         reader._history = writer._history
 
-        v1 = await reader.get_at_version("/skill/a/SKILL.md", 1)
+        v1 = await reader.get("/skill/a/SKILL.md", 1)
         assert v1 is not None
         assert v1.content == "v1"
         assert v1.version == 1

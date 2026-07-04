@@ -18,12 +18,12 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic_ai.mcp import MCPToolset
 
-import logging
+from linktools.core import environ
 
 from ..support.utils import resolve_ref as _resolve_ref
 from .registry import MCPRegistry, MCPServerSpec
 
-logger = logging.getLogger("linktools.ai.mcp.client")
+logger = environ.get_logger("ai.mcp.client")
 
 
 @asynccontextmanager

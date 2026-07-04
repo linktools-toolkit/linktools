@@ -1,8 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta
 
-from linktools.ai.resource_store.local import InMemoryResourceBackend
-from linktools.ai.resource_store.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
+from linktools.ai.resource.local import InMemoryResourceBackend
+from linktools.ai.resource.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
 
 
 def test_backend_satisfies_protocol():
@@ -114,39 +114,52 @@ def test_move_nonexistent_src_returns_none():
     asyncio.run(run())
 
 
-def test_propfind_lists_active_resources_under_prefix():
+def test_list_pattern_matches_prefix():
     async def run():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
         await backend.put("/mcp/x/mcp.yaml", "x")
-        results = await backend.propfind("/skill/")
+        results = await backend.list(pattern="/skill/*")
         paths = {r.path for r in results}
         assert paths == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
 
     asyncio.run(run())
 
 
-def test_propfind_excludes_deleted_resources():
+def test_list_excludes_deleted_resources_by_default():
     async def run():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.delete("/skill/a/SKILL.md")
-        results = await backend.propfind("/skill/")
+        results = await backend.list(pattern="/skill/*")
         assert results == []
 
     asyncio.run(run())
 
 
-def test_get_by_name_matches_filename_across_namespace():
+def test_list_pattern_matches_filename_across_namespace():
     async def run():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
         await backend.put("/skill/b/notes.md", "not a match")
-        results = await backend.get_by_name("skill", "SKILL.md")
+        results = await backend.list(pattern="/skill/*/SKILL.md")
         paths = {r.path for r in results}
         assert paths == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
+
+    asyncio.run(run())
+
+
+def test_list_pattern_matches_glob_across_namespace():
+    async def run():
+        backend = InMemoryResourceBackend()
+        await backend.put("/skill/a/SKILL.md", "a")
+        await backend.put("/mcp/b/mcp.yaml", "b")
+        await backend.put("/skill/b/notes.md", "not a match")
+        results = await backend.list(pattern="*/SKILL.md")
+        paths = {r.path for r in results}
+        assert paths == {"/skill/a/SKILL.md"}
 
     asyncio.run(run())
 
@@ -156,33 +169,35 @@ def test_get_at_version_returns_historical_content():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "v1")
         await backend.put("/skill/a/SKILL.md", "v2")
-        v1 = await backend.get_at_version("/skill/a/SKILL.md", 1)
+        v1 = await backend.get("/skill/a/SKILL.md", 1)
         assert v1 is not None
         assert v1.content == "v1"
 
     asyncio.run(run())
 
 
-def test_list_since_none_returns_everything():
+def test_list_with_no_filters_returns_everything():
     async def run():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
-        results = await backend.list_since(None)
+        results = await backend.list()
         assert len(results) == 2
 
     asyncio.run(run())
 
 
-def test_list_since_timestamp_filters_older_rows():
+def test_list_since_filters_older_rows():
     async def run():
         backend = InMemoryResourceBackend()
         await backend.put("/skill/a/SKILL.md", "a")
         future = datetime.now() + timedelta(days=1)
-        results = await backend.list_since(future)
+        results = await backend.list(since=future)
         assert results == []
 
     asyncio.run(run())
+
+
 
 
 def test_apply_batch_mixed_operations():
@@ -203,12 +218,12 @@ def test_apply_batch_mixed_operations():
     asyncio.run(run())
 
 
-def test_get_revision_increments_on_write():
+def test_revision_increments_on_write():
     async def run():
         backend = InMemoryResourceBackend()
-        before = await backend.get_revision()
+        before = await backend.revision()
         await backend.put("/skill/a/SKILL.md", "a")
-        after = await backend.get_revision()
+        after = await backend.revision()
         assert after == before + 1
 
     asyncio.run(run())

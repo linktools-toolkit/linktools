@@ -79,7 +79,7 @@ def test_start_background_returns_run_id_immediately(tmp_path):
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
-        run_id = await kernel.start_background(spec, session, {"x": 1}, model_config_resolver=lambda model_type: None)
+        run_id = await kernel.start_background(spec, session, {"x": 1})
         assert isinstance(run_id, str) and run_id
         status = await kernel.check_background(run_id)
         assert status.state == "running"
@@ -113,7 +113,7 @@ def test_start_background_eventually_reaches_done_or_failed(tmp_path):
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
-        run_id = await kernel.start_background(spec, session, {"x": 1}, model_config_resolver=lambda model_type: None)
+        run_id = await kernel.start_background(spec, session, {"x": 1})
         for _ in range(50):
             status = await kernel.check_background(run_id)
             if status.state != "running":

@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """MCPServerSpec / MCPRegistry: MCP server definitions loaded from mcp.yaml."""
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Self
+
+from linktools.core import environ
 
 from ..core.registry import BaseRegistry, BaseSpec, SpecSource, find_file
 from ..support.config import (
@@ -14,9 +15,9 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..resource_store.store import ResourceStore
+    from ..resource.store import ResourceStore
 
-logger = logging.getLogger("linktools.ai.mcp.registry")
+logger = environ.get_logger("ai.mcp.registry")
 
 
 @dataclass(slots=True)
@@ -58,9 +59,9 @@ class MCPServerSpec(BaseSpec):
 class MCPRegistry(BaseRegistry[MCPServerSpec]):
     """Scan MCP directories and load MCPServerSpec objects keyed by server_id."""
 
-    def __init__(self, *paths: Path, resource_store: "ResourceStore | None" = None) -> None:
+    def __init__(self, *paths: Path, resource: "ResourceStore | None" = None) -> None:
         super().__init__(*paths)
-        self._resource_store = resource_store
+        self._resource = resource
 
     async def _load(self) -> "dict[str, MCPServerSpec]":
         result: "dict[str, MCPServerSpec]" = {}
@@ -80,8 +81,8 @@ class MCPRegistry(BaseRegistry[MCPServerSpec]):
                         logger.warning("MCP server '%s' from %s overrides existing registration", spec.name, child)
                     result[spec.name] = spec
                     logger.debug("mcp loaded: name=%s path=%s", spec.name, child)
-        if self._resource_store is not None:
-            for resource in await self._resource_store.get_by_name("mcp", "mcp.yaml"):
+        if self._resource is not None:
+            for resource in await self._resource.list(pattern="/mcp/*/mcp.yaml"):
                 capability_id = resource.path.split("/")[2]
                 content = resource.content
                 payload = _load_yaml_text(content, source=f"<db:{capability_id}>")

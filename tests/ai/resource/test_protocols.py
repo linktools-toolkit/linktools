@@ -1,4 +1,4 @@
-from linktools.ai.resource_store.protocols import (
+from linktools.ai.resource.protocols import (
     DeleteOp,
     MoveOp,
     Operation,
@@ -30,17 +30,14 @@ def test_operation_types_construct():
     assert Operation is not None
 
 
-def test_resource_backend_is_runtime_checkable_protocol():
-    class _Impl:
-        async def propfind(self, path): return []
-        async def get(self, path): return None
-        async def get_at_version(self, path, version): return None
-        async def get_by_name(self, namespace, name): return []
-        async def put(self, path, content, *, updated_by="engine"): return None
-        async def delete(self, path, *, updated_by="engine"): return False
-        async def move(self, src_path, dst_path, *, updated_by="engine"): return None
-        async def list_since(self, since): return []
-        async def apply_batch(self, ops, *, updated_by="engine"): return []
-        async def get_revision(self): return 0
+def test_resource_backend_subclass_implementing_all_abstract_methods_is_instantiable():
+    class _Impl(ResourceBackend):
+        async def get(self, path, version=None): return None
+        async def list(self, *, pattern=None, since=None): return []
+        async def put(self, path, content, *, updated_by=""): return None
+        async def delete(self, path, *, updated_by=""): return False
+        async def move(self, src_path, dst_path, *, updated_by=""): return None
+        async def apply_batch(self, ops, *, updated_by=""): return []
+        async def revision(self): return 0
 
     assert isinstance(_Impl(), ResourceBackend)

@@ -29,9 +29,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
-import logging
+from linktools.core import environ
 
-logger = logging.getLogger("linktools.ai.core.model_runtime")
+logger = environ.get_logger("ai.core.model.runtime")
 
 
 class ModelClientUnavailable(RuntimeError):
@@ -71,6 +71,28 @@ class RuntimeModelConfig:
     @property
     def token(self) -> "str | None":
         return self.auth_token or self.api_key
+
+
+class ModelRegistry:
+    """Process-wide model_type -> RuntimeModelConfig registry. Callers register every
+    model_type an agent might request (file, env vars, secrets manager, hardcoded for
+    tests) at startup; agents look configs up by model_type instead of resolving them
+    on demand per call."""
+
+    def __init__(self) -> None:
+        self._configs: "dict[str, RuntimeModelConfig]" = {}
+
+    def register(self, model_type: str, config: RuntimeModelConfig) -> None:
+        self._configs[model_type] = config
+
+    def get(self, model_type: str) -> RuntimeModelConfig:
+        try:
+            return self._configs[model_type]
+        except KeyError:
+            raise ModelClientUnavailable(f"no RuntimeModelConfig registered for model_type '{model_type}'") from None
+
+
+model_registry = ModelRegistry()
 
 
 # ---------------------------------------------------------------------------

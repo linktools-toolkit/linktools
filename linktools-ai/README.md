@@ -31,7 +31,7 @@ src/linktools/ai/
   subagent/         subagent definitions (agent.md) + tree-delegation
                      (call_subagent) capability
   mcp/              MCP server definitions + client/toolset wiring
-  resource_store/   ResourceStore: mem -> disk -> remote-backend layered
+  resource/         ResourceStore: mem -> disk -> remote-backend layered
                      storage for skill/subagent/MCP definition files, used
                      by the registries above
   support/          generic infra shared across modules: config, utils,

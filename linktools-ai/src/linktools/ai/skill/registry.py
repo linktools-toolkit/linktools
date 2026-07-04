@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """SkillSpec / SkillRegistry: skill definitions loaded from skill.md directories."""
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Self
+
+from linktools.core import environ
 
 from ..core.registry import BaseRegistry, BaseSpec, SpecSource, find_file
 from ..support.config import (
@@ -14,9 +15,9 @@ from ..support.config import (
 )
 
 if TYPE_CHECKING:
-    from ..resource_store.store import ResourceStore
+    from ..resource.store import ResourceStore
 
-logger = logging.getLogger("linktools.ai.skill.registry")
+logger = environ.get_logger("ai.skill.registry")
 
 
 @dataclass(slots=True)
@@ -48,11 +49,11 @@ class SkillRegistry(BaseRegistry[SkillSpec]):
     def __init__(
         self,
         *paths: Path,
-        resource_store: "ResourceStore | None" = None,
+        resource: "ResourceStore | None" = None,
         capabilities_root: "Path | None" = None,
     ) -> None:
         super().__init__(*paths)
-        self._resource_store = resource_store
+        self._resource = resource
         self._capabilities_root = capabilities_root
 
     async def _load(self) -> "dict[str, SkillSpec]":
@@ -73,8 +74,8 @@ class SkillRegistry(BaseRegistry[SkillSpec]):
                         logger.warning("Skill '%s' from %s overrides existing registration", spec.name, child)
                     result[spec.name] = spec
                     logger.debug("skill loaded: name=%s category=%s path=%s", spec.name, spec.category, child)
-        if self._resource_store is not None:
-            for resource in await self._resource_store.get_by_name("skill", "SKILL.md"):
+        if self._resource is not None:
+            for resource in await self._resource.list(pattern="/skill/*/SKILL.md"):
                 capability_id = resource.path.split("/")[2]
                 content = resource.content
                 base_dir = self._capabilities_root / "skill" / capability_id if self._capabilities_root else None

@@ -25,25 +25,19 @@ can never be a descendant of the source."""
 import asyncio
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from ..execution.local import LocalExecutionBackend
 from ..subagent.registry import SubagentSpec
 
 if TYPE_CHECKING:
-    from ..core.model_runtime import RuntimeModelConfig
     from ..core.runtime import AgentKernel
     from ..session.types import Session
 
 
 class ForkCoordinator:
-    def __init__(
-        self,
-        kernel: "AgentKernel",
-        model_config_resolver: "Callable[[str], RuntimeModelConfig]",
-    ) -> None:
+    def __init__(self, kernel: "AgentKernel") -> None:
         self.kernel = kernel
-        self.model_config_resolver = model_config_resolver
 
     async def run(
         self, spec: SubagentSpec, session: "Session", inputs: Any, *, branch_count: int, workdir: Path,
@@ -66,7 +60,7 @@ class ForkCoordinator:
                 )
                 agent = SubAgent(
                     spec, branch_session, execution_context=child_context,
-                    model_config_resolver=self.model_config_resolver, workdir=branch_workdir,
+                    workdir=branch_workdir,
                 )
                 result = await agent.generate(inputs, call_id=branch_id)
                 return {"branch_id": branch_id, "status": "done", "result": result, "error": None}

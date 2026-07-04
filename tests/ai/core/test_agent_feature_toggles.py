@@ -64,7 +64,6 @@ def _construct(**toggles) -> SubAgent:
         spec=_FakeSpec(),
         session=_FakeSession(),
         execution_context=_FakeExecutionContext(),
-        model_config_resolver=lambda model_type: None,  # never called by these tests
         **toggles,
     )
 
@@ -78,7 +77,6 @@ def test_construction_no_longer_accepts_environ_kwarg():
             spec=_FakeSpec(),
             session=_FakeSession(),
             execution_context=_FakeExecutionContext(),
-            model_config_resolver=lambda model_type: None,
         )
 
 

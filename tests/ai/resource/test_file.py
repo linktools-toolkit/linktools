@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from linktools.ai.resource_store.file import FileBackend
-from linktools.ai.resource_store.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
+from linktools.ai.resource.file import FileBackend
+from linktools.ai.resource.protocols import DeleteOp, MoveOp, PutOp, ResourceBackend
 
 
 def test_backend_satisfies_protocol(tmp_path):
@@ -23,12 +23,13 @@ def test_put_writes_to_disk_and_get_reads_it_back(tmp_path):
     asyncio.run(run())
 
 
-def test_put_same_content_twice_is_idempotent(tmp_path):
+def test_put_always_returns_version_one(tmp_path):
     async def run():
         backend = FileBackend(tmp_path)
         await backend.put("/skill/a/SKILL.md", "hello")
-        second = await backend.put("/skill/a/SKILL.md", "hello")
+        second = await backend.put("/skill/a/SKILL.md", "world")
         assert second.version == 1
+        assert second.content == "world"
 
     asyncio.run(run())
 
@@ -73,28 +74,41 @@ def test_move_relocates_file(tmp_path):
     asyncio.run(run())
 
 
-def test_propfind_lists_files_under_prefix(tmp_path):
+def test_list_pattern_matches_files_under_prefix(tmp_path):
     async def run():
         backend = FileBackend(tmp_path)
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
         await backend.put("/mcp/x/mcp.yaml", "x")
-        results = await backend.propfind("/skill/")
+        results = await backend.list(pattern="/skill/*")
         paths = {r.path for r in results}
         assert paths == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
 
     asyncio.run(run())
 
 
-def test_get_by_name_matches_filename(tmp_path):
+def test_list_pattern_matches_filename(tmp_path):
     async def run():
         backend = FileBackend(tmp_path)
         await backend.put("/skill/a/SKILL.md", "a")
         await backend.put("/skill/b/SKILL.md", "b")
         await backend.put("/skill/b/notes.md", "not a match")
-        results = await backend.get_by_name("skill", "SKILL.md")
+        results = await backend.list(pattern="/skill/*/SKILL.md")
         paths = {r.path for r in results}
         assert paths == {"/skill/a/SKILL.md", "/skill/b/SKILL.md"}
+
+    asyncio.run(run())
+
+
+def test_list_pattern_matches_glob_across_namespace(tmp_path):
+    async def run():
+        backend = FileBackend(tmp_path)
+        await backend.put("/skill/a/SKILL.md", "a")
+        await backend.put("/mcp/b/mcp.yaml", "b")
+        await backend.put("/skill/b/notes.md", "not a match")
+        results = await backend.list(pattern="*/SKILL.md")
+        paths = {r.path for r in results}
+        assert paths == {"/skill/a/SKILL.md"}
 
     asyncio.run(run())
 
@@ -164,12 +178,12 @@ def test_readonly_backend_allows_reads(tmp_path):
     asyncio.run(run())
 
 
-def test_get_revision_is_always_zero_for_file_backend(tmp_path):
+def test_revision_is_always_zero_for_file_backend(tmp_path):
     async def run():
         backend = FileBackend(tmp_path)
         await backend.put("/skill/a/SKILL.md", "hello")
         # FileBackend has no distributed revision concept -- it's always 0, since
         # DatabaseBackend (Task 5) owns the only real revision counter.
-        assert await backend.get_revision() == 0
+        assert await backend.revision() == 0
 
     asyncio.run(run())

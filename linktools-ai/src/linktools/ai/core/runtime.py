@@ -6,7 +6,7 @@
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from linktools.runtime import EventHandlerMixin
 
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from ..skill.registry import SkillRegistry
     from ..subagent.registry import SubagentRegistry
     from ..mcp.registry import MCPRegistry
-    from .model_runtime import RuntimeModelConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +141,6 @@ class AgentKernel(EventHandlerMixin):
         session: Session,
         input_data: Any,
         *,
-        model_config_resolver: "Callable[[str], RuntimeModelConfig]",
         call_id: "str | None" = None,
     ) -> str:
         """Start a subagent run in the background, returning immediately with a run_id.
@@ -167,7 +165,6 @@ class AgentKernel(EventHandlerMixin):
                     spec,
                     session,
                     execution_context=child_context,
-                    model_config_resolver=model_config_resolver,
                 )
                 result = await agent.generate(input_data, call_id=run_id)
                 await self.run_status_store.update(run_id, RunStatus(state="done", result=result))

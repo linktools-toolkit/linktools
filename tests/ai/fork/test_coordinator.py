@@ -84,7 +84,7 @@ def test_fork_coordinator_runs_isolated_branches(tmp_path):
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
-        coordinator = ForkCoordinator(kernel, model_config_resolver=lambda model_type: None)
+        coordinator = ForkCoordinator(kernel)
         return await coordinator.run(spec, session, {"x": 1}, branch_count=3, workdir=workdir)
 
     results = asyncio.run(_run())
@@ -112,7 +112,7 @@ def test_fork_coordinator_returns_empty_list_for_zero_branches(tmp_path):
     spec = _make_subagent_spec(tmp_path)
 
     async def _run():
-        coordinator = ForkCoordinator(kernel, model_config_resolver=lambda model_type: None)
+        coordinator = ForkCoordinator(kernel)
         return await coordinator.run(spec, session, {"x": 1}, branch_count=0, workdir=workdir)
 
     results = asyncio.run(_run())

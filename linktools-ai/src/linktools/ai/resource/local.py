@@ -4,20 +4,21 @@
 
 Merges what used to be two separate reference doubles (InMemoryCapabilityRepository +
 InMemoryCapabilityCache) into one backend -- ResourceBackend no longer separates
-"repository" from "cache" (see resource_store/database.py's DatabaseBackend). Not for
+"repository" from "cache" (see resource/database.py's DatabaseBackend). Not for
 production use: no persistence, no concurrency control.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from fnmatch import fnmatch
 from hashlib import sha256
 from typing import Any
 
-from .protocols import DeleteOp, MoveOp, Operation, PutOp, ResourceFile
+from .protocols import DeleteOp, MoveOp, Operation, PutOp, ResourceBackend, ResourceFile
 
 
 @dataclass
-class InMemoryResourceBackend:
+class InMemoryResourceBackend(ResourceBackend):
     _rows: "dict[str, dict[str, Any]]" = field(default_factory=dict)
     _history: "dict[str, dict[int, dict[str, Any]]]" = field(default_factory=dict)
     _revision: int = 0
@@ -31,35 +32,30 @@ class InMemoryResourceBackend:
     def _record_version(self, path: str, row: "dict[str, Any]") -> None:
         self._history.setdefault(path, {})[row["version"]] = dict(row)
 
-    async def propfind(self, path: str) -> "list[ResourceFile]":
-        return [
-            self._to_resource_file(p, row)
-            for p, row in self._rows.items()
-            if p.startswith(path) and row["status"] == "active"
-        ]
-
-    async def get(self, path: str) -> "ResourceFile | None":
-        row = self._rows.get(path)
-        if row is None or row["status"] != "active":
-            return None
-        return self._to_resource_file(path, row)
-
-    async def get_at_version(self, path: str, version: int) -> "ResourceFile | None":
+    async def get(self, path: str, version: "int | None" = None) -> "ResourceFile | None":
+        if version is None:
+            row = self._rows.get(path)
+            if row is None or row["status"] != "active":
+                return None
+            return self._to_resource_file(path, row)
         row = self._history.get(path, {}).get(version)
         if row is None:
             return None
         return self._to_resource_file(path, row)
 
-    async def get_by_name(self, namespace: str, name: str) -> "list[ResourceFile]":
-        prefix = f"/{namespace}/"
-        suffix = f"/{name}"
-        return [
-            self._to_resource_file(p, row)
-            for p, row in self._rows.items()
-            if p.startswith(prefix) and p.endswith(suffix) and row["status"] == "active"
-        ]
+    async def list(self, *, pattern: "str | None" = None, since: "datetime | None" = None) -> "list[ResourceFile]":
+        results: "list[ResourceFile]" = []
+        for p, row in self._rows.items():
+            if row["status"] != "active":
+                continue
+            if pattern is not None and not fnmatch(p, pattern):
+                continue
+            if since is not None and row["updated_at"] < since:
+                continue
+            results.append(self._to_resource_file(p, row))
+        return results
 
-    async def put(self, path: str, content: str, *, updated_by: str = "engine") -> ResourceFile:
+    async def put(self, path: str, content: str, *, updated_by: str = "") -> ResourceFile:
         checksum = self._checksum(content)
         existing = self._rows.get(path)
         if existing is not None and existing["status"] == "active" and existing["checksum"] == checksum:
@@ -73,7 +69,7 @@ class InMemoryResourceBackend:
         self._revision += 1
         return self._to_resource_file(path, self._rows[path])
 
-    async def delete(self, path: str, *, updated_by: str = "engine") -> bool:
+    async def delete(self, path: str, *, updated_by: str = "") -> bool:
         existing = self._rows.get(path)
         if existing is None or existing["status"] != "active":
             return False
@@ -85,7 +81,7 @@ class InMemoryResourceBackend:
         self._revision += 1
         return True
 
-    async def move(self, src_path: str, dst_path: str, *, updated_by: str = "engine") -> "ResourceFile | None":
+    async def move(self, src_path: str, dst_path: str, *, updated_by: str = "") -> "ResourceFile | None":
         dst_existing = self._rows.get(dst_path)
         src_existing = self._rows.get(src_path)
         src_active = src_existing is not None and src_existing["status"] == "active"
@@ -108,16 +104,7 @@ class InMemoryResourceBackend:
         self._revision += 1
         return self._to_resource_file(dst_path, self._rows[dst_path])
 
-    async def list_since(self, since: "datetime | None") -> "list[ResourceFile]":
-        if since is None:
-            return [self._to_resource_file(p, row) for p, row in self._rows.items()]
-        return [
-            self._to_resource_file(p, row)
-            for p, row in self._rows.items()
-            if row["updated_at"] >= since
-        ]
-
-    async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "engine") -> "list[ResourceFile]":
+    async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "") -> "list[ResourceFile]":
         results: "dict[str, ResourceFile]" = {}
         for op in ops:
             if isinstance(op, PutOp):
@@ -132,5 +119,5 @@ class InMemoryResourceBackend:
                     results[op.dst_path] = moved
         return list(results.values())
 
-    async def get_revision(self) -> int:
+    async def revision(self) -> int:
         return self._revision

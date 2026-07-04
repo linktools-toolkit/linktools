@@ -4,31 +4,32 @@
 injected Repository protocol -- an external subclass fills in the `_raw_*` methods
 with real SQL access (this repo has never contained that implementation and still
 doesn't). Owns all cache/revision/idempotency logic concretely: a resident content
-tier (unbounded, populated by get_by_name -- see this plan's "Gaps found during
-planning" §3), a bounded LRU tier for everything else, a bounded historical-version
+tier (unbounded, populated by list(pattern=...) -- see this plan's "Gaps
+found during planning" §3), a bounded LRU tier for everything else, a bounded historical-version
 LRU, an optional disk L2 cache (checksum-validated sidecar files), and an optional
-Redis-backed revision counter + distributed write lock (absent Redis, revision
-tracking degrades to a plain in-process counter and locking falls back to
+ClusterLock-backed revision counter + distributed write lock (absent a cluster lock,
+revision tracking degrades to a plain in-process counter and locking falls back to
 asyncio.Lock -- matching registry_store's prior behavior exactly)."""
 
 import asyncio
 import hashlib
 import json
-import logging
-import uuid
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod, ABCMeta
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import AsyncIterator
 
-from .protocols import Operation, ResourceFile
+from linktools.core import environ
 
-logger = logging.getLogger("linktools.ai.resource_store.database")
+from .protocols import Operation, ResourceBackend, ResourceFile
 
-_REVISION_KEY = "resource_store:revision"
+logger = environ.get_logger("ai.resource.database")
+
+_REVISION_KEY = "resource:revision"
 _LRU_MAX_FILES = 256
 _MAX_CACHE_BYTES = 1 * 1024 * 1024
 _SYNC_LOOKBACK = timedelta(minutes=1)
@@ -46,20 +47,31 @@ class _RawRow:
     updated_at: datetime
 
 
-@runtime_checkable
-class _RedisConfigProtocol(Protocol):
-    enabled: bool
+class ClusterLock(ABC):
+    """Cross-process coordination surface DatabaseBackend needs -- a Redis client
+    satisfies this, but so could any other backend (e.g. a linktools.cache.FileCache
+    wrapped in an adapter) that implements the same get/incr/delete/try_acquire/
+    release operations. Passing `cluster_lock=None` to DatabaseBackend disables
+    cross-process coordination entirely (single-process revision counter and
+    in-process locks only) -- there is no separate enabled flag to check.
 
+    try_acquire/release model a single global lock (no key, no owner check) --
+    every write_lock() call across every path shares it."""
 
-@runtime_checkable
-class RedisCoordinatorProtocol(Protocol):
-    config: _RedisConfigProtocol
-
+    @abstractmethod
     async def get(self, key: str) -> "str | None": ...
+
+    @abstractmethod
     async def incr(self, key: str) -> int: ...
+
+    @abstractmethod
     async def delete(self, key: str) -> None: ...
-    async def try_acquire(self, key: str, value: str, ttl: int) -> bool: ...
-    async def release_if_owner(self, key: str, value: str) -> bool: ...
+
+    @abstractmethod
+    async def try_acquire(self, ttl: int) -> bool: ...
+
+    @abstractmethod
+    async def release(self) -> bool: ...
 
 
 def _exceeds_cache_limit(content: str) -> bool:
@@ -70,17 +82,16 @@ def _checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-class DatabaseBackend(ABC):
-    def __init__(self, *, redis: "RedisCoordinatorProtocol", workspace_root: "Path | None" = None) -> None:
-        self.redis = redis
-        self._workspace_root = workspace_root
+class DatabaseBackend(ResourceBackend, metaclass=ABCMeta):
+
+    def __init__(self, *, cluster_lock: "ClusterLock | None" = None, cache_dir: "Path | None" = None) -> None:
+        self._cluster_lock = cluster_lock
+        self._cache_dir = cache_dir
         self._local_revision: int = 0
         self._last_sync_at: "datetime | None" = None
         self._initialized: bool = False
         self._lock = asyncio.Lock()
-        # Resident tier: populated exclusively by get_by_name, never evicted -- see
-        # this plan's "Gaps found during planning" §3 for why residency is earned by
-        # access pattern instead of a pre-registered kind->primary-filename table.
+
         self._resident: "dict[str, str]" = {}
         self._lru: "OrderedDict[str, str]" = OrderedDict()
         self._index: "dict[str, tuple[int, int]]" = {}  # path -> (row_id, version)
@@ -90,13 +101,7 @@ class DatabaseBackend(ABC):
     # ── Abstract raw-storage contract (external subclass implements against real SQL) ──
 
     @abstractmethod
-    async def _raw_get(self, path: str) -> "_RawRow | None": ...
-
-    @abstractmethod
-    async def _raw_get_at_version(self, path: str, version: int) -> "_RawRow | None": ...
-
-    @abstractmethod
-    async def _raw_get_by_name(self, namespace: str, name: str) -> "list[_RawRow]": ...
+    async def _raw_get(self, path: str, version: "int | None" = None) -> "_RawRow | None": ...
 
     @abstractmethod
     async def _raw_upsert(self, path: str, content: str, checksum: str, updated_by: str) -> "tuple[int, int, bool]": ...
@@ -116,7 +121,9 @@ class DatabaseBackend(ABC):
         ...
 
     @abstractmethod
-    async def _raw_list_since(self, since: "datetime | None") -> "list[_RawRow]": ...
+    async def _raw_list(
+        self, *, pattern: "str | None" = None, since: "datetime | None" = None, include_deleted: bool = False
+    ) -> "list[_RawRow]": ...
 
     @abstractmethod
     async def _raw_apply_batch(self, ops: "list[Operation]", *, expected_revision: str, updated_by: str) -> "tuple[str, list[_RawRow], bool]":
@@ -175,22 +182,22 @@ class DatabaseBackend(ABC):
     # ── Disk L2 cache ──
 
     def _write_workspace(self, row_id: int, version: int, content: str) -> None:
-        if self._workspace_root is None:
+        if self._cache_dir is None:
             return
-        dest = self._workspace_root / f"{row_id}.v{version}"
-        meta = self._workspace_root / f"{row_id}.v{version}.meta.json"
+        dest = self._cache_dir / f"{row_id}.v{version}"
+        meta = self._cache_dir / f"{row_id}.v{version}.meta.json"
         try:
-            self._workspace_root.mkdir(parents=True, exist_ok=True)
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             meta.write_text(json.dumps({"checksum": _checksum(content)}), encoding="utf-8")
         except OSError as exc:
-            logger.warning("resource_store: workspace write failed (%s.v%s): %s", row_id, version, exc)
+            logger.warning("resource: workspace write failed (%s.v%s): %s", row_id, version, exc)
 
     def _read_workspace(self, row_id: int, version: int) -> "str | None":
-        if self._workspace_root is None:
+        if self._cache_dir is None:
             return None
-        dest = self._workspace_root / f"{row_id}.v{version}"
-        meta = self._workspace_root / f"{row_id}.v{version}.meta.json"
+        dest = self._cache_dir / f"{row_id}.v{version}"
+        meta = self._cache_dir / f"{row_id}.v{version}.meta.json"
         try:
             if not dest.exists() or not meta.exists():
                 return None
@@ -202,25 +209,23 @@ class DatabaseBackend(ABC):
                 return None
             return content
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("resource_store: workspace read failed (%s.v%s): %s", row_id, version, exc)
+            logger.warning("resource: workspace read failed (%s.v%s): %s", row_id, version, exc)
             return None
 
     # ── Locking ──
 
     @asynccontextmanager
     async def write_lock(self, path: str) -> "AsyncIterator[None]":
-        if not self.redis.config.enabled:
+        if self._cluster_lock is None:
             if path not in self._write_locks:
                 self._write_locks[path] = asyncio.Lock()
             async with self._write_locks[path]:
                 yield
             return
-        lock_key = f"resource_store:wlock:{path}"
-        lock_val = uuid.uuid4().hex
         ttl = 30
         acquired = False
         for _ in range(100):
-            if await self.redis.try_acquire(lock_key, lock_val, ttl):
+            if await self._cluster_lock.try_acquire(ttl):
                 acquired = True
                 break
             await asyncio.sleep(0.1)
@@ -230,53 +235,53 @@ class DatabaseBackend(ABC):
             yield
         finally:
             try:
-                await self.redis.release_if_owner(lock_key, lock_val)
+                await self._cluster_lock.release()
             except Exception as exc:
                 logger.warning("write_lock release failed (%s): %s", path, exc)
 
     # ── Revision / sync ──
 
-    async def get_revision(self) -> int:
-        if not self.redis.config.enabled:
+    async def revision(self) -> int:
+        if self._cluster_lock is None:
             return self._local_revision
         try:
-            value = await self.redis.get(_REVISION_KEY)
+            value = await self._cluster_lock.get(_REVISION_KEY)
             return int(value) if value else 0
         except Exception as exc:
-            logger.warning("resource_store: redis get failed, forcing resync: %s", exc)
+            logger.warning("resource: cluster lock get failed, forcing resync: %s", exc)
             return self._local_revision + 1
 
     async def _bump_revision(self) -> None:
         self._local_revision += 1
-        if not self.redis.config.enabled:
+        if self._cluster_lock is None:
             return
         try:
-            await self.redis.incr(_REVISION_KEY)
+            await self._cluster_lock.incr(_REVISION_KEY)
         except Exception as exc:
-            logger.warning("resource_store: redis revision bump failed: %s", exc)
+            logger.warning("resource: cluster lock revision bump failed: %s", exc)
 
     async def _ensure_fresh(self) -> None:
         if not self._initialized:
             await self._sync()
             return
-        if not self.redis.config.enabled:
+        if self._cluster_lock is None:
             return
-        if await self.get_revision() != self._local_revision:
+        if await self.revision() != self._local_revision:
             await self._sync()
 
     async def _sync(self) -> None:
         async with self._lock:
             try:
-                remote = await self.get_revision()
+                remote = await self.revision()
             except Exception as exc:
-                logger.warning("resource_store: sync failed, using cached memory: %s", exc)
+                logger.warning("resource: sync failed, using cached memory: %s", exc)
                 return
             full_reconcile = self._initialized and remote != self._local_revision
             since = None if (full_reconcile or self._last_sync_at is None) else self._last_sync_at - _SYNC_LOOKBACK
             try:
-                rows = await self._raw_list_since(since)
+                rows = await self._raw_list(since=since, include_deleted=True)
             except Exception as exc:
-                logger.warning("resource_store: sync query failed: %s", exc)
+                logger.warning("resource: sync query failed: %s", exc)
                 return
             if full_reconcile:
                 self._resident.clear()
@@ -298,13 +303,18 @@ class DatabaseBackend(ABC):
             return
         self._index[row.path] = (row.row_id, row.version)
         self._write_workspace(row.row_id, row.version, row.content)
-        # Sync doesn't know which paths were reached via get_by_name -- only promote
-        # to resident if this path is already there; otherwise route through the LRU.
+        # Sync doesn't know which paths were reached via list(pattern=...) -- only
+        # promote to resident if this path is already there; otherwise route through the LRU.
         self._content_put(row.path, row.content, resident=row.path in self._resident)
 
     # ── Public ResourceBackend surface ──
 
-    async def get(self, path: str) -> "ResourceFile | None":
+    async def get(self, path: str, version: "int | None" = None) -> "ResourceFile | None":
+        if version is None:
+            return await self._get_latest(path)
+        return await self._get_at_version(path, version)
+
+    async def _get_latest(self, path: str) -> "ResourceFile | None":
         await self._ensure_fresh()
         cached = self._content_get(path)
         if cached is not None:
@@ -323,7 +333,7 @@ class DatabaseBackend(ABC):
         self._content_put(path, row.content, resident=False)
         return ResourceFile(path=path, content=row.content, version=row.version)
 
-    async def get_at_version(self, path: str, version: int) -> "ResourceFile | None":
+    async def _get_at_version(self, path: str, version: int) -> "ResourceFile | None":
         entry = self._index.get(path)
         row_id = entry[0] if entry else None
         if entry and entry[1] == version:
@@ -338,47 +348,40 @@ class DatabaseBackend(ABC):
             if disk_content is not None:
                 self._hist_put(row_id, version, disk_content)
                 return ResourceFile(path=path, content=disk_content, version=version)
-        row = await self._raw_get_at_version(path, version)
+        row = await self._raw_get(path, version)
         if row is None:
             return None
         self._hist_put(row.row_id, row.version, row.content)
         return ResourceFile(path=row.path, content=row.content, version=row.version)
 
-    async def get_by_name(self, namespace: str, name: str) -> "list[ResourceFile]":
+    async def list(self, *, pattern: "str | None" = None, since: "datetime | None" = None) -> "list[ResourceFile]":
         await self._ensure_fresh()
-        prefix, suffix = f"/{namespace}/", f"/{name}"
-        if self._initialized:
+        if self._initialized and since is None:
             results: "list[ResourceFile]" = []
             for path, (row_id, version) in self._index.items():
-                if path.startswith(prefix) and path.endswith(suffix):
-                    content = self._content_get(path)
-                    if content is None:
-                        content = self._read_workspace(row_id, version)
-                    if content is None:
-                        row = await self._raw_get(path)
-                        content = row.content if row is not None else ""
-                    self._content_put(path, content, resident=True)
-                    results.append(ResourceFile(path=path, content=content, version=version))
+                if pattern is not None and not fnmatch(path, pattern):
+                    continue
+                content = self._content_get(path)
+                if content is None:
+                    content = self._read_workspace(row_id, version)
+                if content is None:
+                    row = await self._raw_get(path)
+                    content = row.content if row is not None else ""
+                self._content_put(path, content, resident=True)
+                results.append(ResourceFile(path=path, content=content, version=version))
             return results
-        rows = await self._raw_get_by_name(namespace, name)
+        rows = await self._raw_list(pattern=pattern, since=since)
         results = []
         for row in rows:
+            if row.status == "deleted":
+                continue
             self._index[row.path] = (row.row_id, row.version)
             self._write_workspace(row.row_id, row.version, row.content)
             self._content_put(row.path, row.content, resident=True)
             results.append(ResourceFile(path=row.path, content=row.content, version=row.version))
         return results
 
-    async def propfind(self, path: str) -> "list[ResourceFile]":
-        await self._ensure_fresh()
-        results: "list[ResourceFile]" = []
-        for p, (row_id, version) in self._index.items():
-            if p.startswith(path):
-                content = self._content_get(p) or self._read_workspace(row_id, version) or ""
-                results.append(ResourceFile(path=p, content=content, version=version))
-        return results
-
-    async def put(self, path: str, content: str, *, updated_by: str = "engine") -> ResourceFile:
+    async def put(self, path: str, content: str, *, updated_by: str = "") -> ResourceFile:
         async with self.write_lock(path):
             checksum = _checksum(content)
             row_id, version, changed = await self._raw_upsert(path, content, checksum, updated_by)
@@ -389,7 +392,7 @@ class DatabaseBackend(ABC):
                 await self._bump_revision()
             return ResourceFile(path=path, content=content, version=version)
 
-    async def delete(self, path: str, *, updated_by: str = "engine") -> bool:
+    async def delete(self, path: str, *, updated_by: str = "") -> bool:
         async with self.write_lock(path):
             changed = await self._raw_delete(path, updated_by)
             if changed:
@@ -398,7 +401,7 @@ class DatabaseBackend(ABC):
                 await self._bump_revision()
             return changed
 
-    async def move(self, src_path: str, dst_path: str, *, updated_by: str = "engine") -> "ResourceFile | None":
+    async def move(self, src_path: str, dst_path: str, *, updated_by: str = "") -> "ResourceFile | None":
         if src_path == dst_path:
             paths_to_lock = [src_path]
         else:
@@ -435,12 +438,8 @@ class DatabaseBackend(ABC):
             async with self.write_lock(paths_to_lock[1]):
                 return await _do_move()
 
-    async def list_since(self, since: "datetime | None") -> "list[ResourceFile]":
-        rows = await self._raw_list_since(since)
-        return [ResourceFile(path=r.path, content=r.content, version=r.version) for r in rows if r.status == "active"]
-
-    async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "engine") -> "list[ResourceFile]":
-        expected_revision = str(await self.get_revision())
+    async def apply_batch(self, ops: "list[Operation]", *, updated_by: str = "") -> "list[ResourceFile]":
+        expected_revision = str(await self.revision())
         _, rows, changed = await self._raw_apply_batch(ops, expected_revision=expected_revision, updated_by=updated_by)
         for row in rows:
             self._apply_row(row)

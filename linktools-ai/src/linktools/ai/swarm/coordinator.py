@@ -6,27 +6,20 @@ pattern (core/runtime.py) for spinning up a SubAgent programmatically."""
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from ..subagent.registry import SubagentSpec
 from .protocols import Task, TaskQueue
 
 if TYPE_CHECKING:
-    from ..core.model_runtime import RuntimeModelConfig
     from ..core.runtime import AgentKernel
     from ..session.types import Session
 
 
 class SwarmCoordinator:
-    def __init__(
-        self,
-        kernel: "AgentKernel",
-        task_queue: TaskQueue,
-        model_config_resolver: "Callable[[str], RuntimeModelConfig]",
-    ) -> None:
+    def __init__(self, kernel: "AgentKernel", task_queue: TaskQueue) -> None:
         self.kernel = kernel
         self.task_queue = task_queue
-        self.model_config_resolver = model_config_resolver
 
     async def run(self, spec: SubagentSpec, session: "Session", *, agent_count: int, workdir: Path) -> "list[Task]":
         # Deferred import: agent.py imports AgentKernel from core/runtime.py
@@ -45,7 +38,7 @@ class SwarmCoordinator:
                     )
                     agent = SubAgent(
                         spec, session, execution_context=child_context,
-                        model_config_resolver=self.model_config_resolver, workdir=workdir,
+                        workdir=workdir,
                     )
                     result = await agent.generate(task.payload, call_id=task.task_id)
                     await self.task_queue.complete(task.task_id, result)
