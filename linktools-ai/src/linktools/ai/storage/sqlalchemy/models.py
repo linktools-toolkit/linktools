@@ -173,3 +173,20 @@ class MemoryRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
     metadata_json: Mapped[str] = mapped_column(Text)
+
+
+class ApprovalRow(Base):
+    __tablename__ = "ai_approvals"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(128))
+    tool_name: Mapped[str] = mapped_column(String(255))
+    reason: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    arguments_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    resolved_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    resolved_by: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text)
