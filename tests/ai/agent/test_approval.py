@@ -178,6 +178,9 @@ class _StubStore:
     async def list_pending(self, run_id):
         ...
 
+    async def list_for_run(self, run_id):
+        ...
+
 
 def test_approval_store_is_runtime_checkable():
     assert isinstance(_StubStore(), ApprovalStore)
@@ -192,10 +195,10 @@ def test_approval_store_rejects_non_implementor():
 
 
 def test_approval_store_stub_methods_are_async():
-    """A stub implementing all 5 async methods satisfies the Protocol; calling
+    """A stub implementing all 6 async methods satisfies the Protocol; calling
     them returns a coroutine (sanity check on the async signature)."""
     import inspect
 
     stub = _StubStore()
-    for method_name in ("create", "get", "approve", "reject", "list_pending"):
+    for method_name in ("create", "get", "approve", "reject", "list_pending", "list_for_run"):
         assert inspect.iscoroutinefunction(getattr(stub, method_name)), method_name

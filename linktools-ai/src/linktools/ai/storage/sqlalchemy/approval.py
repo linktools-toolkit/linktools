@@ -106,6 +106,19 @@ class SqlAlchemyApprovalStore:
             result = await session.execute(stmt)
             return tuple(_row_to_request(row) for row in result.scalars())
 
+    async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+        # Status-agnostic counterpart to ``list_pending``: returns EVERY
+        # request for the run regardless of status, ordered by created_at.
+        # The resume gate (ToolExecutor._already_approved) consults this to
+        # recognize a call that was approved externally without re-persisting
+        # a PENDING duplicate.
+        async with self._session_factory() as session:
+            stmt = select(ApprovalRow).where(
+                ApprovalRow.run_id == run_id
+            ).order_by(ApprovalRow.created_at)
+            result = await session.execute(stmt)
+            return tuple(_row_to_request(row) for row in result.scalars())
+
     # -- write ---------------------------------------------------------
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:

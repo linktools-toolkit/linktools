@@ -84,6 +84,12 @@ class ApprovalStore(Protocol):
     not-found / invalid-transition cases raise the corresponding errors from
     ``linktools.ai.errors`` (ApprovalConflictError / ApprovalNotFoundError /
     InvalidApprovalTransitionError).
+
+    ``list_pending(run_id)`` filters status==PENDING (the pause UI's queue).
+    ``list_for_run(run_id)`` is status-agnostic -- it returns every request
+    for the run regardless of status, ordered by created_at. The resume gate
+    (``ToolExecutor._already_approved``) consults it to recognize a call that
+    was approved externally without re-persisting a PENDING duplicate.
     """
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest: ...
@@ -104,3 +110,5 @@ class ApprovalStore(Protocol):
     ) -> ApprovalRequest: ...
 
     async def list_pending(self, run_id: str) -> "tuple[ApprovalRequest, ...]": ...
+
+    async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]": ...

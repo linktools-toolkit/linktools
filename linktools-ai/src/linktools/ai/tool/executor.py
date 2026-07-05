@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from ..agent.approval import build_approval_request
+from ..agent.approval import ApprovalStatus, build_approval_request
 from ..errors import ToolApprovalRequiredError, ToolDeniedError
 from ..events.envelope import EventEnvelope
 from ..events.payloads import ApprovalRequested
@@ -54,10 +54,43 @@ class ToolExecutor:
         if decision.kind == PolicyDecisionKind.DENY:
             raise ToolDeniedError(decision.reason or f"tool denied: {request.tool_name}")
         if decision.kind == PolicyDecisionKind.REQUIRE_APPROVAL:
+            # Resume gate: if the approval_store already holds an APPROVED
+            # request matching (run_id, tool_call_id), the call was approved
+            # externally (e.g. via the pause UI) and is now being re-driven by
+            # the model with the same tool_call_id -- let it through instead
+            # of re-persisting a PENDING duplicate and re-raising.
+            if await self._already_approved(request, context):
+                return
             await self._record_approval(request, context, decision.reason)
             raise ToolApprovalRequiredError(
                 decision.reason or f"tool requires approval: {request.tool_name}"
             )
+
+    async def _already_approved(
+        self, request: ToolRequest, context: ToolContext
+    ) -> bool:
+        """True iff the approval_store has an APPROVED request matching
+        ``(run_id, tool_call_id)`` -- the resume case. False when no store is
+        wired, when the context carries no ``tool_call_id`` (no stable key to
+        match on -- the uuid fallback path can't recognize a re-drive), or
+        when no matching APPROVED request exists.
+
+        Consults ``list_for_run`` (status-agnostic) rather than
+        ``list_pending`` because the matching request is APPROVED, not PENDING
+        -- ``list_pending`` would filter it out and the gate would never fire.
+        """
+        if self._approval_store is None or context.tool_call_id is None:
+            return False
+        run_id = (
+            self._run_id_resolver(context) if self._run_id_resolver is not None
+            else context.run_id
+        )
+        requests = await self._approval_store.list_for_run(run_id)
+        return any(
+            r.tool_call_id == context.tool_call_id
+            and r.status is ApprovalStatus.APPROVED
+            for r in requests
+        )
 
     async def _record_approval(
         self,

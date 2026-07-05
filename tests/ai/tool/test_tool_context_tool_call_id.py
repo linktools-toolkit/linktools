@@ -46,6 +46,9 @@ class _Store:
     async def list_pending(self, run_id):
         return ()
 
+    async def list_for_run(self, run_id):
+        return ()
+
 
 def test_tool_context_carries_tool_call_id_field_with_default_none():
     assert ToolContext(run_id="r", session_id="s").tool_call_id is None

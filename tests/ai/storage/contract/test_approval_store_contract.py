@@ -356,3 +356,78 @@ def test_path_traversal_in_approval_id_is_rejected(tmp_path):
             await store.reject("../evil", expected_version=1, resolved_by="x")
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# 9. list_for_run(run_id) is status-agnostic: seeds a run with one PENDING +
+#    one APPROVED + one REJECTED request, asserts all three are returned
+#    (ordered by created_at). This is the resume gate's read path -- the
+#    executor's ``_already_approved`` helper consults it to recognize a call
+#    that was approved externally. ``list_pending`` (case 7) filters these
+#    down to just the PENDING one; ``list_for_run`` returns every status.
+# ---------------------------------------------------------------------------
+
+
+def test_list_for_run_is_status_agnostic(store_factory):
+    store = store_factory()
+
+    async def _run():
+        # Three requests for run-1 in three statuses. created_at is minted by
+        # build_approval_request in real UTC time; to make the order assertion
+        # deterministic across the file backend (which sorts by created_at),
+        # we sequence the build calls so their timestamps are strictly
+        # increasing -- and we pin each request's id to its tool_call_id so
+        # the assertions can refer to them by stable handles.
+        a_pending = build_approval_request(
+            run_id="run-1", tool_call_id="c-pending", tool_name="t", reason="x"
+        )
+        a_approved = build_approval_request(
+            run_id="run-1", tool_call_id="c-approved", tool_name="t", reason="x"
+        )
+        a_rejected = build_approval_request(
+            run_id="run-1", tool_call_id="c-rejected", tool_name="t", reason="x"
+        )
+        # A request in a DIFFERENT run -- must NOT appear in list_for_run("run-1").
+        other_run = build_approval_request(
+            run_id="run-2", tool_call_id="c-other", tool_name="t", reason="x"
+        )
+        await store.create(a_pending)
+        await store.create(a_approved)
+        await store.create(a_rejected)
+        await store.create(other_run)
+        # Flip the second into APPROVED and the third into REJECTED (version
+        # moves to 2, resolved_at/resolved_by get set).
+        await store.approve(
+            a_approved.id, expected_version=1, resolved_by="alice"
+        )
+        await store.reject(
+            a_rejected.id, expected_version=1, resolved_by="bob", reason="no"
+        )
+
+        all_for_run = await store.list_for_run("run-1")
+        # Status-agnostic: all three run-1 requests are returned regardless of
+        # status (PENDING + APPROVED + REJECTED). The other run's request is
+        # excluded by the run_id filter.
+        assert {r.tool_call_id for r in all_for_run} == {
+            "c-pending",
+            "c-approved",
+            "c-rejected",
+        }
+        # All three statuses are represented exactly once.
+        statuses = sorted(r.status.value for r in all_for_run)
+        assert statuses == ["approved", "pending", "rejected"]
+        # Ordered by created_at ascending (matches list_pending's ordering).
+        created_ats = [r.created_at for r in all_for_run]
+        assert created_ats == sorted(created_ats)
+        # Other run excluded: list_for_run("run-1") does not leak run-2.
+        assert all(r.run_id == "run-1" for r in all_for_run)
+
+        # list_pending("run-1") on the same seed returns ONLY the PENDING one
+        # (contrast against list_for_run's status-agnostic three).
+        pending_only = await store.list_pending("run-1")
+        assert {r.tool_call_id for r in pending_only} == {"c-pending"}
+
+        # Unknown run_id -> empty tuple (not None, not list).
+        assert await store.list_for_run("run-zzz") == ()
+
+    asyncio.run(_run())

@@ -120,6 +120,21 @@ class FileApprovalStore:
         out.sort(key=lambda r: r.created_at)
         return tuple(out)
 
+    async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+        # Status-agnostic counterpart to ``list_pending``: returns EVERY
+        # request for the run regardless of status, ordered by created_at.
+        # The resume gate (ToolExecutor._already_approved) consults this to
+        # recognize a call that was approved externally without re-persisting
+        # a PENDING duplicate.
+        out: list = []
+        for path in self._requests_dir.glob("*.json"):
+            raw = json.loads(path.read_text())
+            if raw.get("run_id") != run_id:
+                continue
+            out.append(_request_from_json(raw))
+        out.sort(key=lambda r: r.created_at)
+        return tuple(out)
+
     # -- write ---------------------------------------------------------
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:
