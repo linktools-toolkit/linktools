@@ -26,11 +26,11 @@ class ArtifactService:
         artifact_name: str,
         content: bytes,
         content_type: "str | None" = None,
-        metadata: "Mapping[str, object]" = {},
+        metadata: "Mapping[str, object]" = None,
     ) -> Resource:
         path = self._path(tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name)
         return await self._resources.put(
-            path, content, options=WriteOptions(content_type=content_type, metadata=metadata)
+            path, content, options=WriteOptions(content_type=content_type, metadata=metadata or {})
         )
 
     async def get(self, *, tenant_id: str, run_id: str, artifact_name: str) -> "Resource | None":
