@@ -22,7 +22,7 @@ from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.runner import AgentRunner
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.core.model_runtime import ModelRegistry
+from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import RunPaused
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter

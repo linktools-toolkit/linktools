@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent as PydanticAgent
 
-from ..core.model_runtime import ModelBundle
+from ..model.registry import ModelBundle
 from ..tool.capability import PolicyCapability
 from .spec import AgentSpec
 

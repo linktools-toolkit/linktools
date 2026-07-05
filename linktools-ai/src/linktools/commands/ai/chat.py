@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 from linktools.core import environ
-from linktools.ai.core.model_runtime import (
+from linktools.ai.model.registry import (
     ModelClientUnavailable,
     ModelOutputError,
     ModelTurnLimitExceeded,

@@ -4,7 +4,7 @@
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.core.model_runtime import (
+from linktools.ai.model.registry import (
     ModelBundle,
     ModelClientUnavailable,
     ModelRegistry,

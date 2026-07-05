@@ -7,7 +7,7 @@ from pydantic_ai import Agent as PydanticAgent
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.core.model_runtime import ModelRegistry, RuntimeModelConfig
+from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
 

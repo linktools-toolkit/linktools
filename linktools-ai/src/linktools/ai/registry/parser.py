@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import InvalidSpecError, RegistryNotFoundError, RegistryParseError
-from ..support.config import load_markdown_text, load_yaml_text
+from ..registry._config import load_markdown_text, load_yaml_text
 
 
 def parse_yaml_text(text: str, *, source: str = "<yaml>") -> "dict[str, Any]":

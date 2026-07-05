@@ -32,7 +32,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.core.model_runtime import ModelRegistry
+from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import InvalidRunTransitionError, RunNotFoundError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter

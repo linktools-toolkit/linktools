@@ -3,7 +3,7 @@
 """tests/ai/model/test_router.py"""
 import pytest
 
-from linktools.ai.core.model_runtime import ModelBundle, ModelRegistry, RuntimeModelConfig
+from linktools.ai.model.registry import ModelBundle, ModelRegistry, RuntimeModelConfig
 from linktools.ai.errors import ModelRoutingError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter

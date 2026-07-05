@@ -4,7 +4,7 @@
 fallback in order. Makes ModelPolicy.fallbacks load-bearing -- the pre-vNext
 BaseAgent.fallback_models field was accepted but never read anywhere."""
 
-from ..core.model_runtime import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
+from ..model.registry import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
 from ..errors import ModelRoutingError
 from .policy import ModelPolicy
 

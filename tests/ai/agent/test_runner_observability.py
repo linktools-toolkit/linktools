@@ -22,7 +22,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.runner import AgentRunner
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.core.model_runtime import ModelRegistry
+from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.observability.tracing import Span

@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml  # type: ignore
 
-from .utils import resolve_ref
+from ._utils import resolve_ref
 
 
 def _resolve_env_refs(value: Any) -> Any:

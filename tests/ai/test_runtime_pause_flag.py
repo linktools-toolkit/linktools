@@ -7,7 +7,7 @@ import asyncio
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FileStorage
-from linktools.ai.core.model_runtime import ModelRegistry
+from linktools.ai.model.registry import ModelRegistry
 from pydantic_ai.models.function import FunctionModel
 
 

@@ -6,7 +6,7 @@
 import os
 
 from linktools.cli import CommandError
-from linktools.ai.core.model_runtime import RuntimeModelConfig
+from linktools.ai.model.registry import RuntimeModelConfig
 
 
 def resolve_model_config(

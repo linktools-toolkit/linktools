@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from linktools.cli import CommandError
-from linktools.ai.core.model_runtime import RuntimeModelConfig
+from linktools.ai.model.registry import RuntimeModelConfig
 from linktools.commands.ai.support import resolve_model_config, validate_session_id
 
 

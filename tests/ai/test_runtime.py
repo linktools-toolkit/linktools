@@ -21,7 +21,7 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart(content='{"response": {"message": "hello from runtime"}}')])
 
 def _registry():
-    from linktools.ai.core.model_runtime import ModelRegistry
+    from linktools.ai.model.registry import ModelRegistry
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
     return registry
@@ -79,7 +79,7 @@ def test_runtime_run_with_explicit_session_reuses_it(tmp_path):
 
 
 def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_path):
-    from linktools.ai.core.model_runtime import ModelRegistry
+    from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.run.models import RunnableType, RunStatus
     from linktools.ai.swarm.aggregation import AggregationPolicy
@@ -193,7 +193,7 @@ def _echo_model_fn(messages, info: AgentInfo) -> ModelResponse:
 
 
 def _echo_registry():
-    from linktools.ai.core.model_runtime import ModelRegistry
+    from linktools.ai.model.registry import ModelRegistry
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_echo_model_fn))
     return registry
