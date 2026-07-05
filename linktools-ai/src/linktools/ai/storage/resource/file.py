@@ -127,7 +127,6 @@ class FileResourceBackend:
         prefix = path.value.rstrip("/") + "/"
         items = []
         for meta_file in sorted(self._meta_dir.glob("*.json")):
-            raw = json.loads(meta_file.read_text())
             candidate = ResourcePath("/" + meta_file.stem.replace("__", "/"))
             if not candidate.value.startswith(prefix):
                 continue
