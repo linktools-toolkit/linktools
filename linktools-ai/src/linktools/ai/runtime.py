@@ -28,6 +28,7 @@ from .session.models import SessionRecord, SessionStatus
 from .storage.facade import Storage
 from .swarm.runner import SwarmRunner
 from .swarm.spec import SwarmSpec
+from .tool.executor import ToolExecutor
 
 if TYPE_CHECKING:
     from .knowledge.retriever import Retriever
@@ -49,9 +50,26 @@ class Runtime:
               middleware_pipeline: "MiddlewarePipeline | None" = None,
               workspace_root: "str | Path | None" = None,
               retriever: "Retriever | None" = None,
-              workdir: "Path | None" = None) -> "Runtime":
+              workdir: "Path | None" = None,
+              tool_executor: "ToolExecutor | None" = None) -> "Runtime":
+        """Assemble a Runtime from optional sub-components.
+
+        ``tool_executor`` is the override path for the Phase-6 policy rules:
+        when ``None`` (default) the compiler builds its own default
+        ``ToolExecutor`` whose ``PolicyEngine`` carries only ``CommandRule``
+        (the one rule that needs no tool metadata). To make the rich rules
+        (Permission/Risk/Approval) enforce against real tool declarations,
+        the caller awaits ``build_default_policy_engine(tool_registry)`` and
+        passes ``ToolExecutor(policy=that_engine)`` here. ``build`` stays
+        synchronous by design -- the async policy build is the caller's job,
+        so the common ``Runtime.build(...)`` call site stays simple."""
         router = model_router or ModelRouter()
-        compiler = AgentCompiler(model_router=router, middleware_pipeline=middleware_pipeline, workdir=workdir)
+        compiler = AgentCompiler(
+            model_router=router,
+            middleware_pipeline=middleware_pipeline,
+            workdir=workdir,
+            tool_executor=tool_executor,
+        )
         # Memory is on-by-default (storage.memories is always populated by the
         # facade); Knowledge is opt-in via the ``retriever`` argument (None ->
         # no retrieval, no prompt section). Both are forwarded to SwarmRunner
