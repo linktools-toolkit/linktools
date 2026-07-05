@@ -48,9 +48,10 @@ class Runtime:
               model_router: "ModelRouter | None" = None,
               middleware_pipeline: "MiddlewarePipeline | None" = None,
               workspace_root: "str | Path | None" = None,
-              retriever: "Retriever | None" = None) -> "Runtime":
+              retriever: "Retriever | None" = None,
+              workdir: "Path | None" = None) -> "Runtime":
         router = model_router or ModelRouter()
-        compiler = AgentCompiler(model_router=router, middleware_pipeline=middleware_pipeline)
+        compiler = AgentCompiler(model_router=router, middleware_pipeline=middleware_pipeline, workdir=workdir)
         # Memory is on-by-default (storage.memories is always populated by the
         # facade); Knowledge is opt-in via the ``retriever`` argument (None ->
         # no retrieval, no prompt section). Both are forwarded to SwarmRunner
