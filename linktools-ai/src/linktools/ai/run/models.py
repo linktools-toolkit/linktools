@@ -75,3 +75,15 @@ class RunRecord:
     started_at: "datetime | None"
     finished_at: "datetime | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class RunCheckpoint:
+    id: str
+    run_id: str
+    sequence: int
+    format: str
+    schema_version: int
+    payload: bytes
+    created_at: datetime
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
