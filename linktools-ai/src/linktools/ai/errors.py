@@ -79,3 +79,27 @@ class EventError(LinktoolsAIError):
 
 class EventSequenceConflictError(EventError):
     pass
+
+
+class ToolError(LinktoolsAIError):
+    """Base class for Tool-execution-related errors."""
+
+
+class ToolDeniedError(ToolError):
+    pass
+
+
+class ToolApprovalRequiredError(ToolError):
+    pass
+
+
+class ToolTimeoutError(ToolError):
+    pass
+
+
+class PolicyError(LinktoolsAIError):
+    """Base class for PolicyEngine-related errors."""
+
+
+class ModelRoutingError(LinktoolsAIError):
+    pass
