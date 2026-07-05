@@ -3,7 +3,6 @@
 """SqlAlchemyCheckpointStore: DB-backed CheckpointStore, keyed by (run_id, sequence)."""
 
 import json
-from datetime import datetime
 from typing import Callable
 
 from sqlalchemy import select
