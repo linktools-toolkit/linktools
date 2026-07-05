@@ -125,3 +125,40 @@ def test_sqlalchemy_storage_transaction_yields_a_shared_session(tmp_path):
             return result.scalar()
 
     assert asyncio.run(_run()) == 1
+
+
+def test_file_storage_exposes_file_swarm_store(tmp_path):
+    from linktools.ai.storage.file.swarm import FileSwarmStore
+    storage = FileStorage(root=tmp_path)
+    assert isinstance(storage.swarms, FileSwarmStore)
+
+
+def test_sqlalchemy_storage_exposes_sqlalchemy_swarm_store(tmp_path):
+    from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    assert isinstance(storage.swarms, SqlAlchemySwarmStore)
+
+
+def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
+    from decimal import Decimal
+
+    from linktools.ai.swarm_runtime.models import SwarmRun, SwarmStatus, TokenUsage
+
+    storage = FileStorage(root=tmp_path)
+    now = datetime.now(timezone.utc)
+    swarm_run = SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.PENDING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=now, updated_at=now,
+    )
+
+    async def _run():
+        await storage.swarms.create_run(swarm_run)
+        return await storage.swarms.get_run("swarm-1")
+
+    fetched = asyncio.run(_run())
+    assert fetched is not None
+    assert fetched.id == "swarm-1"
+    assert fetched.run_id == "drive-run-1"
+    assert fetched.status is SwarmStatus.PENDING
+

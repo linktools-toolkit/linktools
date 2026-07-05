@@ -28,8 +28,15 @@ def test_public_api_exports_storage():
     assert ai.Storage is _Real
 
 
+def test_public_api_exports_swarm_spec():
+    from linktools.ai.swarm_runtime.spec import SwarmSpec as _Real
+    assert ai.SwarmSpec is _Real
+
+
 def test_public_api_does_not_re_export_internals():
     for internal in ("AgentCompiler", "AgentRunner", "CompiledAgent", "Middleware",
                      "MiddlewarePipeline", "PolicyEngine", "ToolExecutor", "RunStore",
-                     "SessionStore", "EventStore", "ResourceStore", "ModelRouter"):
+                     "SessionStore", "EventStore", "ResourceStore", "ModelRouter",
+                     "SwarmRunner", "SwarmStore",
+                     "CoordinatorDelegationStrategy", "ParallelFanOutStrategy"):
         assert not hasattr(ai, internal), f"linktools.ai should not export {internal}"

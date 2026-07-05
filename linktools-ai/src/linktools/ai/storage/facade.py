@@ -28,11 +28,13 @@ from ..events.store import EventStore
 from ..run.checkpoint import CheckpointStore
 from ..run.store import RunStore
 from ..session.store import SessionStore
+from ..swarm_runtime.store import SwarmStore
 from .capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES, StorageCapabilities
 from .file.checkpoint import FileCheckpointStore
 from .file.event import FileEventStore
 from .file.run import FileRunStore
 from .file.session import FileSessionStore
+from .file.swarm import FileSwarmStore
 from .resource.file import FileResourceBackend
 from .resource.store import ResourceStore
 from .sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
@@ -40,6 +42,7 @@ from .sqlalchemy.event import SqlAlchemyEventStore
 from .sqlalchemy.resource import SqlAlchemyResourceBackend
 from .sqlalchemy.run import SqlAlchemyRunStore
 from .sqlalchemy.session import SqlAlchemySessionStore
+from .sqlalchemy.swarm import SqlAlchemySwarmStore
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,7 @@ class Storage:
     runs: RunStore
     events: EventStore
     checkpoints: CheckpointStore
+    swarms: SwarmStore
     capabilities: StorageCapabilities
 
     def transaction(self) -> "AsyncIterator[AsyncSession]":
@@ -87,6 +91,7 @@ class FileStorage(Storage):
             runs=FileRunStore(root=root_path / "runs"),
             events=FileEventStore(root=root_path / "events"),
             checkpoints=FileCheckpointStore(root=root_path / "checkpoints"),
+            swarms=FileSwarmStore(root=root_path / "swarms"),
             capabilities=FILE_STORAGE_CAPABILITIES,
         )
 
@@ -110,6 +115,7 @@ class SqlAlchemyStorage(Storage):
             runs=SqlAlchemyRunStore(session_factory=session_factory),
             events=SqlAlchemyEventStore(session_factory=session_factory),
             checkpoints=SqlAlchemyCheckpointStore(session_factory=session_factory),
+            swarms=SqlAlchemySwarmStore(session_factory=session_factory),
             capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
         )
         # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().
