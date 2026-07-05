@@ -148,3 +148,14 @@ async def test_events_for_different_runs_are_isolated(store_factory):
     assert len(page_a.items) == 1
     assert len(page_b.items) == 1
     assert page_a.items[0].run_id == "run-a"
+
+
+@pytest.mark.asyncio
+async def test_occurred_at_roundtrips_as_timezone_aware(store_factory):
+    store = store_factory()
+    original = _event(sequence=1)
+    await store.append(original)
+    page = await store.list("run-1")
+    fetched = page.items[0]
+    assert fetched.occurred_at.tzinfo is not None
+    assert fetched.occurred_at == original.occurred_at

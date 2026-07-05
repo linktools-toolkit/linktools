@@ -8,6 +8,7 @@ an optional argument."""
 
 import json
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Callable
 
 from sqlalchemy import select
@@ -19,6 +20,15 @@ from ...errors import EventSequenceConflictError
 from ...events import payloads as _payloads_module
 from ...events.envelope import EventEnvelope
 from ...events.store import EventPage
+
+
+def _as_utc(dt: "datetime | None") -> "datetime | None":
+    # SQLite (aiosqlite) round-trips datetimes as naive values regardless of the
+    # tzinfo they were stored with, so reattach UTC on read to match the
+    # timezone-aware datetimes EventEnvelope is constructed with everywhere else.
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
 
 
 class SqlAlchemyEventStore:
@@ -61,7 +71,7 @@ class SqlAlchemyEventStore:
         payload_cls = getattr(_payloads_module, row.payload_type)
         payload = payload_cls(**json.loads(row.payload_json))
         return EventEnvelope(
-            event_id=row.event_id, sequence=row.sequence, occurred_at=row.occurred_at,
+            event_id=row.event_id, sequence=row.sequence, occurred_at=_as_utc(row.occurred_at),
             run_id=row.run_id, root_run_id=row.root_run_id, parent_run_id=row.parent_run_id,
             session_id=row.session_id, runnable_id=row.runnable_id, payload=payload,
         )
