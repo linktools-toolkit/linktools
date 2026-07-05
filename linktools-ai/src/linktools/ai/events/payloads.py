@@ -79,3 +79,79 @@ class ToolFailed:
     tool_name: str
     tool_call_id: str
     error_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequested:
+    approval_id: str
+    tool_name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalApproved:
+    approval_id: str
+    resolved_by: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRejected:
+    approval_id: str
+    resolved_by: "str | None" = None
+    reason: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmStarted:
+    swarm_run_id: str
+    swarm_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmRoundStarted:
+    swarm_run_id: str
+    round: int
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmRoundCompleted:
+    swarm_run_id: str
+    round: int
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmTaskCreated:
+    swarm_run_id: str
+    task_id: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmTaskClaimed:
+    swarm_run_id: str
+    task_id: str
+    assigned_agent_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmTaskCompleted:
+    swarm_run_id: str
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmTaskFailed:
+    swarm_run_id: str
+    task_id: str
+    error_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmCompleted:
+    swarm_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceChanged:
+    path: str
+    revision: int
