@@ -9,7 +9,7 @@ SwarmRunner (SwarmSpec)."""
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from .agent_runtime.compiler import AgentCompiler
 from .agent_runtime.runner import AgentRunner
@@ -23,6 +23,9 @@ from .session.models import SessionRecord, SessionStatus
 from .storage.facade import Storage
 from .swarm_runtime.runner import SwarmRunner
 from .swarm_runtime.spec import SwarmSpec
+
+if TYPE_CHECKING:
+    from .knowledge.retriever import Retriever
 
 
 class Runtime:
@@ -39,13 +42,20 @@ class Runtime:
     def build(cls, *, storage: Storage,
               model_router: "ModelRouter | None" = None,
               middleware_pipeline: "MiddlewarePipeline | None" = None,
-              workspace_root: "str | Path | None" = None) -> "Runtime":
+              workspace_root: "str | Path | None" = None,
+              retriever: "Retriever | None" = None) -> "Runtime":
         router = model_router or ModelRouter()
         compiler = AgentCompiler(model_router=router, middleware_pipeline=middleware_pipeline)
+        # Memory is on-by-default (storage.memories is always populated by the
+        # facade); Knowledge is opt-in via the ``retriever`` argument (None ->
+        # no retrieval, no prompt section). Both are forwarded to SwarmRunner
+        # so swarm worker Runs see the same injection as top-level Runs.
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
             event_store=storage.events, checkpoint_store=storage.checkpoints,
             middleware_pipeline=middleware_pipeline,
+            memory_store=storage.memories,
+            retriever=retriever,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
@@ -54,6 +64,8 @@ class Runtime:
             event_store=storage.events,
             checkpoint_store=storage.checkpoints,
             compiler=compiler,
+            memory_store=storage.memories,
+            retriever=retriever,
         )
         return cls(
             storage=storage, compiler=compiler, runner=runner,

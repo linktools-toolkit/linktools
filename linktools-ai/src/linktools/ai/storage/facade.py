@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..errors import StorageCapabilityError
 from ..events.store import EventStore
+from ..memory_runtime.store import MemoryStore
 from ..run.checkpoint import CheckpointStore
 from ..run.store import RunStore
 from ..session.store import SessionStore
@@ -32,6 +33,7 @@ from ..swarm_runtime.store import SwarmStore
 from .capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES, StorageCapabilities
 from .file.checkpoint import FileCheckpointStore
 from .file.event import FileEventStore
+from .file.memory import FileMemoryStore
 from .file.run import FileRunStore
 from .file.session import FileSessionStore
 from .file.swarm import FileSwarmStore
@@ -39,6 +41,7 @@ from .resource.file import FileResourceBackend
 from .resource.store import ResourceStore
 from .sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 from .sqlalchemy.event import SqlAlchemyEventStore
+from .sqlalchemy.memory import SqlAlchemyMemoryStore
 from .sqlalchemy.resource import SqlAlchemyResourceBackend
 from .sqlalchemy.run import SqlAlchemyRunStore
 from .sqlalchemy.session import SqlAlchemySessionStore
@@ -58,6 +61,7 @@ class Storage:
     events: EventStore
     checkpoints: CheckpointStore
     swarms: SwarmStore
+    memories: MemoryStore
     capabilities: StorageCapabilities
 
     def transaction(self) -> "AsyncIterator[AsyncSession]":
@@ -92,6 +96,7 @@ class FileStorage(Storage):
             events=FileEventStore(root=root_path / "events"),
             checkpoints=FileCheckpointStore(root=root_path / "checkpoints"),
             swarms=FileSwarmStore(root=root_path / "swarms"),
+            memories=FileMemoryStore(root=root_path / "memories"),
             capabilities=FILE_STORAGE_CAPABILITIES,
         )
 
@@ -116,6 +121,7 @@ class SqlAlchemyStorage(Storage):
             events=SqlAlchemyEventStore(session_factory=session_factory),
             checkpoints=SqlAlchemyCheckpointStore(session_factory=session_factory),
             swarms=SqlAlchemySwarmStore(session_factory=session_factory),
+            memories=SqlAlchemyMemoryStore(session_factory=session_factory),
             capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
         )
         # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().

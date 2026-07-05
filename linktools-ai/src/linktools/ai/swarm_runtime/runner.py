@@ -23,7 +23,7 @@ cancel() is store-level (Decision #4): no live asyncio task cancellation."""
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from ..agent_runtime.compiler import AgentCompiler
 from ..agent_runtime.models import CompiledAgent
@@ -34,6 +34,10 @@ from ..errors import (
     SwarmError,
     SwarmRunNotFoundError,
 )
+
+if TYPE_CHECKING:
+    from ..knowledge.retriever import Retriever
+    from ..memory_runtime.store import MemoryStore
 from ..events.envelope import EventEnvelope
 from ..events.payloads import SwarmCompleted, SwarmStarted
 from ..events.store import EventStore
@@ -71,6 +75,8 @@ class SwarmRunner:
         event_store: EventStore,
         checkpoint_store: CheckpointStore,
         compiler: AgentCompiler,
+        memory_store: "MemoryStore | None" = None,
+        retriever: "Retriever | None" = None,
     ) -> None:
         self._swarm_store = swarm_store
         self._run_store = run_store
@@ -80,11 +86,16 @@ class SwarmRunner:
         # One AgentRunner is reused for every child Run the strategy spawns.
         # SwarmRunner never calls it directly -- it is handed to the
         # SwarmExecutionContext so strategy._run_task can drive worker Runs.
+        # memory_store + retriever are forwarded so the same Phase-5 prompt
+        # injection that AgentRunner applies to top-level runs also applies to
+        # each swarm worker Run (default None -> no change -> no injection).
         self._agent_runner = AgentRunner(
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
             checkpoint_store=checkpoint_store,
+            memory_store=memory_store,
+            retriever=retriever,
         )
 
     # -- run() ----------------------------------------------------------------

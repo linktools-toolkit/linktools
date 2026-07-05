@@ -162,3 +162,36 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
     assert fetched.run_id == "drive-run-1"
     assert fetched.status is SwarmStatus.PENDING
 
+
+def test_file_storage_exposes_file_memory_store(tmp_path):
+    from linktools.ai.storage.file.memory import FileMemoryStore
+    storage = FileStorage(root=tmp_path)
+    assert isinstance(storage.memories, FileMemoryStore)
+
+
+def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
+    from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    assert isinstance(storage.memories, SqlAlchemyMemoryStore)
+
+
+def test_file_storage_memories_round_trips_a_record(tmp_path):
+    from linktools.ai.memory_runtime.models import MemoryRecord
+    storage = FileStorage(root=tmp_path)
+    now = datetime.now(timezone.utc)
+    record = MemoryRecord(
+        id="mem-1", owner_id="user-1", content="prefers terse answers",
+        category="preference", confidence=0.8, version=1,
+        created_at=now, updated_at=now, metadata={},
+    )
+
+    async def _run():
+        await storage.memories.remember(record)
+        return await storage.memories.get("mem-1")
+
+    fetched = asyncio.run(_run())
+    assert fetched is not None
+    assert fetched.id == "mem-1"
+    assert fetched.content == "prefers terse answers"
+    assert fetched.owner_id == "user-1"
+

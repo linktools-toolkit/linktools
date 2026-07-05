@@ -171,3 +171,71 @@ def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
     with pytest.raises(SwarmError):
         asyncio.run(_run())
 
+
+# -- Phase 5: Memory is on-by-default via storage.memories -------------------
+
+def _echo_model_fn(messages, info: AgentInfo) -> ModelResponse:
+    # FunctionModel sees the full prompt pydantic-ai was called with as a
+    # UserPromptPart inside the last ModelRequest.parts. Echo it back wrapped
+    # for pydantic-ai's default dict output validator.
+    import json as _json
+    prompt_text = "no-prompt-captured"
+    for msg in reversed(messages):
+        for part in reversed(getattr(msg, "parts", ()) or ()):
+            content = getattr(part, "content", None)
+            if isinstance(content, str) and content:
+                prompt_text = content
+                break
+        else:
+            continue
+        break
+    return ModelResponse(parts=[TextPart(content='{"response": {"echo": ' + _json.dumps(prompt_text) + '}}')])
+
+
+def _echo_registry():
+    from linktools.ai.core.model_runtime import ModelRegistry
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_echo_model_fn))
+    return registry
+
+
+def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.storage.file.memory import FileMemoryStore
+    storage = FileStorage(root=tmp_path)
+    runtime = Runtime.build(storage=storage, model_router=ModelRouter(registry=_echo_registry()))
+    # Memory is on-by-default: the runner's memory_store is the facade's memories.
+    assert isinstance(runtime.runner._memory_store, FileMemoryStore)
+    assert runtime.runner._memory_store is storage.memories
+
+
+def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
+    from linktools.ai.memory_runtime.models import MemoryRecord
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.session.models import SessionRecord, SessionStatus
+    storage = FileStorage(root=tmp_path)
+    runtime = Runtime.build(storage=storage, model_router=ModelRouter(registry=_echo_registry()))
+    now = datetime.now(timezone.utc)
+    async def _seed():
+        # Runtime.run with an explicit session_id requires the session to exist.
+        await storage.sessions.create(SessionRecord(
+            id="rt-session-mem", parent_id=None, status=SessionStatus.ACTIVE,
+            version=1, created_at=now, updated_at=now,
+        ))
+        # Owner resolution falls back to session_id when user_id/tenant_id are
+        # None, so seed the memory with the same session id. Content includes
+        # the query keyword ("hello") because FileMemoryStore.search is
+        # keyword-substring based.
+        await storage.memories.remember(MemoryRecord(
+            id="mem-rt-1", owner_id="rt-session-mem", content="hello context: runtime-memory-token",
+            category=None, confidence=None, version=1,
+            created_at=now, updated_at=now, metadata={},
+        ))
+    asyncio.run(_seed())
+    spec = AgentSpec(id="agent-mem", name="rt-mem-agent", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))
+    async def _run():
+        return await runtime.run(spec, "hello", session_id="rt-session-mem", run_id="rt-run-mem-1")
+    result = asyncio.run(_run())
+    assert "runtime-memory-token" in str(result.output)
+    assert "## Memory" in str(result.output)
+

@@ -127,3 +127,120 @@ def test_capabilities_current_context_set_during_run_then_cleared(tmp_path):
         await runner.run(compiled, RunInput(prompt="hi"), RunContext(run_id="run-4", root_run_id="run-4", parent_run_id=None, session_id="session-4", runnable_id="agent-4", runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None))
     asyncio.run(_run())
     assert compiled.policy_capability.current_context is None
+
+
+# -- Phase 5: Memory + Knowledge prompt injection ---------------------------
+# FunctionModel sees the FULL prompt pydantic-ai was called with as a
+# UserPromptPart inside the last ModelRequest.parts. An echo model returns that
+# text (wrapped for pydantic-ai's default dict output validator) so the test can
+# assert what was injected without poking at private runner state.
+
+import json as _json
+
+
+def _echo_model_fn(text_when_missing: str = "no-prompt-captured"):
+    def _fn(messages, info: AgentInfo) -> ModelResponse:
+        prompt_text = text_when_missing
+        for msg in reversed(messages):
+            for part in reversed(getattr(msg, "parts", ()) or ()):
+                content = getattr(part, "content", None)
+                if isinstance(content, str) and content:
+                    prompt_text = content
+                    break
+            if prompt_text != text_when_missing:
+                break
+        # Wrap with json.dumps so newlines/quotes in the prompt survive as a
+        # valid JSON string for pydantic-ai's default dict output validator.
+        return ModelResponse(parts=[TextPart(content='{"response": {"echo": ' + _json.dumps(prompt_text) + '}}')])
+    return _fn
+
+
+def _seed_memory(store, memory_id: str, content: str, owner_id: str = "session-1") -> None:
+    from linktools.ai.memory_runtime.models import MemoryRecord
+    now = datetime.now(timezone.utc)
+    asyncio.run(store.remember(MemoryRecord(
+        id=memory_id, owner_id=owner_id, content=content, category=None,
+        confidence=None, version=1, created_at=now, updated_at=now, metadata={},
+    )))
+
+
+def _make_runner_with_memory(tmp_path):
+    from linktools.ai.storage.file.memory import FileMemoryStore
+    return AgentRunner(
+        run_store=FileRunStore(root=tmp_path / "runs"),
+        session_store=FileSessionStore(root=tmp_path / "sessions"),
+        event_store=FileEventStore(root=tmp_path / "events"),
+        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        memory_store=FileMemoryStore(root=tmp_path / "memories"),
+    )
+
+
+def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
+    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_echo_model_fn())))
+    compiled = asyncio.run(compiler.compile(AgentSpec(id="agent-mem", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
+    runner = _make_runner_with_memory(tmp_path)
+    _seed_session(runner._session_store, "session-1")
+    # FileMemoryStore.search is keyword-substring based, so the content must
+    # contain the query ("hello") for the memory to match and be injected.
+    _seed_memory(runner._memory_store, "mem-1", "hello: prefers terse answers (token user-secret-token-xyz)", owner_id="session-1")
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="hello"), _run_context())
+    result = asyncio.run(_run())
+    # Owner resolves to session_id (user_id/tenant_id are None in _run_context),
+    # so the seeded memory matches and is injected as a `## Memory` section.
+    assert "user-secret-token-xyz" in str(result.output)
+    assert "## Memory" in str(result.output)
+
+
+def test_memory_store_none_default_leaves_prompt_unchanged(tmp_path):
+    # Default runner (memory_store=None) must not inject anything: the echoed
+    # prompt is exactly the user prompt (no history seeded -> no history text).
+    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_echo_model_fn())))
+    compiled = asyncio.run(compiler.compile(AgentSpec(id="agent-nomem", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
+    runner = _make_runner(tmp_path)
+    _seed_session(runner._session_store, "session-1")
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="plain-prompt-token"), _run_context())
+    result = asyncio.run(_run())
+    assert "## Memory" not in str(result.output)
+    assert "## Knowledge" not in str(result.output)
+    assert "plain-prompt-token" in str(result.output)
+
+
+def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
+    from linktools.ai.knowledge.document import Document
+
+    class _StubRetriever:
+        async def search(self, query, *, filters=None, limit=10):
+            return (Document(id="doc-1", content="known-fact-alpha", score=None, source="stub", metadata={}),)
+
+    runner = AgentRunner(
+        run_store=FileRunStore(root=tmp_path / "runs"),
+        session_store=FileSessionStore(root=tmp_path / "sessions"),
+        event_store=FileEventStore(root=tmp_path / "events"),
+        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        retriever=_StubRetriever(),
+    )
+    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_echo_model_fn())))
+    compiled = asyncio.run(compiler.compile(AgentSpec(id="agent-kn", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
+    _seed_session(runner._session_store, "session-1")
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="question"), _run_context())
+    result = asyncio.run(_run())
+    assert "known-fact-alpha" in str(result.output)
+    assert "## Knowledge" in str(result.output)
+
+
+def test_empty_memory_store_injects_no_memory_section(tmp_path):
+    # Memory store is wired but has no matching records -> format_memory returns
+    # "" -> no `## Memory` section added -> output unchanged from the no-memory
+    # baseline.
+    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_echo_model_fn())))
+    compiled = asyncio.run(compiler.compile(AgentSpec(id="agent-empty", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
+    runner = _make_runner_with_memory(tmp_path)
+    _seed_session(runner._session_store, "session-1")
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="unmatched-query-token"), _run_context())
+    result = asyncio.run(_run())
+    assert "## Memory" not in str(result.output)
+    assert "unmatched-query-token" in str(result.output)
