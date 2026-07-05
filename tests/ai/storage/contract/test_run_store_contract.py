@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/file/test_run_store.py"""
+"""tests/ai/storage/contract/test_run_store_contract.py — runs the same RunStore
+contract against both FileRunStore and SqlAlchemyRunStore."""
 from datetime import datetime, timezone
 
 import pytest
@@ -20,9 +21,57 @@ def _record(run_id="run-1", parent_run_id=None, status=RunStatus.PENDING, versio
     )
 
 
+@pytest.fixture(params=["file", "sqlalchemy"])
+def store_factory(request, tmp_path):
+    if request.param == "file":
+        counter = {"n": 0}
+
+        def file_factory():
+            counter["n"] += 1
+            return FileRunStore(root=tmp_path / f"runs-{counter['n']}")
+
+        return file_factory
+
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
+
+    counter = {"n": 0}
+
+    def sqlalchemy_factory():
+        counter["n"] += 1
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/runs-db-{counter['n']}.db")
+
+        async def _create():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        import asyncio
+        import threading
+
+        result = {}
+
+        def _run():
+            result["exc"] = None
+            try:
+                asyncio.run(_create())
+            except Exception as exc:
+                result["exc"] = exc
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        thread.join()
+        if result["exc"] is not None:
+            raise result["exc"]
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        return SqlAlchemyRunStore(session_factory=session_factory)
+
+    return sqlalchemy_factory
+
+
 @pytest.mark.asyncio
-async def test_create_then_get_roundtrip(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_create_then_get_roundtrip(store_factory):
+    store = store_factory()
     created = await store.create(_record())
     fetched = await store.get("run-1")
     assert fetched is not None
@@ -32,14 +81,14 @@ async def test_create_then_get_roundtrip(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_missing_returns_none(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_get_missing_returns_none(store_factory):
+    store = store_factory()
     assert await store.get("nope") is None
 
 
 @pytest.mark.asyncio
-async def test_transition_pending_to_running_succeeds(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_pending_to_running_succeeds(store_factory):
+    store = store_factory()
     await store.create(_record())
     updated = await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
     assert updated.status == RunStatus.RUNNING
@@ -47,31 +96,31 @@ async def test_transition_pending_to_running_succeeds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transition_invalid_target_raises(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_invalid_target_raises(store_factory):
+    store = store_factory()
     await store.create(_record())
     with pytest.raises(InvalidRunTransitionError):
         await store.transition("run-1", RunStatus.SUCCEEDED, expected_version=1)
 
 
 @pytest.mark.asyncio
-async def test_transition_wrong_expected_version_raises_conflict(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_wrong_expected_version_raises_conflict(store_factory):
+    store = store_factory()
     await store.create(_record())
     with pytest.raises(RunConflictError):
         await store.transition("run-1", RunStatus.RUNNING, expected_version=99)
 
 
 @pytest.mark.asyncio
-async def test_transition_missing_run_raises_not_found(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_missing_run_raises_not_found(store_factory):
+    store = store_factory()
     with pytest.raises(RunNotFoundError):
         await store.transition("nope", RunStatus.RUNNING, expected_version=1)
 
 
 @pytest.mark.asyncio
-async def test_transition_to_succeeded_stores_result(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_to_succeeded_stores_result(store_factory):
+    store = store_factory()
     await store.create(_record())
     await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
     done = await store.transition(
@@ -82,8 +131,8 @@ async def test_transition_to_succeeded_stores_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transition_to_failed_stores_error(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_transition_to_failed_stores_error(store_factory):
+    store = store_factory()
     await store.create(_record())
     await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
     failed = await store.transition(
@@ -94,8 +143,8 @@ async def test_transition_to_failed_stores_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_list_children_returns_only_direct_children(tmp_path):
-    store = FileRunStore(root=tmp_path)
+async def test_list_children_returns_only_direct_children(store_factory):
+    store = store_factory()
     await store.create(_record(run_id="parent", status=RunStatus.PENDING))
     await store.create(_record(run_id="child-1", parent_run_id="parent"))
     await store.create(_record(run_id="child-2", parent_run_id="parent"))

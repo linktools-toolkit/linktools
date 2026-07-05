@@ -46,3 +46,23 @@ class RevisionRow(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     value: Mapped[int]
+
+
+class RunRow(Base):
+    __tablename__ = "ai_runs"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    root_run_id: Mapped[str] = mapped_column(String(128), index=True)
+    parent_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    runnable_id: Mapped[str] = mapped_column(String(255))
+    runnable_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    input_json: Mapped[str] = mapped_column(Text)
+    result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    error_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    version: Mapped[int]
+    created_at: Mapped[datetime]
+    started_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    finished_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text)
