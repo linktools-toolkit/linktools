@@ -53,3 +53,41 @@ async def test_compile_reuses_model_router_fallback():
     )
     compiled = await compiler.compile(spec)
     assert compiled.model_bundle.config.model_type == "fallback-model"
+
+
+@pytest.mark.asyncio
+async def test_compile_wires_middleware_capability_when_pipeline_provided():
+    from linktools.ai.middleware.capability import MiddlewareCapability
+    from linktools.ai.middleware.pipeline import MiddlewarePipeline
+
+    registry = ModelRegistry()
+    registry.register("test-model", config=_config("test-model"))
+    router = ModelRouter(registry=registry)
+    pipeline = MiddlewarePipeline(middlewares=())
+    compiler = AgentCompiler(model_router=router, middleware_pipeline=pipeline)
+    spec = AgentSpec(
+        id="agent-mw", name="mw-agent", model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="hi"),
+    )
+    compiled = await compiler.compile(spec)
+    assert isinstance(compiled.middleware_capability, MiddlewareCapability)
+    assert compiled.middleware_capability.current_context is None
+    # Both capabilities must end up on the pydantic-ai Agent. In pydantic-ai
+    # 1.107 capabilities are nested under root_capability.capabilities (a list).
+    capability_types = {type(c).__name__ for c in compiled.pydantic_agent.root_capability.capabilities}
+    assert "PolicyCapability" in capability_types
+    assert "MiddlewareCapability" in capability_types
+
+
+@pytest.mark.asyncio
+async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
+    registry = ModelRegistry()
+    registry.register("test-model", config=_config("test-model"))
+    router = ModelRouter(registry=registry)
+    compiler = AgentCompiler(model_router=router)
+    spec = AgentSpec(
+        id="agent-nomw", name="nomw-agent", model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="hi"),
+    )
+    compiled = await compiler.compile(spec)
+    assert compiled.middleware_capability is None
