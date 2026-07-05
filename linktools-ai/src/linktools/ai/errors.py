@@ -47,3 +47,35 @@ class StorageCapabilityError(StorageError):
 
 class IdempotencyConflictError(LinktoolsAIError):
     """Same idempotency key reused with a different request hash."""
+
+
+class RunError(LinktoolsAIError):
+    """Base class for Run-related errors."""
+
+
+class RunNotFoundError(RunError):
+    pass
+
+
+class RunConflictError(RunError):
+    pass
+
+
+class RunCancelledError(RunError):
+    pass
+
+
+class InvalidRunTransitionError(RunError):
+    pass
+
+
+class SessionError(LinktoolsAIError):
+    """Base class for Session-related errors."""
+
+
+class EventError(LinktoolsAIError):
+    """Base class for Event-related errors."""
+
+
+class EventSequenceConflictError(EventError):
+    pass
