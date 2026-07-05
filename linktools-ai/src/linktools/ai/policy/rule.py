@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Policy enums + ToolPolicyMetadata: the policy-relevant slice of a tool's
-declaration (section 26.1), consumed by the rule modules (permission/risk/path/
-network/approval). The full ToolSpec lands in registry/tool.py (Task 11)."""
+"""Policy enums, ToolPolicyMetadata, and the PolicyRule/PolicyDecision/ToolRequest/
+ToolContext types they revolve around. Section 25 defines the rule protocol; the
+rule modules live in permission.py / risk.py / path.py / network.py / approval.py /
+command.py, and PolicyEngine (engine.py) composes them. The policy-relevant slice
+of a tool's declaration (section 26.1) is ToolPolicyMetadata below -- the full
+ToolSpec lands in registry/tool.py (Task 11)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 
 class Permission(str, Enum):
@@ -42,3 +46,36 @@ class ToolPolicyMetadata:
     risk: RiskLevel
     side_effect: SideEffectKind
     approval: ApprovalMode
+
+
+class PolicyDecisionKind(str, Enum):
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyDecision:
+    kind: PolicyDecisionKind
+    rule_id: str
+    reason: "str | None"
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRequest:
+    tool_name: str
+    arguments: "Mapping[str, Any]"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolContext:
+    run_id: str
+    session_id: str
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@runtime_checkable
+class PolicyRule(Protocol):
+    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+        ...
