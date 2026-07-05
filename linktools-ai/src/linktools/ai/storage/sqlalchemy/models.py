@@ -80,3 +80,19 @@ class RunCheckpointRow(Base):
     payload: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime]
     metadata_json: Mapped[str] = mapped_column(Text)
+
+
+class EventRow(Base):
+    __tablename__ = "ai_events"
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_event_run_sequence"),)
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), index=True)
+    sequence: Mapped[int]
+    occurred_at: Mapped[datetime]
+    root_run_id: Mapped[str] = mapped_column(String(128))
+    parent_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    session_id: Mapped[str] = mapped_column(String(128))
+    runnable_id: Mapped[str] = mapped_column(String(255))
+    payload_type: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[str] = mapped_column(Text)
