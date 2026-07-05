@@ -51,7 +51,8 @@ class Runtime:
               workspace_root: "str | Path | None" = None,
               retriever: "Retriever | None" = None,
               workdir: "Path | None" = None,
-              tool_executor: "ToolExecutor | None" = None) -> "Runtime":
+              tool_executor: "ToolExecutor | None" = None,
+              pause_on_approval: bool = False) -> "Runtime":
         """Assemble a Runtime from optional sub-components.
 
         ``tool_executor`` is the override path for the Phase-6 policy rules:
@@ -62,13 +63,37 @@ class Runtime:
         the caller awaits ``build_default_policy_engine(tool_registry)`` and
         passes ``ToolExecutor(policy=that_engine)`` here. ``build`` stays
         synchronous by design -- the async policy build is the caller's job,
-        so the common ``Runtime.build(...)`` call site stays simple."""
+        so the common ``Runtime.build(...)`` call site stays simple.
+
+        ``pause_on_approval=True`` (Task 9) is the ergonomic entry to the
+        pause/resume path: when set AND no explicit ``tool_executor`` was
+        supplied, ``build`` constructs a pause-enabled default executor with
+        the storage's approval store wired (the compiler's own default
+        executor has no store, so it could only fall through to the legacy
+        raise). When ``tool_executor`` is explicit the flag is informational
+        -- the caller's executor already carries its own pause/store config."""
         router = model_router or ModelRouter()
+        resolved_executor = tool_executor
+        if tool_executor is None and pause_on_approval:
+            # Option (b): Runtime.build has access to ``storage.approvals`` so
+            # it wires the full pause-enabled executor in one place. The
+            # default-False path leaves executor construction to the compiler
+            # (byte-for-byte unchanged behavior).
+            from .policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
+            from .policy.engine import PolicyEngine
+
+            resolved_executor = ToolExecutor(
+                policy=PolicyEngine(rules=(
+                    CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),
+                )),
+                approval_store=storage.approvals,
+                pause_on_approval=True,
+            )
         compiler = AgentCompiler(
             model_router=router,
             middleware_pipeline=middleware_pipeline,
             workdir=workdir,
-            tool_executor=tool_executor,
+            tool_executor=resolved_executor,
         )
         # Memory is on-by-default (storage.memories is always populated by the
         # facade); Knowledge is opt-in via the ``retriever`` argument (None ->

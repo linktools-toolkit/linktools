@@ -33,10 +33,21 @@ class AgentCompiler:
         tool_executor: "ToolExecutor | None" = None,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
         workdir: "Path | None" = None,
+        pause_on_approval: bool = False,
     ) -> None:
         self._model_router = model_router
+        # When the caller does not supply an explicit ``tool_executor``, build
+        # the default CommandRule-only executor. ``pause_on_approval`` threads
+        # through so a directly-constructed compiler can opt into the pause
+        # path -- note, however, that pausing without an ``approval_store``
+        # wired falls through to the legacy ToolApprovalRequiredError raise
+        # (Task 9 wires the store at the Runtime.build level where Storage is
+        # available). When ``tool_executor`` is explicit the flag is purely
+        # informational: the supplied executor already carries its own setting.
+        self._pause_on_approval = pause_on_approval
         self._tool_executor = tool_executor or ToolExecutor(
-            policy=PolicyEngine(rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),))
+            policy=PolicyEngine(rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)),
+            pause_on_approval=pause_on_approval,
         )
         self._middleware_pipeline = middleware_pipeline
         # When set, the compiled pydantic-ai Agent carries a builtin
