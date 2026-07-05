@@ -103,3 +103,29 @@ class PolicyError(LinktoolsAIError):
 
 class ModelRoutingError(LinktoolsAIError):
     pass
+
+
+class SwarmError(LinktoolsAIError):
+    """Base class for Swarm-related errors."""
+
+
+class SwarmRunNotFoundError(SwarmError):
+    pass
+
+
+class SwarmTaskNotFoundError(SwarmError):
+    pass
+
+
+class SwarmConflictError(SwarmError):
+    pass
+
+
+class InvalidSwarmTransitionError(SwarmError):
+    pass
+
+
+class SwarmLimitExceededError(SwarmError):
+    def __init__(self, message: str, *, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
