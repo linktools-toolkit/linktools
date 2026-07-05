@@ -22,7 +22,6 @@ its id for the scratch session, child run_id, and complete/fail calls. This keep
 every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED)."""
 
 import asyncio
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -246,8 +245,8 @@ class CoordinatorDelegationStrategy:
         return _default
 
     async def run(self, ctx: SwarmExecutionContext) -> RunResult:
-        # validate the coordinator agent is in the compiled agents mapping; it is
-        # only actually invoked by LLMCoordinator, not by this programmatic path.
+        # validate the coordinator agent is in the compiled agents mapping; the
+        # default coordinator_fn handles the simple programmatic case.
         _ = ctx.agents[ctx.spec.coordinator.agent_id]
         coordinator_fn = self._resolve_coordinator(ctx)
         workers = _worker_pool(ctx)
@@ -340,67 +339,3 @@ class ParallelFanOutStrategy:
 
         all_tasks = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
         return aggregate(ctx.spec.aggregation, all_tasks)
-
-
-# --- LLMCoordinator (thin adapter, provided for parity; not exercised by tests)
-
-class LLMCoordinator:
-    """Wrap an LLM-driven coordinator agent as a ``coordinator_fn``. Compiles
-    ``spec.coordinator`` via ``ctx.compiler`` and runs it through
-    ``ctx.agent_runner`` once per round, parsing the model's text output as a
-    JSON list of ``{"prompt": ...}`` objects into a tuple of TaskInput.
-
-    Used by passing ``coordinator_fn=LLMCoordinator()`` to
-    CoordinatorDelegationStrategy. The strategy tests inject a deterministic
-    coordinator_fn directly and do not exercise this adapter."""
-
-    def __init__(self, *, prompt_template: str | None = None) -> None:
-        self._prompt_template = prompt_template or (
-            "You are a swarm coordinator. Given the request and the completed "
-            "tasks so far, decide the next batch of worker tasks. Reply with a "
-            "JSON list of objects, each {\"prompt\": \"...\"}. Reply [] when "
-            "no further tasks are needed.\n\nRequest: {request}"
-        )
-
-    async def __call__(
-        self, swarm_run: SwarmRun, completed: "tuple[SwarmTask, ...]", limits: SwarmLimits,
-        *, ctx: SwarmExecutionContext,
-    ) -> "tuple[TaskInput, ...]":
-        compiled = await ctx.compiler.compile(ctx.spec.coordinator)
-        # use the coordinator agent_id in its own scratch run/context.
-        run_id = f"swarm:{swarm_run.id}:coordinator"
-        scratch_session = run_id
-        now = _now()
-        await ctx.session_store.create(SessionRecord(
-            id=scratch_session, parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=now, updated_at=now,
-        ))
-        child_context = RunContext(
-            run_id=run_id, root_run_id=ctx.parent_context.root_run_id,
-            parent_run_id=swarm_run.run_id, session_id=scratch_session,
-            runnable_id=ctx.spec.coordinator.agent_id, runnable_type=RunnableType.AGENT,
-            user_id=ctx.parent_context.user_id, tenant_id=ctx.parent_context.tenant_id,
-            workspace=None,
-        )
-        prompt = self._prompt_template.format(request=ctx.request.prompt)
-        result = await ctx.agent_runner.run(compiled, RunInput(prompt=prompt), child_context)
-        return self._parse(result.output)
-
-    @staticmethod
-    def _parse(output: Any) -> "tuple[TaskInput, ...]":
-        if isinstance(output, (list, tuple)):
-            items = output
-        elif isinstance(output, str):
-            try:
-                items = json.loads(output)
-            except json.JSONDecodeError:
-                return ()
-        else:
-            return ()
-        out: "list[TaskInput]" = []
-        for item in items:
-            if isinstance(item, Mapping) and "prompt" in item:
-                out.append(TaskInput(prompt=str(item["prompt"])))
-            elif isinstance(item, str):
-                out.append(TaskInput(prompt=item))
-        return tuple(out)
