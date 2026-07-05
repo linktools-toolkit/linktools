@@ -82,6 +82,32 @@ class RunCheckpointRow(Base):
     metadata_json: Mapped[str] = mapped_column(Text)
 
 
+class SessionRow(Base):
+    __tablename__ = "ai_sessions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    parent_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+    metadata_json: Mapped[str] = mapped_column(Text)
+
+
+class SessionMessageRow(Base):
+    __tablename__ = "ai_session_messages"
+    __table_args__ = (UniqueConstraint("session_id", "sequence", name="uq_session_message_session_sequence"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), index=True)
+    sequence: Mapped[int]
+    role: Mapped[str] = mapped_column(String(32))
+    content_json: Mapped[str] = mapped_column(Text)
+    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime]
+    metadata_json: Mapped[str] = mapped_column(Text)
+
+
 class EventRow(Base):
     __tablename__ = "ai_events"
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_event_run_sequence"),)
