@@ -16,8 +16,18 @@ Optional Memory + Knowledge injection (Phase 5): when ``memory_store`` and/or
 default to None, so existing callers see no change. Final prompt order (when
 both are set and non-empty): ``## Knowledge`` on top, then ``## Memory``, then
 session history, then the user prompt -- memory is injected first (so it lands
-below knowledge), knowledge second (so it lands on top)."""
+below knowledge), knowledge second (so it lands on top).
 
+Optional Observability (Phase 6): when ``observability`` is wired, ``run()``
+wraps the lifecycle in an outer ``agent.run`` span and the model call in a
+nested ``agent.model`` span (parented via the tracing contextvar). When
+``metrics`` is wired, records ``counter("agent.run.completed"/"agent.run.failed")``
+and ``histogram("agent.run.duration_ms")``. Both default to None, so the
+default-None path is a no-op -- no spans opened, no metrics recorded, and the
+existing lifecycle runs byte-for-byte as before (the ``if observability is not
+None:`` guard is the sole gate)."""
+
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -26,6 +36,7 @@ from ..events.envelope import EventEnvelope
 from ..events.payloads import RunCompleted, RunFailed, RunStarted
 from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
+from ..observability.tracing import use_span
 from ..policy.engine import ToolContext
 from ..run.checkpoint import CheckpointStore
 from ..run.context import RunContext
@@ -38,6 +49,8 @@ from .models import CompiledAgent
 if TYPE_CHECKING:
     from ..knowledge.retriever import Retriever
     from ..memory_runtime.store import MemoryStore
+    from ..observability.metrics import ObservabilityMetrics
+    from ..observability.tracing import ObservabilitySink
 
 
 class AgentRunner:
@@ -45,7 +58,9 @@ class AgentRunner:
                  event_store: EventStore, checkpoint_store: CheckpointStore,
                  middleware_pipeline: "MiddlewarePipeline | None" = None,
                  memory_store: "MemoryStore | None" = None,
-                 retriever: "Retriever | None" = None) -> None:
+                 retriever: "Retriever | None" = None,
+                 observability: "ObservabilitySink | None" = None,
+                 metrics: "ObservabilityMetrics | None" = None) -> None:
         self._run_store = run_store
         self._session_store = session_store
         self._event_store = event_store
@@ -53,6 +68,8 @@ class AgentRunner:
         self._middleware_pipeline = middleware_pipeline
         self._memory_store = memory_store
         self._retriever = retriever
+        self._observability = observability
+        self._metrics = metrics
 
     async def run(self, agent: CompiledAgent, request: RunInput, context: RunContext) -> RunResult:
         now = datetime.now(timezone.utc)
@@ -70,6 +87,34 @@ class AgentRunner:
         if agent.middleware_capability is not None:
             agent.middleware_capability.current_context = tool_context
 
+        # Observability (Phase 6): when a sink is wired, open an outer "agent.run"
+        # span around the whole lifecycle. The default-None path skips the span
+        # and delegates directly -- the lifecycle body is unchanged, the sole
+        # gate being the ``observability is None`` branch below.
+        started = time.monotonic()
+        observability = self._observability
+        if observability is None:
+            return await self._run_lifecycle(agent, request, context, started)
+        async with use_span(
+            observability, "agent.run",
+            attributes={"run_id": context.run_id, "session_id": context.session_id},
+        ):
+            return await self._run_lifecycle(agent, request, context, started)
+
+    async def _run_lifecycle(
+        self, agent: CompiledAgent, request: RunInput, context: RunContext, started: float,
+    ) -> RunResult:
+        """The per-invocation lifecycle (events, middleware hooks, prompt build,
+        model call, state transitions, metrics).
+
+        Called either directly (no observability) or from inside the outer
+        ``agent.run`` span. In the latter case the tracing contextvar is already
+        set, so ``use_span("agent.model")`` parents to the outer span
+        automatically. ``started`` is a ``time.monotonic()`` timestamp captured
+        in :meth:`run` for the duration histogram."""
+        observability = self._observability
+        metrics = self._metrics
+        run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
         try:
             await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
                 run_id=context.run_id, runnable_id=context.runnable_id)))
@@ -105,7 +150,16 @@ class AgentRunner:
                 if section:
                     prompt = f"{section}\n{prompt}"
 
-            run_result = await agent.pydantic_agent.run(prompt)
+            # Model call. When observability is wired, wrap in a nested
+            # "agent.model" span parented to the outer "agent.run" span via the
+            # tracing contextvar. When observability is None, call the model
+            # directly -- no span, no overhead, identical to the pre-Phase-6
+            # behavior.
+            if observability is not None:
+                async with use_span(observability, "agent.model"):
+                    run_result = await agent.pydantic_agent.run(prompt)
+            else:
+                run_result = await agent.pydantic_agent.run(prompt)
             output = run_result.output
 
             await self._session_store.append_messages(context.session_id, (
@@ -131,6 +185,14 @@ class AgentRunner:
 
             await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
                 run_id=context.run_id)))
+
+            if metrics is not None:
+                metrics.counter("agent.run.completed", attributes=run_attrs)
+                metrics.histogram(
+                    "agent.run.duration_ms",
+                    value=round((time.monotonic() - started) * 1000, 3),
+                    attributes=run_attrs,
+                )
             return result
         except Exception as exc:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
@@ -146,6 +208,11 @@ class AgentRunner:
                     run_id=context.run_id, error_type=type(exc).__name__, message=str(exc))))
             except Exception:
                 pass
+            if metrics is not None:
+                metrics.counter("agent.run.failed", attributes={
+                    "run_id": context.run_id, "session_id": context.session_id,
+                    "error_type": type(exc).__name__,
+                })
             raise
         finally:
             agent.policy_capability.current_context = None
