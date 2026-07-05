@@ -37,34 +37,60 @@ def store_factory(request, tmp_path):
     from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
 
     counter = {"n": 0}
+    engines = []
+
+    def _run_in_new_loop(coro):
+        # This factory is called synchronously from inside an already-running
+        # pytest-asyncio event loop (the async test function), so we cannot use
+        # asyncio.get_event_loop().run_until_complete() here -- that raises
+        # "This event loop is already running". Run the setup coroutine to
+        # completion on a separate thread with its own fresh event loop instead.
+        import asyncio
+        import threading
+
+        outcome = {}
+
+        def _runner():
+            try:
+                outcome["value"] = asyncio.run(coro)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread below
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=_runner)
+        thread.start()
+        thread.join()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome.get("value")
 
     def sqlalchemy_factory():
         counter["n"] += 1
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/runs-db-{counter['n']}.db")
+        engines.append(engine)
 
         async def _create():
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+            # The connection pool otherwise holds a connection bound to this
+            # thread's event loop; dispose it so later operations (running on
+            # pytest-asyncio's loop) open fresh connections instead of reusing
+            # one tied to a loop that is about to be closed.
+            await engine.dispose()
 
-        import asyncio
-        import threading
-
-        result = {}
-
-        def _run():
-            result["exc"] = None
-            try:
-                asyncio.run(_create())
-            except Exception as exc:
-                result["exc"] = exc
-
-        thread = threading.Thread(target=_run)
-        thread.start()
-        thread.join()
-        if result["exc"] is not None:
-            raise result["exc"]
+        _run_in_new_loop(_create())
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         return SqlAlchemyRunStore(session_factory=session_factory)
+
+    def _dispose_engines():
+        # The store itself opens fresh connections on pytest-asyncio's loop
+        # during the test. Those connections (and aiosqlite's background
+        # worker threads) must be disposed before that loop closes at test
+        # teardown, otherwise the worker thread tries to call back into an
+        # already-closed loop and pytest reports an unraisable exception.
+        for engine in engines:
+            _run_in_new_loop(engine.dispose())
+
+    request.addfinalizer(_dispose_engines)
 
     return sqlalchemy_factory
 
