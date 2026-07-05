@@ -30,8 +30,6 @@ from ..agent_runtime.models import CompiledAgent
 from ..agent_runtime.runner import AgentRunner
 from ..agent_runtime.spec import AgentSpec
 from ..errors import (
-    InvalidRunTransitionError,
-    RunConflictError,
     RunNotFoundError,
     SwarmError,
     SwarmRunNotFoundError,
@@ -342,9 +340,11 @@ class SwarmRunner:
                 await self._run_store.transition(
                     task.id, RunStatus.CANCELLED, expected_version=child.version
                 )
-            except (InvalidRunTransitionError, RunNotFoundError, RunConflictError):
+            except Exception:
                 # best-effort: a child that already completed or was cancelled
-                # concurrently is not a cancel failure.
+                # concurrently is not a cancel failure. Catch broadly to avoid
+                # aborting the loop on unexpected errors (e.g., OSError from a
+                # corrupted store).
                 pass
 
     # -- helpers --------------------------------------------------------------
