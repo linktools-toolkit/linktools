@@ -32,8 +32,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..errors import RunPaused
 from ..events.envelope import EventEnvelope
-from ..events.payloads import RunCompleted, RunFailed, RunStarted
+from ..events.payloads import (
+    RunCompleted,
+    RunFailed,
+    RunPaused as RunPausedEvent,
+    RunStarted,
+)
 from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
@@ -198,6 +204,26 @@ class AgentRunner:
                     attributes=run_attrs,
                 )
             return result
+        except RunPaused as paused:
+            # Pause path (Task 7): transition to WAITING_APPROVAL, emit a
+            # RunPaused event, and RE-RAISE so the caller gets the signal.
+            # No checkpoint in v1 -- streaming is the canonical pause surface.
+            # This handler sits BEFORE the generic ``except Exception`` so the
+            # run is NOT marked FAILED (the bug it guards against).
+            try:
+                await self._run_store.transition(
+                    context.run_id, RunStatus.WAITING_APPROVAL, expected_version=2)
+            except Exception:
+                pass
+            try:
+                await self._event_store.append(self._envelope(
+                    context, sequence=2,
+                    payload=RunPausedEvent(
+                        run_id=context.run_id,
+                        reason=f"approval required: {paused.approval_id}")))
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
@@ -320,28 +346,62 @@ class AgentRunner:
             # node is streamed for tool-call/result events.
             accumulated_text = ""
             async with agent.pydantic_agent.iter(prompt) as run:
-                async for node in run:
-                    if PydanticAgent.is_model_request_node(node):
-                        async with node.stream(run.ctx) as request_stream:
-                            async for event in request_stream:
-                                text = None
-                                if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
-                                    text = event.part.content
-                                elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
-                                    text = event.delta.content_delta
-                                if text:
-                                    accumulated_text += text
-                                    yield {"type": "text", "text": text}
-                    elif PydanticAgent.is_call_tools_node(node):
-                        async with node.stream(run.ctx) as tool_stream:
-                            async for event in tool_stream:
-                                if isinstance(event, FunctionToolCallEvent):
-                                    yield {"type": "tool", "name": event.part.tool_name,
-                                           "phase": "start", "ok": None}
-                                elif isinstance(event, FunctionToolResultEvent):
-                                    yield {"type": "tool", "name": event.part.tool_name,
-                                           "phase": "end",
-                                           "ok": isinstance(event.part, ToolReturnPart)}
+                try:
+                    async for node in run:
+                        if PydanticAgent.is_model_request_node(node):
+                            async with node.stream(run.ctx) as request_stream:
+                                async for event in request_stream:
+                                    text = None
+                                    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                                        text = event.part.content
+                                    elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                                        text = event.delta.content_delta
+                                    if text:
+                                        accumulated_text += text
+                                        yield {"type": "text", "text": text}
+                        elif PydanticAgent.is_call_tools_node(node):
+                            async with node.stream(run.ctx) as tool_stream:
+                                async for event in tool_stream:
+                                    if isinstance(event, FunctionToolCallEvent):
+                                        yield {"type": "tool", "name": event.part.tool_name,
+                                               "phase": "start", "ok": None}
+                                    elif isinstance(event, FunctionToolResultEvent):
+                                        yield {"type": "tool", "name": event.part.tool_name,
+                                               "phase": "end",
+                                               "ok": isinstance(event.part, ToolReturnPart)}
+                except RunPaused as paused:
+                    # Pause path (Task 6 -- canonical pause surface): save a
+                    # real checkpoint of the partial message history, transition
+                    # to WAITING_APPROVAL, emit a RunPaused event, yield the
+                    # pause signal to the caller, and return cleanly (do NOT
+                    # re-raise). The handler is INSIDE the ``async with ... as
+                    # run:`` block so ``run`` is bound and ``run.all_messages()``
+                    # works. The ``return`` exits the generator; the outer
+                    # ``finally`` still clears capability current_context.
+                    messages = run.all_messages()
+                    await self._checkpoint_store.save(RunCheckpoint(
+                        id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
+                        format="pydantic-ai-v1", schema_version=1,
+                        payload=serialize_messages(messages),
+                        created_at=datetime.now(timezone.utc),
+                        metadata={"approval_id": paused.approval_id},
+                    ))
+                    try:
+                        await self._run_store.transition(
+                            context.run_id, RunStatus.WAITING_APPROVAL, expected_version=2)
+                    except Exception:
+                        pass
+                    try:
+                        await self._event_store.append(self._envelope(
+                            context, sequence=2,
+                            payload=RunPausedEvent(
+                                run_id=context.run_id,
+                                reason=f"approval required: {paused.approval_id}")))
+                    except Exception:
+                        pass
+                    yield {"type": "paused", "run_id": paused.run_id,
+                           "approval_id": paused.approval_id}
+                    return
                 result = run.result
 
             # Resolve the final output: prefer result.output when it is text,
