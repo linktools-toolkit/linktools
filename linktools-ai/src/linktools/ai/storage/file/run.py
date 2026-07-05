@@ -13,6 +13,12 @@ from ...errors import InvalidRunTransitionError, RunConflictError, RunNotFoundEr
 from ...run.models import ALLOWED_RUN_TRANSITIONS, RunErrorInfo, RunInput, RunnableType, RunRecord, RunResult, RunStatus
 
 
+def _validate_id_segment(value: str, *, kind: str) -> str:
+    if not value or "/" in value or "\\" in value or value in (".", ".."):
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return value
+
+
 def _atomic_write(path: Path, content: bytes) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -69,7 +75,7 @@ class FileRunStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, run_id: str) -> Path:
-        return self._root / f"{run_id}.json"
+        return self._root / f"{_validate_id_segment(run_id, kind='run_id')}.json"
 
     async def create(self, run: RunRecord) -> RunRecord:
         _atomic_write(self._path(run.id), json.dumps(_to_json(run)).encode("utf-8"))

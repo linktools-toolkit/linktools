@@ -10,13 +10,19 @@ from pathlib import Path
 from ...run.models import RunCheckpoint
 
 
+def _validate_id_segment(value: str, *, kind: str) -> str:
+    if not value or "/" in value or "\\" in value or value in (".", ".."):
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return value
+
+
 class FileCheckpointStore:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _run_dir(self, run_id: str) -> Path:
-        d = self._root / run_id
+        d = self._root / _validate_id_segment(run_id, kind="run_id")
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -47,7 +53,7 @@ class FileCheckpointStore:
         )
 
     async def latest(self, run_id: str) -> "RunCheckpoint | None":
-        run_dir = self._root / run_id
+        run_dir = self._root / _validate_id_segment(run_id, kind="run_id")
         if not run_dir.exists():
             return None
         sequences = sorted((int(p.stem) for p in run_dir.glob("*.json")), reverse=True)

@@ -177,3 +177,10 @@ async def test_list_children_returns_only_direct_children(store_factory):
     await store.create(_record(run_id="unrelated", parent_run_id=None))
     children = await store.list_children("parent")
     assert {c.id for c in children} == {"child-1", "child-2"}
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_in_run_id_is_rejected(tmp_path):
+    store = FileRunStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        await store.get("../../etc/passwd")

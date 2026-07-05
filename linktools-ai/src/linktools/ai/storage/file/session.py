@@ -12,6 +12,12 @@ from ...errors import SessionError
 from ...session.models import MessageRole, SessionMessage, SessionRecord, SessionStatus
 
 
+def _validate_id_segment(value: str, *, kind: str) -> str:
+    if not value or "/" in value or "\\" in value or value in (".", ".."):
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return value
+
+
 def _record_to_json(record: SessionRecord) -> dict:
     return {
         "id": record.id, "parent_id": record.parent_id, "status": record.status.value,
@@ -50,7 +56,7 @@ class FileSessionStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _session_dir(self, session_id: str) -> Path:
-        d = self._root / session_id
+        d = self._root / _validate_id_segment(session_id, kind="session_id")
         d.mkdir(parents=True, exist_ok=True)
         (d / "messages").mkdir(parents=True, exist_ok=True)
         return d
@@ -63,7 +69,7 @@ class FileSessionStore:
         return session
 
     async def get(self, session_id: str) -> "SessionRecord | None":
-        path = self._root / session_id / "record.json"
+        path = self._root / _validate_id_segment(session_id, kind="session_id") / "record.json"
         if not path.exists():
             return None
         return _record_from_json(json.loads(path.read_text()))
@@ -74,7 +80,7 @@ class FileSessionStore:
             (messages_dir / f"{message.sequence:010d}.json").write_text(json.dumps(_message_to_json(message)))
 
     async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
-        messages_dir = self._root / session_id / "messages"
+        messages_dir = self._root / _validate_id_segment(session_id, kind="session_id") / "messages"
         if not messages_dir.exists():
             return ()
         result = []

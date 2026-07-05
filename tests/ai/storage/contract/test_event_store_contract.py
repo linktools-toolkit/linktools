@@ -159,3 +159,10 @@ async def test_occurred_at_roundtrips_as_timezone_aware(store_factory):
     fetched = page.items[0]
     assert fetched.occurred_at.tzinfo is not None
     assert fetched.occurred_at == original.occurred_at
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_in_run_id_is_rejected(tmp_path):
+    store = FileEventStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        await store.list("../../etc/passwd")

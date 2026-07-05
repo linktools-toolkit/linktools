@@ -131,3 +131,22 @@ async def test_checkpoints_for_different_runs_are_isolated(store_factory):
     latest_b = await store.latest("run-b")
     assert latest_a.run_id == "run-a"
     assert latest_b.run_id == "run-b"
+
+
+@pytest.mark.asyncio
+async def test_created_at_roundtrips_as_timezone_aware(store_factory):
+    store = store_factory()
+    original = _checkpoint(sequence=1)
+    await store.save(original)
+    fetched = await store.get(original.id)
+    assert fetched.created_at.tzinfo is not None
+    assert fetched.created_at == original.created_at
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_in_run_id_is_rejected(tmp_path):
+    from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+
+    store = FileCheckpointStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        await store.latest("../../etc/passwd")

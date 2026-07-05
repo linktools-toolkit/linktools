@@ -36,6 +36,10 @@ class SqlAlchemyEventStore:
         self._session_factory = session_factory
 
     async def append(self, event: EventEnvelope, *, expected_sequence: "int | None" = None) -> EventEnvelope:
+        # NOTE: expected_sequence currently only gates whether a duplicate-sequence
+        # check runs at all -- it is not compared against the run's actual last
+        # sequence number. Real optimistic-concurrency validation (comparing against
+        # a caller-expected prior sequence) is deferred until a caller needs it.
         async with self._session_factory() as session:
             async with session.begin():
                 if expected_sequence is not None:

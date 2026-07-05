@@ -150,3 +150,10 @@ async def test_sessions_are_isolated(store_factory):
     messages_b = await store.list_messages("session-b")
     assert len(messages_a) == 1
     assert len(messages_b) == 0
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_in_session_id_is_rejected(tmp_path):
+    store = FileSessionStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        await store.get("../../etc/passwd")

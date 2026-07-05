@@ -3,6 +3,7 @@
 """SqlAlchemyCheckpointStore: DB-backed CheckpointStore, keyed by (run_id, sequence)."""
 
 import json
+from datetime import datetime, timezone
 from typing import Callable
 
 from sqlalchemy import select
@@ -12,10 +13,19 @@ from .models import RunCheckpointRow
 from ...run.models import RunCheckpoint
 
 
+def _as_utc(dt: "datetime | None") -> "datetime | None":
+    # SQLite (aiosqlite) round-trips datetimes as naive values regardless of the
+    # tzinfo they were stored with, so reattach UTC on read to match the
+    # timezone-aware datetimes RunRecord is constructed with everywhere else.
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
 def _row_to_checkpoint(row: RunCheckpointRow) -> RunCheckpoint:
     return RunCheckpoint(
         id=row.id, run_id=row.run_id, sequence=row.sequence, format=row.format,
-        schema_version=row.schema_version, payload=row.payload, created_at=row.created_at,
+        schema_version=row.schema_version, payload=row.payload, created_at=_as_utc(row.created_at),
         metadata=json.loads(row.metadata_json),
     )
 
