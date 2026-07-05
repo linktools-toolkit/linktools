@@ -141,3 +141,39 @@ class MemoryNotFoundError(MemoryError):
 
 class MemoryConflictError(MemoryError):
     pass
+
+
+class RegistryError(LinktoolsAIError):
+    """Base class for spec-registry errors (loading/parsing spec files)."""
+
+
+class RegistryNotFoundError(RegistryError):
+    pass
+
+
+class RegistryConflictError(RegistryError):
+    pass
+
+
+class RegistryParseError(RegistryError):
+    pass
+
+
+class InvalidSpecError(RegistryError):
+    """A parsed spec is structurally present but semantically invalid."""
+
+
+class ApprovalError(LinktoolsAIError):
+    """Base class for Approval-store errors."""
+
+
+class ApprovalNotFoundError(ApprovalError):
+    pass
+
+
+class ApprovalConflictError(ApprovalError):
+    pass
+
+
+class InvalidApprovalTransitionError(ApprovalError):
+    pass

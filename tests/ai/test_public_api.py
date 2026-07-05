@@ -40,3 +40,38 @@ def test_public_api_does_not_re_export_internals():
                      "SwarmRunner", "SwarmStore",
                      "CoordinatorDelegationStrategy", "ParallelFanOutStrategy"):
         assert not hasattr(ai, internal), f"linktools.ai should not export {internal}"
+
+
+def test_registry_error_hierarchy():
+    from linktools.ai.errors import (
+        LinktoolsAIError,
+        RegistryError,
+        RegistryNotFoundError,
+        RegistryConflictError,
+        RegistryParseError,
+        InvalidSpecError,
+    )
+    assert issubclass(RegistryError, LinktoolsAIError)
+    assert issubclass(RegistryNotFoundError, RegistryError)
+    assert issubclass(RegistryConflictError, RegistryError)
+    assert issubclass(RegistryParseError, RegistryError)
+    assert issubclass(InvalidSpecError, RegistryError)
+
+
+def test_approval_error_hierarchy():
+    from linktools.ai.errors import (
+        LinktoolsAIError,
+        ApprovalError,
+        ApprovalNotFoundError,
+        ApprovalConflictError,
+        InvalidApprovalTransitionError,
+    )
+    assert issubclass(ApprovalError, LinktoolsAIError)
+    assert issubclass(ApprovalNotFoundError, ApprovalError)
+    assert issubclass(ApprovalConflictError, ApprovalError)
+    assert issubclass(InvalidApprovalTransitionError, ApprovalError)
+
+
+def test_tool_approval_required_error_still_tool_error():
+    from linktools.ai.errors import ToolError, ToolApprovalRequiredError
+    assert issubclass(ToolApprovalRequiredError, ToolError)
