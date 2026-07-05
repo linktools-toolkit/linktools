@@ -174,3 +174,54 @@ class Runtime:
             user_id=user_id, tenant_id=tenant_id, workspace=None)
         async for event in self.runner.run_stream(compiled, RunInput(prompt=prompt), context):
             yield event
+
+    async def resume(
+        self, run_id: str, spec: "AgentSpec", *,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
+    ) -> "AsyncIterator[dict]":
+        """Resume a paused Run (Task 8). Loads the paused RunRecord,
+        deserializes its checkpoint's message history, transitions
+        WAITING_APPROVAL -> RUNNING, and re-enters
+        :meth:`AgentRunner.run_stream` with ``message_history=<deserialized>``
+        so the pydantic-ai graph picks up from the checkpointed state: pending
+        tool calls execute (the ToolExecutor's resume gate recognizes the
+        now-APPROVED request), the model is called again with the full history,
+        and the run completes normally.
+
+        Yields ``{"type": "resumed", "run_id": run_id}`` first, then the same
+        dict-event shape ``run_stream`` yields (``text`` / ``tool``).
+
+        Raises :class:`RunNotFoundError` when the run or its checkpoint does not
+        exist. Raises :class:`InvalidRunTransitionError` when the run is not in
+        WAITING_APPROVAL status."""
+        from .agent.checkpoint_io import deserialize_messages
+        from .errors import InvalidRunTransitionError, RunNotFoundError
+        from .run.models import RunStatus
+
+        record = await self.storage.runs.get(run_id)
+        if record is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        if record.status != RunStatus.WAITING_APPROVAL:
+            raise InvalidRunTransitionError(
+                f"cannot resume run in status {record.status}"
+            )
+        checkpoint = await self.storage.checkpoints.latest(run_id)
+        if checkpoint is None:
+            raise RunNotFoundError(f"no checkpoint for run: {run_id}")
+        messages = deserialize_messages(checkpoint.payload)
+        await self.storage.runs.transition(
+            run_id, RunStatus.RUNNING, expected_version=record.version,
+        )
+        compiled = await self.compiler.compile(spec)
+        context = RunContext(
+            run_id=run_id, root_run_id=record.root_run_id,
+            parent_run_id=record.parent_run_id, session_id=record.session_id,
+            runnable_id=record.runnable_id, runnable_type=record.runnable_type,
+            user_id=user_id, tenant_id=tenant_id, workspace=None,
+        )
+        yield {"type": "resumed", "run_id": run_id}
+        async for event in self.runner.run_stream(
+            compiled, RunInput(prompt=""), context, message_history=messages,
+        ):
+            yield event

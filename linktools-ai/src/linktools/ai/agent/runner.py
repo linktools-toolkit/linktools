@@ -54,7 +54,9 @@ from .checkpoint_io import serialize_messages
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
+
+    from pydantic_ai.messages import ModelMessage
 
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
@@ -251,6 +253,7 @@ class AgentRunner:
 
     async def run_stream(
         self, agent: CompiledAgent, request: RunInput, context: RunContext,
+        message_history: "Sequence[ModelMessage] | None" = None,
     ) -> "AsyncIterator[dict]":
         """Streaming variant of :meth:`run`. Drives ``agent.pydantic_agent.iter()``
         (the pydantic-ai graph) and yields the dict-event shape the CLI REPL
@@ -284,7 +287,23 @@ class AgentRunner:
         the streaming path: (1) observability spans (Phase 6 wraps a single
         awaited model call; streaming spans are a separate concern) and
         (2) metrics counters/histograms. ``self._observability`` and
-        ``self._metrics`` are therefore not consulted here."""
+        ``self._metrics`` are therefore not consulted here.
+
+        **Resume (Task 8).** When ``message_history`` is provided (the
+        ``Runtime.resume`` path), the new-run setup is skipped entirely --
+        no ``create()``, no ``PENDING -> RUNNING`` transition, no
+        ``RunStarted`` event, no ``before_run`` middleware (all already done
+        in the initial run). The history/memory/knowledge prompt-build block
+        is also skipped (the prompt is already baked into the checkpointed
+        message history). Instead, ``iter()`` is driven with
+        ``message_history=<deserialized>``, which lets the pydantic-ai graph
+        resume from the checkpointed state: pending tool calls execute (the
+        ToolExecutor's resume gate recognizes the APPROVED request), the model
+        is called again with the full history, and the run completes normally.
+        The ``running_version`` for terminal transitions (SUCCEEDED / FAILED /
+        WAITING_APPROVAL) is read from the store at entry so it matches the
+        version left by ``Runtime.resume``'s ``WAITING_APPROVAL -> RUNNING``
+        transition."""
         from pydantic_ai import Agent as PydanticAgent
         from pydantic_ai.messages import (
             FunctionToolCallEvent,
@@ -296,15 +315,23 @@ class AgentRunner:
             ToolReturnPart,
         )
 
-        now = datetime.now(timezone.utc)
-        record = RunRecord(
-            id=context.run_id, root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
-            session_id=context.session_id, runnable_id=context.runnable_id, runnable_type=context.runnable_type,
-            status=RunStatus.PENDING, input=request, result=None, error=None, version=1,
-            created_at=now, started_at=None, finished_at=None,
-        )
-        await self._run_store.create(record)
-        await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
+        if message_history is None:
+            # New run: create record, transition PENDING -> RUNNING.
+            now = datetime.now(timezone.utc)
+            record = RunRecord(
+                id=context.run_id, root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                session_id=context.session_id, runnable_id=context.runnable_id, runnable_type=context.runnable_type,
+                status=RunStatus.PENDING, input=request, result=None, error=None, version=1,
+                created_at=now, started_at=None, finished_at=None,
+            )
+            await self._run_store.create(record)
+            await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
+            running_version = 2
+        else:
+            # Resume: Runtime.resume already transitioned WAITING_APPROVAL ->
+            # RUNNING; capture the current version for the final transition.
+            current = await self._run_store.get(context.run_id)
+            running_version = current.version
 
         tool_context = ToolContext(run_id=context.run_id, session_id=context.session_id)
         agent.policy_capability.current_context = tool_context
@@ -312,40 +339,52 @@ class AgentRunner:
             agent.middleware_capability.current_context = tool_context
 
         try:
-            await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
-                run_id=context.run_id, runnable_id=context.runnable_id)))
+            if message_history is None:
+                await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
+                    run_id=context.run_id, runnable_id=context.runnable_id)))
 
-            if self._middleware_pipeline is not None:
-                await self._middleware_pipeline.run_before_run(context)
+                if self._middleware_pipeline is not None:
+                    await self._middleware_pipeline.run_before_run(context)
 
             prior_messages = await self._session_store.list_messages(context.session_id)
-            history_text = "\n".join(str(m.content) for m in prior_messages)
-            prompt = f"{history_text}\n{request.prompt}" if history_text else request.prompt
 
-            # Memory + Knowledge injection -- mirrors run() so the streaming
-            # path sees the same prompt context as the one-shot path.
-            if self._memory_store is not None:
-                from ..knowledge.context import format_memory
-                owner = context.user_id or context.tenant_id or context.session_id
-                memories = await self._memory_store.search(
-                    request.prompt, owner_id=owner, limit=5,
-                )
-                section = format_memory(memories)
-                if section:
-                    prompt = f"{section}\n{prompt}"
-            if self._retriever is not None:
-                from ..knowledge.context import KnowledgeContext
-                docs = await self._retriever.search(request.prompt, limit=5)
-                section = KnowledgeContext(documents=docs).format()
-                if section:
-                    prompt = f"{section}\n{prompt}"
+            # Resume path (Task 8): when message_history is provided, the
+            # prompt is already baked into the checkpointed history (the
+            # serialize_messages round-trip) -- skip the history/memory/
+            # knowledge prompt-build block entirely and drive iter() with
+            # message_history below instead of a freshly-built user_prompt.
+            if message_history is None:
+                history_text = "\n".join(str(m.content) for m in prior_messages)
+                prompt = f"{history_text}\n{request.prompt}" if history_text else request.prompt
+
+                # Memory + Knowledge injection -- mirrors run() so the streaming
+                # path sees the same prompt context as the one-shot path.
+                if self._memory_store is not None:
+                    from ..knowledge.context import format_memory
+                    owner = context.user_id or context.tenant_id or context.session_id
+                    memories = await self._memory_store.search(
+                        request.prompt, owner_id=owner, limit=5,
+                    )
+                    section = format_memory(memories)
+                    if section:
+                        prompt = f"{section}\n{prompt}"
+                if self._retriever is not None:
+                    from ..knowledge.context import KnowledgeContext
+                    docs = await self._retriever.search(request.prompt, limit=5)
+                    section = KnowledgeContext(documents=docs).format()
+                    if section:
+                        prompt = f"{section}\n{prompt}"
 
             # Drive the graph with iter() and stream incremental events.
             # Pattern mirrors the legacy LlmAgent.stream() (agent.py): each
             # model-request node is streamed for text deltas, each call-tools
             # node is streamed for tool-call/result events.
             accumulated_text = ""
-            async with agent.pydantic_agent.iter(prompt) as run:
+            if message_history is not None:
+                run_iter = agent.pydantic_agent.iter(message_history=message_history)
+            else:
+                run_iter = agent.pydantic_agent.iter(prompt)
+            async with run_iter as run:
                 try:
                     async for node in run:
                         if PydanticAgent.is_model_request_node(node):
@@ -388,7 +427,8 @@ class AgentRunner:
                     ))
                     try:
                         await self._run_store.transition(
-                            context.run_id, RunStatus.WAITING_APPROVAL, expected_version=2)
+                            context.run_id, RunStatus.WAITING_APPROVAL,
+                            expected_version=running_version)
                     except Exception:
                         pass
                     try:
@@ -429,18 +469,26 @@ class AgentRunner:
 
             run_result = RunResult(output=output)
             await self._run_store.transition(
-                context.run_id, RunStatus.SUCCEEDED, expected_version=2, result=run_result)
+                context.run_id, RunStatus.SUCCEEDED,
+                expected_version=running_version, result=run_result)
 
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_after_run(context, run_result)
 
-            await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
-                run_id=context.run_id)))
+            # Best-effort RunCompleted: on the resume path, sequence=2 may
+            # already hold the RunPaused event from the initial pause, so a
+            # conflict here must not fail the run.
+            try:
+                await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
+                    run_id=context.run_id)))
+            except Exception:
+                pass
         except Exception as exc:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
                 await self._run_store.transition(
-                    context.run_id, RunStatus.FAILED, expected_version=2, error=error_info)
+                    context.run_id, RunStatus.FAILED,
+                    expected_version=running_version, error=error_info)
             except Exception:
                 pass
             if self._middleware_pipeline is not None:
