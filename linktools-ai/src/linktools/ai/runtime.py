@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
+# AsyncIterator is a typing-only alias used to annotate the streaming
+# generator below; the function itself is an ``async def`` that ``yield``s.
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 from .agent_runtime.compiler import AgentCompiler
 from .agent_runtime.runner import AgentRunner
 from .agent_runtime.spec import AgentSpec
@@ -110,3 +115,43 @@ class Runtime:
             session_id=resolved_session_id, runnable_id=spec.id, runnable_type=RunnableType.AGENT,
             user_id=user_id, tenant_id=tenant_id, workspace=None)
         return await self.runner.run(compiled, RunInput(prompt=prompt), context)
+
+    async def run_stream(
+        self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
+        session_id: "str | None" = None,
+        run_id: "str | None" = None,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
+    ) -> "AsyncIterator[dict]":
+        """Streaming variant of :meth:`run`. Resolves (or creates) the Session,
+        mints a RunContext, and delegates to :meth:`AgentRunner.run_stream`,
+        yielding the same dict-event shape (``text`` / ``tool``) the CLI REPL
+        consumes.
+
+        Session resolution mirrors :meth:`run` exactly (explicit ``session_id``
+        must exist; ``None`` mints a fresh session). Only ``AgentSpec`` is
+        supported -- a ``SwarmSpec`` raises :class:`SwarmError` because swarm
+        streaming is not implemented."""
+        resolved_session_id = session_id or str(uuid.uuid4())
+        if session_id is not None:
+            existing = await self.storage.sessions.get(session_id)
+            if existing is None:
+                raise SessionError(f"session not found: {session_id}")
+        else:
+            now = datetime.now(timezone.utc)
+            await self.storage.sessions.create(SessionRecord(
+                id=resolved_session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1,
+                created_at=now, updated_at=now))
+
+        resolved_run_id = run_id or str(uuid.uuid4())
+
+        if isinstance(spec, SwarmSpec):
+            raise SwarmError("run_stream does not support SwarmSpec")
+
+        compiled = await self.compiler.compile(spec)
+        context = RunContext(
+            run_id=resolved_run_id, root_run_id=resolved_run_id, parent_run_id=None,
+            session_id=resolved_session_id, runnable_id=spec.id, runnable_type=RunnableType.AGENT,
+            user_id=user_id, tenant_id=tenant_id, workspace=None)
+        async for event in self.runner.run_stream(compiled, RunInput(prompt=prompt), context):
+            yield event

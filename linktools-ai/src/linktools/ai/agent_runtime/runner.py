@@ -47,6 +47,8 @@ from ..session.store import SessionStore
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ..knowledge.retriever import Retriever
     from ..memory_runtime.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
@@ -213,6 +215,178 @@ class AgentRunner:
                     "run_id": context.run_id, "session_id": context.session_id,
                     "error_type": type(exc).__name__,
                 })
+            raise
+        finally:
+            agent.policy_capability.current_context = None
+            if agent.middleware_capability is not None:
+                agent.middleware_capability.current_context = None
+
+    async def run_stream(
+        self, agent: CompiledAgent, request: RunInput, context: RunContext,
+    ) -> "AsyncIterator[dict]":
+        """Streaming variant of :meth:`run`. Drives ``agent.pydantic_agent.iter()``
+        (the pydantic-ai graph) and yields the dict-event shape the CLI REPL
+        consumes as events arrive:
+
+        * ``{"type": "text", "text": <delta>}`` -- incremental answer text.
+        * ``{"type": "tool", "name": <tool>, "phase": "start"|"end", "ok": <bool|None>}``
+          -- a tool call beginning / finishing (``ok`` set on ``end``).
+
+        Unlike ``run_stream(output_type=str)`` -- which treats the first text
+        output as the final result and neither continues the tool loop nor
+        exposes tool events -- ``iter()`` runs every tool turn and surfaces
+        progress, so a turn that consults tools streams instead of appearing
+        to hang.
+
+        Lifecycle mirrors :meth:`run` / :meth:`_run_lifecycle` step for step:
+        RunRecord PENDING -> RUNNING; capabilities' current_context set;
+        RunStarted event; middleware ``before_run``; prompt built from session
+        history with the same Memory + Knowledge injection; SessionMessage
+        append; checkpoint save; SUCCEEDED transition + ``after_run`` +
+        RunCompleted; on exception FAILED transition + ``on_error`` + RunFailed
+        and re-raise; current_context cleared in ``finally``.
+
+        **Deliberate duplication.** ``run_stream`` is an ``async def``
+        generator (it ``yield``s mid-lifecycle), so it cannot reuse
+        :meth:`_run_lifecycle`'s non-yielding body without contortion. The
+        setup/teardown is duplicated (it is short) and the duplication is
+        documented here rather than factored into a shared helper, to avoid
+        any behavior change to :meth:`run` -- existing ``test_runner.py`` must
+        pass unchanged. Two ``run()`` features are intentionally absent from
+        the streaming path: (1) observability spans (Phase 6 wraps a single
+        awaited model call; streaming spans are a separate concern) and
+        (2) metrics counters/histograms. ``self._observability`` and
+        ``self._metrics`` are therefore not consulted here."""
+        from pydantic_ai import Agent as PydanticAgent
+        from pydantic_ai.messages import (
+            FunctionToolCallEvent,
+            FunctionToolResultEvent,
+            PartDeltaEvent,
+            PartStartEvent,
+            TextPart,
+            TextPartDelta,
+            ToolReturnPart,
+        )
+
+        now = datetime.now(timezone.utc)
+        record = RunRecord(
+            id=context.run_id, root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+            session_id=context.session_id, runnable_id=context.runnable_id, runnable_type=context.runnable_type,
+            status=RunStatus.PENDING, input=request, result=None, error=None, version=1,
+            created_at=now, started_at=None, finished_at=None,
+        )
+        await self._run_store.create(record)
+        await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
+
+        tool_context = ToolContext(run_id=context.run_id, session_id=context.session_id)
+        agent.policy_capability.current_context = tool_context
+        if agent.middleware_capability is not None:
+            agent.middleware_capability.current_context = tool_context
+
+        try:
+            await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
+                run_id=context.run_id, runnable_id=context.runnable_id)))
+
+            if self._middleware_pipeline is not None:
+                await self._middleware_pipeline.run_before_run(context)
+
+            prior_messages = await self._session_store.list_messages(context.session_id)
+            history_text = "\n".join(str(m.content) for m in prior_messages)
+            prompt = f"{history_text}\n{request.prompt}" if history_text else request.prompt
+
+            # Memory + Knowledge injection -- mirrors run() so the streaming
+            # path sees the same prompt context as the one-shot path.
+            if self._memory_store is not None:
+                from ..knowledge.context import format_memory
+                owner = context.user_id or context.tenant_id or context.session_id
+                memories = await self._memory_store.search(
+                    request.prompt, owner_id=owner, limit=5,
+                )
+                section = format_memory(memories)
+                if section:
+                    prompt = f"{section}\n{prompt}"
+            if self._retriever is not None:
+                from ..knowledge.context import KnowledgeContext
+                docs = await self._retriever.search(request.prompt, limit=5)
+                section = KnowledgeContext(documents=docs).format()
+                if section:
+                    prompt = f"{section}\n{prompt}"
+
+            # Drive the graph with iter() and stream incremental events.
+            # Pattern mirrors the legacy LlmAgent.stream() (agent.py): each
+            # model-request node is streamed for text deltas, each call-tools
+            # node is streamed for tool-call/result events.
+            accumulated_text = ""
+            async with agent.pydantic_agent.iter(prompt) as run:
+                async for node in run:
+                    if PydanticAgent.is_model_request_node(node):
+                        async with node.stream(run.ctx) as request_stream:
+                            async for event in request_stream:
+                                text = None
+                                if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                                    text = event.part.content
+                                elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                                    text = event.delta.content_delta
+                                if text:
+                                    accumulated_text += text
+                                    yield {"type": "text", "text": text}
+                    elif PydanticAgent.is_call_tools_node(node):
+                        async with node.stream(run.ctx) as tool_stream:
+                            async for event in tool_stream:
+                                if isinstance(event, FunctionToolCallEvent):
+                                    yield {"type": "tool", "name": event.part.tool_name,
+                                           "phase": "start", "ok": None}
+                                elif isinstance(event, FunctionToolResultEvent):
+                                    yield {"type": "tool", "name": event.part.tool_name,
+                                           "phase": "end",
+                                           "ok": isinstance(event.part, ToolReturnPart)}
+                result = run.result
+
+            # Resolve the final output: prefer result.output when it is text,
+            # otherwise fall back to the accumulated streamed text (covers
+            # non-text output_schema where the streamed deltas ARE the answer).
+            if result is not None and isinstance(result.output, str):
+                output = result.output
+            else:
+                output = accumulated_text
+
+            await self._session_store.append_messages(context.session_id, (
+                SessionMessage(
+                    id=f"{context.run_id}-response", session_id=context.session_id,
+                    sequence=len(prior_messages) + 1, role=MessageRole.ASSISTANT, content=str(output),
+                    run_id=context.run_id, created_at=datetime.now(timezone.utc),
+                ),
+            ))
+
+            await self._checkpoint_store.save(RunCheckpoint(
+                id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
+                format="pydantic-ai-v1", schema_version=1, payload=b"",
+                created_at=datetime.now(timezone.utc),
+            ))
+
+            run_result = RunResult(output=output)
+            await self._run_store.transition(
+                context.run_id, RunStatus.SUCCEEDED, expected_version=2, result=run_result)
+
+            if self._middleware_pipeline is not None:
+                await self._middleware_pipeline.run_after_run(context, run_result)
+
+            await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
+                run_id=context.run_id)))
+        except Exception as exc:
+            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
+            try:
+                await self._run_store.transition(
+                    context.run_id, RunStatus.FAILED, expected_version=2, error=error_info)
+            except Exception:
+                pass
+            if self._middleware_pipeline is not None:
+                await self._middleware_pipeline.run_on_error(context, exc)
+            try:
+                await self._event_store.append(self._envelope(context, sequence=2, payload=RunFailed(
+                    run_id=context.run_id, error_type=type(exc).__name__, message=str(exc))))
+            except Exception:
+                pass
             raise
         finally:
             agent.policy_capability.current_context = None
