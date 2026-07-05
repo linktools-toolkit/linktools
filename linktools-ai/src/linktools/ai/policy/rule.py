@@ -72,6 +72,12 @@ class ToolRequest:
 class ToolContext:
     run_id: str
     session_id: str
+    # pydantic-ai ToolCallPart.tool_call_id, threaded through by PolicyCapability
+    # so ToolExecutor can key ApprovalRequest.tool_call_id on the SAME id the
+    # model's message history uses -- the linchpin of resume (a re-driven call
+    # after approve() must find the matching approval). None when the context
+    # is constructed outside a real pydantic-ai call (executor falls back to uuid).
+    tool_call_id: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 

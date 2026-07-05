@@ -14,7 +14,7 @@ Concurrent Runs sharing the same CompiledAgent would race on this field --
 that's a known, explicitly out-of-scope limitation of this phase, not
 something this design hides."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -44,7 +44,13 @@ class PolicyCapability(AbstractCapability[None]):
         args: Any,
     ) -> Any:
         request = ToolRequest(tool_name=tool_def.name, arguments=args)
-        context = self.current_context or ToolContext(run_id="unknown", session_id="unknown")
+        # Thread ToolCallPart.tool_call_id through ToolContext so the executor
+        # keys ApprovalRequest.tool_call_id on the SAME id pydantic-ai's message
+        # history uses -- the linchpin of resume (a re-driven call after
+        # approve() must find the matching approval). current_context is reused
+        # across many real Runs, so copy-on-write via replace() rather than mutate.
+        base = self.current_context or ToolContext(run_id="unknown", session_id="unknown")
+        context = replace(base, tool_call_id=call.tool_call_id)
         try:
             await self.executor.check(request, context)
         except ToolDeniedError as exc:

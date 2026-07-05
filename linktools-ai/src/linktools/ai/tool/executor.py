@@ -87,10 +87,12 @@ class ToolExecutor:
             self._run_id_resolver(context) if self._run_id_resolver is not None
             else context.run_id
         )
-        # ToolContext carries no per-call id, so we mint a fresh uuid4 for
-        # tool_call_id. If a future ToolContext gains a call_id field, prefer
-        # that; for now a fresh uuid is the documented behavior.
-        tool_call_id = str(uuid.uuid4())
+        # Prefer the pydantic-ai ToolCallPart id threaded through ToolContext
+        # by PolicyCapability (the linchpin of resume: a re-driven call after
+        # approve() must find the matching approval). Fall back to a fresh uuid
+        # when unset (e.g. tests that construct ToolContext directly without a
+        # tool_call_id -- test_executor_approval.py relies on this path).
+        tool_call_id = context.tool_call_id or str(uuid.uuid4())
         approval = build_approval_request(
             run_id=run_id,
             tool_call_id=tool_call_id,
