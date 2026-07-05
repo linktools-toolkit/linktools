@@ -7,7 +7,7 @@ covers both live and deleted state."""
 
 from datetime import datetime
 
-from sqlalchemy import LargeBinary, String, Text
+from sqlalchemy import LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -65,4 +65,18 @@ class RunRow(Base):
     created_at: Mapped[datetime]
     started_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     finished_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text)
+
+
+class RunCheckpointRow(Base):
+    __tablename__ = "ai_run_checkpoints"
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_checkpoint_run_sequence"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), index=True)
+    sequence: Mapped[int]
+    format: Mapped[str] = mapped_column(String(32))
+    schema_version: Mapped[int]
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime]
     metadata_json: Mapped[str] = mapped_column(Text)
