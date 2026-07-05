@@ -420,6 +420,39 @@ def test_parallel_fan_out_bounds_concurrency_via_semaphore(tmp_path):
     assert tracker.max == 2
 
 
+# --- 4b. ParallelFanOutStrategy: max_tasks exceeded -> raise ------------------
+
+def test_parallel_fan_out_raises_when_max_tasks_exceeded(tmp_path):
+    compiled_a = _compile_worker("worker-a", "out")
+    swarm_store = _MemorySwarmStore()
+    spec = _make_spec(
+        kind="parallel_fan_out", limits=_limits(max_tasks=2),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+
+    from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+    # task_count=3 would exceed max_tasks=2 -- must raise before dispatching.
+    strategy = ParallelFanOutStrategy(task_count=3)
+
+    async def _run():
+        await strategy.run(ctx)
+    with pytest.raises(SwarmLimitExceededError) as exc_info:
+        asyncio.run(_run())
+    assert exc_info.value.kind == "max_tasks"
+    # SwarmLimitExceededError is a SwarmError.
+    assert isinstance(exc_info.value, SwarmError)
+    # nothing was dispatched: no tasks created before the limit fired.
+    async def _verify():
+        return await swarm_store.list_tasks(ctx.swarm_run.id)
+    tasks = asyncio.run(_verify())
+    assert tasks == ()
+
+
 # --- 5. build_strategy registry ------------------------------------------------
 
 def test_build_strategy_returns_parallel_fan_out():

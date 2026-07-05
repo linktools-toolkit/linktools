@@ -18,8 +18,46 @@ from linktools.ai.registry.parser import (
     parse_tool_refs,
     parse_yaml_text,
 )
-from linktools.ai.resource.local import InMemoryResourceBackend
-from linktools.ai.resource.store import ResourceStore
+from fnmatch import fnmatch
+
+
+class _StubResourceFile:
+    """Minimal duck-typed stand-in satisfying SpecLoader.from_resources."""
+
+    __slots__ = ("path", "content")
+
+    def __init__(self, path: str, content: str) -> None:
+        self.path = path
+        self.content = content
+
+
+class _StubResourceStore:
+    """Minimal in-memory store exercising SpecLoader.from_resources without
+    pulling in any concrete ResourceStore implementation."""
+
+    def __init__(self) -> None:
+        self._entries: "dict[str, str]" = {}
+        self._revision = 0
+
+    async def get(self, path: str) -> "_StubResourceFile | None":
+        if path not in self._entries:
+            return None
+        return _StubResourceFile(path, self._entries[path])
+
+    async def list(self, *, pattern: "str | None" = None) -> "list[_StubResourceFile]":
+        return [
+            _StubResourceFile(p, c)
+            for p, c in self._entries.items()
+            if pattern is None or fnmatch(p, pattern)
+        ]
+
+    async def put(self, path: str, content: str) -> _StubResourceFile:
+        self._entries[path] = content
+        self._revision += 1
+        return _StubResourceFile(path, content)
+
+    async def revision(self) -> int:
+        return self._revision
 
 
 # 1. parse_yaml_text
@@ -121,8 +159,7 @@ def test_spec_loader_from_filesystem_revision_is_deterministic(tmp_path):
 # 4b. SpecLoader.from_resources
 def test_spec_loader_from_resources_read_and_list():
     async def run():
-        backend = InMemoryResourceBackend()
-        store = ResourceStore(backend)
+        store = _StubResourceStore()
         await store.put("agents/a1.md", "agent body")
         await store.put("agents/a2.md", "agent body 2")
         await store.put("agents/skip.txt", "ignored")
@@ -141,7 +178,7 @@ def test_spec_loader_from_resources_read_and_list():
 
 def test_spec_loader_from_resources_read_missing_raises():
     async def run():
-        store = ResourceStore(InMemoryResourceBackend())
+        store = _StubResourceStore()
         loader = SpecLoader.from_resources(store, prefix="agents")
         await loader.read("missing.md")
 

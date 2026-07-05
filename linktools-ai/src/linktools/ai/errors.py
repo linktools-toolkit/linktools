@@ -119,6 +119,10 @@ class ToolTimeoutError(ToolError):
     pass
 
 
+class ToolIdempotencyConflictError(ToolError):
+    pass
+
+
 class PolicyError(LinktoolsAIError):
     """Base class for PolicyEngine-related errors."""
 
@@ -136,6 +140,10 @@ class SwarmRunNotFoundError(SwarmError):
 
 
 class SwarmTaskNotFoundError(SwarmError):
+    pass
+
+
+class SwarmTaskConflictError(SwarmError):
     pass
 
 

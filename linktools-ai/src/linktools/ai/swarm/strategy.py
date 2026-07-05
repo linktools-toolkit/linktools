@@ -319,6 +319,12 @@ class ParallelFanOutStrategy:
         inputs = self._build_inputs(ctx)
         workers = _worker_pool(ctx)
 
+        if len(inputs) > ctx.spec.limits.max_tasks:
+            raise SwarmLimitExceededError(
+                f"fan-out exceeded max_tasks={ctx.spec.limits.max_tasks}",
+                kind="max_tasks",
+            )
+
         # create all tasks up front, round-robin across the worker pool.
         tasks: "list[SwarmTask]" = []
         for i, ti in enumerate(inputs):

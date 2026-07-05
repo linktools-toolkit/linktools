@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RunContext: the read-only context threaded through one Run's execution.
-`workspace` is `Any | None` in this phase -- it becomes `WorkspaceRef | None`
-once Phase 3 defines WorkspaceRef in execution/workspace.py."""
+`workspace` is `WorkspaceRef | None` (WorkspaceRef is defined in
+execution/workspace.py)."""
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .models import RunnableType
+
+if TYPE_CHECKING:
+    from ..execution.workspace import WorkspaceRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,5 +23,5 @@ class RunContext:
     runnable_type: RunnableType
     user_id: "str | None"
     tenant_id: "str | None"
-    workspace: "Any | None"
+    workspace: "WorkspaceRef | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
