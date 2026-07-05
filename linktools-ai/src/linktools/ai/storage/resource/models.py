@@ -7,7 +7,7 @@ import json as _json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeAlias
 
 from .path import ResourcePath
 
@@ -70,7 +70,7 @@ class Masked:
     version: int
 
 
-ResourceLookup = "Found | Missing | Masked"
+ResourceLookup: TypeAlias = "Found | Missing | Masked"
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,7 +26,7 @@ class ArtifactService:
         artifact_name: str,
         content: bytes,
         content_type: "str | None" = None,
-        metadata: "Mapping[str, object]" = None,
+        metadata: "Mapping[str, object] | None" = None,
     ) -> Resource:
         path = self._path(tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name)
         return await self._resources.put(

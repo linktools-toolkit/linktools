@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import ResourceRow, IdempotencyRow, RevisionRow
 from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
 from ..resource.path import ResourcePath
+from ...errors import ResourceNotFoundError
 
 
 def _row_to_info(row: ResourceRow) -> ResourceInfo:
@@ -51,6 +52,9 @@ class SqlAlchemyResourceBackend:
             return Found(resource=Resource(info=_row_to_info(row), content=content))
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+        # NOTE: cursor-based continuation is not yet implemented in Phase 1 -- `cursor`
+        # is accepted for forward API compatibility but ignored; results are simply
+        # truncated to `limit`. Real pagination is deferred to a later phase.
         prefix = path.value.rstrip("/") + "/"
         escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         async with self._session_factory() as session:
@@ -130,7 +134,7 @@ class SqlAlchemyResourceBackend:
     async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
         lookup = await self.raw_get(src)
         if not isinstance(lookup, Found):
-            raise FileNotFoundError(f"cannot move missing resource: {src}")
+            raise ResourceNotFoundError(f"cannot move missing resource: {src}")
         info = await self.raw_put(
             dst,
             lookup.resource.content,

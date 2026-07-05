@@ -49,6 +49,13 @@ class ResourceStore:
         return resource.info if resource is not None else None
 
     async def propfind(self, path: ResourcePath, *, depth: Depth = Depth.ONE, limit: int = 100, cursor: "str | None" = None) -> ResourcePage:
+        """List resources under `path`, merging Primary and Overlay results.
+
+        NOTE: cursor-based continuation is not yet implemented in Phase 1 --
+        `cursor` is accepted for forward API compatibility but ignored; callers
+        must not rely on being able to page past `limit` items. Real pagination
+        is deferred to a later phase.
+        """
         merged: "dict[str, ResourceInfo]" = {}
         for overlay in reversed(self._overlays):
             page = await overlay.raw_propfind(path, depth=depth, limit=limit, cursor=cursor)
@@ -92,7 +99,8 @@ class ResourceStore:
         existing_record = await self._check_idempotency("put", options.idempotency_key, req_hash)
         if existing_record is not None:
             info = existing_record.result
-            content_bytes = (await self._primary.raw_get(path)).resource.content if isinstance(await self._primary.raw_get(path), Found) else content
+            current_lookup = await self._primary.raw_get(path)
+            content_bytes = current_lookup.resource.content if isinstance(current_lookup, Found) else content
             return Resource(info=info, content=content_bytes)
 
         current = await self._lookup_chain(path)

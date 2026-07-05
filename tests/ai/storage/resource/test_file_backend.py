@@ -3,7 +3,8 @@
 """tests/ai/storage/resource/test_file_backend.py"""
 import pytest
 
-from linktools.ai.storage.resource.file import FileResourceBackend
+from linktools.ai.errors import InvalidResourcePathError
+from linktools.ai.storage.resource.file import FileResourceBackend, _filename
 from linktools.ai.storage.resource.models import Found, Missing, Masked, Depth, IdempotencyRecord
 from linktools.ai.storage.resource.path import ResourcePath
 
@@ -93,3 +94,33 @@ async def test_move_reads_writes_and_masks(tmp_path):
     dst_lookup = await backend.raw_get(ResourcePath("/dst.txt"))
     assert isinstance(dst_lookup, Found)
     assert dst_lookup.resource.content == b"data"
+
+
+@pytest.mark.asyncio
+async def test_paths_with_double_underscore_do_not_collide_with_nested_paths(tmp_path):
+    backend = FileResourceBackend(root=tmp_path)
+    await backend.raw_put(ResourcePath("/a/b"), b"nested", content_type=None, metadata={})
+    await backend.raw_put(ResourcePath("/a__b"), b"flat-with-underscores", content_type=None, metadata={})
+    nested = await backend.raw_get(ResourcePath("/a/b"))
+    flat = await backend.raw_get(ResourcePath("/a__b"))
+    assert isinstance(nested, Found) and isinstance(flat, Found)
+    assert nested.resource.content == b"nested"
+    assert flat.resource.content == b"flat-with-underscores"
+
+
+@pytest.mark.asyncio
+async def test_symlink_escape_is_denied(tmp_path):
+    root = tmp_path / "backend-root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    backend = FileResourceBackend(root=root)
+    # Put something so the metadata dir exists, then plant a symlink inside it
+    # pointing outside the backend root, using the exact filename that
+    # ResourcePath("/evil__link") would resolve to.
+    await backend.raw_put(ResourcePath("/a.txt"), b"x", content_type=None, metadata={})
+    evil_name = _filename(ResourcePath("/evil__link")) + ".json"
+    evil_link = root / ".resource" / "metadata" / evil_name
+    evil_link.symlink_to(outside / "does-not-exist.json")
+    with pytest.raises(InvalidResourcePathError):
+        await backend.raw_get(ResourcePath("/evil__link"))

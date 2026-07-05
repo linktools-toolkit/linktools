@@ -8,6 +8,7 @@ JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resour
 import json
 import os
 import tempfile
+import urllib.parse
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -16,7 +17,7 @@ from typing import Mapping
 
 from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
 from .path import ResourcePath
-from ...errors import ResourceReadOnlyError
+from ...errors import InvalidResourcePathError, ResourceNotFoundError
 
 
 class SymlinkPolicy(str, Enum):
@@ -25,7 +26,14 @@ class SymlinkPolicy(str, Enum):
 
 
 def _filename(path: ResourcePath) -> str:
-    return path.value.strip("/").replace("/", "__")
+    # Percent-encode so the mapping from ResourcePath -> filename is reversible:
+    # "/" and "%" are escaped, so distinct paths can never collide on one filename
+    # (unlike the previous "__"-joining scheme, where "/a/b" and "/a__b" collided).
+    return urllib.parse.quote(path.value.strip("/"), safe="")
+
+
+def _path_from_filename(stem: str) -> ResourcePath:
+    return ResourcePath("/" + urllib.parse.unquote(stem))
 
 
 class FileResourceBackend:
@@ -44,9 +52,9 @@ class FileResourceBackend:
     def _resolve(self, directory: Path, filename: str) -> Path:
         resolved = (directory / filename).resolve()
         if self._symlink_policy == SymlinkPolicy.DENY and resolved.is_symlink():
-            raise ResourceReadOnlyError(f"symlink not allowed: {resolved}")
+            raise InvalidResourcePathError(f"symlink not allowed: {resolved}")
         if directory.resolve() not in resolved.parents and resolved != directory.resolve():
-            raise ResourceReadOnlyError(f"path escapes backend root: {resolved}")
+            raise InvalidResourcePathError(f"path escapes backend root: {resolved}")
         return resolved
 
     def _atomic_write(self, path: Path, content: bytes) -> None:
@@ -124,10 +132,13 @@ class FileResourceBackend:
         return Missing()
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+        # NOTE: cursor-based continuation is not yet implemented in Phase 1 -- `cursor`
+        # is accepted for forward API compatibility but ignored; results are simply
+        # truncated to `limit`. Real pagination is deferred to a later phase.
         prefix = path.value.rstrip("/") + "/"
         items = []
         for meta_file in sorted(self._meta_dir.glob("*.json")):
-            candidate = ResourcePath("/" + meta_file.stem.replace("__", "/"))
+            candidate = _path_from_filename(meta_file.stem)
             if not candidate.value.startswith(prefix):
                 continue
             rest = candidate.value[len(prefix):]
@@ -179,7 +190,7 @@ class FileResourceBackend:
     async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
         lookup = await self.raw_get(src)
         if not isinstance(lookup, Found):
-            raise FileNotFoundError(f"cannot move missing resource: {src}")
+            raise ResourceNotFoundError(f"cannot move missing resource: {src}")
         info = await self.raw_put(
             dst,
             lookup.resource.content,
