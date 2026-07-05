@@ -52,21 +52,14 @@ async def test_lock_is_exclusive(redis_client):
 async def test_lock_release_does_not_remove_a_different_holders_lock(redis_client):
     coord = RedisResourceCoordinator(redis=redis_client)
     lock_key = coord._lock_key("k")
-    # Simulate: this holder's lock already expired and someone else now holds it.
+
     async with coord.lock("k"):
-        pass
-    await redis_client.set(lock_key, "someone-elses-token")
-    # Re-entering release logic directly (via a second lock() that immediately exits)
-    # must not delete a key holding a different token than the one it itself set.
-    # This is implicitly exercised by the atomic Lua script; assert the key set by
-    # "someone else" directly above is untouched by an unrelated coordinator instance
-    # attempting to release a stale lock it no longer holds.
-    stale_token = "not-the-real-token"
-    result = await redis_client.eval(
-        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
-        1,
-        lock_key,
-        stale_token,
-    )
-    assert result == 0
-    assert await redis_client.get(lock_key) is not None
+        # Simulate: this holder's lock TTL expired and a different holder has since
+        # acquired the same key with a different token, all while we still believe
+        # we're inside our own critical section.
+        await redis_client.set(lock_key, "someone-elses-token")
+
+    # The coordinator's own release path (inside lock()'s finally block) must not
+    # have deleted the other holder's value, since the token it holds no longer
+    # matches what's currently stored.
+    assert await redis_client.get(lock_key) == b"someone-elses-token"
