@@ -70,7 +70,16 @@ class ToolExecutor:
         are logged and swallowed (the approval record is the source of truth);
         the caller (check) still raises ToolApprovalRequiredError afterward
         regardless of outcome here. With approval_store=None this is a no-op
-        (default-None path: behavior identical to today)."""
+        (default-None path: behavior identical to today).
+
+        Event-sequence caveat: the executor uses a per-executor itertools.count()
+        for event sequences (starting at 1). When the same EventStore is shared
+        with other emitters (e.g., AgentRunner in agent_runtime/runner.py, which
+        uses sequence=1 for RunStarted), collisions may occur and emission may
+        fail -- but emission is best-effort (failures are logged, the approval
+        record remains authoritative). Proper sequence coordination via an
+        EventStore "next sequence" API is deferred until approval is wired into
+        the runner."""
         if self._approval_store is None:
             return
 

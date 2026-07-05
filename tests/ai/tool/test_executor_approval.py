@@ -206,3 +206,34 @@ def test_execute_with_approval_store_raises_and_handler_not_called_request_persi
 
     assert ran["handler"] is False
     assert len(store) == 1
+
+
+def test_check_with_run_id_resolver_uses_custom_run_id_for_approval_and_event():
+    """Test that run_id_resolver overrides context.run_id for both the persisted
+    ApprovalRequest and the emitted ApprovalRequested event."""
+    store = _StubApprovalStore()
+    events = _StubEventStore()
+    executor = ToolExecutor(
+        policy=PolicyEngine(rules=(_Require(),)),
+        approval_store=store,
+        event_store=events,
+        run_id_resolver=lambda ctx: "resolved-run-99",
+    )
+
+    async def _run():
+        await executor.check(_request(), _context())
+
+    with pytest.raises(ToolApprovalRequiredError):
+        asyncio.run(_run())
+
+    # ApprovalRequest.run_id is the resolved run_id, NOT context.run_id
+    assert len(store) == 1
+    persisted = store._by_id[next(iter(store._by_id))]
+    assert persisted.run_id == "resolved-run-99"
+    assert persisted.run_id != "run-123"  # context.run_id was overridden
+
+    # Event envelope run_id is also the resolved run_id
+    assert len(events.events) == 1
+    envelope = events.events[0]
+    assert envelope.run_id == "resolved-run-99"
+    assert envelope.run_id != "run-123"  # context.run_id was overridden
