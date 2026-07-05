@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/agent_runtime/test_compiler_tools.py — verifies the AgentCompiler
+"""tests/ai/agent/test_compiler_tools.py — verifies the AgentCompiler
 wires the builtin file/terminal FunctionToolset into the compiled pydantic-ai
 Agent iff `workdir` is provided, and that an actual read_file tool call driven
 through the compiled agent reads a file written under that workdir."""
@@ -11,8 +11,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
-from linktools.ai.agent_runtime.compiler import AgentCompiler
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.core.model_runtime import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter

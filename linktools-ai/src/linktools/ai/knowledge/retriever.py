@@ -8,7 +8,7 @@ from .._typing import JSONValue
 from .document import Document
 
 if TYPE_CHECKING:
-    from ..memory_runtime.store import MemoryStore
+    from ..memory.store import MemoryStore
 
 
 @runtime_checkable

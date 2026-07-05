@@ -18,7 +18,7 @@ from linktools.ai.errors import (
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.file.swarm import FileSwarmStore
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.models import (
     SwarmRun,
     SwarmStatus,
     SwarmTask,

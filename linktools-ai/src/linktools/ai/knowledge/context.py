@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from .document import Document
 
 if TYPE_CHECKING:
-    from ..memory_runtime.models import MemoryRecord
+    from ..memory.models import MemoryRecord
 
 
 @dataclass(frozen=True, slots=True)

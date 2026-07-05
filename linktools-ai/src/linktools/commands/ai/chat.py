@@ -18,7 +18,7 @@ from linktools.ai.core.model_runtime import (
 )
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FileStorage
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.session.models import SessionRecord, SessionStatus

@@ -132,7 +132,7 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
 
 def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     """Build a tuple[ToolRef] from a list of names or {name: ...} dicts."""
-    from ..agent_runtime.spec import ToolRef
+    from ..agent.spec import ToolRef
 
     if items is None:
         return ()

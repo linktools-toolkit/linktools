@@ -6,7 +6,7 @@ the markdown body becomes the PromptSpec.instructions."""
 
 from typing import Any
 
-from ..agent_runtime.spec import AgentSpec, MiddlewareRef, PromptSpec
+from ..agent.spec import AgentSpec, MiddlewareRef, PromptSpec
 from ..errors import InvalidSpecError, RegistryNotFoundError
 from .parser import (
     SpecLoader,

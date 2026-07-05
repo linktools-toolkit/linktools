@@ -142,7 +142,7 @@ def test_sqlalchemy_storage_exposes_sqlalchemy_swarm_store(tmp_path):
 def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
     from decimal import Decimal
 
-    from linktools.ai.swarm_runtime.models import SwarmRun, SwarmStatus, TokenUsage
+    from linktools.ai.swarm.models import SwarmRun, SwarmStatus, TokenUsage
 
     storage = FileStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
@@ -176,7 +176,7 @@ def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
 
 
 def test_file_storage_memories_round_trips_a_record(tmp_path):
-    from linktools.ai.memory_runtime.models import MemoryRecord
+    from linktools.ai.memory.models import MemoryRecord
     storage = FileStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
     record = MemoryRecord(
@@ -197,7 +197,7 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
 
 
 def test_file_storage_exposes_file_approval_store(tmp_path):
-    from linktools.ai.agent_runtime.approval import ApprovalStore
+    from linktools.ai.agent.approval import ApprovalStore
     from linktools.ai.storage.file.approval import FileApprovalStore
     storage = FileStorage(root=tmp_path)
     assert isinstance(storage.approvals, FileApprovalStore)
@@ -205,7 +205,7 @@ def test_file_storage_exposes_file_approval_store(tmp_path):
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_approval_store(tmp_path):
-    from linktools.ai.agent_runtime.approval import ApprovalStore
+    from linktools.ai.agent.approval import ApprovalStore
     from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.approvals, SqlAlchemyApprovalStore)
@@ -213,7 +213,7 @@ def test_sqlalchemy_storage_exposes_sqlalchemy_approval_store(tmp_path):
 
 
 def test_file_storage_approvals_round_trips_a_request(tmp_path):
-    from linktools.ai.agent_runtime.approval import ApprovalRequest, ApprovalStatus, build_approval_request
+    from linktools.ai.agent.approval import ApprovalRequest, ApprovalStatus, build_approval_request
     storage = FileStorage(root=tmp_path)
     request = build_approval_request(
         run_id="run-1",

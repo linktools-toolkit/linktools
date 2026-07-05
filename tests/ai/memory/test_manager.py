@@ -10,10 +10,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from linktools.ai.errors import MemoryConflictError
-from linktools.ai.memory_runtime.index import KeywordMemoryIndex, MemorySearchHit
-from linktools.ai.memory_runtime.manager import MemoryManager
-from linktools.ai.memory_runtime.models import MemoryRecord
-from linktools.ai.memory_runtime.store import _UNSET
+from linktools.ai.memory.index import KeywordMemoryIndex, MemorySearchHit
+from linktools.ai.memory.manager import MemoryManager
+from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.store import _UNSET
 
 
 def _now() -> datetime:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for memory_runtime.models, MemoryStore/MemoryIndex Protocols,
+"""Tests for memory.models, MemoryStore/MemoryIndex Protocols,
 MemorySearchHit, and the MemoryError family in errors.py. Pure data/Protocol
 checks -- no I/O."""
 
@@ -15,9 +15,9 @@ from linktools.ai.errors import (
     MemoryError,
     MemoryNotFoundError,
 )
-from linktools.ai.memory_runtime.index import MemoryIndex, MemorySearchHit
-from linktools.ai.memory_runtime.models import MemoryRecord
-from linktools.ai.memory_runtime.store import MemoryStore, _UNSET
+from linktools.ai.memory.index import MemoryIndex, MemorySearchHit
+from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.store import MemoryStore, _UNSET
 
 
 # --- MemoryRecord ------------------------------------------------------------

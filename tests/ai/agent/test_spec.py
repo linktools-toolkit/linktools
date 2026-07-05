@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/agent_runtime/test_spec.py"""
-from linktools.ai.agent_runtime.spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
+"""tests/ai/agent/test_spec.py"""
+from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
 from linktools.ai.model.policy import ModelPolicy
 
 

@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Tuple, runtime_checkable
 
-from ..agent_runtime.compiler import AgentCompiler
-from ..agent_runtime.models import CompiledAgent
-from ..agent_runtime.runner import AgentRunner
+from ..agent.compiler import AgentCompiler
+from ..agent.models import CompiledAgent
+from ..agent.runner import AgentRunner
 from ..errors import SwarmError, SwarmLimitExceededError
 from ..run.context import RunContext
 from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType

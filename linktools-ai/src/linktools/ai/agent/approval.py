@@ -7,7 +7,7 @@ build_approval_request factory. Per spec section 28 (approval flow).
 This phase ships persistence + audit + events + external resolve; full run
 pause/resume is deferred. Mirrors the frozen-dataclass + str-Enum +
 transition-map + @runtime_checkable Protocol conventions used by
-swarm_runtime.models / swarm_runtime.store."""
+swarm.models / swarm.store."""
 
 import uuid
 from dataclasses import dataclass, field

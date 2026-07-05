@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for swarm_runtime.models, swarm_runtime.store.SwarmStore, and the
+"""Tests for swarm.models, swarm.store.SwarmStore, and the
 SwarmError family in errors.py. Pure data/Protocol checks -- no I/O."""
 
 from dataclasses import FrozenInstanceError
@@ -19,7 +19,7 @@ from linktools.ai.errors import (
     SwarmTaskNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
     AgentRef,
     SwarmRun,
@@ -29,7 +29,7 @@ from linktools.ai.swarm_runtime.models import (
     TaskInput,
     TokenUsage,
 )
-from linktools.ai.swarm_runtime.store import SwarmStore
+from linktools.ai.swarm.store import SwarmStore
 
 
 # --- SwarmStatus enum --------------------------------------------------------

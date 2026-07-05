@@ -7,9 +7,9 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.agent_runtime.compiler import AgentCompiler
-from linktools.ai.agent_runtime.runner import AgentRunner
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.core.model_runtime import ModelRegistry
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
@@ -156,7 +156,7 @@ def _echo_model_fn(text_when_missing: str = "no-prompt-captured"):
 
 
 def _seed_memory(store, memory_id: str, content: str, owner_id: str = "session-1") -> None:
-    from linktools.ai.memory_runtime.models import MemoryRecord
+    from linktools.ai.memory.models import MemoryRecord
     now = datetime.now(timezone.utc)
     asyncio.run(store.remember(MemoryRecord(
         id=memory_id, owner_id=owner_id, content=content, category=None,

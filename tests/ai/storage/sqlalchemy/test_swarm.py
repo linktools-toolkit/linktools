@@ -21,7 +21,7 @@ from linktools.ai.errors import (
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.sqlalchemy.models import Base
 from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.models import (
     SwarmRun,
     SwarmStatus,
     SwarmTask,

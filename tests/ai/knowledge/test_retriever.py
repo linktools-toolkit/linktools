@@ -7,7 +7,7 @@ import asyncio
 
 from linktools.ai.knowledge.document import Document
 from linktools.ai.knowledge.retriever import MemoryRetriever, Retriever
-from linktools.ai.memory_runtime.models import MemoryRecord
+from linktools.ai.memory.models import MemoryRecord
 
 
 def _make_record(**overrides):

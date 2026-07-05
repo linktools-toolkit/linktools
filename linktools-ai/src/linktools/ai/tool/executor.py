@@ -16,14 +16,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from ..agent_runtime.approval import build_approval_request
+from ..agent.approval import build_approval_request
 from ..errors import ToolApprovalRequiredError, ToolDeniedError
 from ..events.envelope import EventEnvelope
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 
 if TYPE_CHECKING:
-    from ..agent_runtime.approval import ApprovalStore
+    from ..agent.approval import ApprovalStore
     from ..events.store import EventStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class ToolExecutor:
 
         Event-sequence caveat: the executor uses a per-executor itertools.count()
         for event sequences (starting at 1). When the same EventStore is shared
-        with other emitters (e.g., AgentRunner in agent_runtime/runner.py, which
+        with other emitters (e.g., AgentRunner in agent/runner.py, which
         uses sequence=1 for RunStarted), collisions may occur and emission may
         fail -- but emission is best-effort (failures are logged, the approval
         record remains authoritative). Proper sequence coordination via an

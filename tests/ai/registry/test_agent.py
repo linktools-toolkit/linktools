@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from linktools.ai.agent_runtime.spec import (
+from linktools.ai.agent.spec import (
     AgentSpec,
     MiddlewareRef,
     PromptSpec,

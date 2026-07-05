@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import pytest
 
-from linktools.ai.agent_runtime.approval import (
+from linktools.ai.agent.approval import (
     ApprovalStatus,
     build_approval_request,
 )

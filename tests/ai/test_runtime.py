@@ -7,7 +7,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FileStorage
@@ -82,10 +82,10 @@ def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_p
     from linktools.ai.core.model_runtime import ModelRegistry
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.run.models import RunnableType, RunStatus
-    from linktools.ai.swarm_runtime.aggregation import AggregationPolicy
-    from linktools.ai.swarm_runtime.limits import SwarmLimits
-    from linktools.ai.swarm_runtime.models import AgentRef
-    from linktools.ai.swarm_runtime.spec import (
+    from linktools.ai.swarm.aggregation import AggregationPolicy
+    from linktools.ai.swarm.limits import SwarmLimits
+    from linktools.ai.swarm.models import AgentRef
+    from linktools.ai.swarm.spec import (
         SwarmContextPolicy,
         SwarmSpec,
         SwarmStrategySpec,
@@ -144,10 +144,10 @@ def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_p
 def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
     from linktools.ai.errors import SwarmError
     from linktools.ai.model.router import ModelRouter
-    from linktools.ai.swarm_runtime.aggregation import AggregationPolicy
-    from linktools.ai.swarm_runtime.limits import SwarmLimits
-    from linktools.ai.swarm_runtime.models import AgentRef
-    from linktools.ai.swarm_runtime.spec import (
+    from linktools.ai.swarm.aggregation import AggregationPolicy
+    from linktools.ai.swarm.limits import SwarmLimits
+    from linktools.ai.swarm.models import AgentRef
+    from linktools.ai.swarm.spec import (
         SwarmContextPolicy,
         SwarmSpec,
         SwarmStrategySpec,
@@ -210,7 +210,7 @@ def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
 
 
 def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
-    from linktools.ai.memory_runtime.models import MemoryRecord
+    from linktools.ai.memory.models import MemoryRecord
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.session.models import SessionRecord, SessionStatus
     storage = FileStorage(root=tmp_path)

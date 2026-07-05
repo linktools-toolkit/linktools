@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for agent_runtime.approval: ApprovalStatus, ApprovalRequest,
+"""Tests for agent.approval: ApprovalStatus, ApprovalRequest,
 ALLOWED_APPROVAL_TRANSITIONS, build_approval_request factory, and the
 ApprovalStore Protocol. Pure data/Protocol checks -- no I/O."""
 
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent_runtime.approval import (
+from linktools.ai.agent.approval import (
     ALLOWED_APPROVAL_TRANSITIONS,
     ApprovalRequest,
     ApprovalStatus,

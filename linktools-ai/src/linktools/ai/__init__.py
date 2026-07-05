@@ -7,9 +7,9 @@ implementations, Middleware base classes, PolicyEngine, ToolExecutor, etc. --
 is accessed via its own submodule and is not re-exported here.
 """
 
-from .agent_runtime.spec import AgentSpec
+from .agent.spec import AgentSpec
 from .runtime import Runtime
 from .storage.facade import FileStorage, SqlAlchemyStorage, Storage
-from .swarm_runtime.spec import SwarmSpec
+from .swarm.spec import SwarmSpec
 
 __all__ = ["AgentSpec", "SwarmSpec", "Runtime", "FileStorage", "SqlAlchemyStorage", "Storage"]

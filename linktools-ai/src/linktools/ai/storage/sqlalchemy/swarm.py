@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SqlAlchemySwarmStore: DB-backed SwarmStore (the Protocol in
-swarm_runtime/store.py). Mirrors SqlAlchemyRunStore's structure:
+swarm/store.py). Mirrors SqlAlchemyRunStore's structure:
 `session_factory: Callable[[], AsyncSession]` constructor, `_as_utc` helper for
 aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions.
 
@@ -31,7 +31,7 @@ from ...errors import (
     SwarmTaskNotFoundError,
 )
 from ...run.models import RunErrorInfo, RunResult
-from ...swarm_runtime.models import (
+from ...swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
     SwarmRun,
     SwarmStatus,

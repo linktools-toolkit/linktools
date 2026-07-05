@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Mapping
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-from .agent_runtime.compiler import AgentCompiler
-from .agent_runtime.runner import AgentRunner
-from .agent_runtime.spec import AgentSpec
+from .agent.compiler import AgentCompiler
+from .agent.runner import AgentRunner
+from .agent.spec import AgentSpec
 from .errors import SessionError, SwarmError
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
@@ -26,8 +26,8 @@ from .run.context import RunContext
 from .run.models import RunInput, RunnableType
 from .session.models import SessionRecord, SessionStatus
 from .storage.facade import Storage
-from .swarm_runtime.runner import SwarmRunner
-from .swarm_runtime.spec import SwarmSpec
+from .swarm.runner import SwarmRunner
+from .swarm.spec import SwarmSpec
 
 if TYPE_CHECKING:
     from .knowledge.retriever import Retriever

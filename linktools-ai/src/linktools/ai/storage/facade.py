@@ -23,14 +23,14 @@ from typing import AsyncIterator, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..agent_runtime.approval import ApprovalStore
+from ..agent.approval import ApprovalStore
 from ..errors import StorageCapabilityError
 from ..events.store import EventStore
-from ..memory_runtime.store import MemoryStore
+from ..memory.store import MemoryStore
 from ..run.checkpoint import CheckpointStore
 from ..run.store import RunStore
 from ..session.store import SessionStore
-from ..swarm_runtime.store import SwarmStore
+from ..swarm.store import SwarmStore
 from .capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES, StorageCapabilities
 from .file.approval import FileApprovalStore
 from .file.checkpoint import FileCheckpointStore

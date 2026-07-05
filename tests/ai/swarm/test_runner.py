@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for swarm_runtime.runner.SwarmRunner: the orchestrator that compiles
+"""Tests for swarm.runner.SwarmRunner: the orchestrator that compiles
 member agents, creates the driving RunRecord + SwarmRun, builds the
 SwarmExecutionContext, delegates the round loop to the resolved strategy, writes
 ONLY the final aggregate to the shared Session, and transitions the driving Run
@@ -19,8 +19,8 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.agent_runtime.compiler import AgentCompiler
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.core.model_runtime import ModelRegistry
 from linktools.ai.errors import (
     SwarmLimitExceededError,
@@ -45,9 +45,9 @@ from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
 from linktools.ai.storage.file.swarm import FileSwarmStore
-from linktools.ai.swarm_runtime.aggregation import AggregationPolicy
-from linktools.ai.swarm_runtime.limits import SwarmLimits
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.aggregation import AggregationPolicy
+from linktools.ai.swarm.limits import SwarmLimits
+from linktools.ai.swarm.models import (
     AgentRef,
     SwarmRun,
     SwarmStatus,
@@ -56,7 +56,7 @@ from linktools.ai.swarm_runtime.models import (
     TaskInput,
     TokenUsage,
 )
-from linktools.ai.swarm_runtime.spec import (
+from linktools.ai.swarm.spec import (
     SwarmContextPolicy,
     SwarmSpec,
     SwarmStrategySpec,
@@ -147,7 +147,7 @@ def _driving_context(run_id: str, session_id: str) -> RunContext:
 # --- 1. End-to-end run() with ParallelFanOutStrategy ------------------------
 
 def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     # 3 distinct outputs -> 3 registered models; coord is compiled but does not
     # run as a worker (the worker pool excludes the coordinator, so the two
@@ -215,7 +215,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
 # --- 2. cancel(swarm_run_id) ------------------------------------------------
 
 def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     stores = _Stores(tmp_path)
     # construct the in-flight state directly: a RUNNING SwarmRun with one
@@ -275,7 +275,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
 
 
 def test_cancel_unknown_swarm_run_raises(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
@@ -294,7 +294,7 @@ def test_cancel_unknown_swarm_run_raises(tmp_path):
 # --- 3. Strategy exceeding max_rounds surfaces failure ----------------------
 
 def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     compiler = _build_compiler("alpha-out")
     stores = _Stores(tmp_path)
@@ -338,7 +338,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
 # --- 4. resume(swarm_run_id) after partial failure --------------------------
 
 def test_resume_after_partial_failure_completes(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     compiler = _build_compiler("resumed-out")
     stores = _Stores(tmp_path)
@@ -412,7 +412,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
 
 
 def test_resume_unknown_swarm_run_raises(tmp_path):
-    from linktools.ai.swarm_runtime.runner import SwarmRunner
+    from linktools.ai.swarm.runner import SwarmRunner
 
     stores = _Stores(tmp_path)
     runner = SwarmRunner(

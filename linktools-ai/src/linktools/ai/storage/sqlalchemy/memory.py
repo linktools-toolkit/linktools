@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SqlAlchemyMemoryStore: DB-backed MemoryStore (the Protocol in
-memory_runtime/store.py). Mirrors SqlAlchemySwarmStore's structure:
+memory/store.py). Mirrors SqlAlchemySwarmStore's structure:
 `session_factory: Callable[[], AsyncSession]` constructor, `_as_utc` helper for
 aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions.
 
@@ -20,8 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import MemoryRow
 from ...errors import MemoryConflictError, MemoryNotFoundError
-from ...memory_runtime.models import MemoryRecord
-from ...memory_runtime.store import _UNSET
+from ...memory.models import MemoryRecord
+from ...memory.store import _UNSET
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":

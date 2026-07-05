@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileMemoryStore: single-process file backend for MemoryStore (the Protocol in
-memory_runtime/store.py). One JSON file per record at root/{memory_id}.json.
+memory/store.py). One JSON file per record at root/{memory_id}.json.
 Mirrors FileSwarmStore/FileRunStore's atomic-write + path-traversal-guard
 patterns (see storage/file/run.py). The `_UNSET` sentinel distinguishes
 "omit this field" from `category=None` meaning "explicitly clear"."""
@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ...errors import MemoryConflictError, MemoryNotFoundError
-from ...memory_runtime.models import MemoryRecord
-from ...memory_runtime.store import _UNSET
+from ...memory.models import MemoryRecord
+from ...memory.store import _UNSET
 from .run import _atomic_write, _validate_id_segment
 
 

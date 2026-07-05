@@ -4,7 +4,7 @@ import linktools.ai as ai
 
 
 def test_public_api_exports_agent_spec():
-    from linktools.ai.agent_runtime.spec import AgentSpec as _Real
+    from linktools.ai.agent.spec import AgentSpec as _Real
     assert ai.AgentSpec is _Real
 
 
@@ -29,7 +29,7 @@ def test_public_api_exports_storage():
 
 
 def test_public_api_exports_swarm_spec():
-    from linktools.ai.swarm_runtime.spec import SwarmSpec as _Real
+    from linktools.ai.swarm.spec import SwarmSpec as _Real
     assert ai.SwarmSpec is _Real
 
 

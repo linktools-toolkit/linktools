@@ -9,7 +9,7 @@ driving Run to SUCCEEDED.
 
 This module owns the DRIVING swarm lifecycle only. The round loop, per-round /
 per-task events, task persistence, and aggregation are the strategy's job (see
-swarm_runtime.strategy). SwarmRunner never calls a model itself -- it constructs
+swarm.strategy). SwarmRunner never calls a model itself -- it constructs
 one AgentRunner and hands it to the SwarmExecutionContext so the strategy's
 ``_run_task`` can drive child Runs.
 
@@ -25,10 +25,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Mapping
 
-from ..agent_runtime.compiler import AgentCompiler
-from ..agent_runtime.models import CompiledAgent
-from ..agent_runtime.runner import AgentRunner
-from ..agent_runtime.spec import AgentSpec
+from ..agent.compiler import AgentCompiler
+from ..agent.models import CompiledAgent
+from ..agent.runner import AgentRunner
+from ..agent.spec import AgentSpec
 from ..errors import (
     RunNotFoundError,
     SwarmError,
@@ -37,7 +37,7 @@ from ..errors import (
 
 if TYPE_CHECKING:
     from ..knowledge.retriever import Retriever
-    from ..memory_runtime.store import MemoryStore
+    from ..memory.store import MemoryStore
 from ..events.envelope import EventEnvelope
 from ..events.payloads import SwarmCompleted, SwarmStarted
 from ..events.store import EventStore

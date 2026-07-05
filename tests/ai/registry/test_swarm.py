@@ -14,9 +14,9 @@ from linktools.ai.errors import (
 )
 from linktools.ai.registry.parser import SpecLoader
 from linktools.ai.registry.swarm import SwarmRegistry, parse_swarm_spec
-from linktools.ai.swarm_runtime.aggregation import AggregationMode
-from linktools.ai.swarm_runtime.limits import DEFAULT_SWARM_LIMITS
-from linktools.ai.swarm_runtime.spec import (
+from linktools.ai.swarm.aggregation import AggregationMode
+from linktools.ai.swarm.limits import DEFAULT_SWARM_LIMITS
+from linktools.ai.swarm.spec import (
     AgentRef,
     SwarmContextPolicy,
     SwarmSpec,

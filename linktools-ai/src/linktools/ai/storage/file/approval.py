@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileApprovalStore: single-process file backend for ApprovalStore (the
-Protocol in agent_runtime/approval.py). One JSON file per request at
+Protocol in agent/approval.py). One JSON file per request at
 root/requests/{approval_id}.json. Mirrors FileMemoryStore/FileRunStore's
 atomic-write + path-traversal-guard patterns (see storage/file/run.py). An
 ``asyncio.Lock`` serializes ``approve``/``reject`` so the optimistic-version
@@ -20,7 +20,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ...agent_runtime.approval import (
+from ...agent.approval import (
     ALLOWED_APPROVAL_TRANSITIONS,
     ApprovalRequest,
     ApprovalStatus,

@@ -8,11 +8,11 @@ dropped so the next get() re-reads and re-parses the YAML."""
 from decimal import Decimal
 from typing import Any
 
-from ..agent_runtime.spec import MiddlewareRef
+from ..agent.spec import MiddlewareRef
 from ..errors import InvalidSpecError, RegistryNotFoundError
-from ..swarm_runtime.aggregation import AggregationMode, AggregationPolicy
-from ..swarm_runtime.limits import DEFAULT_SWARM_LIMITS, SwarmLimits
-from ..swarm_runtime.spec import (
+from ..swarm.aggregation import AggregationMode, AggregationPolicy
+from ..swarm.limits import DEFAULT_SWARM_LIMITS, SwarmLimits
+from ..swarm.spec import (
     AgentRef,
     SwarmContextPolicy,
     SwarmSpec,

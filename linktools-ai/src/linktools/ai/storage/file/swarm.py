@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileSwarmStore: single-process file backend for SwarmStore (the Protocol in
-swarm_runtime/store.py). One JSON file per SwarmRun under root/runs/{id}.json
+swarm/store.py). One JSON file per SwarmRun under root/runs/{id}.json
 and one per SwarmTask under root/tasks/{id}.json. Mirrors FileRunStore's
 atomic-write + path-traversal-guard patterns (see storage/file/run.py)."""
 
@@ -18,7 +18,7 @@ from ...errors import (
     SwarmTaskNotFoundError,
 )
 from ...run.models import RunErrorInfo, RunResult
-from ...swarm_runtime.models import (
+from ...swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
     SwarmRun,
     SwarmStatus,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for swarm_runtime.strategy: SwarmStrategy Protocol, build_strategy, the
+"""Tests for swarm.strategy: SwarmStrategy Protocol, build_strategy, the
 two built-in strategies (CoordinatorDelegationStrategy, ParallelFanOutStrategy),
 and the LLMCoordinator adapter. PROGRAMMATIC strategies -- workers are real
 CompiledAgents driven by FunctionModel; the coordinator is a deterministic
@@ -17,10 +17,10 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.agent_runtime.compiler import AgentCompiler
-from linktools.ai.agent_runtime.models import CompiledAgent
-from linktools.ai.agent_runtime.runner import AgentRunner
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.models import CompiledAgent
+from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.core.model_runtime import ModelRegistry
 from linktools.ai.errors import SwarmError, SwarmLimitExceededError
 from linktools.ai.model.policy import ModelPolicy
@@ -32,9 +32,9 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.swarm_runtime.aggregation import AggregationPolicy
-from linktools.ai.swarm_runtime.limits import SwarmLimits
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.aggregation import AggregationPolicy
+from linktools.ai.swarm.limits import SwarmLimits
+from linktools.ai.swarm.models import (
     AgentRef,
     SwarmRun,
     SwarmStatus,
@@ -43,13 +43,13 @@ from linktools.ai.swarm_runtime.models import (
     TaskInput,
     TokenUsage,
 )
-from linktools.ai.swarm_runtime.spec import (
+from linktools.ai.swarm.spec import (
     SwarmContextPolicy,
     SwarmSpec,
     SwarmStrategySpec,
 )
-from linktools.ai.swarm_runtime.store import SwarmStore
-from linktools.ai.swarm_runtime.strategy import SwarmExecutionContext
+from linktools.ai.swarm.store import SwarmStore
+from linktools.ai.swarm.strategy import SwarmExecutionContext
 
 
 # --- in-memory SwarmStore (single-process, FIFO claim) ----------------------
@@ -271,7 +271,7 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
             return (TaskInput(prompt="task-a"), TaskInput(prompt="task-b"))
         return ()
 
-    from linktools.ai.swarm_runtime.strategy import CoordinatorDelegationStrategy
+    from linktools.ai.swarm.strategy import CoordinatorDelegationStrategy
     strategy = CoordinatorDelegationStrategy(coordinator_fn=coordinator_fn)
 
     async def _run():
@@ -319,7 +319,7 @@ def test_coordinator_delegation_raises_when_max_rounds_exceeded(tmp_path):
     async def coordinator_fn(swarm_run, completed, limits):
         return (TaskInput(prompt="more work"),)
 
-    from linktools.ai.swarm_runtime.strategy import CoordinatorDelegationStrategy
+    from linktools.ai.swarm.strategy import CoordinatorDelegationStrategy
     strategy = CoordinatorDelegationStrategy(coordinator_fn=coordinator_fn)
 
     async def _run():
@@ -346,7 +346,7 @@ def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
         spec=spec, swarm_store=swarm_store,
     )
 
-    from linktools.ai.swarm_runtime.strategy import ParallelFanOutStrategy
+    from linktools.ai.swarm.strategy import ParallelFanOutStrategy
     strategy = ParallelFanOutStrategy(task_count=3)
 
     async def _run():
@@ -405,7 +405,7 @@ def test_parallel_fan_out_bounds_concurrency_via_semaphore(tmp_path):
     tracker = _ConcurrencyTrackingRunner(ctx.agent_runner)
     ctx = replace(ctx, agent_runner=tracker)
 
-    from linktools.ai.swarm_runtime.strategy import ParallelFanOutStrategy
+    from linktools.ai.swarm.strategy import ParallelFanOutStrategy
     strategy = ParallelFanOutStrategy(task_count=4)
 
     async def _run():
@@ -423,7 +423,7 @@ def test_parallel_fan_out_bounds_concurrency_via_semaphore(tmp_path):
 # --- 5. build_strategy registry ------------------------------------------------
 
 def test_build_strategy_returns_parallel_fan_out():
-    from linktools.ai.swarm_runtime.strategy import (
+    from linktools.ai.swarm.strategy import (
         ParallelFanOutStrategy, build_strategy,
     )
     strategy = build_strategy(SwarmStrategySpec(kind="parallel_fan_out"))
@@ -431,7 +431,7 @@ def test_build_strategy_returns_parallel_fan_out():
 
 
 def test_build_strategy_returns_coordinator_delegation():
-    from linktools.ai.swarm_runtime.strategy import (
+    from linktools.ai.swarm.strategy import (
         CoordinatorDelegationStrategy, build_strategy,
     )
     strategy = build_strategy(SwarmStrategySpec(kind="coordinator_delegation"))
@@ -439,6 +439,6 @@ def test_build_strategy_returns_coordinator_delegation():
 
 
 def test_build_strategy_unknown_kind_raises_swarm_error():
-    from linktools.ai.swarm_runtime.strategy import build_strategy
+    from linktools.ai.swarm.strategy import build_strategy
     with pytest.raises(SwarmError):
         build_strategy(SwarmStrategySpec(kind="no_such_strategy"))

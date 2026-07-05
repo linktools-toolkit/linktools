@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
-from linktools.ai.memory_runtime.models import MemoryRecord
+from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.storage.file.memory import FileMemoryStore
 
 

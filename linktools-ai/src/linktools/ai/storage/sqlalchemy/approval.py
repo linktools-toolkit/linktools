@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SqlAlchemyApprovalStore: DB-backed ApprovalStore (the Protocol in
-agent_runtime/approval.py). Mirrors SqlAlchemyMemoryStore's structure:
+agent/approval.py). Mirrors SqlAlchemyMemoryStore's structure:
 `session_factory: Callable[[], AsyncSession]` constructor, `_as_utc` helper for
 aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions.
 
@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ApprovalRow
-from ...agent_runtime.approval import (
+from ...agent.approval import (
     ALLOWED_APPROVAL_TRANSITIONS,
     ApprovalRequest,
     ApprovalStatus,

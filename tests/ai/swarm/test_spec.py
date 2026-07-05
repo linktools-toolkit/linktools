@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for swarm_runtime.spec/limits/aggregation: the Swarm declaration layer
+"""Tests for swarm.spec/limits/aggregation: the Swarm declaration layer
 (SwarmSpec, SwarmLimits, AggregationPolicy/aggregate, SwarmContextPolicy)."""
 
 from dataclasses import FrozenInstanceError
@@ -9,21 +9,21 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.agent_runtime.spec import MiddlewareRef
+from linktools.ai.agent.spec import MiddlewareRef
 from linktools.ai.run.models import RunResult
-from linktools.ai.swarm_runtime.aggregation import (
+from linktools.ai.swarm.aggregation import (
     AggregationMode,
     AggregationPolicy,
     aggregate,
 )
-from linktools.ai.swarm_runtime.limits import DEFAULT_SWARM_LIMITS, SwarmLimits
-from linktools.ai.swarm_runtime.models import (
+from linktools.ai.swarm.limits import DEFAULT_SWARM_LIMITS, SwarmLimits
+from linktools.ai.swarm.models import (
     AgentRef,
     SwarmTask,
     SwarmTaskStatus,
     TaskInput,
 )
-from linktools.ai.swarm_runtime.spec import (
+from linktools.ai.swarm.spec import (
     SwarmContextPolicy,
     SwarmSpec,
     SwarmStrategySpec,

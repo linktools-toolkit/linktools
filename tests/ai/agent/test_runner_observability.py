@@ -19,9 +19,9 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.agent_runtime.compiler import AgentCompiler
-from linktools.ai.agent_runtime.runner import AgentRunner
-from linktools.ai.agent_runtime.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.core.model_runtime import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter

@@ -7,7 +7,7 @@ a context-sharing policy, and an aggregation policy."""
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from ..agent_runtime.spec import MiddlewareRef
+from ..agent.spec import MiddlewareRef
 from .aggregation import AggregationPolicy
 from .limits import SwarmLimits
 from .models import AgentRef

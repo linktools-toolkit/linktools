@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ..knowledge.retriever import Retriever
-    from ..memory_runtime.store import MemoryStore
+    from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
 

@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from linktools.ai.agent_runtime.approval import (
+from linktools.ai.agent.approval import (
     ApprovalRequest,
     ApprovalStatus,
 )
