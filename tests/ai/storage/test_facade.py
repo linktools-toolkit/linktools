@@ -195,3 +195,44 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
     assert fetched.content == "prefers terse answers"
     assert fetched.owner_id == "user-1"
 
+
+def test_file_storage_exposes_file_approval_store(tmp_path):
+    from linktools.ai.agent_runtime.approval import ApprovalStore
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    storage = FileStorage(root=tmp_path)
+    assert isinstance(storage.approvals, FileApprovalStore)
+    assert isinstance(storage.approvals, ApprovalStore)
+
+
+def test_sqlalchemy_storage_exposes_sqlalchemy_approval_store(tmp_path):
+    from linktools.ai.agent_runtime.approval import ApprovalStore
+    from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    assert isinstance(storage.approvals, SqlAlchemyApprovalStore)
+    assert isinstance(storage.approvals, ApprovalStore)
+
+
+def test_file_storage_approvals_round_trips_a_request(tmp_path):
+    from linktools.ai.agent_runtime.approval import ApprovalRequest, ApprovalStatus, build_approval_request
+    storage = FileStorage(root=tmp_path)
+    request = build_approval_request(
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="browser.search",
+        reason="needs human confirmation",
+        arguments={"query": "test"},
+    )
+
+    async def _run():
+        await storage.approvals.create(request)
+        return await storage.approvals.get(request.id)
+
+    fetched = asyncio.run(_run())
+    assert fetched is not None
+    assert fetched.id == request.id
+    assert fetched.run_id == "run-1"
+    assert fetched.tool_call_id == "call-1"
+    assert fetched.tool_name == "browser.search"
+    assert fetched.reason == "needs human confirmation"
+    assert fetched.status is ApprovalStatus.PENDING
+
