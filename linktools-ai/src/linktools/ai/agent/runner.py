@@ -44,6 +44,7 @@ from ..run.models import RunCheckpoint, RunErrorInfo, RunInput, RunRecord, RunRe
 from ..run.store import RunStore
 from ..session.models import MessageRole, SessionMessage
 from ..session.store import SessionStore
+from .checkpoint_io import serialize_messages
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
@@ -174,7 +175,8 @@ class AgentRunner:
 
             await self._checkpoint_store.save(RunCheckpoint(
                 id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
-                format="pydantic-ai-v1", schema_version=1, payload=b"",
+                format="pydantic-ai-v1", schema_version=1,
+                payload=serialize_messages(run_result.all_messages()),
                 created_at=datetime.now(timezone.utc),
             ))
 
@@ -360,7 +362,8 @@ class AgentRunner:
 
             await self._checkpoint_store.save(RunCheckpoint(
                 id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
-                format="pydantic-ai-v1", schema_version=1, payload=b"",
+                format="pydantic-ai-v1", schema_version=1,
+                payload=serialize_messages(run.all_messages()),
                 created_at=datetime.now(timezone.utc),
             ))
 
