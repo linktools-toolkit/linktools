@@ -31,7 +31,7 @@ class FileEventStore:
 
     async def append(self, event: EventEnvelope, *, expected_sequence: "int | None" = None) -> EventEnvelope:
         path = self._event_path(event.run_id, event.sequence)
-        if expected_sequence is not None and path.exists():
+        if path.exists():
             raise EventSequenceConflictError(
                 f"event already exists at sequence {event.sequence} for run {event.run_id}"
             )

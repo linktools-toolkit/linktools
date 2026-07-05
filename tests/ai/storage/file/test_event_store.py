@@ -57,6 +57,14 @@ async def test_append_with_expected_sequence_conflict_raises(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_append_without_expected_sequence_still_rejects_duplicate_sequence(tmp_path):
+    store = FileEventStore(root=tmp_path)
+    await store.append(_event(sequence=1))
+    with pytest.raises(EventSequenceConflictError):
+        await store.append(_event(sequence=1))
+
+
+@pytest.mark.asyncio
 async def test_events_for_different_runs_are_isolated(tmp_path):
     store = FileEventStore(root=tmp_path)
     await store.append(_event(run_id="run-a", sequence=1))
