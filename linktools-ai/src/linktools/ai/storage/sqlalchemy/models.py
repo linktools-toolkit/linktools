@@ -7,7 +7,7 @@ covers both live and deleted state."""
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -159,3 +159,17 @@ class SwarmTaskRow(Base):
     lease_expires_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class MemoryRow(Base):
+    __tablename__ = "ai_memories"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    category: Mapped["str | None"] = mapped_column(String(64), nullable=True, index=True)
+    confidence: Mapped["float | None"] = mapped_column(Float, nullable=True)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+    metadata_json: Mapped[str] = mapped_column(Text)
