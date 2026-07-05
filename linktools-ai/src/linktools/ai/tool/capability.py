@@ -53,6 +53,28 @@ class PolicyCapability(AbstractCapability[None]):
             raise SkipToolExecution({"error": str(exc)}) from exc
         return args
 
+    async def after_tool_execute(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        call: "ToolCallPart",
+        tool_def: "ToolDefinition",
+        args: Any,
+        result: Any,
+    ) -> Any:
+        return result
+
+    async def on_tool_execute_error(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        call: "ToolCallPart",
+        tool_def: "ToolDefinition",
+        args: Any,
+        error: BaseException,
+    ) -> Any:
+        raise SkipToolExecution({"error": f"{type(error).__name__}: {error}"}) from error
+
 
 def build_policy_capability(executor: ToolExecutor) -> PolicyCapability:
     return PolicyCapability(executor=executor)
