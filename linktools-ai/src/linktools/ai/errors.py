@@ -129,3 +129,15 @@ class SwarmLimitExceededError(SwarmError):
     def __init__(self, message: str, *, kind: str) -> None:
         super().__init__(message)
         self.kind = kind
+
+
+class MemoryError(LinktoolsAIError):
+    """Base class for Memory-related errors."""
+
+
+class MemoryNotFoundError(MemoryError):
+    pass
+
+
+class MemoryConflictError(MemoryError):
+    pass
