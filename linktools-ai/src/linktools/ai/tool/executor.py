@@ -17,13 +17,13 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..agent.approval import ApprovalStatus, build_approval_request
-from ..errors import ToolApprovalRequiredError, ToolDeniedError
+from ..errors import RunPaused, ToolApprovalRequiredError, ToolDeniedError
 from ..events.envelope import EventEnvelope
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 
 if TYPE_CHECKING:
-    from ..agent.approval import ApprovalStore
+    from ..agent.approval import ApprovalRequest, ApprovalStore
     from ..events.store import EventStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,11 +37,20 @@ class ToolExecutor:
         approval_store: "ApprovalStore | None" = None,
         event_store: "EventStore | None" = None,
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
+        pause_on_approval: bool = False,
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
         self._event_store = event_store
         self._run_id_resolver = run_id_resolver
+        # When True, the require-approval branch persists the request (via
+        # _record_approval) and then raises RunPaused(run_id, approval_id)
+        # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
+        # ToolError) so PolicyCapability's catch list does not translate it
+        # into SkipToolExecution -- it propagates out of pydantic-ai's
+        # tool-execution stack to AgentRunner (Tasks 6-7 catch it). Default
+        # False preserves today's behavior byte-for-byte.
+        self._pause_on_approval = pause_on_approval
         # Per-executor monotonic counter for event sequences. The executor is
         # compiled once and reused across many runs; sequence uniqueness is
         # enforced per-run at the storage layer (paths/rows are keyed by
@@ -61,7 +70,14 @@ class ToolExecutor:
             # of re-persisting a PENDING duplicate and re-raising.
             if await self._already_approved(request, context):
                 return
-            await self._record_approval(request, context, decision.reason)
+            approval = await self._record_approval(request, context, decision.reason)
+            if self._pause_on_approval and approval is not None:
+                run_id = (
+                    self._run_id_resolver(context)
+                    if self._run_id_resolver is not None
+                    else context.run_id
+                )
+                raise RunPaused(run_id=run_id, approval_id=approval.id)
             raise ToolApprovalRequiredError(
                 decision.reason or f"tool requires approval: {request.tool_name}"
             )
@@ -97,13 +113,18 @@ class ToolExecutor:
         request: ToolRequest,
         context: ToolContext,
         reason: "str | None",
-    ) -> None:
+    ) -> "ApprovalRequest | None":
         """Persist a PENDING ApprovalRequest (and emit ApprovalRequested) when
-        an approval_store is wired. Best-effort audit: event-emission failures
+        an approval_store is wired, returning the persisted request. Returns
+        None when no store is wired. Best-effort audit: event-emission failures
         are logged and swallowed (the approval record is the source of truth);
-        the caller (check) still raises ToolApprovalRequiredError afterward
-        regardless of outcome here. With approval_store=None this is a no-op
-        (default-None path: behavior identical to today).
+        the caller (check) still raises afterward regardless of outcome here.
+        With approval_store=None this is a no-op (default-None path: behavior
+        identical to today).
+
+        The return value lets the ``pause_on_approval=True`` branch reach the
+        persisted ``approval.id`` for ``RunPaused(approval_id=...)`` without
+        re-doing the run_id resolution / build work.
 
         Event-sequence caveat: the executor uses a per-executor itertools.count()
         for event sequences (starting at 1). When the same EventStore is shared
@@ -114,7 +135,7 @@ class ToolExecutor:
         EventStore "next sequence" API is deferred until approval is wired into
         the runner."""
         if self._approval_store is None:
-            return
+            return None
 
         run_id = (
             self._run_id_resolver(context) if self._run_id_resolver is not None
@@ -159,6 +180,8 @@ class ToolExecutor:
                     approval.id,
                     exc,
                 )
+
+        return approval
 
     async def execute(
         self,

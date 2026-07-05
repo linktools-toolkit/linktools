@@ -69,6 +69,28 @@ class InvalidRunTransitionError(RunError):
     pass
 
 
+class RunPaused(RunError):
+    """Raised by ToolExecutor (under ``pause_on_approval=True``) and propagated
+    through pydantic-ai's tool-execution stack out to AgentRunner, which
+    checkpoints state, transitions the Run to WAITING_APPROVAL, and stops.
+
+    This is a control-flow signal, NOT an error condition -- it's a RunError
+    (not a ToolError) precisely so PolicyCapability.before_tool_execute (which
+    only catches ToolDeniedError/ToolApprovalRequiredError -> SkipToolExecution)
+    lets it propagate. AgentRunner catches it; nothing else should.
+
+    Carries both ids AgentRunner needs: ``run_id`` (already resolved through
+    ToolExecutor.run_id_resolver, so it matches the persisted ApprovalRequest)
+    and ``approval_id`` (the PENDING request the human must approve/reject)."""
+
+    def __init__(self, run_id: str, approval_id: str) -> None:
+        super().__init__(
+            f"run paused waiting for approval: run_id={run_id} approval_id={approval_id}"
+        )
+        self.run_id = run_id
+        self.approval_id = approval_id
+
+
 class SessionError(LinktoolsAIError):
     """Base class for Session-related errors."""
 
