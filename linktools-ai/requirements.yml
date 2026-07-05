@@ -9,6 +9,7 @@ dependencies:
 dev-dependencies:
   - pytest-asyncio
   - fakeredis>=2,<3
+  - lupa>=2,<3
 
 release-dependencies: []
 
