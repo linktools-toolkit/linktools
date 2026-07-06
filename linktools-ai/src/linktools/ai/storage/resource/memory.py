@@ -32,19 +32,26 @@ class MemoryResourceBackend:
         return Missing()
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        # NOTE: cursor-based continuation is not yet implemented in Phase 1 -- `cursor`
-        # is accepted for forward API compatibility but ignored; results are simply
-        # truncated to `limit`. Real pagination is deferred to a later phase.
+        # Keyset pagination (spec §15.2): entries iterate in sorted key order;
+        # ``key > cursor`` is the resume point. Collect limit+1 so the
+        # (limit+1)th path becomes next_cursor. Memory does NOT implement
+        # raw_move / raw_stat -- ResourceStore falls back to the legacy path
+        # for this backend, exercising the hasattr() probe.
         prefix = path.value.rstrip("/") + "/"
         items = []
         for key, (_content, info) in sorted(self._entries.items()):
             if not key.startswith(prefix):
                 continue
+            if cursor is not None and key <= cursor:
+                continue
             rest = key[len(prefix):]
             if depth == Depth.ONE and "/" in rest:
                 continue
             items.append(info)
-        return ResourcePage(items=tuple(items[:limit]), cursor=None)
+            if len(items) > limit:
+                break
+        next_cursor = items[limit].path.value if len(items) > limit else None
+        return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
     async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
         key = path.value

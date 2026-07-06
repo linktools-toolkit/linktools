@@ -7,7 +7,7 @@ put_idempotency."""
 
 from typing import Mapping, Protocol, runtime_checkable
 
-from .models import Depth, IdempotencyRecord, Resource, ResourceInfo, ResourcePage, WriteOptions
+from .models import Depth, IdempotencyRecord, MoveResult, Resource, ResourceInfo, ResourceLookupInfo, ResourcePage, WriteOptions
 from .path import ResourcePath
 
 
@@ -80,4 +80,35 @@ class ResourceBackend(Protocol):
         options: WriteOptions,
         request_hash: str,
     ) -> None:
+        ...
+
+    # -- OPTIONAL atomic MOVE (spec section 13) --
+    # MOVE is a single domain operation: the backend must NOT decompose it into
+    # a public put() + delete() pair, which would expose intermediate state
+    # (target written while source still live, or source gone while target not
+    # yet written) and would bump the revision twice instead of once. A backend
+    # that has a real transaction primitive (SqlAlchemy) implements raw_move as
+    # ONE transaction. The File backend implements it under self._lock with an
+    # os.replace for the data file. The Memory backend does NOT implement it:
+    # ResourceStore probes with hasattr() and, when absent, falls back to the
+    # legacy put+delete orchestration -- so Memory keeps today's behavior.
+
+    async def raw_move(
+        self,
+        source: ResourcePath,
+        target: ResourcePath,
+        *,
+        options: WriteOptions,
+    ) -> MoveResult:
+        ...
+
+    # -- OPTIONAL metadata-only stat (spec section 15.1) --
+    # Returns the resource metadata (path/version/etag/content_type/metadata/
+    # state) WITHOUT loading the content blob. A backend that can select only
+    # metadata columns (SqlAlchemy) or read only the sidecar (File) implements
+    # this to avoid pulling potentially-large content into memory for callers
+    # that only need metadata. ResourceStore.stat() delegates when available
+    # and otherwise falls back to get() + .info.
+
+    async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
         ...

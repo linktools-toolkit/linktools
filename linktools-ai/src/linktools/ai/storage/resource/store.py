@@ -8,7 +8,7 @@ import hashlib
 import json
 
 from .backend import ResourceBackend
-from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourcePage, WriteOptions
+from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceLookupInfo, ResourcePage, WriteOptions
 from .path import ResourcePath
 from ...errors import IdempotencyConflictError, ResourcePreconditionFailedError, ResourceReadOnlyError
 
@@ -44,24 +44,62 @@ class ResourceStore:
         lookup = await self._lookup_chain(path)
         return lookup.resource if isinstance(lookup, Found) else None
 
-    async def stat(self, path: ResourcePath) -> "ResourceInfo | None":
+    async def stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
+        """Metadata-only stat (spec §15.1): delegate to backend.raw_stat when
+        available so the content blob is never loaded. Falls back to get()+info
+        only for backends that don't implement raw_stat (Memory).
+
+        Three-state resolution mirrors _lookup_chain: a Masked primary result
+        stops the overlay search (spec section 14.6 rule 3). The masked check
+        uses raw_get(include_content=False) -- only invoked in the rare case
+        where raw_stat returned None and overlays exist that might otherwise
+        resurrect a masked path."""
+        if hasattr(self._primary, "raw_stat"):
+            info = await self._primary.raw_stat(path)
+            if info is not None:
+                return info
+            # raw_stat returns None for both Missing and Masked. Distinguish
+            # them so a primary whiteout hides overlays (no resurrection).
+            primary_lookup = await self._primary.raw_get(path, include_content=False)
+            if isinstance(primary_lookup, Masked):
+                return None
+            for overlay in self._overlays:
+                if hasattr(overlay, "raw_stat"):
+                    overlay_info = await overlay.raw_stat(path)
+                    if overlay_info is not None:
+                        return overlay_info
+                else:
+                    overlay_lookup = await overlay.raw_get(path, include_content=False)
+                    if isinstance(overlay_lookup, Found):
+                        return overlay_lookup.resource.info
+            return None
         resource = await self.get(path)
         return resource.info if resource is not None else None
 
     async def propfind(self, path: ResourcePath, *, depth: Depth = Depth.ONE, limit: int = 100, cursor: "str | None" = None) -> ResourcePage:
         """List resources under `path`, merging Primary and Overlay results.
 
-        NOTE: cursor-based continuation is not yet implemented in Phase 1 --
-        `cursor` is accepted for forward API compatibility but ignored; callers
-        must not rely on being able to page past `limit` items. Real pagination
-        is deferred to a later phase.
-        """
+        Cursor pagination (spec §15.2): each backend is asked for limit+1 items
+        past the cursor; the (limit+1)th item from any backend signals "more
+        available". After merge + whiteout filter, if the result exceeds limit,
+        the limit-th path becomes next_cursor and the caller passes it back to
+        continue. The cursor is the literal normalized path string, stable
+        because every backend sorts by path.
+
+        Multi-backend merge caveat: a backend may return items past the cursor
+        that are dropped by whiteout or shadowed by a higher-priority backend.
+        The wasted fetch is correctness-neutral -- the next call's cursor
+        strictly advances (the limit-th path), so progress is guaranteed and
+        termination is reached when no backend has more items past the cursor."""
         merged: "dict[str, ResourceInfo]" = {}
+        # Fetch limit+1 from each backend so we can detect "more available"
+        # without a second count query (spec §15.2 LIMIT :limit+1).
+        fetch_limit = limit + 1
         for overlay in reversed(self._overlays):
-            page = await overlay.raw_propfind(path, depth=depth, limit=limit, cursor=cursor)
+            page = await overlay.raw_propfind(path, depth=depth, limit=fetch_limit, cursor=cursor)
             for info in page.items:
                 merged[info.path.value] = info
-        primary_page = await self._primary.raw_propfind(path, depth=depth, limit=limit, cursor=cursor)
+        primary_page = await self._primary.raw_propfind(path, depth=depth, limit=fetch_limit, cursor=cursor)
         primary_paths = {info.path.value for info in primary_page.items}
         for info in primary_page.items:
             merged[info.path.value] = info
@@ -72,7 +110,11 @@ class ResourceStore:
             if isinstance(primary_lookup, Masked):
                 del merged[overlay_only_path]
         items = tuple(merged[key] for key in sorted(merged))
-        return ResourcePage(items=items[:limit], cursor=None)
+        if len(items) > limit:
+            # More available: next page resumes strictly after the last path
+            # we're returning this call. items[limit-1] is the limit-th item.
+            return ResourcePage(items=items[:limit], cursor=items[limit - 1].path.value)
+        return ResourcePage(items=items, cursor=None)
 
     def _require_writable_primary(self) -> None:
         if self._primary.readonly:
@@ -154,7 +196,56 @@ class ResourceStore:
         await self._save_idempotency("delete", options.idempotency_key, req_hash, result_info)
 
     async def move(self, src: ResourcePath, dst: ResourcePath, *, options: WriteOptions = WriteOptions()) -> Resource:
+        """MOVE: a single domain operation (spec §13.1). When the primary
+        backend implements raw_move AND the source lives in primary, delegate
+        to it -- the backend folds load-source + write-target + whiteout-source
+        + bump-revision into ONE transaction, so a concurrent reader never sees
+        the intermediate states (target written while source still live, or
+        source masked while target missing) that a put+delete decomposition
+        would expose. The revision counter bumps exactly once for the whole
+        move.
+
+        Two cases keep the legacy put+delete orchestration: (1) the Memory
+        backend has no transaction primitive, so it never implements raw_move;
+        (2) an OVERLAY-only source must be copied across backends, which spec
+        §13.3 explicitly says cannot be made fully atomic -- the legacy path
+        copies the overlay resource into primary and writes a primary whiteout
+        to mask the overlay source.
+
+        Idempotency: the atomic path keys the idempotency record under
+        ``move:{key}`` (spec §14 lists MOVE as a distinct operation). The
+        legacy path inherits put's ``put:{key}`` keying via the delegated put
+        call -- preserved unchanged for backward compatibility."""
         self._require_writable_primary()
+        if hasattr(self._primary, "raw_move"):
+            # Atomic raw_move handles only primary-resident sources. An
+            # overlay-only source falls through to the legacy cross-backend
+            # copy path (spec §13.3: not fully atomic).
+            source_in_primary = (
+                await self._primary.raw_stat(src) is not None
+                if hasattr(self._primary, "raw_stat")
+                else isinstance(await self._primary.raw_get(src, include_content=False), Found)
+            )
+            if source_in_primary:
+                req_hash = _request_hash(
+                    b"move",
+                    src.value.encode(),
+                    dst.value.encode(),
+                    (options.if_match or "").encode(),
+                    str(options.if_none_match).encode(),
+                    (options.actor or "").encode(),
+                )
+                existing = await self._check_idempotency("move", options.idempotency_key, req_hash)
+                if existing is not None:
+                    # Replay: re-fetch the target content so the caller gets a
+                    # complete Resource, not just the cached info.
+                    current = await self._primary.raw_get(dst)
+                    content = current.resource.content if isinstance(current, Found) else b""
+                    return Resource(info=existing.result, content=content)
+                result = await self._primary.raw_move(src, dst, options=options)
+                await self._save_idempotency("move", options.idempotency_key, req_hash, result.info)
+                return result
+        # Legacy fallback (Memory, or overlay-source move): non-atomic put+delete.
         source = await self.get(src)
         if source is None:
             raise ResourcePreconditionFailedError(f"cannot move missing resource: {src}")

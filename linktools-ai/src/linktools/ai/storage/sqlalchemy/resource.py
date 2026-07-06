@@ -31,7 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ResourceRow, IdempotencyRow, RevisionRow
-from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage, WriteOptions
+from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, MoveResult, Resource, ResourceInfo, ResourceLookupInfo, ResourceKind, ResourcePage, WriteOptions
 from ..resource.path import ResourcePath
 from ...errors import IdempotencyConflictError, ResourcePreconditionFailedError
 
@@ -108,26 +108,58 @@ class SqlAlchemyResourceBackend:
             content = row.content if include_content else b""
             return Found(resource=Resource(info=_row_to_info(row), content=content))
 
+    async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
+        """Metadata-only stat (spec §15.1): SELECT every column EXCEPT content.
+        Loading a potentially-large blob just to read its etag/version is
+        wasteful; projecting the metadata columns only keeps stat() cheap. A
+        masked (deleted_at) row is treated as absent -- stat is for live
+        resources; whiteout lineage is the province of raw_get."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(
+                    ResourceRow.path, ResourceRow.kind, ResourceRow.etag, ResourceRow.version,
+                    ResourceRow.content_type, ResourceRow.size, ResourceRow.modified_at,
+                    ResourceRow.metadata_json,
+                )
+                .where(ResourceRow.path == path.value)
+                .where(ResourceRow.deleted_at.is_(None))
+            )
+            row = result.one_or_none()
+        if row is None:
+            return None
+        return _dict_to_info(row._asdict())
+
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        # NOTE: cursor-based continuation is not yet implemented in Phase 1 -- `cursor`
-        # is accepted for forward API compatibility but ignored; results are simply
-        # truncated to `limit`. Real pagination is deferred to a later phase.
+        """Keyset pagination (spec §15.2): ``WHERE path > :cursor ORDER BY path
+        LIMIT :limit+1``. Pushing the depth=ONE filter into SQL (``NOT LIKE
+        prefix + '%/%'``) keeps the LIMIT honest -- a Python-side depth filter
+        applied after LIMIT could silently under-return. Fetching limit+1 rows
+        lets us detect "more available" without a second count query: when we
+        get limit+1, the (limit+1)th path becomes next_cursor."""
         prefix = path.value.rstrip("/") + "/"
         escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conditions = [
+            ResourceRow.path.like(f"{escaped_prefix}%", escape="\\"),
+            ResourceRow.deleted_at.is_(None),
+        ]
+        if depth == Depth.ONE:
+            # Exclude grand-children and deeper: a child of `/agents/` matches
+            # `/agents/%` but NOT `/agents/%/%` (which requires at least one
+            # further slash). The leading prefix is already escaped; the
+            # trailing `%/` are wildcards/escaped-slash per LIKE-with-escape.
+            conditions.append(~ResourceRow.path.like(f"{escaped_prefix}%/%", escape="\\"))
+        if cursor is not None:
+            conditions.append(ResourceRow.path > cursor)
         async with self._session_factory() as session:
             result = await session.execute(
                 select(ResourceRow)
-                .where(ResourceRow.path.like(f"{escaped_prefix}%", escape="\\"))
-                .where(ResourceRow.deleted_at.is_(None))
+                .where(*conditions)
+                .order_by(ResourceRow.path)
+                .limit(limit + 1)
             )
-            items = []
-            for row in result.scalars():
-                rest = row.path[len(prefix):]
-                if depth == Depth.ONE and "/" in rest:
-                    continue
-                items.append(_row_to_info(row))
-            items.sort(key=lambda info: info.path.value)
-            return ResourcePage(items=tuple(items[:limit]), cursor=None)
+            items = [_row_to_info(row) for row in result.scalars()]
+        next_cursor = items[limit].path.value if len(items) > limit else None
+        return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
     # ------------------------------------------------------------------
     # Revision counter: atomic increment (spec §12.1)
@@ -271,6 +303,7 @@ class SqlAlchemyResourceBackend:
         *,
         if_match: "str | None",
         if_none_match: bool,
+        bump_revision: bool = True,
     ) -> "ResourceInfo | None":
         """One attempt: SELECT then either INSERT (unique-constraint atomicity)
         or conditional UPDATE ``WHERE version = :expected [AND etag = :if_match]``.
@@ -285,6 +318,11 @@ class SqlAlchemyResourceBackend:
         failure: If-Match on a missing resource, If-None-Match on an existing
         resource, IntegrityError on INSERT under If-None-Match, or a conditional
         UPDATE that missed because the etag no longer matches If-Match.
+
+        ``bump_revision``: when False, the caller (raw_move) owns the single
+        revision bump for the whole composite operation and directs this helper
+        to skip its per-step bumps. The no-op short-circuit path never bumps
+        regardless of the flag (§12.4: an idempotent no-op PUT must not bump).
         """
         row = await self._get_row(session, path)
         if row is None:
@@ -295,7 +333,8 @@ class SqlAlchemyResourceBackend:
             try:
                 async with session.begin_nested():
                     new_row = await self._insert_new_row(session, path, content, content_type, metadata)
-                    await self._bump_revision(session)
+                    if bump_revision:
+                        await self._bump_revision(session)
                 return _row_to_info(new_row)
             except IntegrityError:
                 # Concurrent INSERT won the path race. Under If-None-Match this
@@ -342,7 +381,8 @@ class SqlAlchemyResourceBackend:
                     # §12.3: the etag precondition failed inside the DB WHERE.
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
                 return None  # retry-able conflict
-            await self._bump_revision(session)
+            if bump_revision:
+                await self._bump_revision(session)
             return _dict_to_info(updated)
 
     async def _put_with_retry(
@@ -355,16 +395,20 @@ class SqlAlchemyResourceBackend:
         *,
         if_match: "str | None",
         if_none_match: bool,
+        bump_revision: bool = True,
     ) -> ResourceInfo:
         """SELECT-then-conditional-UPDATE loop. Precondition failures raise
         immediately from ``_put_once`` (no retry). Retry-able conflicts (only
         reachable with no precondition set) loop until the conditional UPDATE
         matches, preserving the external "always wins" contract for unconditional
-        puts without losing updates."""
+        puts without losing updates. ``bump_revision`` is forwarded to
+        ``_put_once`` so composite operations (raw_move) can own the single
+        revision bump themselves."""
         for _ in range(_CONFLICT_RETRIES):
             info = await self._put_once(
                 session, path, content, content_type, metadata,
                 if_match=if_match, if_none_match=if_none_match,
+                bump_revision=bump_revision,
             )
             if info is not None:
                 return info
@@ -582,6 +626,62 @@ class SqlAlchemyResourceBackend:
                     )
                 if idem_key is not None:
                     await self._save_idempotency_row(session, idem_key, request_hash, removed_info)
+
+    # ------------------------------------------------------------------
+    # MOVE: ONE transaction (spec §13.2)
+    # ------------------------------------------------------------------
+
+    async def raw_move(
+        self,
+        source: ResourcePath,
+        target: ResourcePath,
+        *,
+        options: WriteOptions,
+    ) -> MoveResult:
+        """Atomic MOVE in ONE transaction (spec §13.2): load+lock source,
+        validate, write target, whiteout source, bump revision once. All four
+        mutations commit or roll back together, so a concurrent reader can
+        never observe the intermediate states a decomposed put+delete would
+        expose (target written while source still live = duplicate; source
+        masked while target missing = data loss). The revision counter bumps
+        exactly once -- observable proof of single-transaction atomicity (a
+        put+delete decomposition would bump twice).
+
+        Source precondition: must exist and be live. Target preconditions:
+        options.if_match / options.if_none_match are enforced against the
+        target row via _put_with_retry (same code path as raw_put_checked, so
+        If-Match enters the conditional UPDATE WHERE per spec §12.3)."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                source_row = await self._get_row(session, source)
+                if source_row is None or source_row.deleted_at is not None:
+                    raise ResourcePreconditionFailedError(f"cannot move missing resource: {source}")
+                source_content = source_row.content
+                source_info = _row_to_info(source_row)
+
+                # Write target (INSERT or conditional UPDATE). Runs in this
+                # transaction's snapshot: no concurrent writer can interleave.
+                # bump_revision=False: raw_move owns the single revision bump
+                # for the whole composite operation (spec §13.2 step 6) -- the
+                # target write and source mask together count as ONE state
+                # change, so the counter advances exactly once.
+                target_info = await self._put_with_retry(
+                    session, target, source_content, source_info.content_type, dict(source_info.metadata),
+                    if_match=options.if_match, if_none_match=options.if_none_match,
+                    bump_revision=False,
+                )
+
+                # Whiteout source: conditional mask on the version we read.
+                # Inside one transaction the source row cannot have changed
+                # since our SELECT, so the conditional UPDATE always matches;
+                # masked=False would indicate a bug or external mutation.
+                masked = await self._conditional_delete_row(session, source, source_row.version, if_match=None)
+                if not masked:
+                    raise ResourcePreconditionFailedError(f"source changed during move: {source}")
+
+                # One revision bump for the whole move (spec §13.2 step 6).
+                await self._bump_revision(session)
+                return Resource(info=target_info, content=source_content)
 
     # ------------------------------------------------------------------
     # Idempotency + revision readers (unchanged behavior)

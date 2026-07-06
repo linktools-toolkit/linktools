@@ -94,3 +94,18 @@ class IdempotencyRecord:
     key: str
     request_hash: str
     result: "ResourceInfo | None"
+
+
+# ResourceLookupInfo is the metadata-only shape returned by raw_stat (spec
+# §15.1). It is intentionally an alias of ResourceInfo: ResourceInfo already
+# carries exactly the metadata fields (path/kind/etag/version/content_type/
+# size/modified_at/metadata) and -- crucially -- no content field. Aliasing
+# rather than duplicating keeps a single source of truth for the metadata
+# shape; the distinct name documents the "no content loaded" contract at the
+# type level.
+ResourceLookupInfo: TypeAlias = ResourceInfo
+
+# MoveResult is the result shape of an atomic MOVE (spec §13.1). The target
+# resource (info + content) is what callers receive from ResourceStore.move();
+# aliasing Resource avoids parallel result types.
+MoveResult: TypeAlias = Resource

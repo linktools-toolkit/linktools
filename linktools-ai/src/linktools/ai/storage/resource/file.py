@@ -16,7 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
 
-from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage, WriteOptions
+from .models import Depth, Found, IdempotencyRecord, Masked, Missing, MoveResult, Resource, ResourceInfo, ResourceKind, ResourceLookupInfo, ResourcePage, WriteOptions
 from .path import ResourcePath
 from ...errors import IdempotencyConflictError, InvalidResourcePathError, ResourcePreconditionFailedError
 
@@ -143,21 +143,35 @@ class FileResourceBackend:
             return Masked(path=path, version=version)
         return Missing()
 
+    async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
+        """Metadata-only stat (spec §15.1): read only the metadata sidecar,
+        never the data file. The sidecar carries path/kind/etag/version/
+        content_type/size/modified_at/metadata -- everything stat() needs
+        without touching the (potentially large) content blob."""
+        return self._load_info(path)
+
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        # NOTE: cursor-based continuation is not yet implemented in Phase 1 -- `cursor`
-        # is accepted for forward API compatibility but ignored; results are simply
-        # truncated to `limit`. Real pagination is deferred to a later phase.
+        """Keyset pagination (spec §15.2): metadata files are iterated in sorted
+        order (so the global path order is stable), filtered by prefix, by
+        ``path > cursor`` (resume point), and by depth, collecting limit+1 items
+        so the (limit+1)th path becomes next_cursor. The cursor is the literal
+        normalized path string of the last item returned."""
         prefix = path.value.rstrip("/") + "/"
         items = []
         for meta_file in sorted(self._meta_dir.glob("*.json")):
             candidate = _path_from_filename(meta_file.stem)
             if not candidate.value.startswith(prefix):
                 continue
+            if cursor is not None and candidate.value <= cursor:
+                continue
             rest = candidate.value[len(prefix):]
             if depth == Depth.ONE and "/" in rest:
                 continue
             items.append(self._load_info(candidate))
-        return ResourcePage(items=tuple(items[:limit]), cursor=None)
+            if len(items) > limit:
+                break  # collected limit+1; enough to signal "more available"
+        next_cursor = items[limit].path.value if len(items) > limit else None
+        return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
     async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
         prior = self._load_info(path)
@@ -310,3 +324,84 @@ class FileResourceBackend:
                 if info is None or info.etag != options.if_match:
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
             await self.raw_delete(path)
+
+    async def raw_move(
+        self,
+        source: ResourcePath,
+        target: ResourcePath,
+        *,
+        options: WriteOptions,
+    ) -> MoveResult:
+        """Atomic MOVE on the same filesystem via ``os.replace`` for the data
+        file (spec §13.3). The whole operation runs under self._lock so two
+        in-process callers cannot interleave the steps; cross-process races
+        remain (a documented limitation -- true cross-process atomicity
+        requires the SqlAlchemy backend).
+
+        Cross-device source/target would raise OSError(EXDEV) from os.replace;
+        we do not catch it. Within one filesystem os.replace is atomic: at no
+        point in time does a reader see the target data file half-written.
+
+        The non-data steps (metadata write, source whiteout, target-whiteout
+        clear, revision bump) are themselves each atomic via _atomic_write, but
+        the SEQUENCE is not crash-atomic -- a crash between the data replace
+        and the source whiteout leaves source masked-but-data-gone. That is
+        the documented file-mode limitation; spec §13.3 requires idempotent
+        recoverability rather than strict crash-atomicity for file mode.
+
+        Revision bumps exactly once (observable proof the move was not
+        decomposed into a put+delete pair, which would bump twice)."""
+        with self._lock:
+            source_info = self._load_info(source)
+            if source_info is None:
+                raise ResourcePreconditionFailedError(f"cannot move missing resource: {source}")
+            source_data_path = self._data_path(source)
+            source_content = source_data_path.read_bytes()
+
+            # Target precondition check (mirror raw_put_checked's logic).
+            target_info = self._load_info(target)
+            if options.if_none_match and target_info is not None:
+                raise ResourcePreconditionFailedError(f"resource already exists: {target}")
+            if options.if_match is not None:
+                if target_info is None or target_info.etag != options.if_match:
+                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {target}")
+
+            target_whiteout_path = self._whiteout_path(target)
+            prior_target_whiteout_version = 0
+            if target_whiteout_path.exists():
+                prior_target_whiteout_version = json.loads(target_whiteout_path.read_text())["version"]
+            new_target_version = max(target_info.version if target_info else 0, prior_target_whiteout_version) + 1
+            new_info = ResourceInfo(
+                path=target,
+                kind=source_info.kind,
+                etag=source_info.etag,  # same content => same etag
+                version=new_target_version,
+                content_type=source_info.content_type,
+                size=source_info.size,
+                modified_at=datetime.now(timezone.utc),
+                metadata=dict(source_info.metadata),
+            )
+
+            # Move the data file atomically (same-filesystem os.replace).
+            # Cross-device would raise OSError(EXDEV); the message documents
+            # the limitation rather than silently falling back to copy+unlink.
+            target_data_path = self._data_path(target)
+            os.replace(source_data_path, target_data_path)
+
+            # Write target metadata, clear any target whiteout.
+            self._save_info(new_info)
+            if target_whiteout_path.exists():
+                target_whiteout_path.unlink()
+
+            # Drop source metadata and write its whiteout.
+            self._meta_path(source).unlink(missing_ok=True)
+            source_whiteout_path = self._whiteout_path(source)
+            existing_sw_version = 0
+            if source_whiteout_path.exists():
+                existing_sw_version = json.loads(source_whiteout_path.read_text())["version"]
+            sw_version = max(source_info.version, existing_sw_version) + 1
+            self._atomic_write(source_whiteout_path, json.dumps({"version": sw_version}).encode("utf-8"))
+
+            # One revision bump for the whole move.
+            self._bump_revision()
+            return Resource(info=new_info, content=source_content)
