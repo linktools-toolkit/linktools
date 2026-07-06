@@ -40,36 +40,57 @@ def _row_to_message(row: SessionMessageRow) -> SessionMessage:
 
 
 class SqlAlchemySessionStore:
-    def __init__(self, *, session_factory: "Callable[[], AsyncSession]") -> None:
+    def __init__(
+        self,
+        *,
+        session_factory: "Callable[[], AsyncSession]",
+        session: "AsyncSession | None" = None,
+    ) -> None:
         self._session_factory = session_factory
+        # UoW mode: when set, every method uses this shared session directly and
+        # does NOT open its own session or call session.begin() -- the UoW owns
+        # the transaction. None means normal mode (own session + transaction).
+        self._session = session
+
+    async def _execute_in_session(self, fn):
+        """Run ``fn(session)`` in own transaction (normal mode) or against the
+        shared session (UoW mode). See SqlAlchemyRunStore._execute_in_session."""
+        if self._session is not None:
+            result = await fn(self._session)
+            await self._session.flush()
+            return result
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await fn(session)
 
     async def create(self, session: SessionRecord) -> SessionRecord:
-        async with self._session_factory() as db_session:
-            async with db_session.begin():
-                db_session.add(SessionRow(
-                    id=session.id, parent_id=session.parent_id, status=session.status.value, version=session.version,
-                    created_at=session.created_at, updated_at=session.updated_at, metadata_json=json.dumps(dict(session.metadata)),
-                ))
+        async def _do(db_session):
+            db_session.add(SessionRow(
+                id=session.id, parent_id=session.parent_id, status=session.status.value, version=session.version,
+                created_at=session.created_at, updated_at=session.updated_at, metadata_json=json.dumps(dict(session.metadata)),
+            ))
+        await self._execute_in_session(_do)
         return session
 
     async def get(self, session_id: str) -> "SessionRecord | None":
-        async with self._session_factory() as db_session:
+        async def _do(db_session):
             result = await db_session.execute(select(SessionRow).where(SessionRow.id == session_id))
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+        return await self._execute_in_session(_do)
 
     async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
-        async with self._session_factory() as db_session:
-            async with db_session.begin():
-                for message in messages:
-                    db_session.add(SessionMessageRow(
-                        id=message.id, session_id=message.session_id, sequence=message.sequence, role=message.role.value,
-                        content_json=json.dumps(message.content), run_id=message.run_id, created_at=message.created_at,
-                        metadata_json=json.dumps(dict(message.metadata)),
-                    ))
+        async def _do(db_session):
+            for message in messages:
+                db_session.add(SessionMessageRow(
+                    id=message.id, session_id=message.session_id, sequence=message.sequence, role=message.role.value,
+                    content_json=json.dumps(message.content), run_id=message.run_id, created_at=message.created_at,
+                    metadata_json=json.dumps(dict(message.metadata)),
+                ))
+        await self._execute_in_session(_do)
 
     async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
-        async with self._session_factory() as db_session:
+        async def _do(db_session):
             result = await db_session.execute(
                 select(SessionMessageRow)
                 .where(SessionMessageRow.session_id == session_id, SessionMessageRow.sequence > after_sequence)
@@ -77,6 +98,7 @@ class SqlAlchemySessionStore:
                 .limit(limit)
             )
             return tuple(_row_to_message(row) for row in result.scalars())
+        return await self._execute_in_session(_do)
 
     async def update(
         self,
@@ -85,17 +107,17 @@ class SqlAlchemySessionStore:
         status: "SessionStatus | None" = None,
         metadata: "Mapping[str, Any] | None" = None,
     ) -> SessionRecord:
-        async with self._session_factory() as db_session:
-            async with db_session.begin():
-                result = await db_session.execute(select(SessionRow).where(SessionRow.id == session_id))
-                row = result.scalar_one_or_none()
-                if row is None:
-                    raise SessionError(f"session not found: {session_id}")
-                if status is not None:
-                    row.status = status.value
-                if metadata is not None:
-                    row.metadata_json = json.dumps(dict(metadata))
-                row.version = row.version + 1
-                row.updated_at = datetime.now(timezone.utc)
-                await db_session.flush()
-                return _row_to_record(row)
+        async def _do(db_session):
+            result = await db_session.execute(select(SessionRow).where(SessionRow.id == session_id))
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionError(f"session not found: {session_id}")
+            if status is not None:
+                row.status = status.value
+            if metadata is not None:
+                row.metadata_json = json.dumps(dict(metadata))
+            row.version = row.version + 1
+            row.updated_at = datetime.now(timezone.utc)
+            await db_session.flush()
+            return _row_to_record(row)
+        return await self._execute_in_session(_do)

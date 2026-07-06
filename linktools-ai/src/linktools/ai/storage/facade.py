@@ -9,8 +9,9 @@ two supported deployment shapes:
   transactions are possible (each backend owns its own files), so the inherited
   Storage.transaction() raises StorageCapabilityError.
 - SqlAlchemyStorage: five sqlalchemy backends sharing one session_factory, plus
-  an overridden transaction() that yields a shared AsyncSession so a caller can
-  coordinate writes across stores in one DB transaction.
+  an overridden transaction() that yields a UnitOfWork whose stores all bind to
+  one AsyncSession + one transaction, so a caller can coordinate writes across
+  stores atomically (commit on clean exit, rollback on exception).
 
 Subclasses use object.__setattr__ to stash their own state (e.g. the session
 factory) because the dataclass is frozen -- hence frozen=True rather than
@@ -68,7 +69,7 @@ class Storage:
     approvals: ApprovalStore
     capabilities: StorageCapabilities
 
-    def transaction(self) -> "AsyncIterator[AsyncSession]":
+    def transaction(self) -> "AsyncIterator[_UnitOfWork]":
         """Cross-store transactional scope. The base implementation always
         raises: only a Storage whose backends genuinely share one underlying
         transaction provider (e.g. SqlAlchemyStorage) can honor this. Callers
@@ -83,6 +84,27 @@ class Storage:
         raise StorageCapabilityError(
             f"{type(self).__name__} does not support cross-store transactions"
         )
+
+
+@dataclass(frozen=True)
+class _UnitOfWork:
+    """Atomic cross-store unit of work. Yielded by
+    SqlAlchemyStorage.transaction(). All seven stores bind to the SAME
+    AsyncSession, and that session's open transaction is owned by the
+    surrounding ``async with`` -- so writes performed through tx.runs /
+    tx.approvals / etc. either all commit (clean exit) or all roll back
+    (exception). Stores in UoW mode do NOT open their own sessions or call
+    session.begin(); they reuse ``session`` and flush after each operation so
+    subsequent reads within the same unit observe prior writes."""
+
+    session: AsyncSession
+    runs: RunStore
+    events: EventStore
+    checkpoints: CheckpointStore
+    approvals: ApprovalStore
+    sessions: SessionStore
+    swarms: SwarmStore
+    memories: MemoryStore
 
 
 class FileStorage(Storage):
@@ -109,9 +131,10 @@ class FileStorage(Storage):
 class SqlAlchemyStorage(Storage):
     """Storage backed by five sqlalchemy backends sharing one session_factory.
     All cross-cutting writes can be coordinated through transaction(), which
-    yields a single AsyncSession the caller can use directly. The
-    resource_coordinator parameter is accepted for forward compatibility with
-    future cross-store coordination features but is not wired in this phase."""
+    yields a UnitOfWork whose stores share one AsyncSession + one transaction.
+    The resource_coordinator parameter is accepted for forward compatibility
+    with future cross-store coordination features but is not wired in this
+    phase."""
 
     def __init__(
         self,
@@ -134,6 +157,21 @@ class SqlAlchemyStorage(Storage):
         object.__setattr__(self, "_session_factory", session_factory)
 
     @asynccontextmanager
-    async def transaction(self) -> "AsyncIterator[AsyncSession]":
+    async def transaction(self) -> "AsyncIterator[_UnitOfWork]":
+        """Yield a UnitOfWork whose stores all share one AsyncSession + one
+        transaction. ``async with session.begin()`` auto-commits on clean exit
+        and auto-rollbacks on exception, giving true atomicity across all
+        stores: either every tx.* write persists, or none of them do."""
         async with self._session_factory() as session:
-            yield session
+            async with session.begin():
+                tx = _UnitOfWork(
+                    session=session,
+                    runs=SqlAlchemyRunStore(session_factory=self._session_factory, session=session),
+                    events=SqlAlchemyEventStore(session_factory=self._session_factory, session=session),
+                    checkpoints=SqlAlchemyCheckpointStore(session_factory=self._session_factory, session=session),
+                    approvals=SqlAlchemyApprovalStore(session_factory=self._session_factory, session=session),
+                    sessions=SqlAlchemySessionStore(session_factory=self._session_factory, session=session),
+                    swarms=SqlAlchemySwarmStore(session_factory=self._session_factory, session=session),
+                    memories=SqlAlchemyMemoryStore(session_factory=self._session_factory, session=session),
+                )
+                yield tx

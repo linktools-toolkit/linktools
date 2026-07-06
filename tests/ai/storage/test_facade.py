@@ -115,16 +115,88 @@ def test_sqlalchemy_storage_runs_end_to_end(tmp_path):
     assert run is not None and run.id == "run-1"
 
 
-def test_sqlalchemy_storage_transaction_yields_a_shared_session(tmp_path):
+def test_sqlalchemy_storage_transaction_yields_a_unit_of_work(tmp_path):
     storage, _ = _sqlalchemy_storage(tmp_path)
 
     async def _run():
-        async with storage.transaction() as session:
+        async with storage.transaction() as tx:
             from sqlalchemy import text
-            result = await session.execute(text("SELECT 1"))
+            # tx.session is the shared AsyncSession all stores bind to.
+            result = await tx.session.execute(text("SELECT 1"))
             return result.scalar()
 
     assert asyncio.run(_run()) == 1
+
+
+def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
+    """All seven tx.* stores bind to the same AsyncSession in UoW mode."""
+    storage, _ = _sqlalchemy_storage(tmp_path)
+
+    async def _run():
+        async with storage.transaction() as tx:
+            return {
+                "session": tx.session,
+                "runs": tx.runs._session,
+                "events": tx.events._session,
+                "checkpoints": tx.checkpoints._session,
+                "approvals": tx.approvals._session,
+                "sessions": tx.sessions._session,
+                "swarms": tx.swarms._session,
+                "memories": tx.memories._session,
+            }
+
+    bound = asyncio.run(_run())
+    shared = bound["session"]
+    for name in ("runs", "events", "checkpoints", "approvals", "sessions", "swarms", "memories"):
+        assert bound[name] is shared, f"{name} does not share the UoW session"
+
+
+def test_sqlalchemy_storage_uow_commits_all_stores_on_success(tmp_path):
+    """A clean exit commits every tx.* write -- both stores persist."""
+    from linktools.ai.agent.approval import build_approval_request
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    run = _run_record()
+    approval = build_approval_request(
+        run_id=run.id, tool_call_id="call-1", tool_name="tool-1", reason="ok", arguments={},
+    )
+
+    async def _run():
+        async with storage.transaction() as tx:
+            await tx.runs.create(run)
+            await tx.approvals.create(approval)
+        # After the UoW commits, both must be visible through the top-level
+        # (non-UoW) stores, which open their own sessions against the same DB.
+        return await storage.runs.get(run.id), await storage.approvals.get(approval.id)
+
+    fetched_run, fetched_approval = asyncio.run(_run())
+    assert fetched_run is not None and fetched_run.id == run.id
+    assert fetched_approval is not None and fetched_approval.id == approval.id
+
+
+def test_sqlalchemy_storage_uow_rolls_back_all_stores_on_failure(tmp_path):
+    """An exception inside the UoW rolls back EVERY store -- neither the run
+    nor the approval persists. This is the atomicity guarantee."""
+    from linktools.ai.agent.approval import build_approval_request
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    run = _run_record()
+    approval = build_approval_request(
+        run_id=run.id, tool_call_id="call-1", tool_name="tool-1", reason="ok", arguments={},
+    )
+
+    async def _run():
+        try:
+            async with storage.transaction() as tx:
+                await tx.runs.create(run)
+                await tx.approvals.create(approval)
+                raise RuntimeError("simulate failure")  # forces rollback
+        except RuntimeError:
+            pass
+        # Neither write should have survived the rollback.
+        return await storage.runs.get(run.id), await storage.approvals.get(approval.id)
+
+    fetched_run, fetched_approval = asyncio.run(_run())
+    assert fetched_run is None, "run leaked after UoW rollback"
+    assert fetched_approval is None, "approval leaked after UoW rollback"
 
 
 def test_file_storage_exposes_file_swarm_store(tmp_path):

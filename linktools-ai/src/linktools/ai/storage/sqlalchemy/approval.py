@@ -84,27 +84,49 @@ class SqlAlchemyApprovalStore:
     ``ApprovalConflictError``.
     """
 
-    def __init__(self, *, session_factory: "Callable[[], AsyncSession]") -> None:
+    def __init__(
+        self,
+        *,
+        session_factory: "Callable[[], AsyncSession]",
+        session: "AsyncSession | None" = None,
+    ) -> None:
         self._session_factory = session_factory
+        # UoW mode: when set, every method uses this shared session directly and
+        # does NOT open its own session or call session.begin() -- the UoW owns
+        # the transaction. None means normal mode (own session + transaction).
+        self._session = session
+
+    async def _execute_in_session(self, fn):
+        """Run ``fn(session)`` in own transaction (normal mode) or against the
+        shared session (UoW mode). See SqlAlchemyRunStore._execute_in_session."""
+        if self._session is not None:
+            result = await fn(self._session)
+            await self._session.flush()
+            return result
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await fn(session)
 
     # -- read ----------------------------------------------------------
 
     async def get(self, approval_id: str) -> "ApprovalRequest | None":
-        async with self._session_factory() as session:
+        async def _do(session):
             result = await session.execute(
                 select(ApprovalRow).where(ApprovalRow.id == approval_id)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_request(row)
+        return await self._execute_in_session(_do)
 
     async def list_pending(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
-        async with self._session_factory() as session:
+        async def _do(session):
             stmt = select(ApprovalRow).where(
                 ApprovalRow.run_id == run_id,
                 ApprovalRow.status == ApprovalStatus.PENDING.value,
             ).order_by(ApprovalRow.created_at)
             result = await session.execute(stmt)
             return tuple(_row_to_request(row) for row in result.scalars())
+        return await self._execute_in_session(_do)
 
     async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
         # Status-agnostic counterpart to ``list_pending``: returns EVERY
@@ -112,39 +134,42 @@ class SqlAlchemyApprovalStore:
         # The resume gate (ToolExecutor._already_approved) consults this to
         # recognize a call that was approved externally without re-persisting
         # a PENDING duplicate.
-        async with self._session_factory() as session:
+        async def _do(session):
             stmt = select(ApprovalRow).where(
                 ApprovalRow.run_id == run_id
             ).order_by(ApprovalRow.created_at)
             result = await session.execute(stmt)
             return tuple(_row_to_request(row) for row in result.scalars())
+        return await self._execute_in_session(_do)
 
     # -- write ---------------------------------------------------------
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:
-        async with self._session_factory() as session:
-            try:
-                async with session.begin():
-                    session.add(ApprovalRow(
-                        id=request.id,
-                        run_id=request.run_id,
-                        tool_call_id=request.tool_call_id,
-                        tool_name=request.tool_name,
-                        reason=request.reason,
-                        arguments_json=json.dumps(dict(request.arguments)),
-                        status=request.status.value,
-                        version=request.version,
-                        created_at=request.created_at,
-                        resolved_at=request.resolved_at,
-                        resolved_by=request.resolved_by,
-                        metadata_json=json.dumps(dict(request.metadata)),
-                    ))
-            except IntegrityError as exc:
-                # Duplicate primary key -> conflict, matching
-                # FileApprovalStore's "approval already exists" semantics.
-                raise ApprovalConflictError(
-                    f"approval already exists: {request.id}"
-                ) from exc
+        async def _do(session):
+            session.add(ApprovalRow(
+                id=request.id,
+                run_id=request.run_id,
+                tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name,
+                reason=request.reason,
+                arguments_json=json.dumps(dict(request.arguments)),
+                status=request.status.value,
+                version=request.version,
+                created_at=request.created_at,
+                resolved_at=request.resolved_at,
+                resolved_by=request.resolved_by,
+                metadata_json=json.dumps(dict(request.metadata)),
+            ))
+        try:
+            await self._execute_in_session(_do)
+        except IntegrityError as exc:
+            # Duplicate primary key -> conflict, matching FileApprovalStore's
+            # "approval already exists" semantics. In UoW mode the IntegrityError
+            # has already poisoned the shared transaction (it will roll back);
+            # we still translate so callers see the domain error type.
+            raise ApprovalConflictError(
+                f"approval already exists: {request.id}"
+            ) from exc
         return request
 
     async def approve(
@@ -183,34 +208,34 @@ class SqlAlchemyApprovalStore:
         resolved_by: str,
         rejection_reason: "Any",
     ) -> ApprovalRequest:
-        async with self._session_factory() as session:
-            async with session.begin():
-                query_result = await session.execute(
-                    select(ApprovalRow).where(ApprovalRow.id == approval_id)
+        async def _do(session):
+            query_result = await session.execute(
+                select(ApprovalRow).where(ApprovalRow.id == approval_id)
+            )
+            row = query_result.scalar_one_or_none()
+            if row is None:
+                raise ApprovalNotFoundError(f"approval not found: {approval_id}")
+            current_status = ApprovalStatus(row.status)
+            if row.version != expected_version:
+                raise ApprovalConflictError(
+                    f"expected version {expected_version}, found {row.version}"
                 )
-                row = query_result.scalar_one_or_none()
-                if row is None:
-                    raise ApprovalNotFoundError(f"approval not found: {approval_id}")
-                current_status = ApprovalStatus(row.status)
-                if row.version != expected_version:
-                    raise ApprovalConflictError(
-                        f"expected version {expected_version}, found {row.version}"
-                    )
-                if target not in ALLOWED_APPROVAL_TRANSITIONS.get(current_status, frozenset()):
-                    raise InvalidApprovalTransitionError(
-                        f"cannot transition {current_status} -> {target}"
-                    )
-                # ``reject`` always sets the key (even to None); ``approve``
-                # leaves metadata untouched so approvals can't shadow a prior
-                # rejection reason on a different request.
-                if rejection_reason is not _UNSET:
-                    new_metadata: "dict[str, Any]" = json.loads(row.metadata_json)
-                    new_metadata[REJECTION_REASON_METADATA_KEY] = rejection_reason
-                    row.metadata_json = json.dumps(new_metadata)
-                now = datetime.now(timezone.utc)
-                row.status = target.value
-                row.resolved_at = now
-                row.resolved_by = resolved_by
-                row.version = row.version + 1
-                await session.flush()
-                return _row_to_request(row)
+            if target not in ALLOWED_APPROVAL_TRANSITIONS.get(current_status, frozenset()):
+                raise InvalidApprovalTransitionError(
+                    f"cannot transition {current_status} -> {target}"
+                )
+            # ``reject`` always sets the key (even to None); ``approve``
+            # leaves metadata untouched so approvals can't shadow a prior
+            # rejection reason on a different request.
+            if rejection_reason is not _UNSET:
+                new_metadata: "dict[str, Any]" = json.loads(row.metadata_json)
+                new_metadata[REJECTION_REASON_METADATA_KEY] = rejection_reason
+                row.metadata_json = json.dumps(new_metadata)
+            now = datetime.now(timezone.utc)
+            row.status = target.value
+            row.resolved_at = now
+            row.resolved_by = resolved_by
+            row.version = row.version + 1
+            await session.flush()
+            return _row_to_request(row)
+        return await self._execute_in_session(_do)
