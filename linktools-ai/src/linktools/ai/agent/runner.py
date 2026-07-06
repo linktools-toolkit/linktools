@@ -90,7 +90,9 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.toolsets import AbstractToolset
 
+    from ..execution.protocols import ExecutionBackend
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
@@ -119,6 +121,7 @@ class AgentRunner:
                  metrics: "ObservabilityMetrics | None" = None,
                  uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
                  run_controller: "RunController | None" = None,
+                 execution: "ExecutionBackend | None" = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -145,6 +148,15 @@ class AgentRunner:
         # CancelledError path -- the existing behavior, no token checks at
         # execution points. Default-None preserves every existing test.
         self._run_controller = run_controller
+        # §17 (review-doc): the per-Runtime ExecutionBackend. execute()
+        # publishes this to AgentDependencies.execution and constructs the
+        # builtin file/terminal FunctionToolset from it at execution time,
+        # passing it via ``agent.iter(prompt, toolsets=[...])``. ``None``
+        # (default) means the compiled agent exposes no builtin tools -- a
+        # conversational-only run, byte-for-byte identical to the prior
+        # ``workdir=None`` path. Holding the backend on the runner (not the
+        # compiler) is what decouples AgentCompiler from the filesystem.
+        self._execution = execution
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -307,7 +319,29 @@ class AgentRunner:
                 tool_context = ToolContext(
                     run_id=context.run_id, session_id=context.session_id,
                     tool_call_id=None)
-                deps = AgentDependencies(tool_context=tool_context)
+                # §17 (review-doc): the builtin file/terminal toolset is
+                # constructed HERE, at execution time, from the per-Runtime
+                # ExecutionBackend -- not baked into the compiled Agent. This
+                # is what makes AgentCompiler stateless (no filesystem surface):
+                # the same CompiledAgent can be reused across Runs that target
+                # different working directories, and a conversational-only run
+                # (no execution backend) simply passes ``toolsets=[]`` so the
+                # model has no file/terminal tools available. ``deps.execution``
+                # is the same backend -- capabilities that need it read
+                # ``ctx.deps.execution`` (future work).
+                deps = AgentDependencies(
+                    tool_context=tool_context, execution=self._execution,
+                )
+                toolsets: "list[AbstractToolset]" = []
+                if deps.execution is not None:
+                    from ..execution.toolset import (
+                        BuiltinToolContext,
+                        build_builtin_toolset,
+                    )
+                    toolsets.append(build_builtin_toolset(BuiltinToolContext(
+                        backend=deps.execution,
+                        enabled_tools={"file", "terminal"},
+                    )))
                 # GAP-08: ModelPolicy.timeout_seconds is enforced by wrapping
                 # each graph step (``run.__anext__()``) in asyncio.wait_for with
                 # the REMAINING budget. The model call happens at this await
@@ -326,9 +360,11 @@ class AgentRunner:
                     await token.raise_if_cancelled()
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
-                        message_history=message_history, deps=deps)
+                        message_history=message_history, deps=deps,
+                        toolsets=toolsets)
                 else:
-                    run_iter = agent.pydantic_agent.iter(prompt, deps=deps)
+                    run_iter = agent.pydantic_agent.iter(
+                        prompt, deps=deps, toolsets=toolsets)
 
                 # ``timed_out`` is set whenever the wait_for budget is exhausted
                 # (either proactively before the call, or reactively when

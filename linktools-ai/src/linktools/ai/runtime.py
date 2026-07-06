@@ -20,6 +20,7 @@ from .agent.compiler import AgentCompiler
 from .agent.runner import AgentRunner
 from .agent.spec import AgentSpec
 from .errors import SessionError, SwarmError
+from .execution.protocols import ExecutionBackend
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
 from .run.context import RunContext
@@ -97,10 +98,20 @@ class Runtime:
                 approval_store=storage.approvals,
                 pause_on_approval=True,
             )
+        # §17 (review-doc): ``workdir`` now routes to the ExecutionBackend --
+        # NOT to the compiler. AgentCompiler is stateless (no filesystem
+        # surface); the builtin file/terminal tools are constructed at
+        # execution time from this backend inside AgentRunner.execute() and
+        # passed via ``agent.iter(prompt, toolsets=[...])``. When ``workdir``
+        # is None, no backend is constructed and runs expose no builtin tools
+        # (conversational-only -- identical to the prior ``workdir=None`` path).
+        execution: "ExecutionBackend | None" = None
+        if workdir is not None:
+            from .execution.local import LocalExecutionBackend
+            execution = LocalExecutionBackend(runtime_dir=workdir)
         compiler = AgentCompiler(
             model_router=router,
             middleware_pipeline=middleware_pipeline,
-            workdir=workdir,
             tool_executor=resolved_executor,
         )
         # Memory is on-by-default (storage.memories is always populated by the
@@ -132,6 +143,7 @@ class Runtime:
             retriever=retriever,
             uow_factory=uow_factory,
             run_controller=run_controller,
+            execution=execution,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
