@@ -244,3 +244,137 @@ def test_empty_memory_store_injects_no_memory_section(tmp_path):
     result = asyncio.run(_run())
     assert "## Memory" not in str(result.output)
     assert "unmatched-query-token" in str(result.output)
+
+
+# --- GAP-08: ModelPolicy.timeout_seconds + max_tokens enforcement -----------
+
+def test_run_model_timeout_transitions_run_to_failed(tmp_path):
+    """ModelPolicy.timeout_seconds wraps agent.run in asyncio.wait_for; a model
+    that sleeps past the timeout -> run FAILED with a descriptive 'model timeout'
+    message (the asyncio.TimeoutError is translated before the FAILED handler)."""
+    async def _slow_fn(messages, info: AgentInfo) -> ModelResponse:
+        await asyncio.sleep(10)
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_slow_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiled = asyncio.run(compiler.compile(AgentSpec(
+        id="agent-to", name="a",
+        model=ModelPolicy(primary="test-model", timeout_seconds=0.05),
+        instructions=PromptSpec(instructions="hi"),
+    )))
+    runner = _make_runner(tmp_path)
+    _seed_session(runner._session_store, "session-to")
+
+    async def _run():
+        await runner.run(compiled, RunInput(prompt="hi"), RunContext(
+            run_id="run-to", root_run_id="run-to", parent_run_id=None,
+            session_id="session-to", runnable_id="agent-to",
+            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None,
+        ))
+    with pytest.raises(Exception):
+        asyncio.run(_run())
+
+    rec = asyncio.run(runner._run_store.get("run-to"))
+    assert rec.status == RunStatus.FAILED
+    assert rec.error is not None
+    assert "model timeout" in rec.error.message
+
+
+def test_run_max_tokens_exceeded_transitions_run_to_failed(tmp_path):
+    """ModelPolicy.max_tokens: when the model returns usage whose
+    input+output > max_tokens, the run is transitioned to FAILED before the
+    SUCCEEDED transition and the error is re-raised."""
+    from pydantic_ai.usage import RunUsage
+
+    def _heavy_fn(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart(content='{"response": {"answer": 1}}')],
+            usage=RunUsage(input_tokens=1000, output_tokens=1000),
+        )
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_heavy_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiled = asyncio.run(compiler.compile(AgentSpec(
+        id="agent-mt", name="a",
+        model=ModelPolicy(primary="test-model", max_tokens=50),
+        instructions=PromptSpec(instructions="hi"),
+    )))
+    runner = _make_runner(tmp_path)
+    _seed_session(runner._session_store, "session-mt")
+
+    async def _run():
+        await runner.run(compiled, RunInput(prompt="hi"), RunContext(
+            run_id="run-mt", root_run_id="run-mt", parent_run_id=None,
+            session_id="session-mt", runnable_id="agent-mt",
+            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None,
+        ))
+    with pytest.raises(Exception):
+        asyncio.run(_run())
+
+    rec = asyncio.run(runner._run_store.get("run-mt"))
+    assert rec.status == RunStatus.FAILED
+    assert rec.error is not None
+    assert "max_tokens" in rec.error.message
+
+
+def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
+    """When usage fits under max_tokens, the run SUCCEEDS and the returned
+    RunResult carries the model's token usage (so the swarm can accumulate)."""
+    from pydantic_ai.usage import RunUsage
+
+    def _light_fn(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart(content='{"response": {"answer": 42}}')],
+            usage=RunUsage(input_tokens=10, output_tokens=5),
+        )
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_light_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiled = asyncio.run(compiler.compile(AgentSpec(
+        id="agent-ok", name="a",
+        model=ModelPolicy(primary="test-model", max_tokens=100),
+        instructions=PromptSpec(instructions="hi"),
+    )))
+    runner = _make_runner(tmp_path)
+    _seed_session(runner._session_store, "session-ok")
+
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="hi"), RunContext(
+            run_id="run-ok", root_run_id="run-ok", parent_run_id=None,
+            session_id="session-ok", runnable_id="agent-ok",
+            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None,
+        ))
+    result = asyncio.run(_run())
+
+    rec = asyncio.run(runner._run_store.get("run-ok"))
+    assert rec.status == RunStatus.SUCCEEDED
+    # token_usage is now populated from run_result.usage (GAP-08 accounting hook).
+    assert result.token_usage.get("input_tokens") == 10
+    assert result.token_usage.get("output_tokens") == 5
+
+
+def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
+    """Defaults (timeout_seconds=None, max_tokens=None) must reproduce the
+    pre-GAP-08 lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
+    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
+    compiled = asyncio.run(compiler.compile(AgentSpec(
+        id="agent-def", name="a", model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="hi"),
+    )))
+    runner = _make_runner(tmp_path)
+    _seed_session(runner._session_store, "session-def")
+
+    async def _run():
+        return await runner.run(compiled, RunInput(prompt="hi"), RunContext(
+            run_id="run-def", root_run_id="run-def", parent_run_id=None,
+            session_id="session-def", runnable_id="agent-def",
+            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None,
+        ))
+    result = asyncio.run(_run())
+    assert "42" in str(result.output)
+    rec = asyncio.run(runner._run_store.get("run-def"))
+    assert rec.status == RunStatus.SUCCEEDED

@@ -475,3 +475,116 @@ def test_build_strategy_unknown_kind_raises_swarm_error():
     from linktools.ai.swarm.strategy import build_strategy
     with pytest.raises(SwarmError):
         build_strategy(SwarmStrategySpec(kind="no_such_strategy"))
+
+
+# --- 6. SwarmLimits.max_depth enforcement in _run_task (GAP-09) -------------
+
+def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
+    """_run_task walks the parent_task_id chain via list_tasks and raises
+    SwarmLimitExceededError(kind="max_depth") when the chain depth exceeds the
+    limit -- before claiming or dispatching the worker. A depth-2 child
+    (parent_task_id -> depth-1 parent) under max_depth=1 fires the guard."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    compiled_a = _compile_worker("worker-a", "out")
+    swarm_store = _MemorySwarmStore()
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(max_depth=1),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+    # parent task (depth 1) already SUCCEEDED -> not claimable; it exists only
+    # so the child's parent_task_id chain resolves to a real parent.
+    parent = SwarmTask(
+        id="parent-1", swarm_run_id="swarm-1", parent_task_id=None,
+        assigned_agent_id="worker-a", description="parent",
+        status=SwarmTaskStatus.SUCCEEDED,
+        dependencies=(), input=TaskInput(prompt="p"), result=None, error=None,
+        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    # child task (depth 2) PENDING -> would be claimed, but the depth guard
+    # fires first.
+    child = SwarmTask(
+        id="child-1", swarm_run_id="swarm-1", parent_task_id="parent-1",
+        assigned_agent_id="worker-a", description="child",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(), input=TaskInput(prompt="c"), result=None, error=None,
+        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    asyncio.run(swarm_store.create_task(parent))
+    asyncio.run(swarm_store.create_task(child))
+
+    with pytest.raises(SwarmLimitExceededError) as exc_info:
+        asyncio.run(_run_task(ctx, child))
+    assert exc_info.value.kind == "max_depth"
+
+    # nothing was claimed -- the child is still PENDING (guard fired first).
+    tasks = asyncio.run(swarm_store.list_tasks("swarm-1"))
+    child_after = next(t for t in tasks if t.id == "child-1")
+    assert child_after.status is SwarmTaskStatus.PENDING
+
+
+def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
+    """A 3-deep chain (child -> parent -> grandparent, all parent_task_id linked)
+    under max_depth=2 raises max_depth; confirms the walk iterates beyond the
+    immediate parent."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    compiled_a = _compile_worker("worker-a", "out")
+    swarm_store = _MemorySwarmStore()
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(max_depth=2),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+    grandparent = SwarmTask(
+        id="gp-1", swarm_run_id="swarm-1", parent_task_id=None,
+        assigned_agent_id="worker-a", description="gp",
+        status=SwarmTaskStatus.SUCCEEDED,
+        dependencies=(), input=TaskInput(prompt="g"), result=None, error=None,
+        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    parent = SwarmTask(
+        id="p-1", swarm_run_id="swarm-1", parent_task_id="gp-1",
+        assigned_agent_id="worker-a", description="p",
+        status=SwarmTaskStatus.SUCCEEDED,
+        dependencies=(), input=TaskInput(prompt="p"), result=None, error=None,
+        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    child = SwarmTask(
+        id="c-1", swarm_run_id="swarm-1", parent_task_id="p-1",
+        assigned_agent_id="worker-a", description="c",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(), input=TaskInput(prompt="c"), result=None, error=None,
+        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    asyncio.run(swarm_store.create_task(grandparent))
+    asyncio.run(swarm_store.create_task(parent))
+    asyncio.run(swarm_store.create_task(child))
+
+    with pytest.raises(SwarmLimitExceededError) as exc_info:
+        asyncio.run(_run_task(ctx, child))
+    assert exc_info.value.kind == "max_depth"

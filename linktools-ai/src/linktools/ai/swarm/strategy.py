@@ -121,10 +121,43 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
+    """Walk ``task.parent_task_id`` up the ancestor chain to compute this task's
+    depth. A top-level task (``parent_task_id is None``) is depth 1; each
+    ancestor adds one. Guards against malformed cycles by capping the walk at a
+    parent that is missing or already seen.
+
+    Used by GAP-09 (spec 22.3) max_depth enforcement. The current built-in
+    strategies (``_make_task``) always set ``parent_task_id=None``, so every
+    programmatically-created task is depth 1; this guard only fires for nested
+    delegations (coordinator chains, future hierarchical strategies).
+    """
+    if task.parent_task_id is None:
+        return 1
+    # list_tasks is the only store api that returns tasks by id; one query feeds
+    # the whole walk (the ancestor set is immutable for the duration of a single
+    # _run_task call). A dedicated get_task is a separate concern.
+    ancestors = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
+    by_id: "dict[str, SwarmTask]" = {t.id: t for t in ancestors}
+    depth = 1
+    current_id = task.parent_task_id
+    seen: "set[str]" = set()
+    while current_id is not None and current_id not in seen:
+        seen.add(current_id)
+        parent = by_id.get(current_id)
+        if parent is None:
+            break
+        depth += 1
+        current_id = parent.parent_task_id
+    return depth
+
+
 async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_retries: int = 0) -> "RunResult | None":
     """Run a single SwarmTask against its assigned worker agent.
 
     Sequence:
+      0. GAP-09 depth guard: walk ``parent_task_id`` chain; raise
+         SwarmLimitExceededError(kind="max_depth") before claiming/dispatching.
       1. resolve the compiled worker.
       2. claim a pending task for (swarm_run, agent) via the store's work-queue
          api -- in the serial path this is ``task``; in the parallel path it may
@@ -140,6 +173,17 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     Returns the worker's RunResult on success, or None if there was nothing to
     claim or every attempt failed.
     """
+    # GAP-09 (spec 22.3): max_depth guard. Fires before claim_task so a too-deep
+    # task is rejected without consuming a worker slot.
+    max_depth = ctx.spec.limits.max_depth
+    if max_depth is not None:
+        depth = await _compute_depth(ctx, task)
+        if depth > max_depth:
+            raise SwarmLimitExceededError(
+                f"task {task.id} depth {depth} exceeds max_depth={max_depth}",
+                kind="max_depth",
+            )
+
     compiled = ctx.agents[task.assigned_agent_id]
     claimed = await ctx.swarm_store.claim_task(ctx.swarm_run.id, task.assigned_agent_id)
     if claimed is None:

@@ -27,12 +27,13 @@ default-None path is a no-op -- no spans opened, no metrics recorded, and the
 existing lifecycle runs byte-for-byte as before (the ``if observability is not
 None:`` guard is the sole gate)."""
 
+import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..errors import RunPaused
+from ..errors import ModelPolicyExceededError, ModelRoutingError, RunPaused
 from ..events.envelope import EventEnvelope
 from ..events.payloads import (
     RunCompleted,
@@ -166,12 +167,45 @@ class AgentRunner:
             # tracing contextvar. When observability is None, call the model
             # directly -- no span, no overhead, identical to the pre-Phase-6
             # behavior.
-            if observability is not None:
-                async with use_span(observability, "agent.model"):
-                    run_result = await agent.pydantic_agent.run(prompt)
-            else:
-                run_result = await agent.pydantic_agent.run(prompt)
+            #
+            # GAP-08 (spec 31): ModelPolicy.timeout_seconds wraps the model call
+            # in asyncio.wait_for when set. On timeout the asyncio.TimeoutError
+            # is translated to ModelRoutingError("model timeout") so the generic
+            # FAILED handler below records a descriptive message; timeout_seconds
+            # left at None reproduces the pre-GAP-08 path (no wait_for wrapper).
+            timeout = agent.spec.model.timeout_seconds
+            try:
+                if observability is not None:
+                    async with use_span(observability, "agent.model"):
+                        if timeout is not None:
+                            run_result = await asyncio.wait_for(
+                                agent.pydantic_agent.run(prompt), timeout=timeout)
+                        else:
+                            run_result = await agent.pydantic_agent.run(prompt)
+                else:
+                    if timeout is not None:
+                        run_result = await asyncio.wait_for(
+                            agent.pydantic_agent.run(prompt), timeout=timeout)
+                    else:
+                        run_result = await agent.pydantic_agent.run(prompt)
+            except asyncio.TimeoutError:
+                raise ModelRoutingError("model timeout")
             output = run_result.output
+
+            # GAP-08: ModelPolicy.max_tokens enforcement + token-usage capture.
+            # usage is read once so the SUCCEEDED-gating check and the
+            # RunResult.token_usage population share the same snapshot. budget is
+            # declared on ModelPolicy but deferred -- no cost-per-token rates
+            # exist yet, so only the token-count limit is enforced here.
+            usage = run_result.usage
+            max_tokens = agent.spec.model.max_tokens
+            if max_tokens is not None:
+                used = usage.input_tokens + usage.output_tokens
+                if used > max_tokens:
+                    raise ModelPolicyExceededError(
+                        f"max_tokens exceeded: used {used} > max_tokens {max_tokens}",
+                        kind="max_tokens",
+                    )
 
             await self._session_store.append_messages(context.session_id, (
                 SessionMessage(
@@ -188,7 +222,17 @@ class AgentRunner:
                 created_at=datetime.now(timezone.utc),
             ))
 
-            result = RunResult(output=output)
+            # token_usage is threaded onto RunResult so the swarm layer can
+            # accumulate it (GAP-09 max_total_tokens). Default-None policy leaves
+            # usage populated straight off the model result (zero-cost when the
+            # FunctionModel reports nothing).
+            result = RunResult(
+                output=output,
+                token_usage={
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                },
+            )
             await self._run_store.transition(
                 context.run_id, RunStatus.SUCCEEDED, expected_version=2, result=result)
 
@@ -379,6 +423,13 @@ class AgentRunner:
             # Pattern mirrors the legacy LlmAgent.stream() (agent.py): each
             # model-request node is streamed for text deltas, each call-tools
             # node is streamed for tool-call/result events.
+            #
+            # GAP-08 streaming-timeout note: ModelPolicy.timeout_seconds is
+            # enforced on the one-shot ``run()`` path above. ``iter()`` returns
+            # an async generator that yields across await points managed by the
+            # caller, so a single ``asyncio.wait_for`` cannot wrap it without
+            # restructuring this yield-based loop; streaming timeout enforcement
+            # is deferred (per-node wrapping would need a per-request budget).
             accumulated_text = ""
             if message_history is not None:
                 run_iter = agent.pydantic_agent.iter(message_history=message_history)

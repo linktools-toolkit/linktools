@@ -20,6 +20,7 @@ status=CLAIMED)`` yields tasks whose ids are the in-flight child Runs to cancel.
 resume() is explicit and caller-driven (Decision #3): no auto-resume-on-construct.
 cancel() is store-level (Decision #4): no live asyncio task cancellation."""
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -32,6 +33,7 @@ from ..agent.spec import AgentSpec
 from ..errors import (
     RunNotFoundError,
     SwarmError,
+    SwarmLimitExceededError,
     SwarmRunNotFoundError,
 )
 
@@ -176,7 +178,41 @@ class SwarmRunner:
                 event_store=self._event_store,
             )
             strategy = build_strategy(spec.strategy)
-            result = await strategy.run(ctx)
+            # GAP-09 (spec 22.3): SwarmLimits.timeout_seconds wraps the strategy
+            # round loop in asyncio.wait_for. On timeout the TimeoutError is
+            # translated to SwarmError("swarm timeout: ...") so the generic
+            # FAILED handler below records a descriptive message; timeout_seconds
+            # left at None reproduces the pre-GAP-09 path (no wait_for wrapper).
+            timeout = spec.limits.timeout_seconds
+            try:
+                if timeout is not None:
+                    result = await asyncio.wait_for(strategy.run(ctx), timeout=timeout)
+                else:
+                    result = await strategy.run(ctx)
+            except asyncio.TimeoutError:
+                raise SwarmError(f"swarm timeout: exceeded timeout_seconds={timeout}")
+
+            # GAP-09: enforce SwarmLimits.max_total_tokens. aggregate() sums each
+            # worker RunResult.token_usage (populated by AgentRunner from the
+            # model's usage) into the aggregate result, so one comparison here
+            # covers every task. max_total_cost is declared on SwarmLimits but
+            # deferred -- no cost-per-token rates exist yet. The accumulated
+            # usage is also persisted onto the SwarmRun (bumping its version,
+            # which the trailing SUCCEEDED update_run picks up via swarm_version).
+            limits = spec.limits
+            acc_input = int(result.token_usage.get("input_tokens", 0))
+            acc_output = int(result.token_usage.get("output_tokens", 0))
+            if limits.max_total_tokens is not None and (acc_input + acc_output) > limits.max_total_tokens:
+                raise SwarmLimitExceededError(
+                    f"swarm exceeded max_total_tokens={limits.max_total_tokens}: "
+                    f"used {acc_input + acc_output}",
+                    kind="max_total_tokens",
+                )
+            swarm_run = await self._swarm_store.update_run(
+                swarm_run.id, expected_version=swarm_version,
+                token_usage=TokenUsage(input_tokens=acc_input, output_tokens=acc_output),
+            )
+            swarm_version = swarm_run.version
 
             # 5. write ONLY the final aggregate to the shared/parent Session.
             if spec.context_policy.write_aggregate_to_session:

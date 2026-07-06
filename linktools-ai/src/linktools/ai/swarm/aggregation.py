@@ -24,9 +24,11 @@ class AggregationPolicy:
 
 
 def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmTask, ...]") -> RunResult:
-    """Reduce the SUCCEEDED tasks' results per policy.mode. Returns RunResult with
-    empty token_usage (token accumulation is SwarmRunner's job) and a metadata
-    dict carrying task_count."""
+    """Reduce the SUCCEEDED tasks' results per policy.mode. Returns RunResult
+    whose ``token_usage`` carries the SUM of per-task input/output tokens (each
+    worker RunResult.token_usage is populated by AgentRunner from the model's
+    usage) so SwarmRunner can enforce ``max_total_tokens`` (spec 22.3), and a
+    metadata dict carrying task_count."""
     succeeded = tuple(t for t in tasks if t.result is not None)
     outputs = [t.result.output for t in succeeded]
     if policy.mode == AggregationMode.CONCAT:
@@ -43,4 +45,10 @@ def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmTask, ...]") -> RunR
         out = merged
     else:
         raise ValueError(f"unknown aggregation mode: {policy.mode}")
-    return RunResult(output=out, token_usage={}, metadata={"task_count": len(succeeded)})
+    total_input = sum(int(t.result.token_usage.get("input_tokens", 0)) for t in succeeded)
+    total_output = sum(int(t.result.token_usage.get("output_tokens", 0)) for t in succeeded)
+    return RunResult(
+        output=out,
+        token_usage={"input_tokens": total_input, "output_tokens": total_output},
+        metadata={"task_count": len(succeeded)},
+    )

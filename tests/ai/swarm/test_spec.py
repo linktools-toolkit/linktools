@@ -142,7 +142,10 @@ def test_aggregate_concat_joins_outputs():
     result = aggregate(AggregationPolicy(AggregationMode.CONCAT), tasks)
     assert result.output == "alpha\nbeta"
     assert result.metadata["task_count"] == 2
-    assert result.token_usage == {}
+    # GAP-09: aggregate now sums per-task token_usage into the result so
+    # SwarmRunner can enforce max_total_tokens. _make_task results carry the
+    # default empty token_usage -> the sum is zeros (still a populated dict).
+    assert result.token_usage == {"input_tokens": 0, "output_tokens": 0}
 
 
 def test_aggregate_first_returns_first_succeeded():

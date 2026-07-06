@@ -131,6 +131,17 @@ class ModelRoutingError(LinktoolsAIError):
     pass
 
 
+class ModelPolicyExceededError(LinktoolsAIError):
+    """Raised when a ModelPolicy limit (max_tokens, ...) is violated by a model
+    call's actual usage. Carries ``kind`` so callers can distinguish which limit
+    fired (currently only ``"max_tokens"``; ``"budget"`` is deferred until
+    cost-per-token rates exist)."""
+
+    def __init__(self, message: str, *, kind: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 class SwarmError(LinktoolsAIError):
     """Base class for Swarm-related errors."""
 

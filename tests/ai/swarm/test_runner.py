@@ -74,6 +74,19 @@ def _make_model(output_text: str) -> FunctionModel:
     return FunctionModel(_fn)
 
 
+def _make_model_with_usage(output_text: str, *, input_tokens: int, output_tokens: int) -> FunctionModel:
+    """Variant of _make_model that also reports token usage on each response --
+    needed for GAP-09 max_total_tokens enforcement (the swarm accumulates
+    RunResult.token_usage which AgentRunner populates from run_result.usage)."""
+    from pydantic_ai.usage import RunUsage
+
+    usage = RunUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+    def _fn(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(content=output_text)], usage=usage)
+    return FunctionModel(_fn)
+
+
 def _build_compiler(*outputs: str) -> AgentCompiler:
     """Build an AgentCompiler with one registered model per output string. The
     model_type for the i-th output is ``f"model-{i}"`` so test specs can request
@@ -430,3 +443,148 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
         await runner.resume("no-such-swarm", spec, agents={})
     with pytest.raises(SwarmRunNotFoundError):
         asyncio.run(_resume())
+
+
+# --- 5. SwarmLimits.timeout_seconds wraps strategy.run (GAP-09) -------------
+
+def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
+    """SwarmLimits.timeout_seconds wraps strategy.run(ctx) in asyncio.wait_for.
+    A coordinator that sleeps past the timeout -> asyncio.TimeoutError ->
+    driving Run FAILED + SwarmRun FAILED (best-effort cleanup in the except)."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("coord-out")
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+    )
+
+    async def slow_coordinator(swarm_run, completed, limits):
+        # Force the strategy's round loop to block past the timeout.
+        await asyncio.sleep(10)
+        return ()
+
+    spec = _spec(
+        kind="coordinator_delegation",
+        limits=_limits(timeout_seconds=0.05),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+        config={"coordinator_fn": slow_coordinator},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-0"),
+    }
+    context = _driving_context("drive-to", "shared-session")
+
+    async def _run():
+        await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+    with pytest.raises(Exception):
+        asyncio.run(_run())
+
+    async def _verify():
+        driving = await stores.run_store.get(context.run_id)
+        return driving
+    driving = asyncio.run(_verify())
+    assert driving.status is RunStatus.FAILED
+    assert driving.error is not None
+    # The timeout surfaces as a descriptive message, not a bare empty TimeoutError.
+    assert "timeout" in driving.error.message.lower()
+
+
+# --- 6. SwarmLimits.max_total_tokens accumulation (GAP-09) ------------------
+
+def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
+    """Two worker tasks each report input=100 + output=100 = 200 tokens; with
+    max_total_tokens=300 the accumulated 400 > 300 fires after strategy.run
+    returns -> SwarmLimitExceededError(kind="max_total_tokens") + FAILED."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    # model-0 = coord (never runs as a worker); model-1 = worker producing usage.
+    registry = ModelRegistry()
+    registry.register("model-0", model=_make_model("coord-out"))
+    registry.register("model-1", model=_make_model_with_usage(
+        "worker-out", input_tokens=100, output_tokens=100))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+    )
+
+    spec = _spec(
+        kind="parallel_fan_out",
+        limits=_limits(max_total_tokens=300),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+        config={"task_count": 2},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-1"),
+    }
+    context = _driving_context("drive-tt", "shared-session")
+
+    async def _run():
+        await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+    with pytest.raises(SwarmLimitExceededError) as exc_info:
+        asyncio.run(_run())
+    assert exc_info.value.kind == "max_total_tokens"
+
+    async def _verify():
+        driving = await stores.run_store.get(context.run_id)
+        return driving
+    driving = asyncio.run(_verify())
+    assert driving.status is RunStatus.FAILED
+
+
+def test_run_under_max_total_tokens_succeeds(tmp_path):
+    """Sanity: when accumulated tokens fit under max_total_tokens the run
+    completes normally -- confirms the check doesn't fire false positives."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    registry = ModelRegistry()
+    registry.register("model-0", model=_make_model("coord-out"))
+    registry.register("model-1", model=_make_model_with_usage(
+        "worker-out", input_tokens=50, output_tokens=50))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+    )
+
+    spec = _spec(
+        kind="parallel_fan_out",
+        limits=_limits(max_total_tokens=1000),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+        config={"task_count": 2},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-1"),
+    }
+    context = _driving_context("drive-ok", "shared-session")
+
+    async def _run():
+        return await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+    result = asyncio.run(_run())
+
+    # 2 tasks * (50 + 50) = 200 tokens accumulated, under the 1000 cap.
+    assert result.token_usage.get("input_tokens") == 100
+    assert result.token_usage.get("output_tokens") == 100
+    driving = asyncio.run(stores.run_store.get(context.run_id))
+    assert driving.status is RunStatus.SUCCEEDED
