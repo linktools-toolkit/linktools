@@ -16,6 +16,7 @@ from ..policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
 from ..policy.engine import PolicyEngine
 from ..tool.capability import build_policy_capability
 from ..tool.executor import ToolExecutor
+from .dependencies import AgentDependencies
 from .models import CompiledAgent
 from .spec import AgentSpec
 
@@ -79,6 +80,7 @@ class AgentCompiler:
             output_type=spec.output_schema or dict,
             capabilities=capabilities,
             toolsets=toolsets or None,
+            deps_type=AgentDependencies,
         )
         return CompiledAgent(
             spec=spec,

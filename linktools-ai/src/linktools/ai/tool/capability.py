@@ -6,13 +6,12 @@ SkipToolExecution so a denied call surfaces as a tool result the model can
 see, matching security/hook.py's SecurityCapability's existing error-surfacing
 pattern.
 
-current_context is a MUTABLE field, not constructor-baked -- a CompiledAgent
-is compiled once and reused across many real Runs, each with its own
-run_id/session_id. AgentRunner (Task 11) sets current_context immediately
-before each agent.pydantic_agent.run(...) call and clears it afterward.
-Concurrent Runs sharing the same CompiledAgent would race on this field --
-that's a known, explicitly out-of-scope limitation of this phase, not
-something this design hides."""
+The per-Run ToolContext arrives via pydantic-ai dependency injection:
+``AgentRunner`` constructs an ``AgentDependencies(tool_context=...)`` and
+passes it as ``deps=`` to ``agent.pydantic_agent.run()`` / ``.iter()``; the
+capability reads it off ``ctx.deps.tool_context``. No mutable per-Run field on
+the capability itself, so a single ``CompiledAgent`` (and thus a single
+``PolicyCapability``) is safe to reuse across many concurrent Runs."""
 
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -21,7 +20,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import SkipToolExecution
 
 from ..errors import ToolApprovalRequiredError, ToolDeniedError
-from ..policy.engine import ToolContext, ToolRequest
+from ..policy.engine import ToolRequest
 from .executor import ToolExecutor
 
 if TYPE_CHECKING:
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
 @dataclass
 class PolicyCapability(AbstractCapability[None]):
     executor: ToolExecutor
-    current_context: "ToolContext | None" = None
 
     async def before_tool_execute(
         self,
@@ -47,9 +45,9 @@ class PolicyCapability(AbstractCapability[None]):
         # Thread ToolCallPart.tool_call_id through ToolContext so the executor
         # keys ApprovalRequest.tool_call_id on the SAME id pydantic-ai's message
         # history uses -- the linchpin of resume (a re-driven call after
-        # approve() must find the matching approval). current_context is reused
-        # across many real Runs, so copy-on-write via replace() rather than mutate.
-        base = self.current_context or ToolContext(run_id="unknown", session_id="unknown")
+        # approve() must find the matching approval). ctx.deps.tool_context is
+        # the per-Run base; copy-on-write via replace() rather than mutate it.
+        base = ctx.deps.tool_context
         context = replace(base, tool_call_id=call.tool_call_id)
         try:
             await self.executor.check(request, context)

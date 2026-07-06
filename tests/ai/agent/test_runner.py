@@ -117,16 +117,20 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
     assert log == ["before_run", "after_run"]
 
 
-def test_capabilities_current_context_set_during_run_then_cleared(tmp_path):
+def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
+    # Phase 1 review-doc refactoring: PolicyCapability / MiddlewareCapability
+    # carry no mutable per-Run field at all -- the per-Run ToolContext reaches
+    # them via pydantic-ai DI (ctx.deps.tool_context). A run leaves the
+    # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).
     compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
     compiled = asyncio.run(compiler.compile(AgentSpec(id="agent-4", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
-    assert compiled.policy_capability.current_context is None
+    assert not hasattr(compiled.policy_capability, "current_context")
     runner = _make_runner(tmp_path)
     _seed_session(runner._session_store, "session-4")
     async def _run():
         await runner.run(compiled, RunInput(prompt="hi"), RunContext(run_id="run-4", root_run_id="run-4", parent_run_id=None, session_id="session-4", runnable_id="agent-4", runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None))
     asyncio.run(_run())
-    assert compiled.policy_capability.current_context is None
+    assert not hasattr(compiled.policy_capability, "current_context")
 
 
 # -- Phase 5: Memory + Knowledge prompt injection ---------------------------

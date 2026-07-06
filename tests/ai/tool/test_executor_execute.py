@@ -7,6 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.errors import ToolDeniedError
 from linktools.ai.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
 from linktools.ai.policy.engine import PolicyDecision, PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
@@ -52,7 +53,7 @@ def _driven_agent(capability) -> Agent:
         if len(messages) <= 1:
             return ModelResponse(parts=[ToolCallPart(tool_name="terminal", args={"command": "ls"})])
         return ModelResponse(parts=[TextPart("ok")])
-    agent = Agent(FunctionModel(model_fn), capabilities=[capability])
+    agent = Agent(FunctionModel(model_fn), capabilities=[capability], deps_type=AgentDependencies)
 
     @agent.tool_plain
     def terminal(command: str) -> str:
@@ -63,7 +64,6 @@ def _driven_agent(capability) -> Agent:
 
 def test_policy_capability_after_tool_execute_returns_result_unchanged():
     capability = build_policy_capability(ToolExecutor(policy=PolicyEngine(rules=())))
-    capability.current_context = ToolContext(run_id="r", session_id="s")
     async def _run():
         return await capability.after_tool_execute(ctx=None, call=None, tool_def=None, args={}, result="some-result")
     assert asyncio.run(_run()) == "some-result"
@@ -73,10 +73,12 @@ def test_policy_capability_on_tool_execute_error_surfaces_as_skip():
     capability = build_policy_capability(
         ToolExecutor(policy=PolicyEngine(rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)))
     )
-    capability.current_context = ToolContext(run_id="r", session_id="s")
     agent = _driven_agent(capability)
     async def _run():
-        return await agent.run("call it")
+        return await agent.run(
+            "call it",
+            deps=AgentDependencies(tool_context=ToolContext(run_id="r", session_id="s")),
+        )
     result = asyncio.run(_run())
     tool_returns = [
         part.content

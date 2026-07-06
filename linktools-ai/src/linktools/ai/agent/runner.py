@@ -3,8 +3,9 @@
 """AgentRunner: owns the per-invocation lifecycle -- Run state transitions,
 Session history load/append, runner-driven Middleware hooks (before_run/after_run/
 on_error), Event publication, Checkpoint save. The 4 pydantic-ai-intercepted hooks
-fire via MiddlewareCapability, enabled by setting current_context on both
-capabilities immediately before agent.run().
+fire via MiddlewareCapability, enabled by passing deps=AgentDependencies(...) to
+agent.pydantic_agent.run() / .iter() -- the per-Run ToolContext travels through
+pydantic-ai's dependency injection (ctx.deps), not a mutable capability field.
 
 Message-history adaptation is a text-join MVP (SessionMessage.content values
 prepended to the prompt). Checkpoint payload is empty bytes this phase -- real
@@ -52,6 +53,7 @@ from ..run.store import RunStore
 from ..session.models import MessageRole, SessionMessage
 from ..session.store import SessionStore
 from .checkpoint_io import serialize_messages
+from .dependencies import AgentDependencies
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
@@ -93,11 +95,6 @@ class AgentRunner:
         )
         await self._run_store.create(record)
         await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
-
-        tool_context = ToolContext(run_id=context.run_id, session_id=context.session_id)
-        agent.policy_capability.current_context = tool_context
-        if agent.middleware_capability is not None:
-            agent.middleware_capability.current_context = tool_context
 
         # Observability (Phase 6): when a sink is wired, open an outer "agent.run"
         # span around the whole lifecycle. The default-None path skips the span
@@ -168,26 +165,35 @@ class AgentRunner:
             # directly -- no span, no overhead, identical to the pre-Phase-6
             # behavior.
             #
+            # Phase 1 review-doc refactoring: the per-Run ToolContext travels to
+            # capabilities via pydantic-ai dependency injection -- ``deps=`` here
+            # becomes ``ctx.deps.tool_context`` inside every capability hook, so
+            # no mutable shared field on CompiledAgent's capabilities is needed
+            # (safe concurrent reuse of one CompiledAgent across many Runs).
+            #
             # GAP-08 (spec 31): ModelPolicy.timeout_seconds wraps the model call
             # in asyncio.wait_for when set. On timeout the asyncio.TimeoutError
             # is translated to ModelRoutingError("model timeout") so the generic
             # FAILED handler below records a descriptive message; timeout_seconds
             # left at None reproduces the pre-GAP-08 path (no wait_for wrapper).
+            tool_context = ToolContext(
+                run_id=context.run_id, session_id=context.session_id, tool_call_id=None)
+            deps = AgentDependencies(tool_context=tool_context)
             timeout = agent.spec.model.timeout_seconds
             try:
                 if observability is not None:
                     async with use_span(observability, "agent.model"):
                         if timeout is not None:
                             run_result = await asyncio.wait_for(
-                                agent.pydantic_agent.run(prompt), timeout=timeout)
+                                agent.pydantic_agent.run(prompt, deps=deps), timeout=timeout)
                         else:
-                            run_result = await agent.pydantic_agent.run(prompt)
+                            run_result = await agent.pydantic_agent.run(prompt, deps=deps)
                 else:
                     if timeout is not None:
                         run_result = await asyncio.wait_for(
-                            agent.pydantic_agent.run(prompt), timeout=timeout)
+                            agent.pydantic_agent.run(prompt, deps=deps), timeout=timeout)
                     else:
-                        run_result = await agent.pydantic_agent.run(prompt)
+                        run_result = await agent.pydantic_agent.run(prompt, deps=deps)
             except asyncio.TimeoutError:
                 raise ModelRoutingError("model timeout")
             output = run_result.output
@@ -278,8 +284,8 @@ class AgentRunner:
             # since Python 3.8 -- so placement is for clarity, but the principle
             # holds: the run must end up CANCELLED, not FAILED), best-effort
             # transition the RunRecord to CANCELLED, then re-raise so the
-            # asyncio machinery observes the cancellation. The trailing
-            # ``finally`` still clears capability current_context.
+            # asyncio machinery observes the cancellation. No capability state
+            # to clear (Phase 1 refactoring: deps travel via pydantic-ai DI).
             try:
                 await self._run_store.transition(
                     context.run_id, RunStatus.CANCELLED, expected_version=2)
@@ -310,10 +316,6 @@ class AgentRunner:
                     "error_type": type(exc).__name__,
                 })
             raise
-        finally:
-            agent.policy_capability.current_context = None
-            if agent.middleware_capability is not None:
-                agent.middleware_capability.current_context = None
 
     async def run_stream(
         self, agent: CompiledAgent, request: RunInput, context: RunContext,
@@ -334,12 +336,13 @@ class AgentRunner:
         to hang.
 
         Lifecycle mirrors :meth:`run` / :meth:`_run_lifecycle` step for step:
-        RunRecord PENDING -> RUNNING; capabilities' current_context set;
-        RunStarted event; middleware ``before_run``; prompt built from session
-        history with the same Memory + Knowledge injection; SessionMessage
-        append; checkpoint save; SUCCEEDED transition + ``after_run`` +
-        RunCompleted; on exception FAILED transition + ``on_error`` + RunFailed
-        and re-raise; current_context cleared in ``finally``.
+        RunRecord PENDING -> RUNNING; per-Run ToolContext built into
+        AgentDependencies; RunStarted event; middleware ``before_run``; prompt
+        built from session history with the same Memory + Knowledge injection;
+        SessionMessage append; checkpoint save; SUCCEEDED transition +
+        ``after_run`` + RunCompleted; on exception FAILED transition +
+        ``on_error`` + RunFailed and re-raise. No capability mutable state to
+        clear (deps travel via pydantic-ai DI).
 
         **Deliberate duplication.** ``run_stream`` is an ``async def``
         generator (it ``yield``s mid-lifecycle), so it cannot reuse
@@ -398,9 +401,7 @@ class AgentRunner:
             running_version = current.version
 
         tool_context = ToolContext(run_id=context.run_id, session_id=context.session_id)
-        agent.policy_capability.current_context = tool_context
-        if agent.middleware_capability is not None:
-            agent.middleware_capability.current_context = tool_context
+        deps = AgentDependencies(tool_context=tool_context)
 
         try:
             if message_history is None:
@@ -452,9 +453,9 @@ class AgentRunner:
             # is deferred (per-node wrapping would need a per-request budget).
             accumulated_text = ""
             if message_history is not None:
-                run_iter = agent.pydantic_agent.iter(message_history=message_history)
+                run_iter = agent.pydantic_agent.iter(message_history=message_history, deps=deps)
             else:
-                run_iter = agent.pydantic_agent.iter(prompt)
+                run_iter = agent.pydantic_agent.iter(prompt, deps=deps)
             async with run_iter as run:
                 try:
                     async for node in run:
@@ -486,8 +487,9 @@ class AgentRunner:
                     # pause signal to the caller, and return cleanly (do NOT
                     # re-raise). The handler is INSIDE the ``async with ... as
                     # run:`` block so ``run`` is bound and ``run.all_messages()``
-                    # works. The ``return`` exits the generator; the outer
-                    # ``finally`` still clears capability current_context.
+                    # works. The ``return`` exits the generator cleanly (Phase 1
+                    # refactoring removed the trailing finally -- no mutable
+                    # capability state to clear).
                     messages = run.all_messages()
                     await self._checkpoint_store.save(RunCheckpoint(
                         id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
@@ -563,8 +565,9 @@ class AgentRunner:
             # Exception), best-effort transition the RunRecord to CANCELLED
             # (using ``running_version`` captured at entry -- the version the
             # SUCCEEDED / FAILED transitions would also use), then re-raise so
-            # the asyncio machinery observes the cancellation. The trailing
-            # ``finally`` still clears capability current_context.
+            # the asyncio machinery observes the cancellation. No capability
+            # state to clear (Phase 1 refactoring: deps travel via pydantic-ai
+            # DI, no mutable per-Run field on the capabilities).
             try:
                 await self._run_store.transition(
                     context.run_id, RunStatus.CANCELLED,
@@ -589,10 +592,6 @@ class AgentRunner:
             except Exception:
                 pass
             raise
-        finally:
-            agent.policy_capability.current_context = None
-            if agent.middleware_capability is not None:
-                agent.middleware_capability.current_context = None
 
     def _envelope(self, context: RunContext, *, sequence: int, payload) -> EventEnvelope:
         return EventEnvelope(

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CompiledAgent: the stateless output of AgentCompiler.compile(). Reusable
-across many Runs -- no Session, no Run, no Checkpoint, no Workspace.
-policy_capability/middleware_capability are the SAME instances already inside
-pydantic_agent's capabilities=[...] list -- AgentRunner sets their
-current_context per-Run rather than reaching into pydantic-ai internals."""
+across many Runs -- no Session, no Run, no Checkpoint, no Workspace, and (Phase
+1 review-doc refactoring) no mutable per-Run fields anywhere on its
+capabilities. policy_capability/middleware_capability are the SAME instances
+already inside pydantic_agent's capabilities=[...] list; the per-Run
+ToolContext reaches them via pydantic-ai dependency injection
+(``deps=AgentDependencies(...)`` -> ``ctx.deps.tool_context``), so one
+CompiledAgent is safe to share across concurrent Runs."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Phase 1 review-doc refactoring: the per-Run ToolContext reaches the
+capability via pydantic-ai dependency injection (``deps=AgentDependencies(...)``
+on ``agent.run()`` -> ``ctx.deps.tool_context`` inside hooks). No mutable
+``current_context`` field is set on the capability."""
 import asyncio
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.capability import build_middleware_capability
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
@@ -40,7 +45,11 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
 
 
 def _agent_with(capability) -> Agent:
-    agent = Agent(FunctionModel(_model_fn), capabilities=[capability])
+    agent = Agent(
+        FunctionModel(_model_fn),
+        capabilities=[capability],
+        deps_type=AgentDependencies,
+    )
 
     @agent.tool_plain
     def echo(text: str) -> str:
@@ -49,14 +58,17 @@ def _agent_with(capability) -> Agent:
     return agent
 
 
-def test_middleware_capability_fires_all_four_hooks_in_order_with_current_context():
+def _deps(run_id: str = "run-1", session_id: str = "session-1") -> AgentDependencies:
+    return AgentDependencies(tool_context=ToolContext(run_id=run_id, session_id=session_id))
+
+
+def test_middleware_capability_fires_all_four_hooks_in_order_with_deps():
     log: "list[tuple]" = []
     pipeline = MiddlewarePipeline(middlewares=(_RecordingMiddleware(log),))
     capability = build_middleware_capability(pipeline)
-    capability.current_context = ToolContext(run_id="run-1", session_id="session-1")
     agent = _agent_with(capability)
     async def _run():
-        return await agent.run("say hi via the tool")
+        return await agent.run("say hi via the tool", deps=_deps())
     asyncio.run(_run())
     kinds = [entry[0] for entry in log]
     assert "before_model" in kinds
@@ -69,15 +81,19 @@ def test_middleware_capability_fires_all_four_hooks_in_order_with_current_contex
     assert before_tool_entry[2] == {"text": "hi"}
 
 
-def test_middleware_capability_current_context_defaults_to_unknown_when_unset():
+def test_middleware_capability_has_no_current_context_field():
+    # Phase 1 refactoring: the mutable ``current_context`` field is gone. A
+    # fresh capability has no such attribute, and a Run driven purely via
+    # deps= leaves it gone -- the concurrency-safety invariant.
     log: "list[tuple]" = []
     pipeline = MiddlewarePipeline(middlewares=(_RecordingMiddleware(log),))
     capability = build_middleware_capability(pipeline)
-    assert capability.current_context is None
+    assert not hasattr(capability, "current_context")
     agent = _agent_with(capability)
     async def _run():
-        return await agent.run("say hi via the tool")
+        return await agent.run("say hi via the tool", deps=_deps())
     asyncio.run(_run())
+    assert not hasattr(capability, "current_context")
     assert any(e[0] == "before_tool" for e in log)
 
 
@@ -91,21 +107,24 @@ def test_on_tool_execute_error_runs_pipeline_on_error_then_reraises():
             log.append(f"on_error:{type(error).__name__}")
     pipeline = MiddlewarePipeline(middlewares=(_ErrMiddleware(log),))
     capability = build_middleware_capability(pipeline)
-    capability.current_context = ToolContext(run_id="run-1", session_id="session-1")
 
     def _exploding_model_fn(messages, info: AgentInfo) -> ModelResponse:
         if len(messages) <= 1:
             return ModelResponse(parts=[ToolCallPart(tool_name="boom", args={})])
         return ModelResponse(parts=[TextPart(content="done")])
 
-    agent = Agent(FunctionModel(_exploding_model_fn), capabilities=[capability])
+    agent = Agent(
+        FunctionModel(_exploding_model_fn),
+        capabilities=[capability],
+        deps_type=AgentDependencies,
+    )
 
     @agent.tool_plain
     def boom() -> str:
         raise RuntimeError("tool blew up")
 
     async def _run():
-        return await agent.run("call the failing tool")
+        return await agent.run("call the failing tool", deps=_deps())
 
     try:
         asyncio.run(_run())

@@ -12,10 +12,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
+from linktools.ai.policy.engine import ToolContext
 
 
 def _registry(model_fn) -> ModelRegistry:
@@ -87,7 +89,15 @@ def test_read_file_tool_call_reads_file_under_workdir(tmp_path):
     compiled = asyncio.run(compiler.compile(_spec()))
 
     async def _run():
-        return await compiled.pydantic_agent.run("read sample.txt")
+        # Phase 1 refactoring: the compiled agent now declares
+        # deps_type=AgentDependencies, so every direct .run() call must supply
+        # a deps= (the runner does this automatically; tests bypassing the
+        # runner must do it explicitly). The builtin read_file tool itself
+        # ignores ctx.deps, but PolicyCapability reads ctx.deps.tool_context.
+        return await compiled.pydantic_agent.run(
+            "read sample.txt",
+            deps=AgentDependencies(tool_context=ToolContext(run_id="r", session_id="s")),
+        )
     result = asyncio.run(_run())
 
     tool_returns = [
