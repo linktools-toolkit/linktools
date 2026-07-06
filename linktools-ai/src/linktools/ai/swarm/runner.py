@@ -40,7 +40,6 @@ from ..errors import (
 if TYPE_CHECKING:
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
-from ..events.envelope import EventEnvelope
 from ..events.payloads import SwarmCompleted, SwarmStarted
 from ..events.store import EventStore
 from ..run.checkpoint import CheckpointStore
@@ -130,9 +129,9 @@ class SwarmRunner:
             started_at=None,
             finished_at=None,
         )
-        await self._run_store.create(record)
-        await self._run_store.transition(
-            context.run_id, RunStatus.RUNNING, expected_version=1
+        created = await self._run_store.create(record)
+        driving_running = await self._run_store.transition(
+            context.run_id, RunStatus.RUNNING, expected_version=created.version
         )
 
         # 2. SwarmRun.
@@ -147,20 +146,23 @@ class SwarmRunner:
             created_at=now,
             updated_at=now,
         )
-        await self._swarm_store.create_run(swarm_run)
-        await self._swarm_store.update_run(
-            swarm_run.id, expected_version=1, status=SwarmStatus.RUNNING
+        created_swarm = await self._swarm_store.create_run(swarm_run)
+        swarm_run = await self._swarm_store.update_run(
+            swarm_run.id, expected_version=created_swarm.version, status=SwarmStatus.RUNNING
         )
         # version is now 2 after the PENDING -> RUNNING update.
-        swarm_version = 2
+        swarm_version = swarm_run.version
 
         try:
-            # 3. SwarmStarted event (sequence=1 for this run's event stream).
+            # 3. SwarmStarted event (store assigns the next sequence).
             await self._event_store.append(
-                self._envelope(
-                    context, sequence=1,
-                    payload=SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
-                )
+                stream_id=context.run_id,
+                run_id=context.run_id,
+                root_run_id=context.root_run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=context.session_id,
+                runnable_id=context.runnable_id,
+                payload=SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
             )
 
             # 4. build the context the strategy consumes + delegate the round loop.
@@ -220,32 +222,37 @@ class SwarmRunner:
 
             # 6. transition driving Run + SwarmRun to SUCCEEDED.
             await self._run_store.transition(
-                context.run_id, RunStatus.SUCCEEDED, expected_version=2, result=result
+                context.run_id, RunStatus.SUCCEEDED,
+                expected_version=driving_running.version, result=result,
             )
             await self._swarm_store.update_run(
                 swarm_run.id, expected_version=swarm_version, status=SwarmStatus.SUCCEEDED
             )
 
-            # 7. SwarmCompleted event (sequence=2).
+            # 7. SwarmCompleted event (store assigns the next sequence).
             await self._event_store.append(
-                self._envelope(
-                    context, sequence=2,
-                    payload=SwarmCompleted(swarm_run_id=swarm_run.id),
-                )
+                stream_id=context.run_id,
+                run_id=context.run_id,
+                root_run_id=context.root_run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=context.session_id,
+                runnable_id=context.runnable_id,
+                payload=SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
         except Exception as exc:
             # Best-effort cleanup: flip both records to FAILED, then re-raise.
-            # Version expectations match the post-RUNNING state (driving Run at
-            # version 2, SwarmRun at version 2) since no intermediate transition
-            # bumps them inside the try block above.
+            # The driving Run's expected version is the post-RUNNING version
+            # captured in driving_running.version (no intermediate transition
+            # bumps it inside the try block above); the SwarmRun's is tracked in
+            # swarm_version.
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc)
             )
             try:
                 await self._run_store.transition(
                     context.run_id, RunStatus.FAILED,
-                    expected_version=2, error=error_info,
+                    expected_version=driving_running.version, error=error_info,
                 )
             except Exception:
                 pass
@@ -328,14 +335,16 @@ class SwarmRunner:
                 swarm_run.id, expected_version=swarm_version, status=SwarmStatus.SUCCEEDED
             )
 
-            # next event sequence: events from the original run already occupy
-            # the low sequences, so append after the highest existing one.
-            next_seq = await self._next_event_sequence(parent_context.run_id)
+            # SwarmCompleted event -- the store assigns the next sequence
+            # (events from the original run already occupy the low ones).
             await self._event_store.append(
-                self._envelope(
-                    parent_context, sequence=next_seq,
-                    payload=SwarmCompleted(swarm_run_id=swarm_run.id),
-                )
+                stream_id=parent_context.run_id,
+                run_id=parent_context.run_id,
+                root_run_id=parent_context.root_run_id,
+                parent_run_id=parent_context.parent_run_id,
+                session_id=parent_context.session_id,
+                runnable_id=parent_context.runnable_id,
+                payload=SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
         except Exception as exc:
@@ -432,25 +441,4 @@ class SwarmRunner:
                     created_at=datetime.now(timezone.utc),
                 ),
             ),
-        )
-
-    async def _next_event_sequence(self, run_id: str) -> int:
-        page = await self._event_store.list(run_id, limit=10000)
-        if not page.items:
-            return 1
-        return max(e.sequence for e in page.items) + 1
-
-    def _envelope(
-        self, context: RunContext, *, sequence: int, payload
-    ) -> EventEnvelope:
-        return EventEnvelope(
-            event_id=f"{context.run_id}-{sequence}",
-            sequence=sequence,
-            occurred_at=datetime.now(timezone.utc),
-            run_id=context.run_id,
-            root_run_id=context.root_run_id,
-            parent_run_id=context.parent_run_id,
-            session_id=context.session_id,
-            runnable_id=context.runnable_id,
-            payload=payload,
         )

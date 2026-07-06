@@ -11,15 +11,12 @@ the raise into SkipToolExecution and the model sees the "approval needed"
 tool result. Default-None (no stores wired) preserves today's behavior
 identically: just raise, no persistence, no event."""
 import asyncio
-import itertools
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..agent.approval import ApprovalStatus, build_approval_request
 from ..errors import RunPaused, ToolApprovalRequiredError, ToolDeniedError
-from ..events.envelope import EventEnvelope
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 
@@ -54,12 +51,6 @@ class ToolExecutor:
         # tool-execution stack to AgentRunner (Tasks 6-7 catch it). Default
         # False preserves today's behavior byte-for-byte.
         self._pause_on_approval = pause_on_approval
-        # Per-executor monotonic counter for event sequences. The executor is
-        # compiled once and reused across many runs; sequence uniqueness is
-        # enforced per-run at the storage layer (paths/rows are keyed by
-        # (run_id, sequence)), so a single counter advancing across runs is
-        # safe -- each run sees only its own events.
-        self._event_sequence = itertools.count(1)
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
@@ -129,14 +120,11 @@ class ToolExecutor:
         persisted ``approval.id`` for ``RunPaused(approval_id=...)`` without
         re-doing the run_id resolution / build work.
 
-        Event-sequence caveat: the executor uses a per-executor itertools.count()
-        for event sequences (starting at 1). When the same EventStore is shared
-        with other emitters (e.g., AgentRunner in agent/runner.py, which
-        uses sequence=1 for RunStarted), collisions may occur and emission may
-        fail -- but emission is best-effort (failures are logged, the approval
-        record remains authoritative). Proper sequence coordination via an
-        EventStore "next sequence" API is deferred until approval is wired into
-        the runner."""
+        Event emission is best-effort: the EventStore assigns the sequence
+        itself (review doc §8.1), so a failure here is logged and swallowed --
+        the approval record remains the source of truth. The store's
+        per-stream sequence counter naturally interleaves this event with any
+        others emitted for the same run (e.g. AgentRunner's RunStarted)."""
         if self._approval_store is None:
             return None
 
@@ -160,23 +148,20 @@ class ToolExecutor:
         await self._approval_store.create(approval)
 
         if self._event_store is not None:
-            envelope = EventEnvelope(
-                event_id=f"{approval.id}-requested",
-                sequence=next(self._event_sequence),
-                occurred_at=datetime.now(timezone.utc),
-                run_id=approval.run_id,
-                root_run_id=approval.run_id,
-                parent_run_id=None,
-                session_id=context.session_id,
-                runnable_id=request.tool_name,
-                payload=ApprovalRequested(
-                    approval_id=approval.id,
-                    tool_name=request.tool_name,
-                    reason=reason or "",
-                ),
-            )
             try:
-                await self._event_store.append(envelope)
+                await self._event_store.append(
+                    stream_id=approval.run_id,
+                    run_id=approval.run_id,
+                    root_run_id=approval.run_id,
+                    parent_run_id=None,
+                    session_id=context.session_id,
+                    runnable_id=request.tool_name,
+                    payload=ApprovalRequested(
+                        approval_id=approval.id,
+                        tool_name=request.tool_name,
+                        reason=reason or "",
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001 - best-effort audit
                 _LOGGER.warning(
                     "failed to append ApprovalRequested event for approval %s: %s",

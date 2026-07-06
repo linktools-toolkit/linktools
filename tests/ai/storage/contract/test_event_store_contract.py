@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/contract/test_event_store_contract.py"""
-from datetime import datetime, timezone
+"""tests/ai/storage/contract/test_event_store_contract.py
+
+EventStore contract: append() takes the payload + run/stream context kwargs
+and assigns the sequence itself (review doc §8.1) -- callers never construct
+an EventEnvelope with a sequence. These tests verify the store-side sequence
+assignment, isolation, and round-tripping for both the file and sqlalchemy
+backends."""
+import asyncio
 
 import pytest
 
-from linktools.ai.errors import EventSequenceConflictError
-from linktools.ai.events.envelope import EventEnvelope
 from linktools.ai.events.payloads import RunStarted
 from linktools.ai.storage.file.event import FileEventStore
 
 
-def _event(run_id="run-1", sequence=1) -> EventEnvelope:
-    return EventEnvelope(
-        event_id=f"evt-{run_id}-{sequence}", sequence=sequence, occurred_at=datetime.now(timezone.utc),
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id="session-1",
-        runnable_id="agent-1", payload=RunStarted(run_id=run_id, runnable_id="agent-1"),
+async def _append(
+    store,
+    *,
+    run_id="run-1",
+    root_run_id=None,
+    parent_run_id=None,
+    session_id="session-1",
+    runnable_id="agent-1",
+):
+    """Append one RunStarted event with sensible default routing fields."""
+    return await store.append(
+        stream_id=run_id,
+        run_id=run_id,
+        root_run_id=root_run_id or run_id,
+        parent_run_id=parent_run_id,
+        session_id=session_id,
+        runnable_id=runnable_id,
+        payload=RunStarted(run_id=run_id, runnable_id=runnable_id),
     )
 
 
@@ -43,7 +60,6 @@ def store_factory(request, tmp_path):
         # asyncio.get_event_loop().run_until_complete() here -- that raises
         # "This event loop is already running". Run the setup coroutine to
         # completion on a separate thread with its own fresh event loop instead.
-        import asyncio
         import threading
 
         outcome = {}
@@ -94,10 +110,28 @@ def store_factory(request, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_append_assigns_sequence_starting_at_one(store_factory):
+    store = store_factory()
+    envelope = await _append(store)
+    assert envelope.sequence == 1
+    # The store mints the identity/timing fields the caller used to supply.
+    assert envelope.event_id  # non-empty uuid string
+    assert envelope.occurred_at.tzinfo is not None
+    assert isinstance(envelope.payload, RunStarted)
+
+
+@pytest.mark.asyncio
+async def test_append_assigns_increasing_sequences(store_factory):
+    store = store_factory()
+    seqs = [(await _append(store)).sequence for _ in range(4)]
+    assert seqs == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_append_then_list_roundtrip(store_factory):
     store = store_factory()
-    await store.append(_event(sequence=1))
-    await store.append(_event(sequence=2))
+    await _append(store)
+    await _append(store)
     page = await store.list("run-1")
     assert [e.sequence for e in page.items] == [1, 2]
     assert isinstance(page.items[0].payload, RunStarted)
@@ -106,9 +140,8 @@ async def test_append_then_list_roundtrip(store_factory):
 @pytest.mark.asyncio
 async def test_list_after_sequence_filters(store_factory):
     store = store_factory()
-    await store.append(_event(sequence=1))
-    await store.append(_event(sequence=2))
-    await store.append(_event(sequence=3))
+    for _ in range(3):
+        await _append(store)
     page = await store.list("run-1", after_sequence=1)
     assert [e.sequence for e in page.items] == [2, 3]
 
@@ -116,49 +149,60 @@ async def test_list_after_sequence_filters(store_factory):
 @pytest.mark.asyncio
 async def test_list_respects_limit(store_factory):
     store = store_factory()
-    for seq in range(1, 6):
-        await store.append(_event(sequence=seq))
+    for _ in range(5):
+        await _append(store)
     page = await store.list("run-1", limit=2)
     assert [e.sequence for e in page.items] == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_append_with_expected_sequence_conflict_raises(store_factory):
+async def test_concurrent_appends_get_distinct_sequences(store_factory):
+    # Fire several appends concurrently; the store's per-stream sequence
+    # assignment must hand each one a unique sequence (review doc §8.1/§8.4).
     store = store_factory()
-    await store.append(_event(sequence=1))
-    with pytest.raises(EventSequenceConflictError):
-        await store.append(_event(sequence=1), expected_sequence=5)
-
-
-@pytest.mark.asyncio
-async def test_append_without_expected_sequence_still_rejects_duplicate_sequence(store_factory):
-    store = store_factory()
-    await store.append(_event(sequence=1))
-    with pytest.raises(EventSequenceConflictError):
-        await store.append(_event(sequence=1))
+    envelopes = await asyncio.gather(*(_append(store) for _ in range(6)))
+    seqs = sorted(e.sequence for e in envelopes)
+    assert seqs == [1, 2, 3, 4, 5, 6]
 
 
 @pytest.mark.asyncio
 async def test_events_for_different_runs_are_isolated(store_factory):
     store = store_factory()
-    await store.append(_event(run_id="run-a", sequence=1))
-    await store.append(_event(run_id="run-b", sequence=1))
+    await _append(store, run_id="run-a")
+    await _append(store, run_id="run-b")
     page_a = await store.list("run-a")
     page_b = await store.list("run-b")
     assert len(page_a.items) == 1
     assert len(page_b.items) == 1
     assert page_a.items[0].run_id == "run-a"
+    # Each stream's sequence counter is independent -- both start at 1.
+    assert page_a.items[0].sequence == 1
+    assert page_b.items[0].sequence == 1
 
 
 @pytest.mark.asyncio
 async def test_occurred_at_roundtrips_as_timezone_aware(store_factory):
     store = store_factory()
-    original = _event(sequence=1)
-    await store.append(original)
+    appended = await _append(store)
     page = await store.list("run-1")
     fetched = page.items[0]
     assert fetched.occurred_at.tzinfo is not None
-    assert fetched.occurred_at == original.occurred_at
+    assert fetched.occurred_at == appended.occurred_at
+
+
+@pytest.mark.asyncio
+async def test_append_routing_fields_roundtrip(store_factory):
+    store = store_factory()
+    await store.append(
+        stream_id="run-1", run_id="run-1", root_run_id="root-1",
+        parent_run_id="parent-1", session_id="sess-1", runnable_id="agent-x",
+        payload=RunStarted(run_id="run-1", runnable_id="agent-x"),
+    )
+    envelope = (await store.list("run-1")).items[0]
+    assert envelope.root_run_id == "root-1"
+    assert envelope.parent_run_id == "parent-1"
+    assert envelope.session_id == "sess-1"
+    assert envelope.runnable_id == "agent-x"
 
 
 @pytest.mark.asyncio

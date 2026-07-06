@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SqlAlchemyEventStore: DB-backed EventStore. The unique (run_id, sequence)
-constraint on ai_events makes append's duplicate-sequence rejection a real
-DB-level guarantee that fires unconditionally (i.e. even when the caller does
-not pass expected_sequence), not just an application-level check gated behind
-an optional argument."""
+constraint on ai_events is the backstop for sequence uniqueness; the store
+additionally reserves the next sequence itself (review doc §8.1/§8.4) by
+reading MAX(sequence)+1 for the stream inside the same transaction that
+inserts the row. On the rare race where two concurrent transactions both
+computed the same next_seq, the unique constraint's IntegrityError is caught
+and the whole append retried (re-reading MAX under a fresh transaction)."""
 
 import json
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from .models import EventRow
 from ...errors import EventSequenceConflictError
 from ...events import payloads as _payloads_module
 from ...events.envelope import EventEnvelope
+from ...events.payloads import EventPayload
 from ...events.store import EventPage
 
 
@@ -35,41 +39,57 @@ class SqlAlchemyEventStore:
     def __init__(self, *, session_factory: "Callable[[], AsyncSession]") -> None:
         self._session_factory = session_factory
 
-    async def append(self, event: EventEnvelope, *, expected_sequence: "int | None" = None) -> EventEnvelope:
-        # NOTE: expected_sequence currently only gates whether a duplicate-sequence
-        # check runs at all -- it is not compared against the run's actual last
-        # sequence number. Real optimistic-concurrency validation (comparing against
-        # a caller-expected prior sequence) is deferred until a caller needs it.
-        async with self._session_factory() as session:
-            async with session.begin():
-                if expected_sequence is not None:
-                    existing = await session.execute(
-                        select(EventRow).where(EventRow.run_id == event.run_id, EventRow.sequence == event.sequence)
-                    )
-                    if existing.scalar_one_or_none() is not None:
-                        raise EventSequenceConflictError(
-                            f"event already exists at sequence {event.sequence} for run {event.run_id}"
+    async def append(
+        self,
+        *,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+    ) -> EventEnvelope:
+        # Reserve the next sequence inside the inserting transaction: read
+        # MAX(sequence) for the stream, add 1, insert. Retry the whole
+        # transaction when the unique (run_id, sequence) constraint fires
+        # (two concurrent reservations computed the same next_seq -- the loser
+        # rolls back and re-reads MAX, which now reflects the winner's row).
+        last_exc: "BaseException | None" = None
+        for _ in range(8):
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        result = await session.execute(
+                            select(func.max(EventRow.sequence)).where(EventRow.run_id == stream_id)
                         )
-                row = EventRow(
-                    event_id=event.event_id, run_id=event.run_id, sequence=event.sequence,
-                    occurred_at=event.occurred_at, root_run_id=event.root_run_id, parent_run_id=event.parent_run_id,
-                    session_id=event.session_id, runnable_id=event.runnable_id,
-                    payload_type=type(event.payload).__name__, payload_json=json.dumps(asdict(event.payload)),
-                )
-                session.add(row)
-                # This flush is unconditional (not nested inside the
-                # expected_sequence is not None branch above) so that the
-                # unique (run_id, sequence) DB constraint's IntegrityError is
-                # converted to EventSequenceConflictError for every duplicate
-                # append attempt, regardless of whether the caller supplied
-                # expected_sequence.
-                try:
-                    await session.flush()
-                except IntegrityError as exc:
-                    raise EventSequenceConflictError(
-                        f"event already exists at sequence {event.sequence} for run {event.run_id}"
-                    ) from exc
-        return event
+                        current = result.scalar()
+                        next_seq = (current or 0) + 1
+                        event_id = str(uuid.uuid4())
+                        occurred_at = datetime.now(timezone.utc)
+                        row = EventRow(
+                            event_id=event_id, run_id=run_id, sequence=next_seq,
+                            occurred_at=occurred_at, root_run_id=root_run_id, parent_run_id=parent_run_id,
+                            session_id=session_id, runnable_id=runnable_id,
+                            payload_type=type(payload).__name__,
+                            payload_json=json.dumps(asdict(payload)),
+                        )
+                        session.add(row)
+                        await session.flush()
+                        return EventEnvelope(
+                            event_id=event_id, sequence=next_seq, occurred_at=occurred_at,
+                            run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
+                            session_id=session_id, runnable_id=runnable_id, payload=payload,
+                        )
+            except IntegrityError as exc:
+                # Unique (run_id, sequence) collision -- a concurrent append
+                # reserved the same sequence first. Retry to re-read MAX.
+                last_exc = exc
+                continue
+        raise EventSequenceConflictError(
+            f"could not reserve a unique event sequence for stream {stream_id!r} "
+            f"after repeated conflicts"
+        ) from last_exc
 
     def _row_to_envelope(self, row: EventRow) -> EventEnvelope:
         payload_cls = getattr(_payloads_module, row.payload_type)

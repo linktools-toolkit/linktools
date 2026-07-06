@@ -5,7 +5,7 @@ payload carries the minimum data meaningful for that event type -- the spec
 mandates which payload TYPES must exist, not their exact fields."""
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Union
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,3 +155,34 @@ class SwarmCompleted:
 class ResourceChanged:
     path: str
     revision: int
+
+
+# Union of every event payload type. This is the type of the ``payload`` field
+# EventStore.append accepts (review doc §8.3) -- callers pass a concrete
+# payload instance and the store wraps it in an EventEnvelope.
+EventPayload = Union[
+    RunStarted,
+    RunCompleted,
+    RunFailed,
+    RunPaused,
+    RunResumed,
+    RunCancelled,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    ToolStarted,
+    ToolCompleted,
+    ToolFailed,
+    ApprovalRequested,
+    ApprovalApproved,
+    ApprovalRejected,
+    SwarmStarted,
+    SwarmRoundStarted,
+    SwarmRoundCompleted,
+    SwarmTaskCreated,
+    SwarmTaskClaimed,
+    SwarmTaskCompleted,
+    SwarmTaskFailed,
+    SwarmCompleted,
+    ResourceChanged,
+]

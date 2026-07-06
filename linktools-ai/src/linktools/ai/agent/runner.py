@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..errors import ModelPolicyExceededError, ModelRoutingError, RunPaused
-from ..events.envelope import EventEnvelope
 from ..events.payloads import (
     RunCompleted,
     RunFailed,
@@ -93,8 +92,10 @@ class AgentRunner:
             status=RunStatus.PENDING, input=request, result=None, error=None, version=1,
             created_at=now, started_at=None, finished_at=None,
         )
-        await self._run_store.create(record)
-        await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
+        created = await self._run_store.create(record)
+        running = await self._run_store.transition(
+            context.run_id, RunStatus.RUNNING, expected_version=created.version,
+        )
 
         # Observability (Phase 6): when a sink is wired, open an outer "agent.run"
         # span around the whole lifecycle. The default-None path skips the span
@@ -103,15 +104,20 @@ class AgentRunner:
         started = time.monotonic()
         observability = self._observability
         if observability is None:
-            return await self._run_lifecycle(agent, request, context, started)
+            return await self._run_lifecycle(
+                agent, request, context, started, running_version=running.version,
+            )
         async with use_span(
             observability, "agent.run",
             attributes={"run_id": context.run_id, "session_id": context.session_id},
         ):
-            return await self._run_lifecycle(agent, request, context, started)
+            return await self._run_lifecycle(
+                agent, request, context, started, running_version=running.version,
+            )
 
     async def _run_lifecycle(
         self, agent: CompiledAgent, request: RunInput, context: RunContext, started: float,
+        *, running_version: int,
     ) -> RunResult:
         """The per-invocation lifecycle (events, middleware hooks, prompt build,
         model call, state transitions, metrics).
@@ -120,13 +126,24 @@ class AgentRunner:
         ``agent.run`` span. In the latter case the tracing contextvar is already
         set, so ``use_span("agent.model")`` parents to the outer span
         automatically. ``started`` is a ``time.monotonic()`` timestamp captured
-        in :meth:`run` for the duration histogram."""
+        in :meth:`run` for the duration histogram. ``running_version`` is the
+        RunRecord version observed right after the PENDING -> RUNNING transition
+        (no hardcoded expected_version per review doc §6.3 -- terminal
+        transitions reuse this exact optimistic-concurrency token)."""
         observability = self._observability
         metrics = self._metrics
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
         try:
-            await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
-                run_id=context.run_id, runnable_id=context.runnable_id)))
+            await self._event_store.append(
+                stream_id=context.run_id,
+                run_id=context.run_id,
+                root_run_id=context.root_run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=context.session_id,
+                runnable_id=context.runnable_id,
+                payload=RunStarted(
+                    run_id=context.run_id, runnable_id=context.runnable_id),
+            )
 
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_before_run(context)
@@ -240,13 +257,22 @@ class AgentRunner:
                 },
             )
             await self._run_store.transition(
-                context.run_id, RunStatus.SUCCEEDED, expected_version=2, result=result)
+                context.run_id, RunStatus.SUCCEEDED,
+                expected_version=running_version, result=result,
+            )
 
             if self._middleware_pipeline is not None:
                 result = await self._middleware_pipeline.run_after_run(context, result)
 
-            await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
-                run_id=context.run_id)))
+            await self._event_store.append(
+                stream_id=context.run_id,
+                run_id=context.run_id,
+                root_run_id=context.root_run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=context.session_id,
+                runnable_id=context.runnable_id,
+                payload=RunCompleted(run_id=context.run_id),
+            )
 
             if metrics is not None:
                 metrics.counter("agent.run.completed", attributes=run_attrs)
@@ -264,15 +290,23 @@ class AgentRunner:
             # run is NOT marked FAILED (the bug it guards against).
             try:
                 await self._run_store.transition(
-                    context.run_id, RunStatus.WAITING_APPROVAL, expected_version=2)
+                    context.run_id, RunStatus.WAITING_APPROVAL,
+                    expected_version=running_version,
+                )
             except Exception:
                 pass
             try:
-                await self._event_store.append(self._envelope(
-                    context, sequence=2,
+                await self._event_store.append(
+                    stream_id=context.run_id,
+                    run_id=context.run_id,
+                    root_run_id=context.root_run_id,
+                    parent_run_id=context.parent_run_id,
+                    session_id=context.session_id,
+                    runnable_id=context.runnable_id,
                     payload=RunPausedEvent(
                         run_id=context.run_id,
-                        reason=f"approval required: {paused.approval_id}")))
+                        reason=f"approval required: {paused.approval_id}"),
+                )
             except Exception:
                 pass
             raise
@@ -288,7 +322,9 @@ class AgentRunner:
             # to clear (Phase 1 refactoring: deps travel via pydantic-ai DI).
             try:
                 await self._run_store.transition(
-                    context.run_id, RunStatus.CANCELLED, expected_version=2)
+                    context.run_id, RunStatus.CANCELLED,
+                    expected_version=running_version,
+                )
             except Exception:
                 # best-effort: the run may already be terminal (e.g. a
                 # concurrent Runtime.cancel beat this transition) or the
@@ -300,14 +336,25 @@ class AgentRunner:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
                 await self._run_store.transition(
-                    context.run_id, RunStatus.FAILED, expected_version=2, error=error_info)
+                    context.run_id, RunStatus.FAILED,
+                    expected_version=running_version, error=error_info,
+                )
             except Exception:
                 pass
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_on_error(context, exc)
             try:
-                await self._event_store.append(self._envelope(context, sequence=2, payload=RunFailed(
-                    run_id=context.run_id, error_type=type(exc).__name__, message=str(exc))))
+                await self._event_store.append(
+                    stream_id=context.run_id,
+                    run_id=context.run_id,
+                    root_run_id=context.root_run_id,
+                    parent_run_id=context.parent_run_id,
+                    session_id=context.session_id,
+                    runnable_id=context.runnable_id,
+                    payload=RunFailed(
+                        run_id=context.run_id,
+                        error_type=type(exc).__name__, message=str(exc)),
+                )
             except Exception:
                 pass
             if metrics is not None:
@@ -391,9 +438,11 @@ class AgentRunner:
                 status=RunStatus.PENDING, input=request, result=None, error=None, version=1,
                 created_at=now, started_at=None, finished_at=None,
             )
-            await self._run_store.create(record)
-            await self._run_store.transition(context.run_id, RunStatus.RUNNING, expected_version=1)
-            running_version = 2
+            created = await self._run_store.create(record)
+            running = await self._run_store.transition(
+                context.run_id, RunStatus.RUNNING, expected_version=created.version,
+            )
+            running_version = running.version
         else:
             # Resume: Runtime.resume already transitioned WAITING_APPROVAL ->
             # RUNNING; capture the current version for the final transition.
@@ -405,8 +454,16 @@ class AgentRunner:
 
         try:
             if message_history is None:
-                await self._event_store.append(self._envelope(context, sequence=1, payload=RunStarted(
-                    run_id=context.run_id, runnable_id=context.runnable_id)))
+                await self._event_store.append(
+                    stream_id=context.run_id,
+                    run_id=context.run_id,
+                    root_run_id=context.root_run_id,
+                    parent_run_id=context.parent_run_id,
+                    session_id=context.session_id,
+                    runnable_id=context.runnable_id,
+                    payload=RunStarted(
+                        run_id=context.run_id, runnable_id=context.runnable_id),
+                )
 
                 if self._middleware_pipeline is not None:
                     await self._middleware_pipeline.run_before_run(context)
@@ -505,11 +562,17 @@ class AgentRunner:
                     except Exception:
                         pass
                     try:
-                        await self._event_store.append(self._envelope(
-                            context, sequence=2,
+                        await self._event_store.append(
+                            stream_id=context.run_id,
+                            run_id=context.run_id,
+                            root_run_id=context.root_run_id,
+                            parent_run_id=context.parent_run_id,
+                            session_id=context.session_id,
+                            runnable_id=context.runnable_id,
                             payload=RunPausedEvent(
                                 run_id=context.run_id,
-                                reason=f"approval required: {paused.approval_id}")))
+                                reason=f"approval required: {paused.approval_id}"),
+                        )
                     except Exception:
                         pass
                     yield {"type": "paused", "run_id": paused.run_id,
@@ -548,12 +611,20 @@ class AgentRunner:
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_after_run(context, run_result)
 
-            # Best-effort RunCompleted: on the resume path, sequence=2 may
-            # already hold the RunPaused event from the initial pause, so a
-            # conflict here must not fail the run.
+            # Best-effort RunCompleted: on the resume path, the event stream
+            # may already hold a RunPaused event from the initial pause, and the
+            # store-assigned sequence here simply appends after it (no caller
+            # sequence to collide with anymore -- review doc §8.1).
             try:
-                await self._event_store.append(self._envelope(context, sequence=2, payload=RunCompleted(
-                    run_id=context.run_id)))
+                await self._event_store.append(
+                    stream_id=context.run_id,
+                    run_id=context.run_id,
+                    root_run_id=context.root_run_id,
+                    parent_run_id=context.parent_run_id,
+                    session_id=context.session_id,
+                    runnable_id=context.runnable_id,
+                    payload=RunCompleted(run_id=context.run_id),
+                )
             except Exception:
                 pass
         except asyncio.CancelledError:
@@ -587,15 +658,17 @@ class AgentRunner:
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_on_error(context, exc)
             try:
-                await self._event_store.append(self._envelope(context, sequence=2, payload=RunFailed(
-                    run_id=context.run_id, error_type=type(exc).__name__, message=str(exc))))
+                await self._event_store.append(
+                    stream_id=context.run_id,
+                    run_id=context.run_id,
+                    root_run_id=context.root_run_id,
+                    parent_run_id=context.parent_run_id,
+                    session_id=context.session_id,
+                    runnable_id=context.runnable_id,
+                    payload=RunFailed(
+                        run_id=context.run_id,
+                        error_type=type(exc).__name__, message=str(exc)),
+                )
             except Exception:
                 pass
             raise
-
-    def _envelope(self, context: RunContext, *, sequence: int, payload) -> EventEnvelope:
-        return EventEnvelope(
-            event_id=f"{context.run_id}-{sequence}", sequence=sequence,
-            occurred_at=datetime.now(timezone.utc), run_id=context.run_id,
-            root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
-            session_id=context.session_id, runnable_id=context.runnable_id, payload=payload)

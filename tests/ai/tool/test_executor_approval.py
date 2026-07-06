@@ -8,6 +8,7 @@ translates it into SkipToolExecution. Default-None (no stores wired)
 preserves today's behavior identically."""
 import asyncio
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -80,16 +81,32 @@ class _StubApprovalStore:
 
 
 class _StubEventStore:
-    """List-backed EventStore: records every appended envelope."""
+    """List-backed EventStore: records every appended envelope. Assigns the
+    sequence itself (mirrors the real Protocol -- review doc §8.1)."""
 
     def __init__(self):
         self.events: "list[EventEnvelope]" = []
 
     async def append(
-        self, event: EventEnvelope, *, expected_sequence: "int | None" = None
+        self,
+        *,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload,
     ) -> EventEnvelope:
-        self.events.append(event)
-        return event
+        sequence = sum(1 for e in self.events if e.run_id == run_id) + 1
+        envelope = EventEnvelope(
+            event_id=f"evt-{run_id}-{sequence}", sequence=sequence,
+            occurred_at=datetime.now(timezone.utc), run_id=run_id,
+            root_run_id=root_run_id, parent_run_id=parent_run_id,
+            session_id=session_id, runnable_id=runnable_id, payload=payload,
+        )
+        self.events.append(envelope)
+        return envelope
 
     async def list(
         self, run_id: str, *, after_sequence: int = 0, limit: int = 100
