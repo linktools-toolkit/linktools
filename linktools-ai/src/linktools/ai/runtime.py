@@ -160,6 +160,34 @@ class Runtime:
             user_id=user_id, tenant_id=tenant_id, workspace=None)
         return await self.runner.run(compiled, RunInput(prompt=prompt), context)
 
+    async def cancel(self, run_id: str) -> None:
+        """Best-effort store-level cancel: transitions the Run to CANCELLED.
+
+        Mirrors SwarmRunner.cancel's store-level approach (Decision #4 in the
+        swarm runner): this flips the RunRecord at the storage layer only -- it
+        does NOT cancel any live asyncio.Task driving an in-flight run. When the
+        run is in-flight (a Task driving AgentRunner.run / run_stream), the
+        caller should also cancel that Task; AgentRunner catches
+        ``asyncio.CancelledError`` in its lifecycle try/except and transitions
+        the Run to CANCELLED itself (so the two paths agree on the final state).
+
+        Idempotent: a Run already in a terminal status (SUCCEEDED / FAILED /
+        CANCELLED) is a no-op. Raises :class:`RunNotFoundError` when the run
+        does not exist."""
+        from .errors import RunNotFoundError
+        from .run.models import RunStatus
+
+        record = await self.storage.runs.get(run_id)
+        if record is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        if record.status in (
+            RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+        ):
+            return  # already terminal -- no-op
+        await self.storage.runs.transition(
+            run_id, RunStatus.CANCELLED, expected_version=record.version,
+        )
+
     async def run_stream(
         self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
         session_id: "str | None" = None,

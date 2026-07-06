@@ -270,6 +270,26 @@ class AgentRunner:
             except Exception:
                 pass
             raise
+        except asyncio.CancelledError:
+            # GAP-16: in-flight cancel path. When the caller cancels the
+            # asyncio.Task driving this run, asyncio raises CancelledError at
+            # the current await point. Catch it BEFORE the generic ``except
+            # Exception`` (CancelledError is a BaseException, not an Exception,
+            # since Python 3.8 -- so placement is for clarity, but the principle
+            # holds: the run must end up CANCELLED, not FAILED), best-effort
+            # transition the RunRecord to CANCELLED, then re-raise so the
+            # asyncio machinery observes the cancellation. The trailing
+            # ``finally`` still clears capability current_context.
+            try:
+                await self._run_store.transition(
+                    context.run_id, RunStatus.CANCELLED, expected_version=2)
+            except Exception:
+                # best-effort: the run may already be terminal (e.g. a
+                # concurrent Runtime.cancel beat this transition) or the
+                # version assumption may be wrong -- either way the
+                # cancellation must propagate.
+                pass
+            raise
         except Exception as exc:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
@@ -534,6 +554,25 @@ class AgentRunner:
                     run_id=context.run_id)))
             except Exception:
                 pass
+        except asyncio.CancelledError:
+            # GAP-16: in-flight cancel path (mirrors _run_lifecycle). When the
+            # caller cancels the asyncio.Task driving this streaming generator,
+            # CancelledError surfaces at the current await point inside iter()
+            # / node.stream() / a tool call. Catch it BEFORE the generic
+            # ``except Exception`` (CancelledError is a BaseException, not an
+            # Exception), best-effort transition the RunRecord to CANCELLED
+            # (using ``running_version`` captured at entry -- the version the
+            # SUCCEEDED / FAILED transitions would also use), then re-raise so
+            # the asyncio machinery observes the cancellation. The trailing
+            # ``finally`` still clears capability current_context.
+            try:
+                await self._run_store.transition(
+                    context.run_id, RunStatus.CANCELLED,
+                    expected_version=running_version,
+                )
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
