@@ -49,6 +49,7 @@ default-None path is a no-op -- no spans opened, no metrics recorded."""
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -91,6 +92,9 @@ if TYPE_CHECKING:
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @contextlib.asynccontextmanager
@@ -406,13 +410,20 @@ class AgentRunner:
                                     created_at=datetime.now(timezone.utc),
                                     metadata={"approval_id": paused.approval_id},
                                 ))
-                                try:
-                                    await self._run_store.transition(
-                                        context.run_id, RunStatus.WAITING_APPROVAL,
-                                        expected_version=running_version,
-                                    )
-                                except Exception:
-                                    pass
+                                # §3.3: Run status update MUST propagate. If the
+                                # WAITING_APPROVAL transition fails the run cannot
+                                # be paused -- propagate so the outer except
+                                # transitions to FAILED instead of leaving the
+                                # checkpoint saved but the run still RUNNING (an
+                                # inconsistent state the doc forbids).
+                                await self._run_store.transition(
+                                    context.run_id, RunStatus.WAITING_APPROVAL,
+                                    expected_version=running_version,
+                                )
+                                # best-effort audit - non-critical path: the run is
+                                # already WAITING_APPROVAL (transition above), so a
+                                # missing RunPaused event is an observability gap,
+                                # not state corruption (review doc §3.3).
                                 try:
                                     await self._event_store.append(
                                         stream_id=context.run_id,
@@ -425,8 +436,11 @@ class AgentRunner:
                                             run_id=context.run_id,
                                             reason=f"approval required: {paused.approval_id}"),
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as exc:  # noqa: BLE001
+                                    _LOGGER.warning(
+                                        "failed to append RunPaused event for run %s: %s",
+                                        context.run_id, exc,
+                                    )
                                 paused_signal = paused
                             else:
                                 if not timed_out:
@@ -539,7 +553,9 @@ class AgentRunner:
                     # stream may already hold a RunPaused event from the
                     # initial pause -- the store-assigned sequence simply
                     # appends after it (no caller sequence to collide with --
-                    # review doc §8.1).
+                    # review doc §8.1). best-effort audit - non-critical path:
+                    # the run is already SUCCEEDED, so a missing event is an
+                    # observability gap, not state corruption (§3.3).
                     try:
                         await self._event_store.append(
                             stream_id=context.run_id,
@@ -550,8 +566,11 @@ class AgentRunner:
                             runnable_id=context.runnable_id,
                             payload=RunCompleted(run_id=context.run_id),
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "failed to append RunCompleted event for run %s: %s",
+                            context.run_id, exc,
+                        )
 
                     if metrics is not None:
                         metrics.counter("agent.run.completed", attributes=run_attrs)
@@ -568,31 +587,52 @@ class AgentRunner:
             # transition to CANCELLED, then re-raise so the asyncio machinery
             # observes the cancellation. No capability state to clear (Phase 1
             # refactoring: deps travel via pydantic-ai DI).
+            #
+            # The CANCELLED transition (§3.3 "Cancel status confirm") is kept
+            # best-effort ONLY because asyncio requires CancelledError to
+            # propagate -- letting the transition error escape would replace
+            # the cancellation with a different exception type and break the
+            # cancel machinery. The warning keeps the failure visible rather
+            # than silent (the run may already be terminal, e.g. a concurrent
+            # Runtime.cancel beat this transition).
             try:
                 await self._run_store.transition(
                     context.run_id, RunStatus.CANCELLED,
                     expected_version=running_version,
                 )
-            except Exception:
-                # best-effort: the run may already be terminal (e.g. a
-                # concurrent Runtime.cancel beat this transition) -- either way
-                # the cancellation must propagate.
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition run %s to CANCELLED on cancel: %s",
+                    context.run_id, exc,
+                )
             raise
         except Exception as exc:
             # Generic error path: transition FAILED, run on_error, append
             # RunFailed, record metrics. Re-raise so the caller sees the error.
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc))
+            # §3.3: Run status update. The FAILED transition is kept
+            # best-effort ONLY because we are already in the failing path:
+            # letting the transition error escape would replace the ORIGINAL
+            # exc (the actual cause) with a version-mismatch/store error,
+            # losing the cause for the caller. The warning keeps the
+            # transition failure visible rather than silent; a typical failure
+            # is a version mismatch from a concurrent terminal transition.
             try:
                 await self._run_store.transition(
                     context.run_id, RunStatus.FAILED,
                     expected_version=running_version, error=error_info,
                 )
-            except Exception:
-                pass
+            except Exception as transition_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition run %s to FAILED: %s",
+                    context.run_id, transition_exc,
+                )
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_on_error(context, exc)
+            # best-effort audit - non-critical path: the run is already failing
+            # (FAILED transition attempted above), so a missing RunFailed event
+            # is an observability gap, not state corruption (§3.3).
             try:
                 await self._event_store.append(
                     stream_id=context.run_id,
@@ -605,8 +645,11 @@ class AgentRunner:
                         run_id=context.run_id,
                         error_type=type(exc).__name__, message=str(exc)),
                 )
-            except Exception:
-                pass
+            except Exception as event_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to append RunFailed event for run %s: %s",
+                    context.run_id, event_exc,
+                )
             if metrics is not None:
                 metrics.counter("agent.run.failed", attributes={
                     "run_id": context.run_id, "session_id": context.session_id,

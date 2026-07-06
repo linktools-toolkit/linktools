@@ -21,6 +21,7 @@ resume() is explicit and caller-driven (Decision #3): no auto-resume-on-construc
 cancel() is store-level (Decision #4): no live asyncio task cancellation."""
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -59,6 +60,9 @@ from .models import SwarmRun, SwarmStatus, SwarmTaskStatus, TokenUsage
 from .spec import SwarmSpec
 from .store import SwarmStore
 from .strategy import SwarmExecutionContext, build_strategy
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SwarmRunner:
@@ -246,6 +250,13 @@ class SwarmRunner:
             # captured in driving_running.version (no intermediate transition
             # bumps it inside the try block above); the SwarmRun's is tracked in
             # swarm_version.
+            #
+            # The FAILED transitions (§3.3 "Run status update") are kept
+            # best-effort ONLY because we are already in the failing path:
+            # letting either transition error escape would replace the ORIGINAL
+            # exc (the actual cause) with a store/version error, losing the
+            # cause for the caller. The warnings keep the transition failures
+            # visible rather than silent.
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc)
             )
@@ -254,15 +265,21 @@ class SwarmRunner:
                     context.run_id, RunStatus.FAILED,
                     expected_version=driving_running.version, error=error_info,
                 )
-            except Exception:
-                pass
+            except Exception as transition_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition driving run %s to FAILED: %s",
+                    context.run_id, transition_exc,
+                )
             try:
                 await self._swarm_store.update_run(
                     swarm_run.id, expected_version=swarm_version,
                     status=SwarmStatus.FAILED,
                 )
-            except Exception:
-                pass
+            except Exception as swarm_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition swarm run %s to FAILED: %s",
+                    swarm_run.id, swarm_exc,
+                )
             raise
 
     # -- resume() -------------------------------------------------------------
@@ -351,21 +368,31 @@ class SwarmRunner:
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc)
             )
+            # §3.3 "Run status update": kept best-effort ONLY because we are
+            # already in the failing path -- letting the transition error
+            # escape would replace the ORIGINAL exc with a store/version error.
+            # The warning keeps the failure visible rather than silent.
             if not driving_was_terminal:
                 try:
                     await self._run_store.transition(
                         parent_context.run_id, RunStatus.FAILED,
                         expected_version=driving_version, error=error_info,
                     )
-                except Exception:
-                    pass
+                except Exception as transition_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "failed to transition driving run %s to FAILED: %s",
+                        parent_context.run_id, transition_exc,
+                    )
             try:
                 await self._swarm_store.update_run(
                     swarm_run.id, expected_version=swarm_version,
                     status=SwarmStatus.FAILED,
                 )
-            except Exception:
-                pass
+            except Exception as swarm_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition swarm run %s to FAILED: %s",
+                    swarm_run.id, swarm_exc,
+                )
             raise
 
     # -- cancel() -------------------------------------------------------------
@@ -389,6 +416,12 @@ class SwarmRunner:
             # task.id == child RunRecord.id (strategy._run_task sets
             # child_context.run_id = task.id). Read the child's current version
             # rather than assuming it tracks task.version.
+            #
+            # best-effort per child (§3.3 "Cancel status confirm"): a child that
+            # already completed or was cancelled concurrently is not a cancel
+            # failure, and one stubborn child must not abort the rest of the
+            # loop -- but the failure is logged (not silent) so a genuinely
+            # unexpected error (e.g., OSError from a corrupted store) surfaces.
             try:
                 child = await self._run_store.get(task.id)
                 if child is None:
@@ -396,12 +429,11 @@ class SwarmRunner:
                 await self._run_store.transition(
                     task.id, RunStatus.CANCELLED, expected_version=child.version
                 )
-            except Exception:
-                # best-effort: a child that already completed or was cancelled
-                # concurrently is not a cancel failure. Catch broadly to avoid
-                # aborting the loop on unexpected errors (e.g., OSError from a
-                # corrupted store).
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to cancel child run %s for swarm run %s: %s",
+                    task.id, swarm_run_id, exc,
+                )
 
     # -- helpers --------------------------------------------------------------
 
