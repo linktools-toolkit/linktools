@@ -64,6 +64,7 @@ class _MemorySwarmStore(SwarmStore):
     def __init__(self) -> None:
         self._runs: "dict[str, SwarmRun]" = {}
         self._tasks: "dict[str, SwarmTask]" = {}
+        self._attempts: "dict[str, list]" = {}  # task_id -> [SwarmTaskAttempt, ...]
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
         self._runs[run.id] = run
@@ -120,7 +121,10 @@ class _MemorySwarmStore(SwarmStore):
             target,
             status=SwarmTaskStatus.CLAIMED,
             claimed_at=now,
-            attempts=target.attempts + 1,
+            # Match File/SqlAlchemy backends: claim does NOT bump attempts.
+            # Only fail_task bumps attempts (a retry happened). This keeps
+            # SwarmTaskAttempt.attempt numbering consistent across backends.
+            attempts=target.attempts,
             version=target.version + 1,
             updated_at=now,
         )
@@ -183,6 +187,44 @@ class _MemorySwarmStore(SwarmStore):
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
         return ()
+
+    async def record_attempt(self, attempt) -> Any:
+        # Upsert by attempt.id (mirrors File/SqlAlchemy backends). Track per
+        # task_id so list_attempts returns them in insertion order.
+        bucket = self._attempts.setdefault(attempt.task_id, [])
+        idx = next(
+            (i for i, a in enumerate(bucket) if a.id == attempt.id), None,
+        )
+        if idx is None:
+            bucket.append(attempt)
+        else:
+            bucket[idx] = attempt
+        return attempt
+
+    async def list_attempts(self, task_id: str):
+        return tuple(self._attempts.get(task_id, ()))
+
+    async def renew_lease(
+        self, task_id: str, *, expected_version: int, lease_seconds: float
+    ) -> SwarmTask:
+        from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+        if task_id not in self._tasks:
+            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+        current = self._tasks[task_id]
+        if current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        from datetime import timedelta
+        new_lease = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+        updated = replace(
+            current,
+            lease_expires_at=new_lease,
+            version=current.version + 1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        self._tasks[task_id] = updated
+        return updated
 
 
 # --- helpers ----------------------------------------------------------------
@@ -776,3 +818,137 @@ def test_set_active_run_missing_task_raises_not_found():
     )))
     with pytest.raises(SwarmTaskNotFoundError):
         asyncio.run(store.set_active_run("nope", "child-1", expected_version=1))
+
+
+# ---------------------------------------------------------------------------
+# SwarmTaskAttempt recording (Phase-5B / review doc §19.2)
+# ---------------------------------------------------------------------------
+
+
+def _seed_worker_task(swarm_store, *, task_id: str = "task-1", agent_id: str = "worker-a"):
+    """Seed a PENDING SwarmTask into the in-memory store for _run_task."""
+    asyncio.run(swarm_store.create_task(SwarmTask(
+        id=task_id, swarm_run_id="swarm-1", parent_task_id=None,
+        assigned_agent_id=agent_id, description="x",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
+        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )))
+
+
+def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_id(tmp_path):
+    """A successful _run_task records exactly one SwarmTaskAttempt whose run_id
+    matches the task's active_run_id (Phase-5A child run) and whose attempt
+    number is 1 (first execution: task.attempts started at 0 -> 0+1)."""
+    from linktools.ai.swarm.models import AttemptStatus
+    from linktools.ai.swarm.strategy import _run_task
+
+    compiled_a = _compile_worker("worker-a", "alpha-out")
+    swarm_store = _MemorySwarmStore()
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+    _seed_worker_task(swarm_store)
+
+    result = asyncio.run(_run_task(ctx, swarm_store._tasks["task-1"]))
+    assert result is not None
+
+    after = asyncio.run(swarm_store.list_tasks("swarm-1"))[0]
+    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts) == 1
+    assert attempts[0].status is AttemptStatus.SUCCEEDED
+    assert attempts[0].run_id == after.active_run_id  # Phase-5A invariant
+    assert attempts[0].task_id == "task-1"
+    assert attempts[0].agent_id == "worker-a"
+    assert attempts[0].attempt == 1  # 1-based: first attempt
+    assert attempts[0].finished_at is not None
+
+
+def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementing_numbers(tmp_path):
+    """With max_task_retries=2 and a worker that fails once then succeeds, the
+    audit trail records TWO attempts: #1=FAILED, #2=SUCCEEDED. The shared
+    run_id (Phase-5A child run id) is the same across both attempts because
+    they are iterations of the same _run_task call."""
+    from linktools.ai.swarm.models import AttemptStatus
+    from linktools.ai.swarm.strategy import _run_task
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.models import AgentSpec
+    from linktools.ai.agent.spec import PromptSpec
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    # Stateful model: first call raises, second call succeeds. The exception
+    # surfaces from agent_runner.run into _run_task's retry loop.
+    call_state = {"n": 0}
+
+    def _flaky_model(messages, info):
+        call_state["n"] += 1
+        if call_state["n"] == 1:
+            # Raise directly: AgentRunner surfaces exceptions to the strategy's
+            # retry loop. This is the path _run_task catches.
+            raise RuntimeError("transient boom")
+        return ModelResponse(parts=[TextPart(content="recovered")])
+
+    registry = ModelRegistry()
+    registry.register("flaky-model", model=FunctionModel(_flaky_model))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    flaky_spec = AgentSpec(
+        id="worker-flaky", name="worker-flaky",
+        model=ModelPolicy(primary="flaky-model"),
+        instructions=PromptSpec(instructions="you are flaky"),
+        output_schema=str,
+    )
+    compiled_flaky = asyncio.run(compiler.compile(flaky_spec))
+
+    swarm_store = _MemorySwarmStore()
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-flaky")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
+        spec=spec, swarm_store=swarm_store,
+    )
+    _seed_worker_task(swarm_store, agent_id="worker-flaky")
+
+    # max_task_retries=1 -> two iterations: first fails, second succeeds.
+    result = asyncio.run(_run_task(
+        ctx, swarm_store._tasks["task-1"], max_task_retries=1,
+    ))
+    assert result is not None
+
+    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts) == 2
+    # attempt numbers increment 1 -> 2
+    assert [a.attempt for a in attempts] == [1, 2]
+    # first FAILED, second SUCCEEDED
+    assert attempts[0].status is AttemptStatus.FAILED
+    assert attempts[1].status is AttemptStatus.SUCCEEDED
+    # both share the same Phase-5A child run_id (one _run_task call = one run_id)
+    assert attempts[0].run_id == attempts[1].run_id
+    # FAILED attempt carries the error
+    assert attempts[0].error is not None
+    assert attempts[0].error.error_type == "RuntimeError"
+    # SUCCEEDED attempt has no error and a finished_at
+    assert attempts[1].error is None
+    assert attempts[1].finished_at is not None

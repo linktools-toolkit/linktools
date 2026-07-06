@@ -30,7 +30,7 @@ This keeps every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|F
 
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Tuple, runtime_checkable
 
@@ -43,7 +43,7 @@ from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
 from ..session.models import SessionRecord, SessionStatus
 from .aggregation import aggregate
 from .limits import SwarmLimits
-from .models import SwarmRun, SwarmTask, SwarmTaskStatus, TaskInput
+from .models import AttemptStatus, SwarmRun, SwarmTask, SwarmTaskAttempt, SwarmTaskStatus, TaskInput
 from .spec import SwarmSpec, SwarmStrategySpec
 from .store import SwarmStore
 
@@ -228,15 +228,53 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     )
 
     last_exc: "BaseException | None" = None
+    # Phase-5B (review doc §19.2): each retry iteration records one
+    # SwarmTaskAttempt. ``base_attempt`` is the 1-based attempt number of the
+    # FIRST iteration of this _run_task call. ``claimed.attempts`` is 0 on first
+    # execution (claim_task doesn't bump it; only fail_task does), so the trail
+    # is: first execution -> attempt 1, first retry -> attempt 2, etc. A prior
+    # _run_task failure already bumped claimed.attempts via fail_task, so a
+    # re-invocation of _run_task continues the numbering monotonically.
+    base_attempt = claimed.attempts + 1
     for _attempt in range(max_task_retries + 1):
+        # Record the RUNNING attempt BEFORE invoking the worker so the audit
+        # trail captures the start even if the worker never returns (crash
+        # mid-run). record_attempt is an upsert on attempt.id, so the trailing
+        # SUCCEEDED|FAILED write reuses the same id and finishes the row.
+        current_attempt = SwarmTaskAttempt(
+            id=str(uuid.uuid4()),
+            task_id=claimed.id,
+            run_id=child_run_id,
+            agent_id=claimed.assigned_agent_id or "",
+            attempt=base_attempt + _attempt,
+            status=AttemptStatus.RUNNING,
+            started_at=_now(),
+            finished_at=None,
+            error=None,
+        )
+        await ctx.swarm_store.record_attempt(current_attempt)
         try:
             result = await ctx.agent_runner.run(
                 compiled, RunInput(prompt=claimed.input.prompt), child_context,
             )
             await ctx.swarm_store.complete_task(claimed.id, result)
+            await ctx.swarm_store.record_attempt(replace(
+                current_attempt,
+                status=AttemptStatus.SUCCEEDED,
+                finished_at=_now(),
+            ))
             return result
         except Exception as exc:
             last_exc = exc
+            await ctx.swarm_store.record_attempt(replace(
+                current_attempt,
+                status=AttemptStatus.FAILED,
+                finished_at=_now(),
+                error=RunErrorInfo(
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                ),
+            ))
 
     await ctx.swarm_store.fail_task(claimed.id, RunErrorInfo(
         error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",

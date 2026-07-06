@@ -10,7 +10,7 @@ PROGRAMMATIC -- workers are real CompiledAgents driven by FunctionModel; no real
 model calls. Mirrors the test_strategy.py harness conventions."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -30,8 +30,10 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
+    RunErrorInfo,
     RunInput,
     RunRecord,
+    RunResult,
     RunStatus,
     RunnableType,
 )
@@ -652,3 +654,226 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
         assert t.active_run_id in child_ids, (
             f"task {t.id} active_run_id {t.active_run_id} not in child runs {child_ids}"
         )
+
+
+# --- recover() (Phase-5B / review doc §19.5) --------------------------------
+
+
+def _seed_recover_state(
+    stores: _Stores,
+    *,
+    task_id: str,
+    child_run_id: "str | None",
+    child_status: "RunStatus | None" = None,
+    child_result: "RunResult | None" = None,
+    child_error: "RunErrorInfo | None" = None,
+    lease_expires_at: "datetime | None" = None,
+) -> None:
+    """Seed a SwarmRun + a CLAIMED SwarmTask (+ optionally a child RunRecord)
+    for recover() to walk. ``lease_expires_at`` defaults to the past so the
+    task is observable as expired -- pass a future datetime to leave it alone."""
+    now = _NOW
+    expired = lease_expires_at or (now - timedelta(seconds=60))
+
+    async def _seed():
+        # driving RunRecord (the swarm run's parent).
+        await stores.run_store.create(RunRecord(
+            id="drive-run-1", root_run_id="drive-run-1", parent_run_id=None,
+            session_id="shared", runnable_id="swarm-spec-1",
+            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
+            input=RunInput(prompt="x"), result=None, error=None, version=1,
+            created_at=now, started_at=now, finished_at=None,
+        ))
+        await stores.swarm_store.create_run(SwarmRun(
+            id="swarm-1", run_id="drive-run-1", round=1, status=SwarmStatus.RUNNING,
+            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+            created_at=now, updated_at=now,
+        ))
+        if child_run_id is not None:
+            await stores.run_store.create(RunRecord(
+                id=child_run_id, root_run_id="drive-run-1", parent_run_id="drive-run-1",
+                session_id=f"swarm:swarm-1:{task_id}", runnable_id="worker-a",
+                runnable_type=RunnableType.AGENT, status=child_status or RunStatus.SUCCEEDED,
+                input=RunInput(prompt="sub"), result=child_result, error=child_error, version=1,
+                created_at=now, started_at=now, finished_at=now,
+            ))
+        await stores.swarm_store.create_task(SwarmTask(
+            id=task_id, swarm_run_id="swarm-1", parent_task_id=None,
+            assigned_agent_id="worker-a", description="x",
+            status=SwarmTaskStatus.CLAIMED,
+            dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
+            attempts=1, version=1, claimed_at=now, lease_expires_at=expired,
+            created_at=now, updated_at=now,
+            active_run_id=child_run_id,
+        ))
+    asyncio.run(_seed())
+
+
+def _make_runner(stores: _Stores):
+    from linktools.ai.swarm.runner import SwarmRunner
+    return SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        checkpoint_store=stores.checkpoint_store, compiler=_build_compiler("ok"),
+    )
+
+
+def test_recover_completes_task_when_child_run_succeeded(tmp_path):
+    """§19.5: a CLAIMED task whose lease lapsed but whose child Run already
+    SUCCEEDED is reconciled to SUCCEEDED (the strategy crashed between the
+    child's SUCCEEDED transition and its complete_task call)."""
+    stores = _Stores(tmp_path)
+    child_result = RunResult(output="done", token_usage={}, metadata={})
+    _seed_recover_state(
+        stores, task_id="task-1", child_run_id="child-1",
+        child_status=RunStatus.SUCCEEDED, child_result=child_result,
+    )
+    runner = _make_runner(stores)
+
+    async def _recover():
+        await runner.recover("swarm-1")
+    asyncio.run(_recover())
+
+    async def _verify():
+        return await stores.swarm_store.list_tasks("swarm-1")
+    tasks = asyncio.run(_verify())
+    assert tasks[0].status is SwarmTaskStatus.SUCCEEDED
+    assert tasks[0].result == child_result
+
+
+def test_recover_fails_task_when_child_run_failed(tmp_path):
+    """§19.5: a CLAIMED task whose child Run already FAILED is reconciled to
+    FAILED (carrying the child Run's error forward)."""
+    stores = _Stores(tmp_path)
+    child_error = RunErrorInfo(error_type="ValueError", message="boom", detail={})
+    _seed_recover_state(
+        stores, task_id="task-1", child_run_id="child-1",
+        child_status=RunStatus.FAILED, child_error=child_error,
+    )
+    runner = _make_runner(stores)
+
+    async def _recover():
+        await runner.recover("swarm-1")
+    asyncio.run(_recover())
+
+    async def _verify():
+        return await stores.swarm_store.list_tasks("swarm-1")
+    tasks = asyncio.run(_verify())
+    assert tasks[0].status is SwarmTaskStatus.FAILED
+    assert tasks[0].error == child_error
+
+
+def test_recover_leaves_task_alone_when_child_run_still_running(tmp_path):
+    """§19.4 guard: even though the lease has lapsed, the child Run is still
+    RUNNING -- the worker may yet finish. Leave the task CLAIMED (don't blindly
+    re-run a side-effecting task)."""
+    stores = _Stores(tmp_path)
+    _seed_recover_state(
+        stores, task_id="task-1", child_run_id="child-1",
+        child_status=RunStatus.RUNNING,
+    )
+    runner = _make_runner(stores)
+
+    async def _recover():
+        await runner.recover("swarm-1")
+    asyncio.run(_recover())
+
+    async def _verify():
+        return await stores.swarm_store.list_tasks("swarm-1")
+    tasks = asyncio.run(_verify())
+    assert tasks[0].status is SwarmTaskStatus.CLAIMED
+
+
+def test_recover_skips_task_with_unexpired_lease(tmp_path):
+    """A task whose lease is still live is presumed being worked -- recover()
+    must not touch it (§19.4: don't blindly re-run)."""
+    from datetime import timedelta
+    stores = _Stores(tmp_path)
+    future = _NOW + timedelta(seconds=300)
+    _seed_recover_state(
+        stores, task_id="task-1", child_run_id="child-1",
+        child_status=RunStatus.SUCCEEDED,
+        child_result=RunResult(output="done", token_usage={}, metadata={}),
+        lease_expires_at=future,
+    )
+    runner = _make_runner(stores)
+
+    async def _recover():
+        await runner.recover("swarm-1")
+    asyncio.run(_recover())
+
+    async def _verify():
+        return await stores.swarm_store.list_tasks("swarm-1")
+    tasks = asyncio.run(_verify())
+    # Lease not expired -> recover skipped it; task is still CLAIMED.
+    assert tasks[0].status is SwarmTaskStatus.CLAIMED
+
+
+def test_recover_unknown_swarm_run_raises(tmp_path):
+    from linktools.ai.errors import SwarmRunNotFoundError
+    stores = _Stores(tmp_path)
+    runner = _make_runner(stores)
+
+    async def _recover():
+        await runner.recover("nope")
+    with pytest.raises(SwarmRunNotFoundError):
+        asyncio.run(_recover())
+
+
+def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_path):
+    """On SqlAlchemySwarmStore a CLAIMED+expired task whose active_run_id is
+    None gets re-queued to PENDING by the trailing reclaim_expired_tasks call
+    (the strategy crashed between claim_task and set_active_run). FileSwarmStore
+    documents this as a no-op (single-process: nothing to reclaim at rest)."""
+    from contextlib import asynccontextmanager
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    now = _NOW
+    expired = now - timedelta(seconds=60)
+
+    @asynccontextmanager
+    async def _swarm_store():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/recover.db")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            yield SqlAlchemySwarmStore(session_factory=session_factory)
+        finally:
+            await engine.dispose()
+
+    async def _scenario():
+        async with _swarm_store() as swarm_store:
+            await swarm_store.create_run(SwarmRun(
+                id="swarm-1", run_id="drive-run-1", round=1, status=SwarmStatus.RUNNING,
+                version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+                created_at=now, updated_at=now,
+            ))
+            await swarm_store.create_task(SwarmTask(
+                id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
+                assigned_agent_id="worker-a", description="x",
+                status=SwarmTaskStatus.CLAIMED,
+                dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
+                attempts=1, version=1, claimed_at=now, lease_expires_at=expired,
+                created_at=now, updated_at=now,
+                active_run_id=None,
+            ))
+            # File-backed RunStore is fine here: recover() only reads via
+            # run_store.get(), and there's no child RunRecord to look up
+            # (active_run_id is None -> the recover loop skips run_store.get).
+            runner = SwarmRunner(
+                swarm_store=swarm_store, run_store=stores.run_store,
+                session_store=stores.session_store, event_store=stores.event_store,
+                checkpoint_store=stores.checkpoint_store, compiler=_build_compiler("ok"),
+            )
+            await runner.recover("swarm-1")
+            return await swarm_store.list_tasks("swarm-1")
+
+    stores = _Stores(tmp_path)
+    tasks = asyncio.run(_scenario())
+    assert tasks[0].status is SwarmTaskStatus.PENDING
+    assert tasks[0].active_run_id is None
+    assert tasks[0].assigned_agent_id is None

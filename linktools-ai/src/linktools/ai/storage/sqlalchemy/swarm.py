@@ -23,7 +23,7 @@ from typing import Callable
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import SwarmRunRow, SwarmTaskRow
+from .models import SwarmRunRow, SwarmTaskAttemptRow, SwarmTaskRow
 from ...errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
@@ -33,9 +33,11 @@ from ...errors import (
 from ...run.models import RunErrorInfo, RunResult
 from ...swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
+    AttemptStatus,
     SwarmRun,
     SwarmStatus,
     SwarmTask,
+    SwarmTaskAttempt,
     SwarmTaskStatus,
     TaskInput,
     TokenUsage,
@@ -111,6 +113,20 @@ def _error_to_json(error: RunErrorInfo) -> str:
         "message": error.message,
         "detail": dict(error.detail),
     })
+
+
+def _row_to_attempt(row: SwarmTaskAttemptRow) -> SwarmTaskAttempt:
+    return SwarmTaskAttempt(
+        id=row.id,
+        task_id=row.task_id,
+        run_id=row.run_id,
+        agent_id=row.agent_id,
+        attempt=row.attempt,
+        status=AttemptStatus(row.status),
+        started_at=_as_utc(row.started_at),
+        finished_at=_as_utc(row.finished_at),
+        error=None if row.error_json is None else RunErrorInfo(**json.loads(row.error_json)),
+    )
 
 
 class SqlAlchemySwarmStore:
@@ -414,4 +430,92 @@ class SqlAlchemySwarmStore:
                 reclaimed.append(_row_to_task(row))
             await session.flush()
             return tuple(reclaimed)
+        return await self._execute_in_session(_do)
+
+    # -- lease renewal (review doc §19.4) --------------------------------
+
+    async def renew_lease(
+        self, task_id: str, *, expected_version: int, lease_seconds: float
+    ) -> SwarmTask:
+        # UPDATE ... WHERE id=:tid AND version=:expected AND status='claimed':
+        # the WHERE clauses make both the optimistic-concurrency check and the
+        # CLAIMED-only guard atomic. rowcount == 0 means either missing, stale
+        # version, or wrong status; the trailing SELECT discriminates so the
+        # caller gets the right error class/message.
+        async def _do(session):
+            new_lease = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+            result = await session.execute(
+                update(SwarmTaskRow)
+                .where(SwarmTaskRow.id == task_id)
+                .where(SwarmTaskRow.version == expected_version)
+                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                .values(
+                    lease_expires_at=new_lease,
+                    version=SwarmTaskRow.version + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            if result.rowcount == 0:
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                if row.version != expected_version:
+                    raise SwarmConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
+                raise InvalidSwarmTransitionError(
+                    f"renew_lease requires CLAIMED, task {task_id} is {row.status}"
+                )
+            query_result = await session.execute(
+                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+            )
+            row = query_result.scalar_one()
+            return _row_to_task(row)
+        return await self._execute_in_session(_do)
+
+    # -- attempts (review doc §19.2) -------------------------------------
+
+    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+        # Upsert keyed on attempt.id. SQLite/SQLAlchemy has no native upsert
+        # across dialects, so emulate: try to find the row, INSERT if missing,
+        # UPDATE all mutable columns if present. The strategy writes the RUNNING
+        # row before the worker call and the SUCCEEDED|FAILED row after with the
+        # same id, so this path always sees exactly one prior row on the update.
+        async def _do(session):
+            query_result = await session.execute(
+                select(SwarmTaskAttemptRow).where(SwarmTaskAttemptRow.id == attempt.id)
+            )
+            row = query_result.scalar_one_or_none()
+            error_json = None if attempt.error is None else _error_to_json(attempt.error)
+            if row is None:
+                session.add(SwarmTaskAttemptRow(
+                    id=attempt.id,
+                    task_id=attempt.task_id,
+                    run_id=attempt.run_id,
+                    agent_id=attempt.agent_id,
+                    attempt=attempt.attempt,
+                    status=attempt.status.value,
+                    started_at=attempt.started_at,
+                    finished_at=attempt.finished_at,
+                    error_json=error_json,
+                ))
+            else:
+                row.status = attempt.status.value
+                row.finished_at = attempt.finished_at
+                row.error_json = error_json
+            await session.flush()
+            return attempt
+        return await self._execute_in_session(_do)
+
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+        async def _do(session):
+            result = await session.execute(
+                select(SwarmTaskAttemptRow)
+                .where(SwarmTaskAttemptRow.task_id == task_id)
+                .order_by(SwarmTaskAttemptRow.started_at, SwarmTaskAttemptRow.attempt)
+            )
+            return tuple(_row_to_attempt(row) for row in result.scalars())
         return await self._execute_in_session(_do)

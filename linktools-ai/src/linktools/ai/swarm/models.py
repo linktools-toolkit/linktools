@@ -30,6 +30,19 @@ class SwarmTaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class AttemptStatus(str, Enum):
+    """Lifecycle of a single task execution attempt (SwarmTaskAttempt.status).
+
+    Review doc §19.2: each (re)try of a SwarmTask records one SwarmTaskAttempt so
+    retries, agent migrations, and failure recovery are fully auditable. A task
+    that succeeds on the second try leaves attempt #1 = FAILED and #2 = SUCCEEDED.
+    """
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 ALLOWED_SWARM_TRANSITIONS: "Mapping[SwarmStatus, frozenset[SwarmStatus]]" = {
     SwarmStatus.PENDING: frozenset({SwarmStatus.RUNNING}),
     SwarmStatus.RUNNING: frozenset({
@@ -113,3 +126,27 @@ class SwarmTask:
     # task.id IS NOT its child RunRecord.id; each (re)execution mints a fresh
     # run_id and stores it here. None until claimed, or after a reclaim reset.
     active_run_id: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmTaskAttempt:
+    """One execution attempt of a SwarmTask (review doc §19.2).
+
+    A single SwarmTask may produce several SwarmTaskAttempts over its life:
+    retries inside one ``_run_task`` call each record their own attempt, as does
+    a re-invocation of ``_run_task`` after a prior FAILED. The ``run_id`` is the
+    Phase-5A child RunRecord id for that execution (NOT the task id), and the
+    ``attempt`` field is 1-based and monotonically increments per task. The
+    status transitions RUNNING -> SUCCEEDED | FAILED so the audit trail records
+    both the failures and the eventual success (or final failure).
+    """
+
+    id: str
+    task_id: str
+    run_id: str
+    agent_id: str
+    attempt: int
+    status: AttemptStatus
+    started_at: datetime
+    finished_at: "datetime | None"
+    error: "RunErrorInfo | None"

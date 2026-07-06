@@ -189,6 +189,23 @@ class SwarmTaskRow(Base):
     active_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
+class SwarmTaskAttemptRow(Base):
+    """One execution attempt of a SwarmTask (review doc §19.2). Mirrors the
+    SwarmTaskAttempt domain model. Indexed on task_id for fast list_attempts."""
+
+    __tablename__ = "ai_swarm_task_attempts"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(128), index=True)
+    run_id: Mapped[str] = mapped_column(String(128), index=True)
+    agent_id: Mapped[str] = mapped_column(String(128))
+    attempt: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    error_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+
+
 class MemoryRow(Base):
     __tablename__ = "ai_memories"
 

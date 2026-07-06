@@ -340,6 +340,15 @@ class _StubStore:
     async def reclaim_expired_tasks(self, swarm_run_id):
         ...
 
+    async def record_attempt(self, attempt):
+        ...
+
+    async def list_attempts(self, task_id):
+        ...
+
+    async def renew_lease(self, task_id, *, expected_version, lease_seconds):
+        ...
+
 
 def test_swarm_store_is_runtime_checkable():
     assert isinstance(_StubStore(), SwarmStore)

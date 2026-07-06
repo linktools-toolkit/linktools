@@ -440,6 +440,83 @@ class SwarmRunner:
                     task.active_run_id, swarm_run_id, exc,
                 )
 
+    # -- recover() -------------------------------------------------------------
+
+    async def recover(self, swarm_run_id: str) -> None:
+        """Best-effort restart-time scan (review doc §19.5). Walks every CLAIMED
+        task whose lease has lapsed and reconciles it with the child RunRecord's
+        current state:
+
+          * Run SUCCEEDED -> ``complete_task`` (the strategy crashed between the
+            child Run's SUCCEEDED transition and its ``complete_task`` call).
+          * Run FAILED    -> ``fail_task`` (same gap, failed side).
+          * Run RUNNING   -> leave alone. The worker may yet finish; this is the
+            §19.4 "禁止仅根据时间过期就盲目重复执行副作用任务" guard.
+          * active_run_id is None / Run missing / Run CANCELLED or PENDING ->
+            skip here, then ``reclaim_expired_tasks`` resets them to PENDING so
+            the next ``resume()`` can pick them up.
+
+        This is NOT distributed coordination. The caller MUST ensure no live
+        worker is still processing this swarm run before invoking recover();
+        otherwise a slow worker will have its task snatched on a stale lease.
+        On FileSwarmStore ``reclaim_expired_tasks`` is a no-op (single-process:
+        nothing to reclaim at rest), so the requeue path effectively only fires
+        on SqlAlchemySwarmStore -- which is the only backend that observes
+        cross-process lease expiry anyway."""
+        swarm_run = await self._swarm_store.get_run(swarm_run_id)
+        if swarm_run is None:
+            raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
+
+        claimed = await self._swarm_store.list_tasks(
+            swarm_run_id, status=SwarmTaskStatus.CLAIMED,
+        )
+        now = datetime.now(timezone.utc)
+        for task in claimed:
+            # A task whose lease hasn't lapsed is presumed still being worked --
+            # leave it alone (§19.4: don't blindly re-run side-effecting tasks).
+            if task.lease_expires_at is not None and task.lease_expires_at > now:
+                continue
+            # No active_run_id: the strategy crashed between claim_task and
+            # set_active_run. Nothing to reconcile -- reclaim_expired_tasks
+            # below will reset it to PENDING.
+            if task.active_run_id is None:
+                continue
+            try:
+                child = await self._run_store.get(task.active_run_id)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "recover: failed to read child run %s for task %s: %s",
+                    task.active_run_id, task.id, exc,
+                )
+                continue
+            # Missing Run record: lost. Reset to PENDING via reclaim below.
+            if child is None:
+                continue
+            # Reconcile by terminal state. Best-effort per task so one bad
+            # transition doesn't abort the whole recovery pass.
+            try:
+                if child.status == RunStatus.SUCCEEDED and child.result is not None:
+                    await self._swarm_store.complete_task(task.id, child.result)
+                elif child.status == RunStatus.FAILED and child.error is not None:
+                    await self._swarm_store.fail_task(task.id, child.error)
+                elif child.status == RunStatus.RUNNING:
+                    # Worker may still be alive -- leave it. If the worker is
+                    # actually dead, the next recover() pass after this Run
+                    # reaches a terminal state will catch it.
+                    pass
+                # CANCELLED / PENDING Runs: leave for reclaim_expired_tasks.
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "recover: failed to reconcile task %s from child run %s (%s): %s",
+                    task.id, task.active_run_id, child.status, exc,
+                )
+
+        # Reset everything still CLAIMED with an expired lease (cases above we
+        # didn't reconcile: no active_run_id, missing Run, non-terminal Run
+        # state) to PENDING so resume() can re-drive them. On FileSwarmStore
+        # this is a documented no-op.
+        await self._swarm_store.reclaim_expired_tasks(swarm_run_id)
+
     # -- helpers --------------------------------------------------------------
 
     async def _compile_members(

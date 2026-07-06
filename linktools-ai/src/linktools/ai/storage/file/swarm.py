@@ -26,9 +26,11 @@ from ...errors import (
 from ...run.models import RunErrorInfo, RunResult
 from ...swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
+    AttemptStatus,
     SwarmRun,
     SwarmStatus,
     SwarmTask,
+    SwarmTaskAttempt,
     SwarmTaskStatus,
     TaskInput,
     TokenUsage,
@@ -154,6 +156,34 @@ def _task_from_json(raw: dict) -> SwarmTask:
     )
 
 
+def _attempt_to_json(attempt: SwarmTaskAttempt) -> dict:
+    return {
+        "id": attempt.id,
+        "task_id": attempt.task_id,
+        "run_id": attempt.run_id,
+        "agent_id": attempt.agent_id,
+        "attempt": attempt.attempt,
+        "status": attempt.status.value,
+        "started_at": attempt.started_at.isoformat(),
+        "finished_at": None if attempt.finished_at is None else attempt.finished_at.isoformat(),
+        "error": None if attempt.error is None else _error_to_json(attempt.error),
+    }
+
+
+def _attempt_from_json(raw: dict) -> SwarmTaskAttempt:
+    return SwarmTaskAttempt(
+        id=raw["id"],
+        task_id=raw["task_id"],
+        run_id=raw["run_id"],
+        agent_id=raw["agent_id"],
+        attempt=raw["attempt"],
+        status=AttemptStatus(raw["status"]),
+        started_at=datetime.fromisoformat(raw["started_at"]),
+        finished_at=None if raw["finished_at"] is None else datetime.fromisoformat(raw["finished_at"]),
+        error=None if raw["error"] is None else _error_from_json(raw["error"]),
+    )
+
+
 class FileSwarmStore:
     """Single-process SwarmStore backed by per-record JSON files.
 
@@ -162,6 +192,23 @@ class FileSwarmStore:
     (temp-file + ``os.replace``) and ids are validated to prevent path
     traversal. An ``asyncio.Lock`` serializes ``claim_task``/``update_run`` so
     that optimistic-concurrency invariants hold within one process.
+
+    Review doc §19.5 -- explicit single-process scope:
+
+      * Only ONE process may instantiate this store against a given ``root``.
+        There is no cross-process file lock, so concurrent processes would
+        observe torn writes and double-claim the same task.
+      * No multi-worker ``claim_task`` race: the in-process ``asyncio.Lock`` is
+        the only serializer. Two OS processes racing the same JSON file would
+        corrupt the store.
+      * No distributed lease: ``lease_expires_at`` is recorded but never
+        observed by this backend, so ``reclaim_expired_tasks`` returns ``()``
+        unconditionally. Lease semantics live on SqlAlchemySwarmStore.
+      * Process restart: a caller that recovers from a crash invokes
+        ``SwarmRunner.recover(swarm_run_id)``, which scans incomplete tasks and
+        reconciles them with the child RunRecord + Checkpoint state (best-effort
+        -- this is not a distributed coordination system). The store itself
+        performs no automatic recovery; the caller owns the policy.
 
     ``reclaim_expired_tasks`` always returns the empty tuple: with the
     in-process lock, a task can never be observed with an expired lease while
@@ -177,6 +224,8 @@ class FileSwarmStore:
         self._runs_dir.mkdir(parents=True, exist_ok=True)
         self._tasks_dir = self._root / "tasks"
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
+        self._attempts_dir = self._root / "attempts"
+        self._attempts_dir.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
 
     # -- paths ---------------------------------------------------------
@@ -186,6 +235,9 @@ class FileSwarmStore:
 
     def _task_path(self, task_id: str) -> Path:
         return self._tasks_dir / f"{_validate_id_segment(task_id, kind='task_id')}.json"
+
+    def _attempt_path(self, attempt_id: str) -> Path:
+        return self._attempts_dir / f"{_validate_id_segment(attempt_id, kind='attempt_id')}.json"
 
     # -- run lifecycle -------------------------------------------------
 
@@ -464,3 +516,80 @@ class FileSwarmStore:
         # cannot be observed with an expired lease while another coroutine is
         # mid-claim, so there is nothing to reclaim at rest. Returns empty.
         return ()
+
+    # -- lease renewal (review doc §19.4) --------------------------------
+
+    def _renew_lease_sync(
+        self, task_id: str, *, expected_version: int, lease_seconds: float
+    ) -> SwarmTask:
+        path = self._task_path(task_id)
+        if not path.exists():
+            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+        current = _task_from_json(json.loads(path.read_text()))
+        if current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        if current.status != SwarmTaskStatus.CLAIMED:
+            raise InvalidSwarmTransitionError(
+                f"renew_lease requires CLAIMED, task {task_id} is {current.status.value}"
+            )
+        now = datetime.now(current.created_at.tzinfo or timezone.utc)
+        new_lease = now + timedelta(seconds=lease_seconds)
+        updated = SwarmTask(
+            id=current.id,
+            swarm_run_id=current.swarm_run_id,
+            parent_task_id=current.parent_task_id,
+            assigned_agent_id=current.assigned_agent_id,
+            description=current.description,
+            status=current.status,
+            dependencies=current.dependencies,
+            input=current.input,
+            result=current.result,
+            error=current.error,
+            attempts=current.attempts,
+            version=current.version + 1,
+            claimed_at=current.claimed_at,
+            lease_expires_at=new_lease,
+            created_at=current.created_at,
+            updated_at=now,
+            active_run_id=current.active_run_id,
+        )
+        _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
+        return updated
+
+    async def renew_lease(
+        self, task_id: str, *, expected_version: int, lease_seconds: float
+    ) -> SwarmTask:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._renew_lease_sync, task_id,
+                expected_version=expected_version, lease_seconds=lease_seconds,
+            )
+
+    # -- attempts (review doc §19.2) -------------------------------------
+
+    def _record_attempt_sync(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+        # Upsert keyed on attempt.id: the strategy writes the RUNNING row before
+        # the worker call and the SUCCEEDED|FAILED row after, with the same id.
+        _atomic_write(
+            self._attempt_path(attempt.id),
+            json.dumps(_attempt_to_json(attempt)).encode("utf-8"),
+        )
+        return attempt
+
+    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+        return await asyncio.to_thread(self._record_attempt_sync, attempt)
+
+    def _list_attempts_sync(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+        out: list = []
+        for path in self._attempts_dir.glob("*.json"):
+            raw = json.loads(path.read_text())
+            if raw["task_id"] != task_id:
+                continue
+            out.append(_attempt_from_json(raw))
+        out.sort(key=lambda a: (a.started_at, a.attempt))
+        return tuple(out)
+
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+        return await asyncio.to_thread(self._list_attempts_sync, task_id)

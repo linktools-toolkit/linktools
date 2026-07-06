@@ -19,9 +19,11 @@ from linktools.ai.errors import (
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.file.swarm import FileSwarmStore
 from linktools.ai.swarm.models import (
+    AttemptStatus,
     SwarmRun,
     SwarmStatus,
     SwarmTask,
+    SwarmTaskAttempt,
     SwarmTaskStatus,
     TaskInput,
     TokenUsage,
@@ -362,5 +364,168 @@ def test_path_traversal_in_task_id_rejected(tmp_path):
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(ValueError):
             await store.complete_task("../evil", RunResult(output=None))
+
+    asyncio.run(_run_case())
+
+
+# ---------------------------------------------------------------------------
+# 8. SwarmTaskAttempt: record -> list round-trip (review doc §19.2)
+# ---------------------------------------------------------------------------
+
+
+def _attempt(
+    attempt_id: str = "att-1",
+    task_id: str = "task-1",
+    run_id: str = "run-1",
+    agent_id: str = "agent-1",
+    attempt: int = 1,
+    status: AttemptStatus = AttemptStatus.RUNNING,
+    started_at: "datetime | None" = None,
+    finished_at: "datetime | None" = None,
+    error: "RunErrorInfo | None" = None,
+) -> SwarmTaskAttempt:
+    return SwarmTaskAttempt(
+        id=attempt_id,
+        task_id=task_id,
+        run_id=run_id,
+        agent_id=agent_id,
+        attempt=attempt,
+        status=status,
+        started_at=started_at or _now(),
+        finished_at=finished_at,
+        error=error,
+    )
+
+
+def test_record_attempt_then_list_roundtrip(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        started = _now()
+        recorded = await store.record_attempt(_attempt(
+            attempt_id="att-1", task_id="task-1", run_id="run-1",
+            attempt=1, status=AttemptStatus.RUNNING, started_at=started,
+        ))
+        assert recorded.id == "att-1"
+        listed = await store.list_attempts("task-1")
+        assert len(listed) == 1
+        assert listed[0].task_id == "task-1"
+        assert listed[0].run_id == "run-1"
+        assert listed[0].agent_id == "agent-1"
+        assert listed[0].attempt == 1
+        assert listed[0].status is AttemptStatus.RUNNING
+        assert listed[0].started_at == started
+        assert listed[0].finished_at is None
+        assert listed[0].error is None
+
+    asyncio.run(_run_case())
+
+
+def test_record_attempt_upsert_updates_existing_row(tmp_path):
+    """Strategy records RUNNING before worker, SUCCEEDED after -- same id, two
+    writes. Verify the second write updates the row (not creates a new one) and
+    that finished_at + error round-trip."""
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.record_attempt(_attempt(
+            attempt_id="att-1", status=AttemptStatus.RUNNING,
+        ))
+        finished = _now()
+        await store.record_attempt(_attempt(
+            attempt_id="att-1", status=AttemptStatus.SUCCEEDED,
+            finished_at=finished,
+        ))
+        listed = await store.list_attempts("task-1")
+        assert len(listed) == 1
+        assert listed[0].status is AttemptStatus.SUCCEEDED
+        assert listed[0].finished_at == finished
+
+    asyncio.run(_run_case())
+
+
+def test_list_attempts_filters_by_task_id_and_orders_by_attempt(tmp_path):
+    """Two attempts for task-1 (incrementing attempt#) and one for task-2;
+    list_attempts(task-1) returns just task-1's, ordered by attempt number."""
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.record_attempt(_attempt(
+            attempt_id="att-1a", task_id="task-1", attempt=1,
+        ))
+        await store.record_attempt(_attempt(
+            attempt_id="att-1b", task_id="task-1", attempt=2,
+        ))
+        await store.record_attempt(_attempt(
+            attempt_id="att-2a", task_id="task-2", attempt=1,
+        ))
+        listed = await store.list_attempts("task-1")
+        assert [a.attempt for a in listed] == [1, 2]
+        assert all(a.task_id == "task-1" for a in listed)
+
+    asyncio.run(_run_case())
+
+
+def test_record_attempt_round_trips_error_field(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        err = RunErrorInfo(error_type="ValueError", message="boom", detail={"k": "v"})
+        await store.record_attempt(_attempt(
+            attempt_id="att-1", status=AttemptStatus.FAILED,
+            finished_at=_now(), error=err,
+        ))
+        listed = await store.list_attempts("task-1")
+        assert listed[0].error == err
+
+    asyncio.run(_run_case())
+
+
+# ---------------------------------------------------------------------------
+# 9. renew_lease (review doc §19.4)
+# ---------------------------------------------------------------------------
+
+
+def test_renew_lease_extends_lease_expires_at(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        await store.create_task(_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-1", lease_seconds=10.0)
+        assert claimed is not None
+        original_lease = claimed.lease_expires_at
+        assert original_lease is not None
+        renewed = await store.renew_lease(
+            "t-1", expected_version=claimed.version, lease_seconds=60.0,
+        )
+        assert renewed.lease_expires_at is not None
+        # New lease is ~60s out, well beyond the original ~10s.
+        assert renewed.lease_expires_at > original_lease
+        assert renewed.version == claimed.version + 1
+
+    asyncio.run(_run_case())
+
+
+def test_renew_lease_wrong_version_raises_conflict(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        await store.create_task(_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-1", lease_seconds=10.0)
+        assert claimed is not None
+        with pytest.raises(SwarmConflictError):
+            await store.renew_lease(
+                "t-1", expected_version=claimed.version + 1, lease_seconds=60.0,
+            )
+
+    asyncio.run(_run_case())
+
+
+def test_renew_lease_non_claimed_raises_invalid_transition(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        # Task is PENDING (never claimed) -- renew_lease requires CLAIMED.
+        await store.create_task(_task(task_id="t-1"))
+        with pytest.raises(InvalidSwarmTransitionError):
+            await store.renew_lease(
+                "t-1", expected_version=1, lease_seconds=60.0,
+            )
 
     asyncio.run(_run_case())
