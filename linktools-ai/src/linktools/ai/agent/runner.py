@@ -55,7 +55,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..errors import ModelPolicyExceededError, ModelRoutingError, RunPaused
+from ..errors import InvalidRunTransitionError, ModelPolicyExceededError, ModelRoutingError, RunConflictError, RunPaused
 from ..events.payloads import (
     RunCompleted,
     RunFailed,
@@ -66,8 +66,10 @@ from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
 from ..policy.engine import ToolContext
+from ..run.cancellation import CancellationToken
 from ..run.checkpoint import CheckpointStore
 from ..run.context import RunContext
+from ..run.controller import RunController
 from ..run.models import (
     RunCheckpoint,
     RunErrorInfo,
@@ -116,6 +118,7 @@ class AgentRunner:
                  observability: "ObservabilitySink | None" = None,
                  metrics: "ObservabilityMetrics | None" = None,
                  uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
+                 run_controller: "RunController | None" = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -133,6 +136,15 @@ class AgentRunner:
         # promise cross-store transactions, so the pause path keeps its
         # best-effort non-atomic shape (§10.3).
         self._uow_factory = uow_factory
+        # Phase 3A real cancellation (review doc §7). When wired, execute()
+        # registers its driving asyncio.Task + a fresh CancellationToken with
+        # the controller so Runtime.cancel(run_id) can actually stop the run
+        # (sets the token -> next raise_if_cancelled() check aborts; also
+        # task.cancel() to interrupt a hanging await inside the model call).
+        # When None (default), cancellation works purely through asyncio's
+        # CancelledError path -- the existing behavior, no token checks at
+        # execution points. Default-None preserves every existing test.
+        self._run_controller = run_controller
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -200,6 +212,24 @@ class AgentRunner:
             # RUNNING; capture the current version for terminal transitions.
             current = await self._run_store.get(context.run_id)
             running_version = current.version
+
+        # Phase 3A real cancellation (§7). When a RunController is wired,
+        # register the driving asyncio.Task + a fresh CancellationToken so
+        # Runtime.cancel(run_id) can actually stop this run: the token is
+        # checked at the model-call execution points below, and the task is
+        # cancelled to interrupt any hanging await inside the model call.
+        # When ``run_controller`` is None (default), ``token`` stays None and
+        # every check below is skipped -- cancellation then works purely via
+        # asyncio's CancelledError path (the pre-Phase-3A behavior, so the
+        # default-None path is observationally identical to before).
+        token: "CancellationToken | None" = None
+        if self._run_controller is not None:
+            token = CancellationToken()
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                await self._run_controller.register(
+                    context.run_id, current_task, token,
+                )
 
         started = time.monotonic()
         # ``paused_signal`` is captured INSIDE the iter() context (where
@@ -288,6 +318,12 @@ class AgentRunner:
 
                 accumulated_text = ""
                 result = None
+                # §7.2: check the cancellation token BEFORE the model call.
+                # raise_if_cancelled() is a no-op when the token is not set
+                # (or when no controller is wired -- token is None), so this
+                # is observationally invisible on the default path.
+                if token is not None:
+                    await token.raise_if_cancelled()
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
                         message_history=message_history, deps=deps)
@@ -533,6 +569,15 @@ class AgentRunner:
                     else:
                         raise
 
+                # §7.2: check the cancellation token AFTER the model call
+                # completes. If Runtime.cancel flipped the token while the
+                # iter() drive was in flight (but the underlying asyncio.Task
+                # cancel hasn't surfaced yet), this raises CancelledError here
+                # -- caught by the outer handler below which transitions
+                # CANCELLING -> CANCELLED. No-op when no controller is wired.
+                if token is not None:
+                    await token.raise_if_cancelled()
+
                 # If the timeout budget was exhausted, raise ModelRoutingError
                 # so the outer generic-except handler records FAILED with a
                 # descriptive "model timeout" message (GAP-08). This sits
@@ -636,25 +681,50 @@ class AgentRunner:
                             attributes=run_attrs,
                         )
         except asyncio.CancelledError:
-            # GAP-16: in-flight cancel path. CancelledError surfaces at the
-            # current await point (model call / node.stream() / event append /
-            # middleware). Caught BEFORE the generic ``except Exception``
-            # (CancelledError is a BaseException since Python 3.8). Best-effort
-            # transition to CANCELLED, then re-raise so the asyncio machinery
-            # observes the cancellation. No capability state to clear (Phase 1
-            # refactoring: deps travel via pydantic-ai DI).
+            # GAP-16 + Phase 3A (§6.1, §7): in-flight cancel path. CancelledError
+            # surfaces at the current await point (model call / node.stream() /
+            # event append / middleware / token check). Caught BEFORE the generic
+            # ``except Exception`` (CancelledError is a BaseException since
+            # Python 3.8). The run is transitioned to CANCELLING then CANCELLED
+            # -- CANCELLING distinguishes "cancel requested" from "actually
+            # stopped" (§6.1), and the run only reaches CANCELLED once this
+            # handler has actually drained.
             #
-            # The CANCELLED transition (§3.3 "Cancel status confirm") is kept
-            # best-effort ONLY because asyncio requires CancelledError to
-            # propagate -- letting the transition error escape would replace
-            # the cancellation with a different exception type and break the
-            # cancel machinery. The warning keeps the failure visible rather
-            # than silent (the run may already be terminal, e.g. a concurrent
-            # Runtime.cancel beat this transition).
+            # Defensive against the controller-driven path: when Runtime.cancel
+            # beat us to it, the store is ALREADY in CANCELLING and the
+            # RUNNING -> CANCELLING transition is rejected. We re-read the
+            # record to capture its live version for the CANCELLING -> CANCELLED
+            # step (§6.3 -- expected_version always comes from the store, never
+            # hardcoded).
+            #
+            # Both transitions are best-effort ONLY because asyncio requires
+            # CancelledError to propagate -- letting a transition error escape
+            # would replace the cancellation with a different exception type and
+            # break the cancel machinery. The warning keeps failures visible
+            # rather than silent (the run may already be terminal, e.g. a
+            # concurrent cancel beat this handler).
             try:
+                try:
+                    cancelling = await self._run_store.transition(
+                        context.run_id, RunStatus.CANCELLING,
+                        expected_version=running_version,
+                    )
+                except (InvalidRunTransitionError, RunConflictError):
+                    # Runtime.cancel already moved the store to CANCELLING
+                    # (controller-driven path): either the version no longer
+                    # matches (RunConflictError) or the source state is no
+                    # longer RUNNING (InvalidRunTransitionError). Re-read to
+                    # capture the live version for the CANCELLED transition.
+                    # If the run is not in CANCELLING (e.g. concurrent
+                    # terminal transition), bail out -- nothing more we can do
+                    # here.
+                    current = await self._run_store.get(context.run_id)
+                    if current is None or current.status is not RunStatus.CANCELLING:
+                        raise
+                    cancelling = current
                 await self._run_store.transition(
                     context.run_id, RunStatus.CANCELLED,
-                    expected_version=running_version,
+                    expected_version=cancelling.version,
                 )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
@@ -712,6 +782,14 @@ class AgentRunner:
                     "error_type": type(exc).__name__,
                 })
             raise
+        finally:
+            # Phase 3A: drop the in-flight registration so the controller does
+            # not retain a reference to the (now-finished) asyncio.Task. The
+            # unregister is in ``finally`` so it runs on every exit path --
+            # success, pause-yield, cancel, and error. Idempotent (no-op when
+            # nothing was registered, e.g. the default-None controller path).
+            if self._run_controller is not None:
+                await self._run_controller.unregister(context.run_id)
 
         # -- Paused-event yield: OUTSIDE every ``async with`` and the outer
         # try/except, so the generator holds no open context manager when it

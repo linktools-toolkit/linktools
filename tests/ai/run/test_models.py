@@ -19,19 +19,35 @@ def test_run_status_values():
     assert RunStatus.RUNNING == "running"
     assert RunStatus.WAITING_APPROVAL == "waiting_approval"
     assert RunStatus.PAUSED == "paused"
+    # Phase 3A: CANCELLING distinguishes "cancel requested" from "actually
+    # cancelled" (review doc §6.1).
+    assert RunStatus.CANCELLING == "cancelling"
     assert RunStatus.SUCCEEDED == "succeeded"
     assert RunStatus.FAILED == "failed"
     assert RunStatus.CANCELLED == "cancelled"
 
 
 def test_allowed_transitions_match_spec():
+    # Review doc §6.2. CANCELLING is the canonical route to CANCELLED for
+    # in-flight runs (RUNNING/WAITING_APPROVAL/PAUSED -> CANCELLING ->
+    # CANCELLED or FAILED). The direct -> CANCELLED edges are RETAINED as a
+    # fallback for the no-task path (Runtime.cancel on a stale record or a
+    # test seed -- no live asyncio.Task to actually stop). See run/models.py
+    # for the rationale.
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.PENDING] == frozenset({RunStatus.RUNNING})
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.RUNNING] == frozenset({
         RunStatus.WAITING_APPROVAL, RunStatus.PAUSED, RunStatus.SUCCEEDED,
-        RunStatus.FAILED, RunStatus.CANCELLED,
+        RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.CANCELLED,
     })
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.WAITING_APPROVAL] == frozenset({RunStatus.RUNNING, RunStatus.CANCELLED})
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.PAUSED] == frozenset({RunStatus.RUNNING, RunStatus.CANCELLED})
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.WAITING_APPROVAL] == frozenset({
+        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
+    })
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.PAUSED] == frozenset({
+        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
+    })
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.CANCELLING] == frozenset({
+        RunStatus.CANCELLED, RunStatus.FAILED,
+    })
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.SUCCEEDED] == frozenset()
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.FAILED] == frozenset()
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.CANCELLED] == frozenset()

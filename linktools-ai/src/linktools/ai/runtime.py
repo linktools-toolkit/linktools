@@ -23,6 +23,7 @@ from .errors import SessionError, SwarmError
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
 from .run.context import RunContext
+from .run.controller import RunController
 from .run.models import RunInput, RunnableType
 from .session.models import SessionRecord, SessionStatus
 from .storage.facade import Storage
@@ -37,12 +38,19 @@ if TYPE_CHECKING:
 class Runtime:
     def __init__(self, *, storage: Storage, compiler: AgentCompiler,
                  runner: AgentRunner, swarm_runner: SwarmRunner,
-                 model_router: ModelRouter) -> None:
+                 model_router: ModelRouter,
+                 run_controller: "RunController | None" = None) -> None:
         self.storage = storage
         self.compiler = compiler
         self.runner = runner
         self.swarm_runner = swarm_runner
         self.model_router = model_router
+        # Phase 3A (§7.1): tracks in-flight asyncio.Tasks so cancel(run_id)
+        # can actually stop a running task, not just flip the DB status. When
+        # None, cancel() falls back to the pre-Phase-3A store-only path
+        # (best-effort direct -> CANCELLED). Always wired by build() so the
+        # default-constructed Runtime gains real cancellation for free.
+        self.run_controller = run_controller
 
     @classmethod
     def build(cls, *, storage: Storage,
@@ -109,6 +117,13 @@ class Runtime:
             storage.transaction
             if storage.capabilities.cross_store_transactions else None
         )
+        # Phase 3A (§7): one RunController per Runtime. AgentRunner.execute()
+        # registers its driving asyncio.Task + a fresh CancellationToken here
+        # so Runtime.cancel(run_id) can actually stop the run (token check +
+        # task.cancel()). Always wired -- there is no downside since the
+        # runner's token checks are no-ops unless a controller-issued cancel
+        # sets the token.
+        run_controller = RunController()
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
             event_store=storage.events, checkpoint_store=storage.checkpoints,
@@ -116,6 +131,7 @@ class Runtime:
             memory_store=storage.memories,
             retriever=retriever,
             uow_factory=uow_factory,
+            run_controller=run_controller,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
@@ -130,6 +146,7 @@ class Runtime:
         return cls(
             storage=storage, compiler=compiler, runner=runner,
             swarm_runner=swarm_runner, model_router=router,
+            run_controller=run_controller,
         )
 
     async def run(self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
@@ -172,15 +189,26 @@ class Runtime:
         return await self.runner.run(compiled, RunInput(prompt=prompt), context)
 
     async def cancel(self, run_id: str) -> None:
-        """Best-effort store-level cancel: transitions the Run to CANCELLED.
+        """Cancel an in-flight Run (review doc §7).
 
-        Mirrors SwarmRunner.cancel's store-level approach (Decision #4 in the
-        swarm runner): this flips the RunRecord at the storage layer only -- it
-        does NOT cancel any live asyncio.Task driving an in-flight run. When the
-        run is in-flight (a Task driving AgentRunner.run / run_stream), the
-        caller should also cancel that Task; AgentRunner catches
-        ``asyncio.CancelledError`` in its lifecycle try/except and transitions
-        the Run to CANCELLED itself (so the two paths agree on the final state).
+        Two paths, depending on whether a live asyncio.Task is registered with
+        the RunController:
+
+        * **In-flight task registered** -- the run is actually being driven by
+          AgentRunner.execute(). Transition the store to CANCELLING (§6.1:
+          distinguishes "cancel requested" from "actually cancelled"), then
+          call ``run_controller.cancel(run_id)`` which (a) sets the
+          CancellationToken so the runner's next execution-point check raises
+          CancelledError, and (b) calls ``task.cancel()`` so any hanging await
+          inside the model call also unblocks. The runner's CancelledError
+          handler then transitions CANCELLING -> CANCELLED via the version
+          captured from the preceding step (§6.3).
+
+        * **No in-flight task** (stale record from a crashed worker, a test
+          seed, or any path where the runner is not driving execute()) --
+          there is nothing to actually stop, so the store goes directly to
+          CANCELLED. This is the pre-Phase-3A behavior and preserves every
+          existing seeded-cancel test.
 
         Idempotent: a Run already in a terminal status (SUCCEEDED / FAILED /
         CANCELLED) is a no-op. Raises :class:`RunNotFoundError` when the run
@@ -195,9 +223,25 @@ class Runtime:
             RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
         ):
             return  # already terminal -- no-op
-        await self.storage.runs.transition(
-            run_id, RunStatus.CANCELLED, expected_version=record.version,
+
+        # If a live task is registered, go through CANCELLING + signal the
+        # controller; the runner finishes the transition to CANCELLED via its
+        # CancelledError handler. Otherwise (no task / no controller) go
+        # directly to CANCELLED -- there is nothing to actually stop.
+        in_flight = (
+            self.run_controller is not None
+            and self.run_controller.get_token(run_id) is not None
         )
+        if in_flight:
+            await self.storage.runs.transition(
+                run_id, RunStatus.CANCELLING,
+                expected_version=record.version,
+            )
+            await self.run_controller.cancel(run_id)
+        else:
+            await self.storage.runs.transition(
+                run_id, RunStatus.CANCELLED, expected_version=record.version,
+            )
 
     async def run_stream(
         self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
