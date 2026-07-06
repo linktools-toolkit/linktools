@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Tests for AgentRunner.run pause path (Task 7).
 
-In the non-streaming path, ``_run_lifecycle`` must catch ``RunPaused`` BEFORE
-the generic ``except Exception`` handler, transition the Run to
-``WAITING_APPROVAL``, emit a ``RunPaused`` event, and RE-RAISE ``RunPaused``
-(caller gets the signal; no checkpoint in v1 -- streaming is the canonical
-surface). The ``finally`` block still clears capability ``current_context``.
+In the non-streaming path, the unified ``execute()`` lifecycle must catch
+``RunPaused`` BEFORE the generic ``except Exception`` handler, transition the
+Run to ``WAITING_APPROVAL``, emit a ``RunPaused`` event, save a real
+checkpoint, and yield a pause event that ``run()`` re-raises as ``RunPaused``
+(caller gets the signal). Phase 2A: ``execute()`` is the single lifecycle for
+both ``run()`` and ``run_stream()``.
 
 If ``RunPaused`` were caught by the generic ``except Exception`` handler, the
 Run would transition to ``FAILED`` instead of ``WAITING_APPROVAL`` -- this is
