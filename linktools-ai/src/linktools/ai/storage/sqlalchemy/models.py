@@ -41,6 +41,31 @@ class IdempotencyRow(Base):
     result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
 
 
+class ToolIdempotencyRow(Base):
+    """Persistent tool-call idempotency records (review doc §11). The unique
+    constraint on (scope, key) is the natural primary key for the
+    IdempotencyStore Protocol -- it backs ``reserve``'s "find-or-create"
+    semantics (IntegrityError on the race -> SELECT the winner -> hash-check).
+    Named ``ToolIdempotencyRow`` (not ``IdempotencyRow``) because that class
+    name is already taken by resource-side idempotency above."""
+
+    __tablename__ = "ai_idempotency"
+    __table_args__ = (
+        UniqueConstraint("scope", "key", name="uq_idempotency_scope_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(128), index=True)
+    key: Mapped[str] = mapped_column(String(512))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    error_text: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime]
+    completed_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    expires_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+
+
 class RevisionRow(Base):
     __tablename__ = "ai_resource_revision"
 

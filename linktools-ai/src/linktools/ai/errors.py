@@ -123,6 +123,15 @@ class ToolIdempotencyConflictError(ToolError):
     pass
 
 
+class IdempotencyInProgressError(ToolError):
+    """Raised by ToolExecutor when an idempotent call hits a RESERVED record
+    (another in-flight call owns the reservation). §11.2 lists "wait / return
+    in-progress / reject duplicate" as policy choices; for now the executor
+    rejects -- the caller can retry once the in-flight call completes and the
+    record moves to COMPLETED or FAILED."""
+
+
+
 class PolicyError(LinktoolsAIError):
     """Base class for PolicyEngine-related errors."""
 

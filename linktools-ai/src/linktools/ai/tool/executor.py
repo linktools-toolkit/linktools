@@ -16,9 +16,10 @@ import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..agent.approval import ApprovalStatus, build_approval_request
-from ..errors import RunPaused, ToolApprovalRequiredError, ToolDeniedError
+from ..errors import IdempotencyInProgressError, RunPaused, ToolApprovalRequiredError, ToolDeniedError
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
+from .idempotency import IdempotencyStatus, IdempotencyStore, compute_request_hash
 
 if TYPE_CHECKING:
     from ..agent.approval import ApprovalRequest, ApprovalStore
@@ -36,13 +37,13 @@ class ToolExecutor:
         event_store: "EventStore | None" = None,
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
         pause_on_approval: bool = False,
-        idempotency_cache: "dict[tuple[str, str], Any] | None" = None,
+        idempotency_store: "IdempotencyStore | None" = None,
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
         self._event_store = event_store
         self._run_id_resolver = run_id_resolver
-        self._idempotency_cache = idempotency_cache
+        self._idempotency_store = idempotency_store
         # When True, the require-approval branch persists the request (via
         # _record_approval) and then raises RunPaused(run_id, approval_id)
         # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
@@ -191,26 +192,47 @@ class ToolExecutor:
         is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
         the legacy single-call-no-timeout behavior exactly.
 
-        ``idempotency_key`` enables tool-level idempotency (spec section 27,
-        basic form): when the executor was constructed with an
-        ``idempotency_cache`` dict AND ``idempotency_key`` is provided, the
-        cache is keyed by ``(request.tool_name, idempotency_key)``. A repeat
-        call with the same key returns the cached result without invoking the
-        handler; the first successful call stores its result. A failed
-        (exception-raising) call is NOT cached, so a retry with the same key
-        re-invokes the handler. This is deliberately MINIMAL -- an in-process
-        dict, no hash-based conflict detection, no persistence: the same key
-        with different arguments simply returns the cached result. The full
-        spec (hash-based conflict, persistent IdempotencyStore, TTL) is a
-        future enhancement. For production the caller may supply a shared or
-        TTL-backed dict. Default ``idempotency_cache=None`` (or
-        ``idempotency_key=None``) preserves today's no-cache behavior."""
+        ``idempotency_key`` enables persistent tool-call idempotency (spec
+        section 27, §11 form). When the executor was constructed with an
+        ``idempotency_store`` AND ``idempotency_key`` is provided, the
+        ``(scope, key)`` is ``(context.run_id, idempotency_key)``. The store
+        survives process restart (review doc §11.1 forbids dict-only
+        idempotency). Behavior per ``IdempotencyStatus``:
+
+        - COMPLETED + same request hash -> cached ``result`` returned, the
+          handler is NOT invoked.
+        - RESERVED  + same request hash -> ``IdempotencyInProgressError``
+          (another in-flight call owns the reservation).
+        - FAILED    + same request hash -> retry: the handler runs again and
+          the terminal transition overwrites the prior FAILED record.
+        - Same (scope, key) with a different request hash -> reserve raises
+          ``IdempotencyConflictError`` (same key reused for different args).
+        - Fresh reservation -> handler runs; ``complete`` on success,
+          ``fail`` on exception.
+
+        Default ``idempotency_store=None`` (or ``idempotency_key=None``)
+        preserves today's no-idempotency behavior: the handler runs every
+        call and nothing is persisted."""
         await self.check(request, context)
-        cache_key: "tuple[str, str] | None" = None
-        if self._idempotency_cache is not None and idempotency_key is not None:
-            cache_key = (request.tool_name, idempotency_key)
-            if cache_key in self._idempotency_cache:
-                return self._idempotency_cache[cache_key]
+        # Idempotency is scoped to context.run_id so the same idempotency_key
+        # can be reused across different runs without colliding. ``scope`` is
+        # part of the request_hash too, so a hash mismatch always reflects a
+        # genuine difference in (tool, args, scope) -- not just (tool, args).
+        use_idempotency = self._idempotency_store is not None and idempotency_key is not None
+        if use_idempotency:
+            scope = context.run_id
+            request_hash = compute_request_hash(request.tool_name, request.arguments, scope)
+            existing = await self._idempotency_store.reserve(scope, idempotency_key, request_hash)
+            if existing is not None:
+                if existing.status is IdempotencyStatus.COMPLETED:
+                    return existing.result
+                if existing.status is IdempotencyStatus.RESERVED:
+                    raise IdempotencyInProgressError(
+                        f"idempotent request in progress: key={idempotency_key!r}"
+                    )
+                # FAILED: fall through to re-execute. The handler runs again
+                # and complete()/fail() overwrites the prior terminal record
+                # (§11.2 -- FAILED allows retry per policy).
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
         for attempt in range(max_retries + 1):
@@ -219,11 +241,13 @@ class ToolExecutor:
                     result = await asyncio.wait_for(handler(**arguments), timeout=timeout)
                 else:
                     result = await handler(**arguments)
-                if cache_key is not None:
-                    self._idempotency_cache[cache_key] = result
+                if use_idempotency:
+                    await self._idempotency_store.complete(scope, idempotency_key, result)
                 return result
             except Exception as exc:  # noqa: BLE001 - retry then re-raise
                 last_error = exc
                 if attempt < max_retries:
                     continue
+        if use_idempotency:
+            await self._idempotency_store.fail(scope, idempotency_key, str(last_error))
         raise last_error  # type: ignore[misc]

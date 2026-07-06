@@ -32,10 +32,12 @@ from ..run.checkpoint import CheckpointStore
 from ..run.store import RunStore
 from ..session.store import SessionStore
 from ..swarm.store import SwarmStore
+from ..tool.idempotency import IdempotencyStore
 from .capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES, StorageCapabilities
 from .file.approval import FileApprovalStore
 from .file.checkpoint import FileCheckpointStore
 from .file.event import FileEventStore
+from .file.idempotency import FileIdempotencyStore
 from .file.memory import FileMemoryStore
 from .file.run import FileRunStore
 from .file.session import FileSessionStore
@@ -45,6 +47,7 @@ from .resource.store import ResourceStore
 from .sqlalchemy.approval import SqlAlchemyApprovalStore
 from .sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 from .sqlalchemy.event import SqlAlchemyEventStore
+from .sqlalchemy.idempotency import SqlAlchemyIdempotencyStore
 from .sqlalchemy.memory import SqlAlchemyMemoryStore
 from .sqlalchemy.resource import SqlAlchemyResourceBackend
 from .sqlalchemy.run import SqlAlchemyRunStore
@@ -67,6 +70,7 @@ class Storage:
     swarms: SwarmStore
     memories: MemoryStore
     approvals: ApprovalStore
+    idempotency: IdempotencyStore
     capabilities: StorageCapabilities
 
     def transaction(self) -> "AsyncIterator[_UnitOfWork]":
@@ -105,6 +109,7 @@ class _UnitOfWork:
     sessions: SessionStore
     swarms: SwarmStore
     memories: MemoryStore
+    idempotency: IdempotencyStore
 
 
 class FileStorage(Storage):
@@ -124,6 +129,7 @@ class FileStorage(Storage):
             swarms=FileSwarmStore(root=root_path / "swarms"),
             memories=FileMemoryStore(root=root_path / "memories"),
             approvals=FileApprovalStore(root=root_path / "approvals"),
+            idempotency=FileIdempotencyStore(root=root_path / "idempotency"),
             capabilities=FILE_STORAGE_CAPABILITIES,
         )
 
@@ -151,6 +157,7 @@ class SqlAlchemyStorage(Storage):
             swarms=SqlAlchemySwarmStore(session_factory=session_factory),
             memories=SqlAlchemyMemoryStore(session_factory=session_factory),
             approvals=SqlAlchemyApprovalStore(session_factory=session_factory),
+            idempotency=SqlAlchemyIdempotencyStore(session_factory=session_factory),
             capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
         )
         # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().
@@ -173,5 +180,6 @@ class SqlAlchemyStorage(Storage):
                     sessions=SqlAlchemySessionStore(session_factory=self._session_factory, session=session),
                     swarms=SqlAlchemySwarmStore(session_factory=self._session_factory, session=session),
                     memories=SqlAlchemyMemoryStore(session_factory=self._session_factory, session=session),
+                    idempotency=SqlAlchemyIdempotencyStore(session_factory=self._session_factory, session=session),
                 )
                 yield tx
