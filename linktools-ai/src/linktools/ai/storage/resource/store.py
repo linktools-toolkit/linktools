@@ -137,7 +137,7 @@ class ResourceStore:
 
     async def put(self, path: ResourcePath, content: bytes, *, options: WriteOptions = WriteOptions()) -> Resource:
         self._require_writable_primary()
-        req_hash = _request_hash(path.value.encode(), content, json.dumps(dict(options.metadata), sort_keys=True).encode())
+        req_hash = _request_hash(path.value.encode(), content, (options.content_type or "").encode(), json.dumps(dict(options.metadata), sort_keys=True).encode())
         # TOCTOU fix (spec section 16): when the primary backend implements the
         # atomic checked operation, delegate precondition + idempotency + mutate
         # to it as a single atomic call so a concurrent writer cannot interleave
