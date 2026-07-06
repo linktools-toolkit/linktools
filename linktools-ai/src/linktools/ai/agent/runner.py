@@ -84,7 +84,8 @@ from .dependencies import AgentDependencies
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
+    from contextlib import AbstractAsyncContextManager
 
     from pydantic_ai.messages import ModelMessage
 
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
+    from ..storage.facade import _UnitOfWork
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,7 +114,9 @@ class AgentRunner:
                  memory_store: "MemoryStore | None" = None,
                  retriever: "Retriever | None" = None,
                  observability: "ObservabilitySink | None" = None,
-                 metrics: "ObservabilityMetrics | None" = None) -> None:
+                 metrics: "ObservabilityMetrics | None" = None,
+                 uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
+                 ) -> None:
         self._run_store = run_store
         self._session_store = session_store
         self._event_store = event_store
@@ -122,6 +126,13 @@ class AgentRunner:
         self._retriever = retriever
         self._observability = observability
         self._metrics = metrics
+        # Cross-store UnitOfWork factory (SqlAlchemy only). When wired, the
+        # pause path wraps checkpoint-save + Run-transition + event-append in
+        # one shared AsyncSession + one transaction, so they commit/rollback
+        # atomically (review doc §10.2). None for FileStorage -- File cannot
+        # promise cross-store transactions, so the pause path keeps its
+        # best-effort non-atomic shape (§10.3).
+        self._uow_factory = uow_factory
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -402,45 +413,90 @@ class AgentRunner:
                                 # non-streaming consumer can abandon the
                                 # generator without triggering a cross-task
                                 # cancel-scope exit.
-                                await self._checkpoint_store.save(RunCheckpoint(
+                                #
+                                # §10.2 atomicity: when a UnitOfWork factory is
+                                # wired (SqlAlchemy), checkpoint + transition +
+                                # event share ONE transaction -- they commit
+                                # together on clean exit or rollback together
+                                # if ANY of them raises (which then propagates
+                                # to the outer generic-except -> FAILED). When
+                                # no factory is wired (File), cross-store
+                                # transactions are impossible, so the path
+                                # keeps its non-atomic best-effort shape
+                                # (§10.3): checkpoint + transition still
+                                # propagate (§3.3 forbids leaving them partial),
+                                # but the RunPaused event append is best-effort.
+                                checkpoint = RunCheckpoint(
                                     id=str(uuid.uuid4()), run_id=context.run_id,
                                     sequence=1, format="pydantic-ai-v1",
                                     schema_version=1,
                                     payload=serialize_messages(run.all_messages()),
                                     created_at=datetime.now(timezone.utc),
                                     metadata={"approval_id": paused.approval_id},
-                                ))
-                                # §3.3: Run status update MUST propagate. If the
-                                # WAITING_APPROVAL transition fails the run cannot
-                                # be paused -- propagate so the outer except
-                                # transitions to FAILED instead of leaving the
-                                # checkpoint saved but the run still RUNNING (an
-                                # inconsistent state the doc forbids).
-                                await self._run_store.transition(
-                                    context.run_id, RunStatus.WAITING_APPROVAL,
-                                    expected_version=running_version,
                                 )
-                                # best-effort audit - non-critical path: the run is
-                                # already WAITING_APPROVAL (transition above), so a
-                                # missing RunPaused event is an observability gap,
-                                # not state corruption (review doc §3.3).
-                                try:
-                                    await self._event_store.append(
-                                        stream_id=context.run_id,
-                                        run_id=context.run_id,
-                                        root_run_id=context.root_run_id,
-                                        parent_run_id=context.parent_run_id,
-                                        session_id=context.session_id,
-                                        runnable_id=context.runnable_id,
-                                        payload=RunPausedEvent(
+                                paused_payload = RunPausedEvent(
+                                    run_id=context.run_id,
+                                    reason=f"approval required: {paused.approval_id}",
+                                )
+                                if self._uow_factory is not None:
+                                    # Atomic (SqlAlchemy): all three writes bind
+                                    # to one AsyncSession + one transaction. Any
+                                    # failure rolls back checkpoint + transition
+                                    # AND propagates to the outer generic-except
+                                    # handler so the Run ends up FAILED rather
+                                    # than left in a half-paused state.
+                                    async with self._uow_factory() as tx:
+                                        await tx.checkpoints.save(checkpoint)
+                                        # §3.3 + §6.3: WAITING_APPROVAL
+                                        # transition MUST propagate. If it
+                                        # fails the run cannot be paused --
+                                        # rolling back + propagating avoids
+                                        # leaving the checkpoint saved but the
+                                        # run still RUNNING (the inconsistent
+                                        # state §10.2 forbids).
+                                        await tx.runs.transition(
+                                            context.run_id,
+                                            RunStatus.WAITING_APPROVAL,
+                                            expected_version=running_version,
+                                        )
+                                        await tx.events.append(
+                                            stream_id=context.run_id,
                                             run_id=context.run_id,
-                                            reason=f"approval required: {paused.approval_id}"),
+                                            root_run_id=context.root_run_id,
+                                            parent_run_id=context.parent_run_id,
+                                            session_id=context.session_id,
+                                            runnable_id=context.runnable_id,
+                                            payload=paused_payload,
+                                        )
+                                else:
+                                    # File mode: non-atomic best-effort (§10.3).
+                                    # Cross-store transactions are unavailable,
+                                    # so checkpoint + transition propagate (§3.3
+                                    # forbids masking them) but the RunPaused
+                                    # event append stays best-effort -- the run
+                                    # is already WAITING_APPROVAL, so a missing
+                                    # event is an observability gap, not state
+                                    # corruption.
+                                    await self._checkpoint_store.save(checkpoint)
+                                    await self._run_store.transition(
+                                        context.run_id, RunStatus.WAITING_APPROVAL,
+                                        expected_version=running_version,
                                     )
-                                except Exception as exc:  # noqa: BLE001
-                                    _LOGGER.warning(
-                                        "failed to append RunPaused event for run %s: %s",
-                                        context.run_id, exc,
-                                    )
+                                    try:
+                                        await self._event_store.append(
+                                            stream_id=context.run_id,
+                                            run_id=context.run_id,
+                                            root_run_id=context.root_run_id,
+                                            parent_run_id=context.parent_run_id,
+                                            session_id=context.session_id,
+                                            runnable_id=context.runnable_id,
+                                            payload=paused_payload,
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        _LOGGER.warning(
+                                            "failed to append RunPaused event for run %s: %s",
+                                            context.run_id, exc,
+                                        )
                                 paused_signal = paused
                             else:
                                 if not timed_out:

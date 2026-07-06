@@ -99,12 +99,23 @@ class Runtime:
         # facade); Knowledge is opt-in via the ``retriever`` argument (None ->
         # no retrieval, no prompt section). Both are forwarded to SwarmRunner
         # so swarm worker Runs see the same injection as top-level Runs.
+        #
+        # §10.2 atomic pause: when the storage can promise cross-store
+        # transactions (SqlAlchemy), thread its ``transaction()`` factory into
+        # AgentRunner so the RunPaused handler wraps checkpoint + transition +
+        # event in one UnitOfWork. FileStorage cannot (capabilities flag False)
+        # -> None -> the pause path keeps its non-atomic best-effort shape.
+        uow_factory = (
+            storage.transaction
+            if storage.capabilities.cross_store_transactions else None
+        )
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
             event_store=storage.events, checkpoint_store=storage.checkpoints,
             middleware_pipeline=middleware_pipeline,
             memory_store=storage.memories,
             retriever=retriever,
+            uow_factory=uow_factory,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
