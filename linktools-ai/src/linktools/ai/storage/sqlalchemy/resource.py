@@ -11,11 +11,13 @@ from hashlib import sha256
 from typing import Callable, Mapping
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ResourceRow, IdempotencyRow, RevisionRow
-from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
+from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage, WriteOptions
 from ..resource.path import ResourcePath
+from ...errors import IdempotencyConflictError, ResourcePreconditionFailedError
 
 
 def _row_to_info(row: ResourceRow) -> ResourceInfo:
@@ -28,6 +30,22 @@ def _row_to_info(row: ResourceRow) -> ResourceInfo:
         size=row.size,
         modified_at=row.modified_at,
         metadata=json.loads(row.metadata_json),
+    )
+
+
+def _idempotency_result_to_info(result_json: "str | None") -> "ResourceInfo | None":
+    if result_json is None:
+        return None
+    raw = json.loads(result_json)
+    return ResourceInfo(
+        path=ResourcePath(raw["path"]),
+        kind=ResourceKind(raw["kind"]),
+        etag=raw["etag"],
+        version=raw["version"],
+        content_type=raw["content_type"],
+        size=raw["size"],
+        modified_at=datetime.fromisoformat(raw["modified_at"]),
+        metadata=raw["metadata"],
     )
 
 
@@ -78,57 +96,181 @@ class SqlAlchemyResourceBackend:
         else:
             row.value += 1
 
+    async def _apply_put(
+        self,
+        session: AsyncSession,
+        path: ResourcePath,
+        content: bytes,
+        content_type: "str | None",
+        metadata: "Mapping[str, object]",
+    ) -> ResourceInfo:
+        """Mutate-side of a put (assumes any precondition was already checked by
+        the caller within this transaction). Loads the row, applies the new
+        content/version, bumps revision, flushes. Shared by raw_put (legacy
+        3-step) and raw_put_checked (atomic) so the mutate logic is identical."""
+        row = await self._get_row(session, path)
+        if row is None:
+            version = 1
+            row = ResourceRow(path=path.value)
+            session.add(row)
+        else:
+            # Version must be monotonic across both the live lineage and any
+            # prior whiteout: a path that was deleted and is now being
+            # recreated must not reuse a version number already observed by
+            # a reader before the delete.
+            version = max(row.version or 0, row.whiteout_version or 0) + 1
+        row.kind = "file"
+        row.etag = sha256(content).hexdigest()
+        row.version = version
+        row.content_type = content_type
+        row.size = len(content)
+        row.content = content
+        row.modified_at = datetime.now(timezone.utc)
+        row.metadata_json = json.dumps(dict(metadata))
+        row.deleted_at = None
+        row.whiteout_version = None
+        await self._bump_revision(session)
+        await session.flush()
+        return _row_to_info(row)
+
     async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._get_row(session, path)
-                if row is None:
-                    version = 1
-                    row = ResourceRow(path=path.value)
-                    session.add(row)
-                else:
-                    # Version must be monotonic across both the live lineage and any
-                    # prior whiteout: a path that was deleted and is now being
-                    # recreated must not reuse a version number already observed by
-                    # a reader before the delete.
-                    version = max(row.version or 0, row.whiteout_version or 0) + 1
-                row.kind = "file"
-                row.etag = sha256(content).hexdigest()
-                row.version = version
-                row.content_type = content_type
-                row.size = len(content)
-                row.content = content
-                row.modified_at = datetime.now(timezone.utc)
-                row.metadata_json = json.dumps(dict(metadata))
-                row.deleted_at = None
-                row.whiteout_version = None
-                await self._bump_revision(session)
-                await session.flush()
-                info = _row_to_info(row)
+                info = await self._apply_put(session, path, content, content_type, metadata)
             return info
 
     async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._get_row(session, path)
-                removed_info = None
-                if row is not None and row.deleted_at is None:
-                    removed_info = _row_to_info(row)
-                    prior_version = row.version
-                    row.deleted_at = datetime.now(timezone.utc)
-                    row.whiteout_version = prior_version + 1
-                    row.content = b""
-                elif row is None:
-                    row = ResourceRow(
-                        path=path.value, kind="file", etag="", version=0, content_type=None, size=0,
-                        content=b"", modified_at=datetime.now(timezone.utc), metadata_json="{}",
-                        deleted_at=datetime.now(timezone.utc), whiteout_version=1,
-                    )
-                    session.add(row)
-                else:
-                    row.whiteout_version = (row.whiteout_version or 0) + 1
-                await self._bump_revision(session)
+                removed_info = await self._apply_delete(session, path)
             return removed_info
+
+    async def _apply_delete(self, session: AsyncSession, path: ResourcePath) -> "ResourceInfo | None":
+        """Mutate-side of a delete within an already-open transaction. Shared by
+        raw_delete and raw_delete_checked."""
+        row = await self._get_row(session, path)
+        removed_info = None
+        if row is not None and row.deleted_at is None:
+            removed_info = _row_to_info(row)
+            prior_version = row.version
+            row.deleted_at = datetime.now(timezone.utc)
+            row.whiteout_version = prior_version + 1
+            row.content = b""
+        elif row is None:
+            row = ResourceRow(
+                path=path.value, kind="file", etag="", version=0, content_type=None, size=0,
+                content=b"", modified_at=datetime.now(timezone.utc), metadata_json="{}",
+                deleted_at=datetime.now(timezone.utc), whiteout_version=1,
+            )
+            session.add(row)
+        else:
+            row.whiteout_version = (row.whiteout_version or 0) + 1
+        await self._bump_revision(session)
+        return removed_info
+
+    async def _save_idempotency_row(
+        self,
+        session: AsyncSession,
+        key: str,
+        request_hash: str,
+        info: "ResourceInfo | None",
+    ) -> None:
+        result_json = None
+        if info is not None:
+            result_json = json.dumps({
+                "path": info.path.value, "kind": info.kind.value, "etag": info.etag,
+                "version": info.version, "content_type": info.content_type,
+                "size": info.size, "modified_at": info.modified_at.isoformat(),
+                "metadata": dict(info.metadata),
+            })
+        result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == key))
+        row = result.scalar_one_or_none()
+        if row is None:
+            session.add(IdempotencyRow(key=key, request_hash=request_hash, result_json=result_json))
+        else:
+            row.request_hash = request_hash
+            row.result_json = result_json
+
+    async def raw_put_checked(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> Resource:
+        """Atomic precondition + idempotency + put in ONE transaction (TOCTOU
+        fix, spec section 16). The unique ``path`` constraint is the real
+        atomicity backstop: a concurrent put that wins the race makes our insert
+        raise IntegrityError, which we translate to ResourcePreconditionFailedError
+        so the observable result is independent of transaction-interleaving timing."""
+        idem_key = f"put:{options.idempotency_key}" if options.idempotency_key else None
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    if idem_key is not None:
+                        idem_result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == idem_key))
+                        idem_row = idem_result.scalar_one_or_none()
+                        if idem_row is not None:
+                            if idem_row.request_hash != request_hash:
+                                raise IdempotencyConflictError(
+                                    f"idempotency key {options.idempotency_key!r} reused with a different request"
+                                )
+                            cached_info = _idempotency_result_to_info(idem_row.result_json)
+                            row = await self._get_row(session, path)
+                            content_bytes = row.content if (row is not None and row.deleted_at is None) else content
+                            return Resource(info=cached_info, content=content_bytes)
+                    row = await self._get_row(session, path)
+                    exists = row is not None and row.deleted_at is None
+                    if options.if_none_match and exists:
+                        raise ResourcePreconditionFailedError(f"resource already exists: {path}")
+                    if options.if_match is not None:
+                        if not exists or row.etag != options.if_match:
+                            raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                    if exists and row.content == content and json.loads(row.metadata_json) == dict(options.metadata):
+                        info = _row_to_info(row)
+                    else:
+                        info = await self._apply_put(session, path, content, options.content_type, options.metadata)
+                    if idem_key is not None:
+                        await self._save_idempotency_row(session, idem_key, request_hash, info)
+                    return Resource(info=info, content=content)
+        except IntegrityError as exc:
+            # Concurrent put won the path race between our (empty) precondition
+            # read and our insert: the unique-path constraint caught it. Surface
+            # it as a precondition failure so callers see a deterministic error
+            # regardless of how the two transactions interleaved.
+            raise ResourcePreconditionFailedError(
+                f"resource already exists (concurrent write): {path}"
+            ) from exc
+
+    async def raw_delete_checked(
+        self,
+        path: ResourcePath,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> None:
+        """Atomic precondition + idempotency + delete in ONE transaction."""
+        idem_key = f"delete:{options.idempotency_key}" if options.idempotency_key else None
+        async with self._session_factory() as session:
+            async with session.begin():
+                if idem_key is not None:
+                    idem_result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == idem_key))
+                    idem_row = idem_result.scalar_one_or_none()
+                    if idem_row is not None:
+                        if idem_row.request_hash != request_hash:
+                            raise IdempotencyConflictError(
+                                f"idempotency key {options.idempotency_key!r} reused with a different request"
+                            )
+                        return  # idempotent replay: delete returns None
+                row = await self._get_row(session, path)
+                exists = row is not None and row.deleted_at is None
+                if options.if_match is not None:
+                    if not exists or row.etag != options.if_match:
+                        raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                removed_info = await self._apply_delete(session, path)
+                if idem_key is not None:
+                    await self._save_idempotency_row(session, idem_key, request_hash, removed_info)
 
     async def revision(self) -> int:
         async with self._session_factory() as session:

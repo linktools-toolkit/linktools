@@ -96,6 +96,14 @@ class ResourceStore:
     async def put(self, path: ResourcePath, content: bytes, *, options: WriteOptions = WriteOptions()) -> Resource:
         self._require_writable_primary()
         req_hash = _request_hash(path.value.encode(), content, json.dumps(dict(options.metadata), sort_keys=True).encode())
+        # TOCTOU fix (spec section 16): when the primary backend implements the
+        # atomic checked operation, delegate precondition + idempotency + mutate
+        # to it as a single atomic call so a concurrent writer cannot interleave
+        # the three steps. The Memory backend does not implement it, so the
+        # legacy 3-step orchestration below remains as the fallback.
+        if hasattr(self._primary, "raw_put_checked"):
+            return await self._primary.raw_put_checked(path, content, options=options, request_hash=req_hash)
+
         existing_record = await self._check_idempotency("put", options.idempotency_key, req_hash)
         if existing_record is not None:
             info = existing_record.result
@@ -122,6 +130,11 @@ class ResourceStore:
     async def delete(self, path: ResourcePath, *, options: WriteOptions = WriteOptions()) -> None:
         self._require_writable_primary()
         req_hash = _request_hash(path.value.encode())
+        # TOCTOU fix: delegate to the atomic checked op when available (see put).
+        if hasattr(self._primary, "raw_delete_checked"):
+            await self._primary.raw_delete_checked(path, options=options, request_hash=req_hash)
+            return
+
         existing_record = await self._check_idempotency("delete", options.idempotency_key, req_hash)
         if existing_record is not None:
             return

@@ -7,7 +7,7 @@ put_idempotency."""
 
 from typing import Mapping, Protocol, runtime_checkable
 
-from .models import Depth, IdempotencyRecord, ResourceInfo, ResourcePage
+from .models import Depth, IdempotencyRecord, Resource, ResourceInfo, ResourcePage, WriteOptions
 from .path import ResourcePath
 
 
@@ -48,4 +48,36 @@ class ResourceBackend(Protocol):
         ...
 
     async def put_idempotency(self, record: IdempotencyRecord) -> None:
+        ...
+
+    # -- OPTIONAL atomic checked operations (spec section 16, TOCTOU fix) --
+    # These fold precondition-check + idempotency-reservation + mutate into ONE
+    # backend call so the three steps cannot be interleaved by a concurrent
+    # writer (the TOCTOU race the split ResourceStore orchestration has). A
+    # backend that has a real transaction primitive (SqlAlchemy) implements them
+    # to run all three steps inside a single transaction. The File backend
+    # implements them under an in-process lock (the best a non-transactional
+    # filesystem can do). The Memory backend does NOT implement them:
+    # ResourceStore probes with hasattr() and, when absent, falls back to the
+    # legacy 3-step orchestration -- so Memory keeps today's behavior unchanged.
+    # `request_hash` is computed by ResourceStore (which owns the hash recipe)
+    # and passed in so the backend can do the idempotency comparison atomically.
+
+    async def raw_put_checked(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> Resource:
+        ...
+
+    async def raw_delete_checked(
+        self,
+        path: ResourcePath,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> None:
         ...

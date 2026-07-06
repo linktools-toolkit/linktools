@@ -8,6 +8,7 @@ JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resour
 import json
 import os
 import tempfile
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 from enum import Enum
@@ -15,9 +16,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
 
-from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
+from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage, WriteOptions
 from .path import ResourcePath
-from ...errors import InvalidResourcePathError
+from ...errors import IdempotencyConflictError, InvalidResourcePathError, ResourcePreconditionFailedError
 
 
 class SymlinkPolicy(str, Enum):
@@ -46,6 +47,17 @@ class FileResourceBackend:
         self._whiteout_dir = self._root / ".resource" / "whiteouts"
         self._idempotency_dir = self._root / ".resource" / "idempotency"
         self._revision_file = self._root / ".resource" / "revision"
+        # In-process lock serializing the checked (precondition+idempotency+
+        # mutate) operations. The filesystem itself is not transactional, so
+        # this lock is the best atomicity FileResourceBackend can offer: it
+        # prevents two concurrent checked-puts within ONE process from
+        # interleaving the three steps. Cross-process races remain (a different
+        # process writing the same backend root can still interleave) -- that is
+        # a documented limitation; true cross-process atomicity requires the
+        # SqlAlchemy backend. The backend methods are async-def but purely
+        # synchronous-bodied (no await inside), so holding a threading.Lock
+        # across them never blocks the event loop on a suspension point.
+        self._lock = threading.Lock()
         for d in (self._data_dir, self._meta_dir, self._whiteout_dir, self._idempotency_dir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -190,7 +202,7 @@ class FileResourceBackend:
     async def revision(self) -> int:
         return self._read_revision()
 
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
+    def _read_idempotency_sync(self, key: str) -> "IdempotencyRecord | None":
         path = self._idempotency_path(key)
         if not path.exists():
             return None
@@ -210,7 +222,7 @@ class FileResourceBackend:
             )
         return IdempotencyRecord(key=raw["key"], request_hash=raw["request_hash"], result=result)
 
-    async def put_idempotency(self, record: IdempotencyRecord) -> None:
+    def _write_idempotency_sync(self, record: IdempotencyRecord) -> None:
         result = None
         if record.result is not None:
             result = {
@@ -225,3 +237,76 @@ class FileResourceBackend:
             }
         raw = {"key": record.key, "request_hash": record.request_hash, "result": result}
         self._atomic_write(self._idempotency_path(record.key), json.dumps(raw).encode("utf-8"))
+
+    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
+        return self._read_idempotency_sync(key)
+
+    async def put_idempotency(self, record: IdempotencyRecord) -> None:
+        self._write_idempotency_sync(record)
+
+    async def raw_put_checked(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> Resource:
+        """Precondition + idempotency + put under self._lock (best-effort
+        in-process atomicity; see self._lock docstring). Mirrors what
+        ResourceStore.put does in the legacy 3-step path, but the three steps
+        run without interleaving from another in-process caller."""
+        with self._lock:
+            idem_key = f"put:{options.idempotency_key}" if options.idempotency_key else None
+            if idem_key is not None:
+                record = self._read_idempotency_sync(idem_key)
+                if record is not None:
+                    if record.request_hash != request_hash:
+                        raise IdempotencyConflictError(
+                            f"idempotency key {options.idempotency_key!r} reused with a different request"
+                        )
+                    cached_info = record.result
+                    current = self._load_info(path)
+                    content_bytes = self._data_path(path).read_bytes() if current is not None else content
+                    return Resource(info=cached_info, content=content_bytes)
+            info = self._load_info(path)
+            if options.if_none_match and info is not None:
+                raise ResourcePreconditionFailedError(f"resource already exists: {path}")
+            if options.if_match is not None:
+                if info is None or info.etag != options.if_match:
+                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+            if info is not None:
+                existing_content = self._data_path(path).read_bytes()
+                if existing_content == content and dict(info.metadata) == dict(options.metadata):
+                    new_info = info
+                else:
+                    new_info = await self.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
+            else:
+                new_info = await self.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
+            if idem_key is not None:
+                self._write_idempotency_sync(IdempotencyRecord(key=idem_key, request_hash=request_hash, result=new_info))
+            return Resource(info=new_info, content=content)
+
+    async def raw_delete_checked(
+        self,
+        path: ResourcePath,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> None:
+        """Precondition + idempotency + delete under self._lock."""
+        with self._lock:
+            idem_key = f"delete:{options.idempotency_key}" if options.idempotency_key else None
+            if idem_key is not None:
+                record = self._read_idempotency_sync(idem_key)
+                if record is not None:
+                    if record.request_hash != request_hash:
+                        raise IdempotencyConflictError(
+                            f"idempotency key {options.idempotency_key!r} reused with a different request"
+                        )
+                    return  # idempotent replay: delete returns None
+            info = self._load_info(path)
+            if options.if_match is not None:
+                if info is None or info.etag != options.if_match:
+                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+            await self.raw_delete(path)

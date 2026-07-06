@@ -39,11 +39,13 @@ class ToolExecutor:
         event_store: "EventStore | None" = None,
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
         pause_on_approval: bool = False,
+        idempotency_cache: "dict[tuple[str, str], Any] | None" = None,
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
         self._event_store = event_store
         self._run_id_resolver = run_id_resolver
+        self._idempotency_cache = idempotency_cache
         # When True, the require-approval branch persists the request (via
         # _record_approval) and then raises RunPaused(run_id, approval_id)
         # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
@@ -192,6 +194,7 @@ class ToolExecutor:
         *,
         timeout: "float | None" = None,
         max_retries: int = 0,
+        idempotency_key: "str | None" = None,
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -201,15 +204,39 @@ class ToolExecutor:
         number of additional attempts after the first -- on any exception the
         call is retried up to ``max_retries`` times, after which the last error
         is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
-        the legacy single-call-no-timeout behavior exactly."""
+        the legacy single-call-no-timeout behavior exactly.
+
+        ``idempotency_key`` enables tool-level idempotency (spec section 27,
+        basic form): when the executor was constructed with an
+        ``idempotency_cache`` dict AND ``idempotency_key`` is provided, the
+        cache is keyed by ``(request.tool_name, idempotency_key)``. A repeat
+        call with the same key returns the cached result without invoking the
+        handler; the first successful call stores its result. A failed
+        (exception-raising) call is NOT cached, so a retry with the same key
+        re-invokes the handler. This is deliberately MINIMAL -- an in-process
+        dict, no hash-based conflict detection, no persistence: the same key
+        with different arguments simply returns the cached result. The full
+        spec (hash-based conflict, persistent IdempotencyStore, TTL) is a
+        future enhancement. For production the caller may supply a shared or
+        TTL-backed dict. Default ``idempotency_cache=None`` (or
+        ``idempotency_key=None``) preserves today's no-cache behavior."""
         await self.check(request, context)
+        cache_key: "tuple[str, str] | None" = None
+        if self._idempotency_cache is not None and idempotency_key is not None:
+            cache_key = (request.tool_name, idempotency_key)
+            if cache_key in self._idempotency_cache:
+                return self._idempotency_cache[cache_key]
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
         for attempt in range(max_retries + 1):
             try:
                 if timeout is not None:
-                    return await asyncio.wait_for(handler(**arguments), timeout=timeout)
-                return await handler(**arguments)
+                    result = await asyncio.wait_for(handler(**arguments), timeout=timeout)
+                else:
+                    result = await handler(**arguments)
+                if cache_key is not None:
+                    self._idempotency_cache[cache_key] = result
+                return result
             except Exception as exc:  # noqa: BLE001 - retry then re-raise
                 last_error = exc
                 if attempt < max_retries:
