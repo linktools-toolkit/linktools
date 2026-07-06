@@ -85,18 +85,6 @@ async def test_idempotency_record_persists_across_reopen(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_move_reads_writes_and_masks(tmp_path):
-    backend = FileResourceBackend(root=tmp_path)
-    await backend.raw_put(ResourcePath("/src.txt"), b"data", content_type=None, metadata={})
-    info = await backend.raw_move(ResourcePath("/src.txt"), ResourcePath("/dst.txt"))
-    assert info.path == ResourcePath("/dst.txt")
-    assert isinstance(await backend.raw_get(ResourcePath("/src.txt")), Masked)
-    dst_lookup = await backend.raw_get(ResourcePath("/dst.txt"))
-    assert isinstance(dst_lookup, Found)
-    assert dst_lookup.resource.content == b"data"
-
-
-@pytest.mark.asyncio
 async def test_paths_with_double_underscore_do_not_collide_with_nested_paths(tmp_path):
     backend = FileResourceBackend(root=tmp_path)
     await backend.raw_put(ResourcePath("/a/b"), b"nested", content_type=None, metadata={})

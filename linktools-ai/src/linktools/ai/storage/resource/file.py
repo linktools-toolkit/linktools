@@ -17,7 +17,7 @@ from typing import Mapping
 
 from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
 from .path import ResourcePath
-from ...errors import InvalidResourcePathError, ResourceNotFoundError
+from ...errors import InvalidResourcePathError
 
 
 class SymlinkPolicy(str, Enum):
@@ -185,19 +185,6 @@ class FileResourceBackend:
         new_version = max(prior_version, existing_whiteout_version) + 1
         self._atomic_write(whiteout_path, json.dumps({"version": new_version}).encode("utf-8"))
         self._bump_revision()
-        return info
-
-    async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
-        lookup = await self.raw_get(src)
-        if not isinstance(lookup, Found):
-            raise ResourceNotFoundError(f"cannot move missing resource: {src}")
-        info = await self.raw_put(
-            dst,
-            lookup.resource.content,
-            content_type=lookup.resource.info.content_type,
-            metadata=lookup.resource.info.metadata,
-        )
-        await self.raw_delete(src)
         return info
 
     async def revision(self) -> int:

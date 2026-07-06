@@ -41,9 +41,6 @@ class ResourceBackend(Protocol):
     async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
         ...
 
-    async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
-        ...
-
     async def revision(self) -> int:
         ...
 

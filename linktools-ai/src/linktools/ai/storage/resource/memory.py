@@ -10,7 +10,6 @@ from typing import Mapping
 
 from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
 from .path import ResourcePath
-from ...errors import ResourceNotFoundError
 
 
 class MemoryResourceBackend:
@@ -77,19 +76,6 @@ class MemoryResourceBackend:
         prior_version = removed[1].version if removed else self._whiteouts.get(key, 0)
         self._whiteouts[key] = prior_version + 1
         return removed[1] if removed else None
-
-    async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
-        lookup = await self.raw_get(src)
-        if not isinstance(lookup, Found):
-            raise ResourceNotFoundError(f"cannot move missing resource: {src}")
-        info = await self.raw_put(
-            dst,
-            lookup.resource.content,
-            content_type=lookup.resource.info.content_type,
-            metadata=lookup.resource.info.metadata,
-        )
-        await self.raw_delete(src)
-        return info
 
     async def revision(self) -> int:
         return self._revision

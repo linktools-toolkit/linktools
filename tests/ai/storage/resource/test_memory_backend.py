@@ -58,19 +58,6 @@ async def test_delete_never_written_still_masks_for_overlay_shadowing():
 
 
 @pytest.mark.asyncio
-async def test_move_reads_then_writes_dst_and_masks_src():
-    backend = MemoryResourceBackend()
-    await backend.raw_put(ResourcePath("/a/src.txt"), b"data", content_type=None, metadata={})
-    info = await backend.raw_move(ResourcePath("/a/src.txt"), ResourcePath("/a/dst.txt"))
-    assert info.path == ResourcePath("/a/dst.txt")
-    src_lookup = await backend.raw_get(ResourcePath("/a/src.txt"))
-    assert isinstance(src_lookup, Masked)
-    dst_lookup = await backend.raw_get(ResourcePath("/a/dst.txt"))
-    assert isinstance(dst_lookup, Found)
-    assert dst_lookup.resource.content == b"data"
-
-
-@pytest.mark.asyncio
 async def test_revision_increments_on_write():
     backend = MemoryResourceBackend()
     r0 = await backend.revision()

@@ -41,6 +41,28 @@ def test_run_bash_timeout(backend):
     assert "error" in result and "timeout" in result["error"]
 
 
+def test_terminate_kills_in_flight_subprocess(backend):
+    async def main():
+        task = asyncio.ensure_future(backend.run_bash("sleep 30"))
+        # Poll until the subprocess is tracked, so terminate() has a live proc
+        # to kill rather than racing the spawn.
+        for _ in range(200):
+            if backend._subprocesses:
+                break
+            await asyncio.sleep(0.01)
+        assert backend._subprocesses, "run_bash did not register its subprocess"
+        await backend.terminate()
+        result = await task
+        assert not backend._subprocesses, "registry was not cleared after terminate()"
+        return result
+
+    result = asyncio.run(main())
+    # SIGKILL from terminate() surfaces as a negative (signal) exit code, and
+    # the run does NOT return a timeout error -- the proc was reaped mid-flight.
+    assert "error" not in result
+    assert isinstance(result.get("exit_code"), int) and result["exit_code"] < 0
+
+
 def test_fork_copies_runtime_dir_and_isolates_writes(backend, tmp_path):
     (tmp_path / "shared.txt").write_text("original")
     branch_dir = tmp_path.parent / "branch1"

@@ -20,6 +20,10 @@ from typing import Any
 class LocalExecutionBackend:
     runtime_dir: Path
     base_dirs: "list[Path]" = field(default_factory=list)
+    # Live run_bash subprocesses, keyed by pid. Populated by run_bash_tool as
+    # each proc is spawned and removed again once it is awaited (success or
+    # timeout), so this only ever contains processes still in flight.
+    _subprocesses: "dict[str, asyncio.subprocess.Process]" = field(default_factory=dict)
 
     async def list_dir(self, path: str = ".", recursive: bool = False) -> "dict[str, Any]":
         return await run_file_tool("list_dir", {"path": path, "recursive": recursive}, self.runtime_dir, self.base_dirs)
@@ -54,7 +58,7 @@ class LocalExecutionBackend:
         args: "dict[str, Any]" = {"command": resolved}
         if timeout_ms is not None:
             args["timeout_ms"] = timeout_ms
-        return await run_bash_tool(args, self.runtime_dir, timeout_s=60.0)
+        return await run_bash_tool(args, self.runtime_dir, timeout_s=60.0, registry=self._subprocesses)
 
     async def apply_patch(self, diff: str) -> "dict[str, Any]":
         raw_paths = _extract_patch_target_paths(diff)
@@ -72,6 +76,21 @@ class LocalExecutionBackend:
         await asyncio.to_thread(branch_dir.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(shutil.copytree, self.runtime_dir, branch_dir, dirs_exist_ok=True)
         return LocalExecutionBackend(runtime_dir=branch_dir, base_dirs=self.base_dirs)
+
+    async def terminate(self) -> None:
+        # SIGKILL every tracked subprocess still in flight, then reap it. A
+        # process that already exited between the run_bash hot path and here
+        # surfaces as ProcessLookupError on kill(), which we swallow.
+        for proc in list(self._subprocesses.values()):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                continue
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        self._subprocesses.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +124,12 @@ async def run_patch_tool(diff: str, runtime_dir: Path, timeout_s: float) -> "dic
     return {"ok": True, "output": stdout.decode("utf-8", errors="replace")}
 
 
-async def run_bash_tool(args: "dict[str, Any]", runtime_dir: Path, timeout_s: float) -> "dict[str, Any]":
+async def run_bash_tool(
+    args: "dict[str, Any]",
+    runtime_dir: Path,
+    timeout_s: float,
+    registry: "dict[str, asyncio.subprocess.Process] | None" = None,
+) -> "dict[str, Any]":
     command = str(args.get("command", ""))
     if not command:
         return {"error": "missing 'command'"}
@@ -122,12 +146,21 @@ async def run_bash_tool(args: "dict[str, Any]", runtime_dir: Path, timeout_s: fl
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    # Register the live proc so LocalExecutionBackend.terminate() can reap it
+    # while communicate() is still awaiting. Removed in finally on both the
+    # success and timeout paths so the registry only holds in-flight procs.
+    key = str(proc.pid)
+    if registry is not None:
+        registry[key] = proc
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
         return {"error": f"timeout after {timeout}s"}
+    finally:
+        if registry is not None:
+            registry.pop(key, None)
     return {
         "exit_code": proc.returncode,
         "stdout": stdout.decode("utf-8", errors="replace")[-16000:],

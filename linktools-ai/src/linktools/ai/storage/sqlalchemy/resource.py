@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import ResourceRow, IdempotencyRow, RevisionRow
 from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
 from ..resource.path import ResourcePath
-from ...errors import ResourceNotFoundError
 
 
 def _row_to_info(row: ResourceRow) -> ResourceInfo:
@@ -130,19 +129,6 @@ class SqlAlchemyResourceBackend:
                     row.whiteout_version = (row.whiteout_version or 0) + 1
                 await self._bump_revision(session)
             return removed_info
-
-    async def raw_move(self, src: ResourcePath, dst: ResourcePath) -> ResourceInfo:
-        lookup = await self.raw_get(src)
-        if not isinstance(lookup, Found):
-            raise ResourceNotFoundError(f"cannot move missing resource: {src}")
-        info = await self.raw_put(
-            dst,
-            lookup.resource.content,
-            content_type=lookup.resource.info.content_type,
-            metadata=lookup.resource.info.metadata,
-        )
-        await self.raw_delete(src)
-        return info
 
     async def revision(self) -> int:
         async with self._session_factory() as session:

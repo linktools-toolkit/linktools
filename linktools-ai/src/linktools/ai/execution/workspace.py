@@ -3,11 +3,16 @@
 """WorkspaceManager: creates/resolves/cleans up the physical execution directory
 for a Run, keyed by run_id. AgentSpec/CompiledAgent/RunContext hold only a
 WorkspaceRef, never a raw Path -- only WorkspaceManager.resolve() exposes one,
-and only at the point of tool execution (spec section 29)."""
+and only at the point of tool execution (spec section 29).
+
+``WorkspaceManager`` is the Protocol every backend satisfies; ``LocalWorkspaceManager``
+is the local-filesystem implementation. A container-backed implementation can
+satisfy the same Protocol without touching the local disk."""
 
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from ..run.context import RunContext
 
@@ -25,7 +30,24 @@ class ExecutionWorkspace:
     root: Path
 
 
-class WorkspaceManager:
+@runtime_checkable
+class WorkspaceManager(Protocol):
+    """Resolve a RunContext/WorkspaceRef to a physical execution directory.
+
+    Implementations must confine path exposure to ``resolve()`` -- callers
+    receive a WorkspaceRef, never a raw Path, until the moment of tool
+    execution."""
+
+    async def create(self, run: RunContext) -> WorkspaceRef: ...
+
+    async def resolve(self, workspace: WorkspaceRef) -> ExecutionWorkspace: ...
+
+    async def cleanup(self, workspace: WorkspaceRef) -> None: ...
+
+
+class LocalWorkspaceManager:
+    """Local-filesystem WorkspaceManager: one directory per run_id under ``root``."""
+
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
