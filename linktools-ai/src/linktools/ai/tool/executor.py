@@ -10,6 +10,7 @@ ToolApprovalRequiredError is raised, so PolicyCapability still translates
 the raise into SkipToolExecution and the model sees the "approval needed"
 tool result. Default-None (no stores wired) preserves today's behavior
 identically: just raise, no persistence, no event."""
+import asyncio
 import itertools
 import logging
 import uuid
@@ -188,6 +189,29 @@ class ToolExecutor:
         request: ToolRequest,
         context: ToolContext,
         handler: "Callable[..., Awaitable[Any]]",
+        *,
+        timeout: "float | None" = None,
+        max_retries: int = 0,
     ) -> Any:
+        """Policy-check then run ``handler``, optionally with timeout/retry.
+
+        ``timeout`` wraps each handler call in :func:`asyncio.wait_for`; an
+        :class:`asyncio.TimeoutError` is caught like any other exception
+        (retried if attempts remain, raised otherwise). ``max_retries`` is the
+        number of additional attempts after the first -- on any exception the
+        call is retried up to ``max_retries`` times, after which the last error
+        is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
+        the legacy single-call-no-timeout behavior exactly."""
         await self.check(request, context)
-        return await handler(**dict(request.arguments))
+        arguments = dict(request.arguments)
+        last_error: "Exception | None" = None
+        for attempt in range(max_retries + 1):
+            try:
+                if timeout is not None:
+                    return await asyncio.wait_for(handler(**arguments), timeout=timeout)
+                return await handler(**arguments)
+            except Exception as exc:  # noqa: BLE001 - retry then re-raise
+                last_error = exc
+                if attempt < max_retries:
+                    continue
+        raise last_error  # type: ignore[misc]
