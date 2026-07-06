@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileSessionStore: root/{session_id}/record.json + root/{session_id}/messages/
-{sequence:010d}.json (one file per message, append-only)."""
+{sequence:010d}.json (one file per message, append-only).
 
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop."""
+
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,22 +69,31 @@ class FileSessionStore:
     def _record_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "record.json"
 
-    async def create(self, session: SessionRecord) -> SessionRecord:
+    def _create_sync(self, session: SessionRecord) -> SessionRecord:
         self._record_path(session.id).write_text(json.dumps(_record_to_json(session)))
         return session
 
-    async def get(self, session_id: str) -> "SessionRecord | None":
+    async def create(self, session: SessionRecord) -> SessionRecord:
+        return await asyncio.to_thread(self._create_sync, session)
+
+    def _get_sync(self, session_id: str) -> "SessionRecord | None":
         path = self._root / _validate_id_segment(session_id, kind="session_id") / "record.json"
         if not path.exists():
             return None
         return _record_from_json(json.loads(path.read_text()))
 
-    async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
+    async def get(self, session_id: str) -> "SessionRecord | None":
+        return await asyncio.to_thread(self._get_sync, session_id)
+
+    def _append_messages_sync(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
         messages_dir = self._session_dir(session_id) / "messages"
         for message in messages:
             (messages_dir / f"{message.sequence:010d}.json").write_text(json.dumps(_message_to_json(message)))
 
-    async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
+    async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
+        await asyncio.to_thread(self._append_messages_sync, session_id, messages)
+
+    def _list_messages_sync(self, session_id: str, *, after_sequence: int, limit: int) -> "tuple[SessionMessage, ...]":
         messages_dir = self._root / _validate_id_segment(session_id, kind="session_id") / "messages"
         if not messages_dir.exists():
             return ()
@@ -91,14 +105,19 @@ class FileSessionStore:
             result.append(message)
         return tuple(result[:limit])
 
-    async def update(
+    async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
+        return await asyncio.to_thread(
+            self._list_messages_sync, session_id, after_sequence=after_sequence, limit=limit,
+        )
+
+    def _update_sync(
         self,
         session_id: str,
         *,
-        status: "SessionStatus | None" = None,
-        metadata: "Mapping[str, Any] | None" = None,
+        status: "SessionStatus | None",
+        metadata: "Mapping[str, Any] | None",
     ) -> SessionRecord:
-        current = await self.get(session_id)
+        current = self._get_sync(session_id)
         if current is None:
             raise SessionError(f"session not found: {session_id}")
         updated = SessionRecord(
@@ -110,3 +129,12 @@ class FileSessionStore:
         )
         self._record_path(session_id).write_text(json.dumps(_record_to_json(updated)))
         return updated
+
+    async def update(
+        self,
+        session_id: str,
+        *,
+        status: "SessionStatus | None" = None,
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> SessionRecord:
+        return await asyncio.to_thread(self._update_sync, session_id, status=status, metadata=metadata)

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileCheckpointStore: root/{run_id}/{sequence}.bin (raw payload) + a JSON
-sidecar for id/format/schema_version/created_at/metadata."""
+sidecar for id/format/schema_version/created_at/metadata.
 
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop."""
+
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -32,13 +37,16 @@ class FileCheckpointStore:
     def _meta_path(self, run_id: str, sequence: int) -> Path:
         return self._run_dir(run_id) / f"{sequence}.json"
 
-    async def save(self, checkpoint: RunCheckpoint) -> None:
+    def _save_sync(self, checkpoint: RunCheckpoint) -> None:
         self._payload_path(checkpoint.run_id, checkpoint.sequence).write_bytes(checkpoint.payload)
         meta = {
             "id": checkpoint.id, "format": checkpoint.format, "schema_version": checkpoint.schema_version,
             "created_at": checkpoint.created_at.isoformat(), "metadata": dict(checkpoint.metadata),
         }
         self._meta_path(checkpoint.run_id, checkpoint.sequence).write_text(json.dumps(meta))
+
+    async def save(self, checkpoint: RunCheckpoint) -> None:
+        await asyncio.to_thread(self._save_sync, checkpoint)
 
     def _load(self, run_id: str, sequence: int) -> "RunCheckpoint | None":
         meta_path = self._meta_path(run_id, sequence)
@@ -52,7 +60,7 @@ class FileCheckpointStore:
             created_at=datetime.fromisoformat(meta["created_at"]), metadata=meta["metadata"],
         )
 
-    async def latest(self, run_id: str) -> "RunCheckpoint | None":
+    def _latest_sync(self, run_id: str) -> "RunCheckpoint | None":
         run_dir = self._root / _validate_id_segment(run_id, kind="run_id")
         if not run_dir.exists():
             return None
@@ -61,7 +69,10 @@ class FileCheckpointStore:
             return None
         return self._load(run_id, sequences[0])
 
-    async def get(self, checkpoint_id: str) -> "RunCheckpoint | None":
+    async def latest(self, run_id: str) -> "RunCheckpoint | None":
+        return await asyncio.to_thread(self._latest_sync, run_id)
+
+    def _get_sync(self, checkpoint_id: str) -> "RunCheckpoint | None":
         for run_dir in self._root.iterdir():
             if not run_dir.is_dir():
                 continue
@@ -70,3 +81,6 @@ class FileCheckpointStore:
                 if meta["id"] == checkpoint_id:
                     return self._load(run_dir.name, int(meta_path.stem))
         return None
+
+    async def get(self, checkpoint_id: str) -> "RunCheckpoint | None":
+        return await asyncio.to_thread(self._get_sync, checkpoint_id)

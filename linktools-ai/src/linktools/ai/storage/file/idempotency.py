@@ -10,7 +10,12 @@ one process so the read-check-mutate sequences are race-free.
 Lookup is by (scope, key) -- the file path is keyed on those two segments,
 so reserve/get/complete/fail are all O(1). ``record.id`` is a uuid4 minted
 on reserve and stored inside the JSON for diagnostics/audit; it is not used
-to address the file."""
+to address the file.
+
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop. The ``asyncio.Lock`` is held in the async
+wrapper and spans the ``to_thread`` call (not the other way around)."""
 
 import asyncio
 import json
@@ -82,6 +87,41 @@ class FileIdempotencyStore:
 
     # -- write ---------------------------------------------------------
 
+    def _reserve_sync(
+        self,
+        scope: str,
+        key: str,
+        request_hash: str,
+        *,
+        expires_at: "datetime | None",
+    ) -> "IdempotencyRecord | None":
+        existing = self._read(scope, key)
+        if existing is not None:
+            if existing.request_hash != request_hash:
+                raise IdempotencyConflictError(
+                    f"idempotency key {key!r} reused with a different request"
+                )
+            return existing
+        now = datetime.now(timezone.utc)
+        record = IdempotencyRecord(
+            id=str(uuid.uuid4()),
+            scope=scope,
+            key=key,
+            request_hash=request_hash,
+            status=IdempotencyStatus.RESERVED,
+            result=None,
+            error=None,
+            created_at=now,
+            completed_at=None,
+        )
+        # mkdir for the scope subdir is done here (not in __init__) so
+        # FileIdempotencyStore(root=...) never creates empty scope dirs
+        # for scopes that never reserve. Idempotent.
+        path = self._path(scope, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps(_record_to_json(record)).encode("utf-8"))
+        return None
+
     async def reserve(
         self,
         scope: str,
@@ -91,72 +131,55 @@ class FileIdempotencyStore:
         expires_at: "datetime | None" = None,
     ) -> "IdempotencyRecord | None":
         async with self._lock:
-            existing = self._read(scope, key)
-            if existing is not None:
-                if existing.request_hash != request_hash:
-                    raise IdempotencyConflictError(
-                        f"idempotency key {key!r} reused with a different request"
-                    )
-                return existing
-            now = datetime.now(timezone.utc)
-            record = IdempotencyRecord(
-                id=str(uuid.uuid4()),
-                scope=scope,
-                key=key,
-                request_hash=request_hash,
-                status=IdempotencyStatus.RESERVED,
-                result=None,
-                error=None,
-                created_at=now,
-                completed_at=None,
+            return await asyncio.to_thread(
+                self._reserve_sync, scope, key, request_hash, expires_at=expires_at,
             )
-            # mkdir for the scope subdir is done here (not in __init__) so
-            # FileIdempotencyStore(root=...) never creates empty scope dirs
-            # for scopes that never reserve. Idempotent.
-            path = self._path(scope, key)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(path, json.dumps(_record_to_json(record)).encode("utf-8"))
-            return None
+
+    def _complete_sync(self, scope: str, key: str, result: Any) -> None:
+        current = self._read(scope, key)
+        if current is None:
+            return
+        now = datetime.now(timezone.utc)
+        updated = IdempotencyRecord(
+            id=current.id,
+            scope=current.scope,
+            key=current.key,
+            request_hash=current.request_hash,
+            status=IdempotencyStatus.COMPLETED,
+            result=result,
+            error=None,
+            created_at=current.created_at,
+            completed_at=now,
+        )
+        _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
 
     async def complete(self, scope: str, key: str, result: Any) -> None:
         async with self._lock:
-            current = self._read(scope, key)
-            if current is None:
-                return
-            now = datetime.now(timezone.utc)
-            updated = IdempotencyRecord(
-                id=current.id,
-                scope=current.scope,
-                key=current.key,
-                request_hash=current.request_hash,
-                status=IdempotencyStatus.COMPLETED,
-                result=result,
-                error=None,
-                created_at=current.created_at,
-                completed_at=now,
-            )
-            _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
+            await asyncio.to_thread(self._complete_sync, scope, key, result)
+
+    def _fail_sync(self, scope: str, key: str, error: str) -> None:
+        current = self._read(scope, key)
+        if current is None:
+            return
+        now = datetime.now(timezone.utc)
+        updated = IdempotencyRecord(
+            id=current.id,
+            scope=current.scope,
+            key=current.key,
+            request_hash=current.request_hash,
+            status=IdempotencyStatus.FAILED,
+            result=None,
+            error=error,
+            created_at=current.created_at,
+            completed_at=now,
+        )
+        _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
 
     async def fail(self, scope: str, key: str, error: str) -> None:
         async with self._lock:
-            current = self._read(scope, key)
-            if current is None:
-                return
-            now = datetime.now(timezone.utc)
-            updated = IdempotencyRecord(
-                id=current.id,
-                scope=current.scope,
-                key=current.key,
-                request_hash=current.request_hash,
-                status=IdempotencyStatus.FAILED,
-                result=None,
-                error=error,
-                created_at=current.created_at,
-                completed_at=now,
-            )
-            _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
+            await asyncio.to_thread(self._fail_sync, scope, key, error)
 
     async def get(self, scope: str, key: str) -> "IdempotencyRecord | None":
         # Read-only: no lock needed. _path validates the segments, so a
         # traversal attempt raises ValueError rather than escaping root.
-        return self._read(scope, key)
+        return await asyncio.to_thread(self._read, scope, key)

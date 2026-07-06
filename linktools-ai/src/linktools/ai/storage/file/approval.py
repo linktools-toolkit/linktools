@@ -13,7 +13,12 @@ reason, so ``reject(..., reason=...)`` stores it under
 mapped to None, so callers can distinguish "rejected, no reason given" from
 "approved"). Any pre-existing ``metadata`` is preserved; ``approve`` never
 touches the metadata so it cannot shadow a prior rejection reason on a
-different request."""
+different request.
+
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop. The ``asyncio.Lock`` is held in the async
+wrapper and spans the ``to_thread`` call (not the other way around)."""
 
 import asyncio
 import json
@@ -102,13 +107,16 @@ class FileApprovalStore:
 
     # -- read ----------------------------------------------------------
 
-    async def get(self, approval_id: str) -> "ApprovalRequest | None":
+    def _get_sync(self, approval_id: str) -> "ApprovalRequest | None":
         path = self._path(approval_id)
         if not path.exists():
             return None
         return _request_from_json(json.loads(path.read_text()))
 
-    async def list_pending(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+    async def get(self, approval_id: str) -> "ApprovalRequest | None":
+        return await asyncio.to_thread(self._get_sync, approval_id)
+
+    def _list_pending_sync(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
         out: list = []
         for path in self._requests_dir.glob("*.json"):
             raw = json.loads(path.read_text())
@@ -120,7 +128,10 @@ class FileApprovalStore:
         out.sort(key=lambda r: r.created_at)
         return tuple(out)
 
-    async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+    async def list_pending(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+        return await asyncio.to_thread(self._list_pending_sync, run_id)
+
+    def _list_for_run_sync(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
         # Status-agnostic counterpart to ``list_pending``: returns EVERY
         # request for the run regardless of status, ordered by created_at.
         # The resume gate (ToolExecutor._already_approved) consults this to
@@ -135,15 +146,21 @@ class FileApprovalStore:
         out.sort(key=lambda r: r.created_at)
         return tuple(out)
 
+    async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
+        return await asyncio.to_thread(self._list_for_run_sync, run_id)
+
     # -- write ---------------------------------------------------------
 
-    async def create(self, request: ApprovalRequest) -> ApprovalRequest:
+    def _create_sync(self, request: ApprovalRequest) -> ApprovalRequest:
         # _path validates the id segment, guarding against path traversal.
         path = self._path(request.id)
         if path.exists():
             raise ApprovalConflictError(f"approval already exists: {request.id}")
         _atomic_write(path, json.dumps(_request_to_json(request)).encode("utf-8"))
         return request
+
+    async def create(self, request: ApprovalRequest) -> ApprovalRequest:
+        return await asyncio.to_thread(self._create_sync, request)
 
     async def approve(
         self, approval_id: str, *, expected_version: int, resolved_by: str
@@ -172,6 +189,53 @@ class FileApprovalStore:
             rejection_reason=reason,
         )
 
+    def _resolve_sync(
+        self,
+        approval_id: str,
+        *,
+        target: ApprovalStatus,
+        expected_version: int,
+        resolved_by: str,
+        rejection_reason: object,
+    ) -> ApprovalRequest:
+        current = self._get_sync(approval_id)
+        if current is None:
+            raise ApprovalNotFoundError(f"approval not found: {approval_id}")
+        if current.version != expected_version:
+            raise ApprovalConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        if target not in ALLOWED_APPROVAL_TRANSITIONS.get(current.status, frozenset()):
+            raise InvalidApprovalTransitionError(
+                f"cannot transition {current.status} -> {target}"
+            )
+        now = datetime.now(current.created_at.tzinfo or timezone.utc)
+        new_metadata = dict(current.metadata)
+        # ``reject`` always sets the key (even to None); ``approve`` leaves
+        # metadata untouched so approvals can't shadow a prior rejection
+        # reason on a different request.
+        if rejection_reason is not _UNSET:
+            new_metadata[REJECTION_REASON_METADATA_KEY] = rejection_reason
+        resolved = ApprovalRequest(
+            id=current.id,
+            run_id=current.run_id,
+            tool_call_id=current.tool_call_id,
+            tool_name=current.tool_name,
+            reason=current.reason,
+            arguments=current.arguments,
+            status=target,
+            version=current.version + 1,
+            created_at=current.created_at,
+            resolved_at=now,
+            resolved_by=resolved_by,
+            metadata=new_metadata,
+        )
+        _atomic_write(
+            self._path(approval_id),
+            json.dumps(_request_to_json(resolved)).encode("utf-8"),
+        )
+        return resolved
+
     async def _resolve(
         self,
         approval_id: str,
@@ -181,41 +245,13 @@ class FileApprovalStore:
         resolved_by: str,
         rejection_reason: object,
     ) -> ApprovalRequest:
+        # The asyncio.Lock is held in the async wrapper and spans the
+        # ``to_thread`` call -- serializing the read-check-mutate cycle
+        # within one process while letting the event loop run during the
+        # blocking I/O.
         async with self._lock:
-            current = await self.get(approval_id)
-            if current is None:
-                raise ApprovalNotFoundError(f"approval not found: {approval_id}")
-            if current.version != expected_version:
-                raise ApprovalConflictError(
-                    f"expected version {expected_version}, found {current.version}"
-                )
-            if target not in ALLOWED_APPROVAL_TRANSITIONS.get(current.status, frozenset()):
-                raise InvalidApprovalTransitionError(
-                    f"cannot transition {current.status} -> {target}"
-                )
-            now = datetime.now(current.created_at.tzinfo or timezone.utc)
-            new_metadata = dict(current.metadata)
-            # ``reject`` always sets the key (even to None); ``approve`` leaves
-            # metadata untouched so approvals can't shadow a prior rejection
-            # reason on a different request.
-            if rejection_reason is not _UNSET:
-                new_metadata[REJECTION_REASON_METADATA_KEY] = rejection_reason
-            resolved = ApprovalRequest(
-                id=current.id,
-                run_id=current.run_id,
-                tool_call_id=current.tool_call_id,
-                tool_name=current.tool_name,
-                reason=current.reason,
-                arguments=current.arguments,
-                status=target,
-                version=current.version + 1,
-                created_at=current.created_at,
-                resolved_at=now,
-                resolved_by=resolved_by,
-                metadata=new_metadata,
+            return await asyncio.to_thread(
+                self._resolve_sync, approval_id,
+                target=target, expected_version=expected_version,
+                resolved_by=resolved_by, rejection_reason=rejection_reason,
             )
-            _atomic_write(
-                self._path(approval_id),
-                json.dumps(_request_to_json(resolved)).encode("utf-8"),
-            )
-            return resolved

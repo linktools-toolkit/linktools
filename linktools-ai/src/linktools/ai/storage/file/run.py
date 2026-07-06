@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileRunStore: one JSON file per run under root/{run_id}.json. Atomic writes via
-temp-file-then-os.replace, matching FileResourceBackend's pattern from Phase 1."""
+temp-file-then-os.replace, matching FileResourceBackend's pattern from Phase 1.
 
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop."""
+
+import asyncio
 import json
 import os
 import tempfile
@@ -77,26 +82,32 @@ class FileRunStore:
     def _path(self, run_id: str) -> Path:
         return self._root / f"{_validate_id_segment(run_id, kind='run_id')}.json"
 
-    async def create(self, run: RunRecord) -> RunRecord:
+    def _create_sync(self, run: RunRecord) -> RunRecord:
         _atomic_write(self._path(run.id), json.dumps(_to_json(run)).encode("utf-8"))
         return run
 
-    async def get(self, run_id: str) -> "RunRecord | None":
+    async def create(self, run: RunRecord) -> RunRecord:
+        return await asyncio.to_thread(self._create_sync, run)
+
+    def _get_sync(self, run_id: str) -> "RunRecord | None":
         path = self._path(run_id)
         if not path.exists():
             return None
         return _from_json(json.loads(path.read_text()))
 
-    async def transition(
+    async def get(self, run_id: str) -> "RunRecord | None":
+        return await asyncio.to_thread(self._get_sync, run_id)
+
+    def _transition_sync(
         self,
         run_id: str,
         target: RunStatus,
         *,
         expected_version: int,
-        result: "RunResult | None" = None,
-        error: "RunErrorInfo | None" = None,
+        result: "RunResult | None",
+        error: "RunErrorInfo | None",
     ) -> RunRecord:
-        current = await self.get(run_id)
+        current = self._get_sync(run_id)
         if current is None:
             raise RunNotFoundError(f"run not found: {run_id}")
         if current.version != expected_version:
@@ -120,10 +131,27 @@ class FileRunStore:
         _atomic_write(self._path(run_id), json.dumps(_to_json(updated)).encode("utf-8"))
         return updated
 
-    async def list_children(self, run_id: str) -> "tuple[RunRecord, ...]":
+    async def transition(
+        self,
+        run_id: str,
+        target: RunStatus,
+        *,
+        expected_version: int,
+        result: "RunResult | None" = None,
+        error: "RunErrorInfo | None" = None,
+    ) -> RunRecord:
+        return await asyncio.to_thread(
+            self._transition_sync, run_id, target,
+            expected_version=expected_version, result=result, error=error,
+        )
+
+    def _list_children_sync(self, run_id: str) -> "tuple[RunRecord, ...]":
         children = []
         for path in self._root.glob("*.json"):
             raw = json.loads(path.read_text())
             if raw["parent_run_id"] == run_id:
                 children.append(_from_json(raw))
         return tuple(children)
+
+    async def list_children(self, run_id: str) -> "tuple[RunRecord, ...]":
+        return await asyncio.to_thread(self._list_children_sync, run_id)

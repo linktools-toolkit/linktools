@@ -3,8 +3,16 @@
 """FileResourceBackend: filesystem-backed ResourceBackend. Flat filename mapping
 (path segments joined with "__") avoids managing nested directories; atomic writes
 via temp-file-then-os.replace; whiteouts/idempotency/revision are separate small
-JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resources."""
+JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resources.
 
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop. The in-process ``threading.Lock`` is held
+inside the sync core (running in a worker thread), so it still serializes
+the checked operations within one process while the event loop continues
+running other coroutines."""
+
+import asyncio
 import json
 import os
 import tempfile
@@ -54,9 +62,10 @@ class FileResourceBackend:
         # interleaving the three steps. Cross-process races remain (a different
         # process writing the same backend root can still interleave) -- that is
         # a documented limitation; true cross-process atomicity requires the
-        # SqlAlchemy backend. The backend methods are async-def but purely
-        # synchronous-bodied (no await inside), so holding a threading.Lock
-        # across them never blocks the event loop on a suspension point.
+        # SqlAlchemy backend. The lock is held inside the ``_*_sync`` cores
+        # (which run in a worker thread via ``asyncio.to_thread``), so the
+        # event loop is never blocked either by the I/O or by another worker
+        # waiting on this lock.
         self._lock = threading.Lock()
         for d in (self._data_dir, self._meta_dir, self._whiteout_dir, self._idempotency_dir):
             d.mkdir(parents=True, exist_ok=True)
@@ -130,7 +139,7 @@ class FileResourceBackend:
         }
         self._atomic_write(self._meta_path(info.path), json.dumps(raw).encode("utf-8"))
 
-    async def raw_get(self, path: ResourcePath, *, include_content: bool = True):
+    def _raw_get_sync(self, path: ResourcePath, *, include_content: bool):
         info = self._load_info(path)
         if info is not None:
             content = b""
@@ -143,14 +152,17 @@ class FileResourceBackend:
             return Masked(path=path, version=version)
         return Missing()
 
+    async def raw_get(self, path: ResourcePath, *, include_content: bool = True):
+        return await asyncio.to_thread(self._raw_get_sync, path, include_content=include_content)
+
     async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
         """Metadata-only stat (spec §15.1): read only the metadata sidecar,
         never the data file. The sidecar carries path/kind/etag/version/
         content_type/size/modified_at/metadata -- everything stat() needs
         without touching the (potentially large) content blob."""
-        return self._load_info(path)
+        return await asyncio.to_thread(self._load_info, path)
 
-    async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+    def _raw_propfind_sync(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
         """Keyset pagination (spec §15.2): metadata files are iterated in sorted
         order (so the global path order is stable), filtered by prefix, by
         ``path > cursor`` (resume point), and by depth, collecting limit+1 items
@@ -173,7 +185,12 @@ class FileResourceBackend:
         next_cursor = items[limit].path.value if len(items) > limit else None
         return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
-    async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+    async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+        return await asyncio.to_thread(
+            self._raw_propfind_sync, path, depth=depth, limit=limit, cursor=cursor,
+        )
+
+    def _raw_put_sync(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
         prior = self._load_info(path)
         whiteout_path = self._whiteout_path(path)
         prior_whiteout_version = 0
@@ -198,7 +215,12 @@ class FileResourceBackend:
         self._bump_revision()
         return info
 
-    async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
+    async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+        return await asyncio.to_thread(
+            self._raw_put_sync, path, content, content_type=content_type, metadata=metadata,
+        )
+
+    def _raw_delete_sync(self, path: ResourcePath) -> "ResourceInfo | None":
         info = self._load_info(path)
         prior_version = info.version if info else 0
         if info is not None:
@@ -213,8 +235,11 @@ class FileResourceBackend:
         self._bump_revision()
         return info
 
+    async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
+        return await asyncio.to_thread(self._raw_delete_sync, path)
+
     async def revision(self) -> int:
-        return self._read_revision()
+        return await asyncio.to_thread(self._read_revision)
 
     def _read_idempotency_sync(self, key: str) -> "IdempotencyRecord | None":
         path = self._idempotency_path(key)
@@ -253,12 +278,12 @@ class FileResourceBackend:
         self._atomic_write(self._idempotency_path(record.key), json.dumps(raw).encode("utf-8"))
 
     async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
-        return self._read_idempotency_sync(key)
+        return await asyncio.to_thread(self._read_idempotency_sync, key)
 
     async def put_idempotency(self, record: IdempotencyRecord) -> None:
-        self._write_idempotency_sync(record)
+        await asyncio.to_thread(self._write_idempotency_sync, record)
 
-    async def raw_put_checked(
+    def _raw_put_checked_sync(
         self,
         path: ResourcePath,
         content: bytes,
@@ -294,14 +319,26 @@ class FileResourceBackend:
                 if existing_content == content and dict(info.metadata) == dict(options.metadata):
                     new_info = info
                 else:
-                    new_info = await self.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
+                    new_info = self._raw_put_sync(path, content, content_type=options.content_type, metadata=options.metadata)
             else:
-                new_info = await self.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
+                new_info = self._raw_put_sync(path, content, content_type=options.content_type, metadata=options.metadata)
             if idem_key is not None:
                 self._write_idempotency_sync(IdempotencyRecord(key=idem_key, request_hash=request_hash, result=new_info))
             return Resource(info=new_info, content=content)
 
-    async def raw_delete_checked(
+    async def raw_put_checked(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> Resource:
+        return await asyncio.to_thread(
+            self._raw_put_checked_sync, path, content, options=options, request_hash=request_hash,
+        )
+
+    def _raw_delete_checked_sync(
         self,
         path: ResourcePath,
         *,
@@ -323,9 +360,20 @@ class FileResourceBackend:
             if options.if_match is not None:
                 if info is None or info.etag != options.if_match:
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
-            await self.raw_delete(path)
+            self._raw_delete_sync(path)
 
-    async def raw_move(
+    async def raw_delete_checked(
+        self,
+        path: ResourcePath,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> None:
+        return await asyncio.to_thread(
+            self._raw_delete_checked_sync, path, options=options, request_hash=request_hash,
+        )
+
+    def _raw_move_sync(
         self,
         source: ResourcePath,
         target: ResourcePath,
@@ -405,3 +453,12 @@ class FileResourceBackend:
             # One revision bump for the whole move.
             self._bump_revision()
             return Resource(info=new_info, content=source_content)
+
+    async def raw_move(
+        self,
+        source: ResourcePath,
+        target: ResourcePath,
+        *,
+        options: WriteOptions,
+    ) -> MoveResult:
+        return await asyncio.to_thread(self._raw_move_sync, source, target, options=options)

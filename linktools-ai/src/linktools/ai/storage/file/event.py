@@ -8,7 +8,13 @@ so list() can reconstruct the exact dataclass.
 Per review doc §8.1/§8.5, the store is the SOLE owner of sequence assignment.
 append() takes the payload plus run/stream context and assigns the next
 sequence atomically under a per-stream lock (single-process file mode per
-§19.5 -- an asyncio.Lock per stream serializes appends within one event loop)."""
+§19.5 -- an asyncio.Lock per stream serializes appends within one event loop).
+
+Per review doc §16 (Phase 4B): each public async method delegates to a
+``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
+never runs on the event loop. The per-stream ``asyncio.Lock`` is held in the
+async wrapper and spans the ``to_thread`` call, so concurrent appends to the
+same stream still serialize."""
 
 import asyncio
 import json
@@ -51,6 +57,37 @@ class FileEventStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _append_sync(
+        self,
+        *,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+    ) -> EventEnvelope:
+        stream_dir = self._stream_dir(stream_id)
+        existing = list(stream_dir.glob("*.json"))
+        next_seq = max((int(p.stem) for p in existing), default=0) + 1
+        event_id = str(uuid.uuid4())
+        occurred_at = datetime.now(timezone.utc)
+        payload_type = type(payload).__name__
+        raw = {
+            "event_id": event_id, "sequence": next_seq, "occurred_at": occurred_at.isoformat(),
+            "run_id": run_id, "root_run_id": root_run_id, "parent_run_id": parent_run_id,
+            "session_id": session_id, "runnable_id": runnable_id,
+            "payload_type": payload_type, "payload": asdict(payload),
+        }
+        path = stream_dir / f"{next_seq:010d}.json"
+        path.write_text(json.dumps(raw))
+        return EventEnvelope(
+            event_id=event_id, sequence=next_seq, occurred_at=occurred_at,
+            run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
+            session_id=session_id, runnable_id=runnable_id, payload=payload,
+        )
+
     async def append(
         self,
         *,
@@ -64,27 +101,17 @@ class FileEventStore:
     ) -> EventEnvelope:
         # Atomic per-stream sequence assignment: hold the lock across the
         # read-max + write so a concurrent append to the same stream cannot
-        # observe the same max and reuse a sequence number.
+        # observe the same max and reuse a sequence number. The lock spans
+        # the to_thread call (not the other way around) -- holding an
+        # asyncio.Lock across a to_thread await is fine; holding a sync lock
+        # across an await would block the loop.
         lock = await self._stream_lock(stream_id)
         async with lock:
-            stream_dir = self._stream_dir(stream_id)
-            existing = list(stream_dir.glob("*.json"))
-            next_seq = max((int(p.stem) for p in existing), default=0) + 1
-            event_id = str(uuid.uuid4())
-            occurred_at = datetime.now(timezone.utc)
-            payload_type = type(payload).__name__
-            raw = {
-                "event_id": event_id, "sequence": next_seq, "occurred_at": occurred_at.isoformat(),
-                "run_id": run_id, "root_run_id": root_run_id, "parent_run_id": parent_run_id,
-                "session_id": session_id, "runnable_id": runnable_id,
-                "payload_type": payload_type, "payload": asdict(payload),
-            }
-            path = stream_dir / f"{next_seq:010d}.json"
-            path.write_text(json.dumps(raw))
-            return EventEnvelope(
-                event_id=event_id, sequence=next_seq, occurred_at=occurred_at,
-                run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
-                session_id=session_id, runnable_id=runnable_id, payload=payload,
+            return await asyncio.to_thread(
+                self._append_sync,
+                stream_id=stream_id, run_id=run_id, root_run_id=root_run_id,
+                parent_run_id=parent_run_id, session_id=session_id,
+                runnable_id=runnable_id, payload=payload,
             )
 
     def _load(self, path: Path) -> EventEnvelope:
@@ -97,7 +124,7 @@ class FileEventStore:
             session_id=raw["session_id"], runnable_id=raw["runnable_id"], payload=payload,
         )
 
-    async def list(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+    def _list_sync(self, run_id: str, *, after_sequence: int, limit: int) -> EventPage:
         run_dir = self._root / _validate_id_segment(run_id, kind="run_id")
         if not run_dir.exists():
             return EventPage(items=(), cursor=None)
@@ -108,3 +135,8 @@ class FileEventStore:
                 continue
             items.append(envelope)
         return EventPage(items=tuple(items[:limit]), cursor=None)
+
+    async def list(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+        return await asyncio.to_thread(
+            self._list_sync, run_id, after_sequence=after_sequence, limit=limit,
+        )
