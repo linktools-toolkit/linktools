@@ -90,6 +90,10 @@ def _row_to_task(row: SwarmTaskRow) -> SwarmTask:
         lease_expires_at=_as_utc(row.lease_expires_at),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
+        # getattr covers rows written before Phase-5A added the column (raw
+        # SQL rows from an old DB won't have it; SQLAlchemy unmapped-column
+        # access raises AttributeError).
+        active_run_id=getattr(row, "active_run_id", None),
     )
 
 
@@ -239,6 +243,7 @@ class SqlAlchemySwarmStore:
                 lease_expires_at=task.lease_expires_at,
                 created_at=task.created_at,
                 updated_at=task.updated_at,
+                active_run_id=task.active_run_id,
             ))
         await self._execute_in_session(_do)
         return task
@@ -314,6 +319,43 @@ class SqlAlchemySwarmStore:
                     return _row_to_task(candidate)
                 # rowcount == 0: another worker claimed it; try next candidate.
             return None
+        return await self._execute_in_session(_do)
+
+    async def set_active_run(
+        self, task_id: str, run_id: str, *, expected_version: int
+    ) -> SwarmTask:
+        # No status transition guard: the strategy calls this with the freshly-
+        # minted child RunRecord id right after claim_task (task is CLAIMED).
+        # Optimistic concurrency on expected_version catches a concurrent
+        # reclaim/claim race. UPDATE ... WHERE version=:expected makes the
+        # race-decider atomic (rowcount == 0 -> conflict).
+        async def _do(session):
+            result = await session.execute(
+                update(SwarmTaskRow)
+                .where(SwarmTaskRow.id == task_id)
+                .where(SwarmTaskRow.version == expected_version)
+                .values(
+                    active_run_id=run_id,
+                    version=SwarmTaskRow.version + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            if result.rowcount == 0:
+                # Either missing or version mismatch -- read to discriminate.
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                raise SwarmConflictError(
+                    f"expected version {expected_version}, found {row.version}"
+                )
+            query_result = await session.execute(
+                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+            )
+            row = query_result.scalar_one()
+            return _row_to_task(row)
         return await self._execute_in_session(_do)
 
     async def complete_task(self, task_id: str, result: RunResult) -> SwarmTask:

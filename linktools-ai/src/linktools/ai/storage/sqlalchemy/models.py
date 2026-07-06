@@ -184,6 +184,9 @@ class SwarmTaskRow(Base):
     lease_expires_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
+    # Phase-5A: child RunRecord id of the current/most-recent execution.
+    # nullable for backward compat with rows written before this column existed.
+    active_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
 class MemoryRow(Base):

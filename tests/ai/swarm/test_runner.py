@@ -232,8 +232,9 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
 
     stores = _Stores(tmp_path)
     # construct the in-flight state directly: a RUNNING SwarmRun with one
-    # CLAIMED task whose id is also a RUNNING child RunRecord (the invariant
-    # strategy._run_task establishes: task.id == child RunRecord.id).
+    # CLAIMED task whose active_run_id points at a RUNNING child RunRecord
+    # (the Phase-5A invariant: task.active_run_id == child RunRecord.id,
+    # NOT task.id == child RunRecord.id).
     now = _NOW
 
     async def _seed():
@@ -249,9 +250,10 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
             version=1, token_usage=TokenUsage(), cost=Decimal("0"),
             created_at=now, updated_at=now,
         ))
-        # child RunRecord (id == task.id) in RUNNING state.
+        # child RunRecord in RUNNING state. Phase-5A: its id is DIFFERENT from
+        # the task's id -- cancel() must locate it via task.active_run_id.
         await stores.run_store.create(RunRecord(
-            id="task-1", root_run_id="drive-run-1", parent_run_id="drive-run-1",
+            id="child-run-1", root_run_id="drive-run-1", parent_run_id="drive-run-1",
             session_id="swarm:swarm-1:task-1", runnable_id="worker-a",
             runnable_type=RunnableType.AGENT, status=RunStatus.RUNNING,
             input=RunInput(prompt="sub"), result=None, error=None, version=1,
@@ -263,6 +265,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
             dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
             attempts=1, version=1, claimed_at=now, lease_expires_at=None,
             created_at=now, updated_at=now,
+            active_run_id="child-run-1",
         ))
     asyncio.run(_seed())
 
@@ -279,7 +282,9 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
 
     async def _verify():
         swarm = await stores.swarm_store.get_run("swarm-1")
-        child = await stores.run_store.get("task-1")
+        child = await stores.run_store.get("child-run-1")
+        # and the task.id RunRecord was never created -> cancel must NOT have
+        # tried to transition it (proves cancel used active_run_id, not task.id).
         return swarm, child
     swarm, child = asyncio.run(_verify())
 
@@ -588,3 +593,62 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     assert result.token_usage.get("output_tokens") == 100
     driving = asyncio.run(stores.run_store.get(context.run_id))
     assert driving.status is RunStatus.SUCCEEDED
+
+
+# --- 7. Phase-5A: end-to-end active_run_id decoupling (real FileSwarmStore) ---
+
+def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
+    """End-to-end through the real FileSwarmStore: after runner.run() completes,
+    every SUCCEEDED task has active_run_id set, DIFFERENT from task.id, and
+    matching a real child RunRecord id. This is the Phase-5A invariant the
+    review doc §19.1 mandates (禁止 SwarmTask.id == child_run_id)."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("coord-out", "alpha-out", "beta-out")
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+    )
+
+    spec = _spec(
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=4),
+        agents=(AgentRef("coord"), AgentRef("worker-a"), AgentRef("worker-b")),
+        coordinator=AgentRef("coord"),
+        config={"task_count": 2},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-1"),
+        "worker-b": _agent_spec("worker-b", "model-2"),
+    }
+    context = _driving_context("drive-5a", "shared-session")
+
+    async def _run():
+        return await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+    asyncio.run(_run())
+
+    async def _verify():
+        # discover the swarm_run_id by listing the run dir (only one exists).
+        runs = []
+        for p in (tmp_path / "swarm" / "runs").glob("*.json"):
+            runs.append(p.stem)
+        swarm_run_id = runs[0]
+        tasks = await stores.swarm_store.list_tasks(swarm_run_id)
+        children = await stores.run_store.list_children(context.run_id)
+        return tasks, children
+    tasks, children = asyncio.run(_verify())
+
+    child_ids = {c.id for c in children}
+    assert len(tasks) == 2
+    for t in tasks:
+        # the invariant: task.id != child run id; active_run_id is the handle.
+        assert t.active_run_id is not None, f"task {t.id} has no active_run_id"
+        assert t.active_run_id != t.id
+        assert t.active_run_id in child_ids, (
+            f"task {t.id} active_run_id {t.active_run_id} not in child runs {child_ids}"
+        )

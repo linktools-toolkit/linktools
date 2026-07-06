@@ -127,6 +127,26 @@ class _MemorySwarmStore(SwarmStore):
         self._tasks[target.id] = claimed
         return claimed
 
+    async def set_active_run(
+        self, task_id: str, run_id: str, *, expected_version: int
+    ) -> SwarmTask:
+        from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+        if task_id not in self._tasks:
+            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+        current = self._tasks[task_id]
+        if current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        updated = replace(
+            current,
+            active_run_id=run_id,
+            version=current.version + 1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        self._tasks[task_id] = updated
+        return updated
+
     async def complete_task(self, task_id: str, result) -> SwarmTask:
         current = self._tasks[task_id]
         done = replace(
@@ -588,3 +608,171 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
     with pytest.raises(SwarmLimitExceededError) as exc_info:
         asyncio.run(_run_task(ctx, child))
     assert exc_info.value.kind == "max_depth"
+
+
+# --- 7. Phase-5A: task.id != child RunRecord.id (active_run_id decoupling) ---
+#
+# review doc §19.1: "禁止 SwarmTask.id == child_run_id". Each execution mints a
+# fresh run_id and stores it on task.active_run_id via SwarmStore.set_active_run.
+
+
+def test_task_id_is_different_from_child_run_id(tmp_path):
+    """After a successful run, every SUCCEEDED task's active_run_id is set and
+    is DIFFERENT from task.id, and matches an existing child RunRecord id."""
+    compiled_a = _compile_worker("worker-a", "alpha-out")
+    swarm_store = _MemorySwarmStore()
+    spec = _make_spec(
+        kind="parallel_fan_out", limits=_limits(max_concurrency=2),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+
+    from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+    strategy = ParallelFanOutStrategy(task_count=2)
+
+    async def _run():
+        return await strategy.run(ctx)
+    asyncio.run(_run())
+
+    async def _verify():
+        children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
+        tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
+        return children, tasks
+    children, tasks = asyncio.run(_verify())
+
+    child_ids = {c.id for c in children}
+    for t in tasks:
+        # the invariant: task.id IS NOT its child RunRecord.id.
+        assert t.active_run_id is not None
+        assert t.active_run_id != t.id
+        # active_run_id points at a real child RunRecord.
+        assert t.active_run_id in child_ids
+
+
+def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
+    """A retry of the same task mints a NEW child run_id and overwrites
+    task.active_run_id -- so two sequential executions of the same task leave
+    DIFFERENT active_run_ids behind (the second one wins on the task, but the
+    first child RunRecord still exists in RunStore)."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    compiled_a = _compile_worker("worker-a", "alpha-out")
+    swarm_store = _MemorySwarmStore()
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec, swarm_store=swarm_store,
+    )
+    # one PENDING task to execute twice.
+    task = SwarmTask(
+        id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
+        assigned_agent_id="worker-a", description="x",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
+        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )
+    asyncio.run(swarm_store.create_task(task))
+
+    # First execution: succeeds -> task SUCCEEDED with active_run_id set.
+    first = asyncio.run(_run_task(ctx, task))
+    assert first is not None
+    after_first = asyncio.run(swarm_store.list_tasks("swarm-1"))[0]
+    first_active = after_first.active_run_id
+    assert first_active is not None
+    assert first_active != "task-1"
+
+    # Simulate a retry: reset the task to PENDING (a reclaim-style reset) and
+    # execute again. The NEW execution mints a fresh run_id.
+    reset = replace(
+        after_first,
+        status=SwarmTaskStatus.PENDING,
+        result=None,
+        active_run_id=None,
+        version=after_first.version + 1,
+    )
+    swarm_store._tasks["task-1"] = reset
+    second = asyncio.run(_run_task(ctx, reset))
+    assert second is not None
+    after_second = asyncio.run(swarm_store.list_tasks("swarm-1"))[0]
+    second_active = after_second.active_run_id
+
+    # the decoupling: two executions -> two DIFFERENT active_run_ids, and neither
+    # equals task.id.
+    assert second_active is not None
+    assert second_active != first_active
+    assert second_active != "task-1"
+
+    # both child RunRecords exist in RunStore (different ids, both parented to
+    # the driving swarm run).
+    async def _children():
+        return await ctx.run_store.list_children(ctx.swarm_run.run_id)
+    children = asyncio.run(_children())
+    assert {first_active, second_active}.issubset({c.id for c in children})
+
+
+def test_set_active_run_rejects_stale_expected_version(swarm_store_via_module=None):
+    """SwarmStore.set_active_run honors expected_version: a concurrent update
+    that bumps the version between claim_task and set_active_run surfaces a
+    SwarmConflictError rather than silently overwriting."""
+    from linktools.ai.errors import SwarmConflictError
+    from linktools.ai.swarm.models import SwarmRun
+
+    store = _MemorySwarmStore()
+    asyncio.run(store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    asyncio.run(store.create_task(SwarmTask(
+        id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
+        assigned_agent_id="worker-a", description="x",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(), input=TaskInput(prompt="x"), result=None, error=None,
+        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    claimed = asyncio.run(store.claim_task("swarm-1", "worker-a"))
+    assert claimed is not None
+    assert claimed.version == 2
+
+    # Simulate a concurrent update bumping version (e.g., a reclaim or another
+    # set_active_run) between claim_task and our set_active_run call.
+    bumped = asyncio.run(store.set_active_run(
+        "task-1", "child-run-concurrent", expected_version=claimed.version
+    ))
+    assert bumped.version == 3
+
+    # Now the original caller tries with the STALE version -- conflict.
+    with pytest.raises(SwarmConflictError):
+        asyncio.run(store.set_active_run(
+            "task-1", "child-run-stale", expected_version=claimed.version
+        ))
+
+
+def test_set_active_run_missing_task_raises_not_found():
+    """set_active_run on a missing task id surfaces SwarmTaskNotFoundError
+    (mirrors complete_task / fail_task behavior)."""
+    from linktools.ai.errors import SwarmTaskNotFoundError
+
+    store = _MemorySwarmStore()
+    asyncio.run(store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    with pytest.raises(SwarmTaskNotFoundError):
+        asyncio.run(store.set_active_run("nope", "child-1", expected_version=1))

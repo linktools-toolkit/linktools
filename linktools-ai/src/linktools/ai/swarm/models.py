@@ -108,3 +108,8 @@ class SwarmTask:
     lease_expires_at: "datetime | None"
     created_at: datetime
     updated_at: datetime
+    # The id of the child RunRecord this task's execution creates (set in
+    # strategy._run_task right after claim_task succeeds). Phase-5A invariant:
+    # task.id IS NOT its child RunRecord.id; each (re)execution mints a fresh
+    # run_id and stores it here. None until claimed, or after a reclaim reset.
+    active_run_id: "str | None" = None

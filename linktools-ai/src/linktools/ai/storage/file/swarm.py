@@ -119,6 +119,9 @@ def _task_to_json(task: SwarmTask) -> dict:
         "lease_expires_at": None if task.lease_expires_at is None else task.lease_expires_at.isoformat(),
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat(),
+        # active_run_id added in Phase-5A; older files lack the key, so the
+        # reader falls back to None (dataclasses.replace + default).
+        "active_run_id": task.active_run_id,
     }
 
 
@@ -140,6 +143,8 @@ def _task_from_json(raw: dict) -> SwarmTask:
         lease_expires_at=None if raw["lease_expires_at"] is None else datetime.fromisoformat(raw["lease_expires_at"]),
         created_at=datetime.fromisoformat(raw["created_at"]),
         updated_at=datetime.fromisoformat(raw["updated_at"]),
+        # Phase-5A: older files written before active_run_id land as None.
+        active_run_id=raw.get("active_run_id"),
     )
 
 
@@ -292,10 +297,52 @@ class FileSwarmStore:
                     lease_expires_at=lease_expires,
                     created_at=task.created_at,
                     updated_at=now,
+                    # carry over any prior active_run_id (relevant on re-claim
+                    # after a reclaim reset; fresh PENDING tasks have None).
+                    active_run_id=task.active_run_id,
                 )
                 _atomic_write(self._task_path(task.id), json.dumps(_task_to_json(claimed)).encode("utf-8"))
                 return claimed
             return None
+
+    async def set_active_run(
+        self, task_id: str, run_id: str, *, expected_version: int
+    ) -> SwarmTask:
+        # No transition guard on status: the strategy calls this right after a
+        # successful claim_task (task is CLAIMED) with the freshly-minted child
+        # RunRecord id. Optimistic concurrency on expected_version catches a
+        # concurrent reclaim/claim race (the loser sees a stale version).
+        async with self._lock:
+            path = self._task_path(task_id)
+            if not path.exists():
+                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            current = _task_from_json(json.loads(path.read_text()))
+            if current.version != expected_version:
+                raise SwarmConflictError(
+                    f"expected version {expected_version}, found {current.version}"
+                )
+            now = datetime.now(current.created_at.tzinfo or timezone.utc)
+            updated = SwarmTask(
+                id=current.id,
+                swarm_run_id=current.swarm_run_id,
+                parent_task_id=current.parent_task_id,
+                assigned_agent_id=current.assigned_agent_id,
+                description=current.description,
+                status=current.status,
+                dependencies=current.dependencies,
+                input=current.input,
+                result=current.result,
+                error=current.error,
+                attempts=current.attempts,
+                version=current.version + 1,
+                claimed_at=current.claimed_at,
+                lease_expires_at=current.lease_expires_at,
+                created_at=current.created_at,
+                updated_at=now,
+                active_run_id=run_id,
+            )
+            _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
+            return updated
 
     async def complete_task(self, task_id: str, result: RunResult) -> SwarmTask:
         async with self._lock:
@@ -321,6 +368,7 @@ class FileSwarmStore:
                 lease_expires_at=current.lease_expires_at,
                 created_at=current.created_at,
                 updated_at=now,
+                active_run_id=current.active_run_id,
             )
             _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
             return updated
@@ -349,6 +397,7 @@ class FileSwarmStore:
                 lease_expires_at=current.lease_expires_at,
                 created_at=current.created_at,
                 updated_at=now,
+                active_run_id=current.active_run_id,
             )
             _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
             return updated

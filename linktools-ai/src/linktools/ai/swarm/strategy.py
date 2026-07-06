@@ -13,13 +13,20 @@ aggregate is written to the shared/parent session). ``_run_task`` builds a CHILD
 RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}"`` and creates
 that SessionRecord before invoking AgentRunner.run.
 
+Phase-5A invariant: the child RunRecord's id is NOT the task's id. ``_run_task``
+mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
+task via ``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the
+handle SwarmRunner.cancel uses to find the in-flight child Run. On retry the
+same task gets a NEW run_id (active_run_id is overwritten), which is the
+decoupling the review doc §19.1 mandates.
+
 claim_task is a WORK-QUEUE api: ``claim_task(swarm_run_id, agent_id)`` returns
 the oldest PENDING task for that (run, agent) pair -- it does NOT take a task_id.
 In the serial coordinator path the claimed task is the one just created; in the
 parallel fan-out path several coroutines may compete for tasks of the same agent,
 so ``_run_task`` processes the CLAIMED task (not the passed-in ``task``) and uses
-its id for the scratch session, child run_id, and complete/fail calls. This keeps
-every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED)."""
+its id for the scratch session, complete/fail calls, and the active-run lookup.
+This keeps every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED)."""
 
 import asyncio
 import uuid
@@ -163,10 +170,14 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
          api -- in the serial path this is ``task``; in the parallel path it may
          be a sibling task created by the same fan-out. We process whatever the
          store hands us so the PENDING->CLAIMED flip is consistent.
-      3. build a per-task SCRATCH session and create it (workers must not touch
+      3. mint a FRESH child run_id (Phase-5A invariant: task.id != run_id) and
+         record it on the task via ``set_active_run`` so cancel() can find the
+         child RunRecord later. On retry this same method is re-invoked, so a
+         new run_id is minted and active_run_id is overwritten.
+      4. build a per-task SCRATCH session and create it (workers must not touch
          the shared/parent session).
-      4. build a CHILD RunContext parented to the swarm's driving run.
-      5. retry loop: on exception retry up to ``max_task_retries`` extra times;
+      5. build a CHILD RunContext parented to the swarm's driving run.
+      6. retry loop: on exception retry up to ``max_task_retries`` extra times;
          on final failure mark the task FAILED and return None (catch-and-
          continue so a coordinator round completes even if a worker errors).
 
@@ -189,6 +200,14 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     if claimed is None:
         return None
 
+    # Phase-5A: each execution mints a NEW child RunRecord id (decoupled from
+    # task.id). set_active_run records it on the task (bumping its version) so
+    # SwarmRunner.cancel can locate the in-flight child Run via active_run_id.
+    child_run_id = str(uuid.uuid4())
+    claimed = await ctx.swarm_store.set_active_run(
+        claimed.id, child_run_id, expected_version=claimed.version
+    )
+
     scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}"
     now = _now()
     await ctx.session_store.create(SessionRecord(
@@ -197,7 +216,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     ))
 
     child_context = RunContext(
-        run_id=claimed.id,
+        run_id=child_run_id,
         root_run_id=ctx.parent_context.root_run_id,
         parent_run_id=ctx.swarm_run.run_id,
         session_id=scratch_session_id,

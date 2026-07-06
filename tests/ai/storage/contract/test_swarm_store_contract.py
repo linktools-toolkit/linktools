@@ -349,6 +349,73 @@ def test_claim_task_returns_none_when_nothing_claimable(store_factory):
 
 
 # ---------------------------------------------------------------------------
+# 8b. set_active_run: stores the child RunRecord id on a CLAIMED task,
+#     bumps version, and rejects a stale expected_version. Phase-5A.
+# ---------------------------------------------------------------------------
+
+
+def test_set_active_run_stores_run_id_and_advances_version(store_factory):
+    store = store_factory()
+
+    async def _run():
+        await store.create_run(make_run())
+        await store.create_task(make_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-1")
+        assert claimed is not None
+        # claim advanced v1 -> v2; set_active_run must advance v2 -> v3.
+        updated = await store.set_active_run(
+            "t-1", "child-run-7", expected_version=claimed.version
+        )
+        assert updated.active_run_id == "child-run-7"
+        assert updated.version == claimed.version + 1
+
+    asyncio.run(_run())
+
+
+def test_set_active_run_wrong_expected_version_raises_conflict(store_factory):
+    store = store_factory()
+
+    async def _run():
+        await store.create_run(make_run())
+        await store.create_task(make_task(task_id="t-1"))
+        await store.claim_task("swarm-1", "agent-1")
+        with pytest.raises(SwarmConflictError):
+            await store.set_active_run("t-1", "child-1", expected_version=99)
+
+    asyncio.run(_run())
+
+
+def test_set_active_run_missing_task_raises_not_found(store_factory):
+    store = store_factory()
+
+    async def _run():
+        await store.create_run(make_run())
+        with pytest.raises(SwarmTaskNotFoundError):
+            await store.set_active_run("nope", "child-1", expected_version=1)
+
+    asyncio.run(_run())
+
+
+def test_set_active_run_roundtrips_through_persistence(store_factory):
+    """active_run_id round-trips through the store's serialization layer (JSON
+    for FileSwarmStore, SQL column for SqlAlchemySwarmStore). Verified by
+    reading back via list_tasks on the same store instance after write."""
+    store = store_factory()
+
+    async def _run():
+        await store.create_run(make_run())
+        await store.create_task(make_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-1")
+        assert claimed is not None
+        await store.set_active_run("t-1", "child-run-xyz", expected_version=claimed.version)
+        # read back through the same serialization path the next process would.
+        tasks = await store.list_tasks("swarm-1")
+        assert len(tasks) == 1
+        assert tasks[0].active_run_id == "child-run-xyz"
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # 9. complete_task -> SUCCEEDED + result; fail_task -> FAILED + error.
 # ---------------------------------------------------------------------------
 

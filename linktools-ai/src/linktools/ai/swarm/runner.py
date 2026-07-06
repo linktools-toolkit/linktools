@@ -13,9 +13,10 @@ swarm.strategy). SwarmRunner never calls a model itself -- it constructs
 one AgentRunner and hands it to the SwarmExecutionContext so the strategy's
 ``_run_task`` can drive child Runs.
 
-Critical invariant (established by strategy._run_task): a SwarmTask's ``id`` IS
-its child RunRecord's ``id``. cancel() exploits this -- ``list_tasks(...,
-status=CLAIMED)`` yields tasks whose ids are the in-flight child Runs to cancel.
+Critical invariant (established by strategy._run_task): a SwarmTask's
+``active_run_id`` is its child RunRecord's ``id`` (NOT the task's own id).
+cancel() exploits this -- ``list_tasks(..., status=CLAIMED)`` yields tasks
+whose ``active_run_id`` is the in-flight child Run to cancel.
 
 resume() is explicit and caller-driven (Decision #3): no auto-resume-on-construct.
 cancel() is store-level (Decision #4): no live asyncio task cancellation."""
@@ -399,9 +400,9 @@ class SwarmRunner:
 
     async def cancel(self, swarm_run_id: str) -> None:
         """Store-level cancel (Decision #4): no live asyncio task cancellation.
-        Flips the SwarmRun to CANCELLED, then enumerates CLAIMED tasks (each
-        task.id IS its child RunRecord.id per the strategy invariant) and
-        transitions those child Runs to CANCELLED best-effort."""
+        Flips the SwarmRun to CANCELLED, then enumerates CLAIMED tasks and
+        transitions each task's child Run (located via ``task.active_run_id``,
+        the Phase-5A handle set by strategy._run_task) to CANCELLED best-effort."""
         current = await self._swarm_store.get_run(swarm_run_id)
         if current is None:
             raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
@@ -413,8 +414,10 @@ class SwarmRunner:
             swarm_run_id, status=SwarmTaskStatus.CLAIMED
         )
         for task in claimed:
-            # task.id == child RunRecord.id (strategy._run_task sets
-            # child_context.run_id = task.id). Read the child's current version
+            # Phase-5A: the child RunRecord's id is task.active_run_id (NOT
+            # task.id). A CLAIMED task with active_run_id is None means the
+            # strategy claimed it but crashed before set_active_run -- nothing
+            # to cancel in RunStore, skip. Read the child's current version
             # rather than assuming it tracks task.version.
             #
             # best-effort per child (§3.3 "Cancel status confirm"): a child that
@@ -422,17 +425,19 @@ class SwarmRunner:
             # failure, and one stubborn child must not abort the rest of the
             # loop -- but the failure is logged (not silent) so a genuinely
             # unexpected error (e.g., OSError from a corrupted store) surfaces.
+            if task.active_run_id is None:
+                continue
             try:
-                child = await self._run_store.get(task.id)
+                child = await self._run_store.get(task.active_run_id)
                 if child is None:
                     continue
                 await self._run_store.transition(
-                    task.id, RunStatus.CANCELLED, expected_version=child.version
+                    task.active_run_id, RunStatus.CANCELLED, expected_version=child.version
                 )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to cancel child run %s for swarm run %s: %s",
-                    task.id, swarm_run_id, exc,
+                    task.active_run_id, swarm_run_id, exc,
                 )
 
     # -- helpers --------------------------------------------------------------

@@ -325,6 +325,9 @@ class _StubStore:
     async def claim_task(self, swarm_run_id, agent_id, *, lease_seconds=None):
         ...
 
+    async def set_active_run(self, task_id, run_id, *, expected_version):
+        ...
+
     async def complete_task(self, task_id, result):
         ...
 
