@@ -32,7 +32,7 @@ from linktools import utils
 from linktools.capabilities.mobile import __cap_mobile__
 from linktools.cli import CommandError
 from linktools.cli.argparse import range_type, BooleanOptionalAction
-from linktools.platform import get_free_port, get_interpreter
+from linktools.system import get_free_port, get_interpreter
 from linktools.core import environ
 from linktools.mobile.cli import AndroidCommand
 from linktools.mobile.frida import FridaAndroidServer

@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""Event dispatch (spec §15.2).
+
+:class:`EventBus` is the canonical dispatcher: ``on`` returns a cancellable
+subscription, ``emit`` honors a configurable exception policy, and callbacks run
+against a snapshot outside the registration lock (so a callback may cancel
+itself or register new handlers without deadlocking).
+
+:class:`EventHandlerMixin` keeps the legacy mixin API mobile depends on and
+delegates to an EventBus, so there is a single dispatch implementation.
+"""
+
 import threading as _threading
 import typing as _t
 
+# Exception policies (spec §15.2 RUN-EVT-002).
+LOG_AND_CONTINUE = "log_and_continue"  # default; CLI-friendly
+RAISE_FIRST = "raise_first"
+COLLECT = "collect"
+STOP = "stop"
+_ALL_POLICIES = (LOG_AND_CONTINUE, RAISE_FIRST, COLLECT, STOP)
 
 _logger = None
-_event_handler_lock = _threading.RLock()
-_event_handler_name = "__EventHandlerMixin_event_handler"
 
 
 def _get_logger():
@@ -18,76 +33,143 @@ def _get_logger():
     return _logger
 
 
-class _EventHandler(dict):
+class Subscription(object):
+    """A cancellable event subscription returned by :meth:`EventBus.on`."""
 
-    def __init__(self):
-        super().__init__()
-        self._lock = _threading.RLock()
+    def __init__(self, bus, event, callback):
+        self._bus = bus
+        self._event = event
+        self._callback = callback
+        self._cancelled = False
 
     @property
-    def lock(self) -> "_threading.RLock":
-        return self._lock
+    def cancelled(self):
+        return self._cancelled
+
+    def cancel(self):
+        # type: () -> None
+        """Remove this subscription. Idempotent."""
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self._bus._remove(self._event, self._callback)
+
+
+class EventBus(object):
+    """A thread-safe named-event dispatcher (spec §15.2)."""
+
+    def __init__(self, exception_policy=LOG_AND_CONTINUE):
+        # type: (str) -> None
+        if exception_policy not in _ALL_POLICIES:
+            raise ValueError("unknown exception policy: %r" % (exception_policy,))
+        self._policy = exception_policy
+        self._lock = _threading.RLock()
+        # event -> {callback: {"time": int, "max_times": Optional[int]}}
+        self._handlers = {}  # type: _t.Dict[str, _t.Dict]
+
+    # -- registration ------------------------------------------------------
+
+    def on(self, event, callback, times=None):
+        # type: (str, _t.Callable, _t.Optional[int]) -> Subscription
+        with self._lock:
+            callbacks = self._handlers.setdefault(event, {})
+            callbacks[callback] = {"time": 0, "max_times": times}
+        return Subscription(self, event, callback)
+
+    def once(self, event, callback):
+        # type: (str, _t.Callable) -> Subscription
+        return self.on(event, callback, times=1)
+
+    def off(self, event, callback):
+        # type: (str, _t.Callable) -> None
+        self._remove(event, callback)
+
+    def _remove(self, event, callback):
+        with self._lock:
+            callbacks = self._handlers.get(event)
+            if callbacks is None:
+                return
+            callbacks.pop(callback, None)
+            if not callbacks:
+                self._handlers.pop(event, None)
+
+    # -- dispatch ----------------------------------------------------------
+
+    def emit(self, event, *args, **kwargs):
+        # type: (str, *_t.Any, **_t.Any) -> None
+        logger = _get_logger()
+        # Snapshot under the lock; invoke outside it so callbacks may
+        # cancel themselves or register new handlers (§15.2 RUN-EVT-004).
+        with self._lock:
+            callbacks = self._handlers.get(event)
+            if not callbacks:
+                return
+            invoke = []
+            remove = []
+            for callback, info in callbacks.items():
+                invoke.append(callback)
+                info["time"] += 1
+                if info["max_times"] is not None and info["time"] >= info["max_times"]:
+                    remove.append(callback)
+            for callback in remove:
+                callbacks.pop(callback, None)
+            if not callbacks:
+                self._handlers.pop(event, None)
+
+        logger.debug("Event `%s` invoke %d callbacks" % (event, len(invoke)))
+        collected = []
+        for callback in invoke:
+            try:
+                callback(*args, **kwargs)
+            except Exception as e:  # §15.2 RUN-EVT-002
+                if self._policy == LOG_AND_CONTINUE:
+                    logger.warning("Event `%s` handler `%s` error" % (event, callback), exc_info=e)
+                elif self._policy == RAISE_FIRST:
+                    raise
+                elif self._policy == STOP:
+                    raise
+                elif self._policy == COLLECT:
+                    collected.append(e)
+        if collected:
+            raise collected[0]
+
+
+# --------------------------------------------------------------------------- #
+# Legacy mixin API (mobile depends on it); delegates to a single EventBus.
+# --------------------------------------------------------------------------- #
+
+_event_handler_lock = _threading.RLock()
+_event_handler_name = "__EventHandlerMixin_event_handler"
 
 
 class EventHandlerMixin(object):
-    """Dispatch named events to registered handlers."""
+    """Dispatch named events to registered handlers (delegates to EventBus)."""
 
     @property
-    def _event_handler(self) -> "_EventHandler":
+    def _event_handler(self):
+        # type: () -> EventBus
         value = getattr(self, _event_handler_name, None)
         if value is None:
             with _event_handler_lock:
                 value = getattr(self, _event_handler_name, None)
                 if value is None:
-                    value = _EventHandler()
+                    value = EventBus()
                     setattr(self, _event_handler_name, value)
         return value
 
-    def on(self, event: str, callback: "_t.Callable[..., _t.Any]", times: int = None):
-        logger = _get_logger()
-        handler = self._event_handler
-        with handler.lock:
-            logger.debug(f"Register event `{event}` handler `{callback}`")
-            callbacks = handler.get(event, None)
-            if callbacks is None:
-                callbacks = handler[event] = dict()
-            callbacks[callback] = {
-                "time": 0,
-                "max_times": times,
-            }
+    def on(self, event, callback, times=None):
+        # type: (str, _t.Callable, _t.Optional[int]) -> Subscription
+        _get_logger().debug("Register event `%s` handler `%s`" % (event, callback))
+        return self._event_handler.on(event, callback, times=times)
 
-    def off(self, event: str, callback: "_t.Callable[..., _t.Any]"):
-        logger = _get_logger()
-        handler = self._event_handler
-        with handler.lock:
-            logger.debug(f"Unregister event `{event}` handler `{callback}`")
-            if event in handler:
-                callbacks = handler.get(event)
-                try:
-                    callbacks.pop(callback)
-                except KeyError:
-                    pass
+    def off(self, event, callback):
+        # type: (str, _t.Callable) -> None
+        _get_logger().debug("Unregister event `%s` handler `%s`" % (event, callback))
+        self._event_handler.off(event, callback)
 
-    def once(self, event: str, callback: "_t.Callable[..., _t.Any]"):
-        self.on(event, callback, 1)
+    def once(self, event, callback):
+        # type: (str, _t.Callable) -> Subscription
+        return self._event_handler.once(event, callback)
 
-    def trigger(self, event: str, *args: "_t.Any", **kwargs: "_t.Any"):
-        logger = _get_logger()
-        handler = self._event_handler
-        invoke_list, remove_list = [], []
-        with handler.lock:
-            if event in handler:
-                callbacks = handler.get(event)
-                for callback, info in callbacks.items():
-                    invoke_list.append(callback)
-                    info["time"] += 1
-                    if info["max_times"] is not None and info["time"] >= info["max_times"]:
-                        remove_list.append(callback)
-            for callback in remove_list:
-                callbacks.pop(callback)
-        logger.debug(f"Event `{event}` invoke {len(invoke_list)} callbacks")
-        for callback in invoke_list:
-            try:
-                callback(*args, **kwargs)
-            except Exception as e:
-                logger.warning(f"Event `{event}` handler `{callback}` error", exc_info=e)
+    def trigger(self, event, *args, **kwargs):
+        self._event_handler.emit(event, *args, **kwargs)

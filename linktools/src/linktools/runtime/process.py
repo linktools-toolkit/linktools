@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..decorator import cached_property, timeoutable
 from ..errors import ExecError
-from ..platform import is_unix_like, wait_process
+from ..system import is_unix_like, wait_process
 from ..utils import list2cmdline
 
 if TYPE_CHECKING:
@@ -67,7 +67,7 @@ if is_unix_like():
                 fds.append(stderr.fd)
 
             while len(fds) > 0:
-                remain = _coalesce(timeout.remain, 1)
+                remain = _coalesce(timeout.remaining, 1)
                 if remain <= 0:
                     break
                 rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
@@ -176,7 +176,7 @@ else:
 
         def get(self, timeout: "Timeout"):
             while self.is_alive:
-                remain = _coalesce(timeout.remain, 1)
+                remain = _coalesce(timeout.remaining, 1)
                 if remain <= 0:
                     break
                 try:
@@ -201,7 +201,7 @@ class Process(subprocess.Popen):
     def call(self, timeout: "TimeoutType" = None) -> int:
         with self:
             try:
-                return self.wait(timeout.remain)
+                return self.wait(timeout.remaining)
             except:
                 self.recursive_kill()
                 raise
@@ -210,7 +210,7 @@ class Process(subprocess.Popen):
     def check_call(self, timeout: "TimeoutType" = None) -> int:
         with self:
             try:
-                retcode = self.wait(timeout.remain)
+                retcode = self.wait(timeout.remaining)
                 if retcode:
                     raise subprocess.CalledProcessError(retcode, self.args)
                 return retcode

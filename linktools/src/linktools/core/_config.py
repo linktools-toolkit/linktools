@@ -30,6 +30,7 @@
 import abc
 import configparser
 import errno
+import io
 import json
 import os
 import shutil
@@ -42,8 +43,7 @@ from typing import TYPE_CHECKING, Tuple, List, Dict
 from linktools import utils
 from linktools.types import MISSING
 from linktools.rich import choose, prompt, confirm
-from linktools.cache import FileCache
-from linktools.errors import ConfigError
+from linktools.errors import ConfigError, ConfigCycleError
 from linktools.types import PathType, get_args
 
 if TYPE_CHECKING:
@@ -489,25 +489,28 @@ class ConfigCacheParser:
     def __init__(self, path: "PathType", namespace: str):
         self._parser = ConfigParser(default_section="ENV")  # Keep ENV as the legacy default section.
         self._path = path
-        self._cache = FileCache(f"{self._path}.cache")
         self._section = f"{namespace}.CACHE".upper()
         self.load()
 
     def load(self):
         """Load cache data from disk."""
-        with self._cache.backups():
-            if self._path and os.path.exists(self._path):
-                self._parser.read(self._path)
-            if not self._parser.has_section(self._section):
-                self._parser.add_section(self._section)
+        if self._path and os.path.exists(self._path):
+            self._parser.read(self._path)
+        if not self._parser.has_section(self._section):
+            self._parser.add_section(self._section)
 
     def dump(self):
-        """Write cache data to disk."""
-        with self._cache.backups() as backup:
-            if self._path and os.path.exists(self._path):
-                backup.backup(self._path)
-            with open(self._path, "wt") as fd:
-                self._parser.write(fd)
+        """Write cache data to disk atomically (spec §3.7/§17.1).
+
+        The old rotating FileCache backups are superseded by atomic_write
+        (temp -> fsync -> os.replace): a crash mid-write leaves the previous
+        file intact, so no separate backup copies are needed.
+        """
+        if not self._path:
+            return
+        buf = io.StringIO()
+        self._parser.write(buf)
+        utils.atomic_write(self._path, buf.getvalue())
 
     def get(self, key: str, default: "Any") -> "Any":
         """Return a cached option value.
@@ -635,6 +638,18 @@ class ConfigCache(dict):
         return self
 
 
+class _Resolving(threading.local):
+    """Per-thread stack of config keys currently being resolved (§8.10).
+
+    Used to detect Alias/Lazy dependency cycles (A -> B -> A) instead of
+    overflowing the C stack.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []  # type: List[str]
+
+
 class Config:
 
     """Configuration container backed by defaults, files, and cache."""
@@ -657,6 +672,7 @@ class Config:
         self._env_prefix = env_prefix.upper() if env_prefix is not MISSING else ""
         self._data = data
         self._cache = ConfigCache(environ, namespace if namespace is not MISSING else "MAIN")
+        self._resolving = _Resolving()  # per-thread Alias/Lazy resolution stack (§8.10)
         self._map = ChainMap(
             {
                 key[len(self._env_prefix):]: value
@@ -744,9 +760,19 @@ class Config:
             value = self._map.get(key, MISSING)
             if value is not MISSING:
                 if isinstance(value, ConfigProperty):
-                    with self._cache.__lock__:
-                        result = self._cache[key] = value.get(self, key, type=type, default=MISSING)
-                        return result
+                    # §8.10 cycle detection across Alias/Lazy resolution.
+                    stack = self._resolving.stack
+                    if key in stack:
+                        chain = stack[stack.index(key):] + [key]
+                        raise ConfigCycleError(
+                            "config dependency cycle: " + " -> ".join(chain))
+                    stack.append(key)
+                    try:
+                        with self._cache.__lock__:
+                            result = self._cache[key] = value.get(self, key, type=type, default=MISSING)
+                            return result
+                    finally:
+                        stack.pop()
                 return self.cast(value, type=type)
             raise ConfigError(f"Not found environment variable \"{self._env_prefix}{key}\" or config \"{key}\"")
         except ConfigError:
@@ -802,6 +828,31 @@ class Config:
         """
         self._data[key] = value
         return self
+
+    def explain(self, key: str) -> "dict[str, Any]":
+        """Return structured resolution info for a config key (spec §8.9).
+
+        Reports the resolved value, which source layer provided it, and all
+        candidate values across the source chain. Useful for debugging config
+        resolution ("why did this value come from here?").
+        """
+        try:
+            resolved = self.get(key)
+        except Exception as exc:
+            resolved = "<error: %s>" % exc
+        source_names = ["environment", "cache", "config", "global"]
+        candidates = []
+        for i, layer in enumerate(self._map.maps):
+            if key in layer:
+                name = source_names[i] if i < len(source_names) else "layer-%d" % i
+                candidates.append({"source": name, "raw": layer[key]})
+        return {
+            "resolved_value": resolved,
+            "selected_source": candidates[0]["source"] if candidates else "default",
+            "raw_value": candidates[0]["raw"] if candidates else MISSING,
+            "all_candidates": candidates,
+            "secret": False,
+        }
 
     def set_default(self, key: str, value: "Any") -> "Any":
         """Set the default.

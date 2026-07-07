@@ -10,7 +10,7 @@ from dulwich.errors import NotGitRepository
 from dulwich.repo import Repo as DulwichRepo
 
 from linktools.errors import GitError
-from linktools.git import GitRepository
+from linktools.git import GitRepository, GitSyncPolicy
 
 _AUTHOR = b"Test User <test@example.com>"
 
@@ -229,6 +229,38 @@ class TestGit(unittest.TestCase):
 
         with self.assertRaises(NotGitRepository):
             GitRepository(not_a_repo)
+
+    def test_clone_target_exists_raises(self):
+        # Atomic clone (§12.2): refuse to clobber an existing target rather
+        # than leaving a half-merged repository.
+        os.makedirs(self.clone_path)
+        with self.assertRaises(GitError):
+            GitRepository.clone(self.remote_path, self.clone_path)
+
+    def test_clone_failure_leaves_no_partial(self):
+        # If the clone fails mid-way, no staging dir or partial repo survives
+        # at the target (spec §27.2: interrupted clone never produces a valid
+        # repository).
+        from unittest import mock
+
+        with mock.patch("linktools.git.repository.porcelain.clone",
+                        side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                GitRepository.clone(self.remote_path, self.clone_path)
+        self.assertFalse(os.path.exists(self.clone_path))
+        leftovers = [p for p in os.listdir(self._tmp_dir)
+                     if p.startswith("clone.staging-")]
+        self.assertEqual(leftovers, [])
+
+    def test_sync_reset_policy(self):
+        GitRepository.clone(self.remote_path, self.clone_path)
+        repo = GitRepository(self.clone_path)
+        self.addCleanup(repo.close)
+        self._commit(self.remote_path, "b.txt", "remote change", "remote second")
+        self._commit(self.clone_path, "c.txt", "local change", "local second")
+        repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE)
+        self.assertEqual(self._read(self.clone_path, "b.txt"), "remote change")
+        self.assertFalse(os.path.exists(os.path.join(self.clone_path, "c.txt")))
 
 
 if __name__ == '__main__':

@@ -39,7 +39,6 @@ from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import Config
-from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.errors import Error
 from linktools.runtime import lazy_load
@@ -300,12 +299,15 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     @property
-    def settings(self) -> "FileCache":
-        return FileCache(self.manager.setting_path / "app" / self.name)
+    def settings(self):
+        # Per-container operational settings (mount_paths, ...) moved off the
+        # legacy FileCache to a per-container cache namespace; use
+        # ``settings.transaction()`` for atomic read-modify-write batches.
+        return self.manager.environ.cache.namespace("cntr:app:" + self.name)
 
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             mount_paths = settings.get("mount_paths", {})
             for name in self.manager.docker_compose_names:
                 path = self.get_source_path(name)
@@ -542,7 +544,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None):
         if not source or not target:
             if not source and not target:
-                with self.settings.session() as settings:
+                with self.settings.transaction() as settings:
                     result = {}
                     mount_paths = settings.get("mount_paths") or {}
                     for service in self.services.values():
@@ -567,7 +569,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             return
 
         service = self.choose_service(service_name)
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             mount_paths = settings.get("mount_paths") or {}
             containers_paths = mount_paths.setdefault(service.get("container_name"), {})
             container_path = f"{source_path}:{target_path}:{permission}"
@@ -583,7 +585,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_unmount_file(self, service_name: str = None):
         service = self.choose_service(service_name)
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             mount_paths = settings.get("mount_paths") or {}
             containers_paths = mount_paths.setdefault(service.get("container_name"), {})
             if not containers_paths:

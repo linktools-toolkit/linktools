@@ -35,7 +35,7 @@ from paramiko.ssh_exception import SSHException
 
 from linktools import utils
 from linktools.cli import CommandMain
-from linktools.platform import get_free_port
+from linktools.system import get_free_port
 from linktools.mobile.cli import IOSCommand
 from linktools.runtime import popen
 from linktools.ssh import SSHClient

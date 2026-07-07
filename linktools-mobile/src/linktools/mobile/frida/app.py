@@ -20,7 +20,7 @@ from frida.core import Session, Script
 from linktools import utils, metadata
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
-from linktools.platform import wait_event
+from linktools.system import wait_event
 from linktools.runtime import Reactor, get_derived_type
 from linktools.types import Stoppable
 from .script import FridaUserScript, FridaEvalCode, FridaScriptFile

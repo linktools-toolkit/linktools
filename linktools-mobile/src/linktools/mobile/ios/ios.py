@@ -36,7 +36,7 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
-from linktools.platform import get_free_port, is_port_free, wait_process
+from linktools.system import get_free_port, is_port_free, wait_process
 from linktools.runtime import Process
 from linktools.types import Stoppable, Timeout
 
@@ -404,7 +404,7 @@ class GoIOSForward(Stoppable):
                         break
 
                 if self._process.poll() is None:
-                    time.sleep(min(max(timeout.remain, 1), 1))
+                    time.sleep(min(max(timeout.remaining, 1), 1))
                     if self._process.poll() is None and not is_port_free(local_port):
                         _logger.debug(f"{self} process is running, continue")
                         return

@@ -46,7 +46,7 @@ from ..core import environ, BaseCapability, ConfigProperty
 from ..decorator import cached_property
 from ..types import MISSING
 from ..rich import get_log_handler, init_logging, _is_rich_available
-from ..errors import Error
+from ..errors import Error, CliError
 from ..runtime import import_module
 
 if TYPE_CHECKING:
@@ -60,8 +60,12 @@ if TYPE_CHECKING:
     ERROR_HANDLER = Literal["error", "ignore", "warn"] | Callable[[str, Exception], None]
 
 
-class CommandError(Error):
-    """Base exception for command-line failures."""
+class CommandError(CliError):
+    """Base exception for command-line failures (spec §18.1 CliError domain).
+
+    Reparented from ``Error`` so the CLI exit-code mapper (spec §16.4) treats
+    command/user-input errors as exit 2 rather than internal (10).
+    """
     pass
 
 
@@ -1242,6 +1246,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                 environ.global_config["DEBUG"] = True
                 environ.logger.setLevel(logging.DEBUG)
 
+        class NoInputAction(Action):
+
+            def __call__(self, parser, namespace, values, option_string=None):
+                from ..rich import set_no_input
+                set_no_input(True)
+
         class LogTimeAction(BooleanOptionalAction):
 
             def __call__(self, parser, namespace, values, option_string=None):
@@ -1267,6 +1277,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                            help="disable all log output")
         group.add_argument(f"{prefix}{prefix}debug", action=DebugAction, nargs=0, const=True, dest=SUPPRESS,
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
+
+        group = parser.add_argument_group(title="interaction options")
+        group.add_argument(f"{prefix}{prefix}no-input", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
+                           help="never prompt; return defaults or error (spec §16.6)")
+        group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
+                           help="answer yes/accept defaults to all prompts (alias for --no-input)")
 
         if get_log_handler():
             group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
@@ -1305,12 +1321,19 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             exit_code = self.run(args) or 0
 
         except (CommandError, *self.known_errors) as e:
-            exit_code = 1
+            # Spec §16.4: map the error's domain to a stable exit code.
+            from .exitcodes import exit_code_for
+            exit_code = exit_code_for(e)
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
                 exc_info=True if self.environ.debug else None,
             )
+
+        except KeyboardInterrupt:
+            from .exitcodes import EXIT_INTERRUPT
+            exit_code = EXIT_INTERRUPT
+            self.logger.warning("Interrupted")
 
         return exit_code
 

@@ -37,14 +37,15 @@ from typing import TYPE_CHECKING
 from dulwich.errors import NotGitRepository
 
 from linktools import utils
-from linktools.platform import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
+from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
 from linktools.core import Config
-from linktools.cache import FileCache
 from linktools.decorator import cached_property
 from linktools.errors import GitDivergedError
-from linktools.git import GitRepository
+from linktools.git import GitRepository, GitSyncPolicy
 from linktools.types import MISSING
 from linktools.runtime import Process, import_module_file, popen
+
+from . import _migrate
 from .container import BaseContainer, SimpleContainer, ContainerError
 from ..capabilities.cntr import __cap_cntr__
 
@@ -162,35 +163,23 @@ class ContainerManager:
         return path
 
     @cached_property
-    def _settings(self):
-        settings = FileCache(self.setting_path / "manager")
+    def _persistent_store(self):
+        """Persistent user state (spec §8.5): INSTALLED_CONTAINERS / REPOS."""
+        return self.environ.config_store
 
-        config_path = self.data_path.joinpath("config", "containers.yml")
-        repo_path = self.data_path.joinpath("repo", "repo.json")
-        repo_lock = self.data_path.joinpath("repo", "repo.lock")
+    @cached_property
+    def _transient_ns(self):
+        """Transient settings (RUNNING_CONTAINERS, ...) in the cache store."""
+        return self.environ.cache.namespace("cntr")
 
-        if os.path.isfile(config_path) or os.path.isfile(repo_path):
-            with settings.session() as data:
-                if os.path.isfile(config_path):
-                    self.logger.warning("Found old config file, try to migrate.")
-                    try:
-                        with open(config_path) as fd:
-                            data.set("INSTALLED_CONTAINERS", json.load(fd))
-                        utils.remove_file(config_path.parent)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load old config file: {e}")
-
-                if os.path.isfile(repo_path):
-                    self.logger.warning("Found old repo file, try to migrate.")
-                    try:
-                        with open(repo_path) as fd:
-                            data.set("INSTALLED_REPOS", json.load(fd))
-                        utils.remove_file(repo_path)
-                        utils.remove_file(repo_lock)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load old repo file: {e}")
-
-        return settings
+    @cached_property
+    def _migrated(self):
+        # One-time legacy -> ConfigStore migration (spec §21.2). Runs on first
+        # access of any setting; idempotent.
+        _migrate.migrate_legacy_container_settings(
+            self._persistent_store, self.data_path, self.setting_path, self.logger
+        )
+        return True
 
     @cached_property
     def _repo_path(self):
@@ -277,7 +266,7 @@ class ContainerManager:
                 return
 
     def get_installed_containers(self, resolve: bool = True) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             containers = self._load_installed_containers()
         if resolve:
             containers = self.resolve_depend_containers(containers)
@@ -327,7 +316,7 @@ class ContainerManager:
         return containers
 
     def add_installed_containers(self, *names: str) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             result = set()
             for name in names:
                 container = self.containers.get(name, None)
@@ -339,7 +328,7 @@ class ContainerManager:
             return list(result)
 
     def remove_installed_containers(self, *names: str, force: bool = False) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             containers = self._load_installed_containers(reload=True)
 
             result = set()
@@ -381,7 +370,7 @@ class ContainerManager:
         self._dump_setting("INSTALLED_CONTAINERS", list(set([container.name for container in containers])))
 
     def get_running_containers(self):
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             return self._load_running_containers()
 
     def _load_running_containers(self):
@@ -438,7 +427,7 @@ class ContainerManager:
         yield
 
         if context.is_full_containers:
-            with self._settings.lock():
+            with self.environ.locks.process_lock("cntr:settings"):
                 running_containers = self._load_running_containers()
                 all_containers = {*context.containers, *running_containers}
                 for container in running_containers:
@@ -564,7 +553,7 @@ class ContainerManager:
         return self._load_setting("INSTALLED_REPOS", default={})
 
     def add_repo(self, url: str, branch: str = None, force: bool = False):
-        with self._settings.lock("repo"):
+        with self.environ.locks.process_lock("cntr:repo"):
             repos = self._load_setting("INSTALLED_REPOS", reload=True, default={})
 
             def ensure_repo_not_exist(key):
@@ -643,14 +632,15 @@ class ContainerManager:
                         new_branch.checkout()
 
                 try:
-                    repo.pull(reset=reset)
+                    repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE if reset
+                              else GitSyncPolicy.FAST_FORWARD_ONLY)
                 except GitDivergedError:
                     if reset:
                         raise
                     self.logger.warning(
                         f"Repository `{url}` has diverged from the remote, force resetting ..."
                     )
-                    repo.pull(reset=True)
+                    repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE)
 
             finally:
                 if is_stash:
@@ -658,7 +648,7 @@ class ContainerManager:
                     repo.git.stash("pop")
 
     def remove_repo(self, url: str):
-        with self._settings.lock("repo"):
+        with self.environ.locks.process_lock("cntr:repo"):
             repos = self._load_setting("INSTALLED_REPOS", reload=True, default={})
             if url not in repos:
                 raise ContainerError(f"Repository `{url}` not found.")
@@ -684,18 +674,23 @@ class ContainerManager:
                 shutil.rmtree(repo_path, ignore_errors=True)
 
     def _load_setting(self, key: str, reload: bool = False, default: "Any" = None) -> "dict | list | tuple":
+        self._migrated  # ensure legacy data has been moved into ConfigStore
         if reload:
             self._setting_cache.pop(key, None)
         elif key in self._setting_cache:
             return self._setting_cache[key]
-        with self._settings.session() as data:
-            result = data.get(key, default)
-            if result is None:  # key may be stored explicitly as null
-                result = default
-            self._setting_cache[key] = result
-            return result
+        if key in _migrate.PERSISTENT_KEYS:
+            result = self._persistent_store.get(key, default)
+        else:
+            result = self._transient_ns.get(key, default)
+        # Existence is decided by row presence in the new stores (no falsy drop),
+        # so the old `if result is None: result = default` workaround is gone.
+        self._setting_cache[key] = result
+        return result
 
     def _dump_setting(self, key: str, setting: "dict | list | tuple"):
         self._setting_cache.pop(key, None)
-        with self._settings.session() as data:
-            data.set(key, setting)
+        if key in _migrate.PERSISTENT_KEYS:
+            self._persistent_store.set(key, setting)
+        else:
+            self._transient_ns.set(key, setting)

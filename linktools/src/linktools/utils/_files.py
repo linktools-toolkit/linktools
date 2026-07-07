@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import tempfile
 from pathlib import Path
 from typing import overload, TYPE_CHECKING
 
@@ -31,6 +32,21 @@ def join_path(root_path, *paths: str) -> Path:
         except ValueError:
             raise Error(f"Unsafe path \"{path}\"")
     return Path(target_path)
+
+
+def ensure_within(path, root):
+    """Raise Error if ``path`` does not resolve within ``root`` (spec §17.2).
+
+    Unlike ``is_sub_path`` (which returns a bool), this raises on violation and
+    returns the resolved absolute Path on success.
+    """
+    if not is_sub_path(str(path), str(root)):
+        raise Error("path %r is not within root %r" % (str(path), str(root)))
+    return Path(os.path.abspath(str(path)))
+
+
+# Alias for the spec's preferred name (§17.2).
+safe_join = join_path
 
 
 if TYPE_CHECKING:
@@ -72,6 +88,39 @@ def write_file(path, data, encoding: str = DEFAULT_ENCODING) -> None:
             fd.write(data)
 
 
+def atomic_write(path, data, encoding: str = DEFAULT_ENCODING) -> None:
+    """Write ``data`` to ``path`` atomically (spec §3.7/§17.1 UTL-001).
+
+    temp-in-same-dir -> write -> flush -> fsync -> os.replace. A crash mid-write
+    leaves the previous version (if any) intact and no partial file at ``path``.
+    """
+    target = Path(path)
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(parent), prefix=target.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if isinstance(data, str):
+                handle.write(data.encode(encoding))
+            else:
+                handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, str(target))
+    except BaseException:
+        # Never leave the .tmp behind on failure.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_replace(source, target) -> None:
+    """Atomically replace ``target`` with ``source`` (spec §17.1 UTL-001)."""
+    os.replace(str(source), str(target))
+
+
 def remove_file(path) -> None:
     if not os.path.exists(path):
         return
@@ -103,3 +152,33 @@ def clear_directory(path) -> None:
                 os.remove(target_path)
             except:
                 pass
+
+
+def safe_remove(path, root=None) -> bool:
+    """Remove a file or directory after verifying it is within ``root`` (§17.5).
+
+    ``root`` defaults to the parent directory of ``path``. A target resolving
+    outside ``root`` raises :class:`linktools.errors.Error` and is left
+    untouched. Returns True if something was removed, False if absent.
+    """
+    import shutil
+
+    target = Path(str(path))
+    boundary = Path(str(root)) if root is not None else target.parent
+    if not is_sub_path(str(target), str(boundary)):
+        raise Error("Refusing to remove %r: outside root %r" % (str(target), str(boundary)))
+    if not target.exists() and not target.is_symlink():
+        return False
+    if target.is_dir() and not target.is_symlink():
+        shutil.rmtree(str(target), ignore_errors=True)
+    else:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return False
+    return True
+
+
+def safe_rmtree(path, root=None) -> bool:
+    """Remove a directory tree after verifying it is within ``root`` (§17.5)."""
+    return safe_remove(path, root=root)

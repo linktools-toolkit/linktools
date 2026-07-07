@@ -36,13 +36,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools import utils, metadata
-from linktools.platform import get_machine, get_system
+from linktools.system import get_machine, get_system
 from linktools.decorator import cached_property, cached_classproperty
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
     from linktools.types import T, ConfigDict, Config, Tools, Tool, UrlFile, PathType
+    from ._paths import EnvironmentPaths
+    from ._logging import LoggingManager
+    from ._locks import LockManager
+    from .._cache_store import CacheStore
+    from .._config_store import ConfigStore
+    from .._download import DownloadManager
 
 
 class BaseEnviron(abc.ABC):
@@ -142,6 +148,107 @@ class BaseEnviron(abc.ABC):
         """
         return Path(self.global_config["TEMP_PATH"])
 
+    @cached_property(lock=True)
+    def paths(self) -> "EnvironmentPaths":
+        """Resolved, normalised filesystem layout (spec §5.3).
+
+        Returns:
+            EnvironmentPaths: The operation result.
+
+        ``data``/``temp`` come from the same global config as the legacy
+        accessors, so existing behavior is unchanged; ``cache``/``config``/
+        ``logs``/``downloads`` are the new canonical locations consumers migrate
+        to in later phases.
+        """
+        from ._paths import EnvironmentPaths
+
+        cfg = self.global_config
+        return EnvironmentPaths(
+            root=self.root_path,
+            storage=cfg["STORAGE_PATH"],
+            data=cfg["DATA_PATH"],
+            temp=cfg["TEMP_PATH"],
+        )
+
+    @cached_property(lock=True)
+    def locks(self) -> "LockManager":
+        """Unified process/file lock manager (spec §7.11 CAC-009).
+
+        Returns:
+            LockManager: The operation result.
+        """
+        from ._locks import LockManager
+
+        return LockManager(self.paths.cache / "locks")
+
+    @cached_property(lock=True)
+    def cache(self) -> "CacheStore":
+        """Transactional local cache (spec §7, §5.1).
+
+        Returns:
+            CacheStore: The operation result.
+
+        A single SQLite store shared across the process; use
+        ``environ.cache.namespace(name)`` for isolated key spaces. Per-thread
+        connections are managed inside the store.
+        """
+        from .._cache_store import CacheStore
+
+        self.paths.ensure_cache()
+        return CacheStore(self.paths.cache / "cache.db")
+
+    @cached_property(lock=True)
+    def config_store(self) -> "ConfigStore":
+        """Persistent, user-editable JSON store (spec §8.5 CFG-005).
+
+        Returns:
+            ConfigStore: The operation result.
+
+        The proper home for persistent user state (e.g. cntr's
+        INSTALLED_CONTAINERS) that must NOT live in the cache. Distinct file and
+        lifecycle from ``cache``; written atomically under a process lock.
+        """
+        from .._config_store import ConfigStore
+
+        self.paths.ensure_config()
+        return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
+
+    @cached_property(lock=True)
+    def downloads(self) -> "DownloadManager":
+        """Unified download manager (spec §9, §5.1).
+
+        Returns:
+            DownloadManager: The operation result.
+
+        Locks via ``self.locks``, stores resume metadata in ``self.cache``;
+        consumers migrate from the legacy UrlFile (core/_url.py) to this.
+        """
+        from .._download import DownloadManager
+
+        return DownloadManager(self)
+
+    def subprocess_env(self, include_tools=True, overrides=None):
+        """Build a subprocess environment dict (spec §5.1, §10.11).
+
+        Returns a fresh mapping (never mutates the process ``os.environ``): the
+        managed-tools stub dir is prepended to PATH so tools resolve without the
+        global PATH mutation the legacy ``_create_tools`` did, then ``overrides``
+        are applied.
+        """
+        env = dict(os.environ)
+        if include_tools:
+            try:
+                stub = str(self.tools.stub_path)
+                if stub:
+                    rest = [p for p in env.get("PATH", "").split(os.pathsep)
+                            if p and p != stub]
+                    env["PATH"] = os.pathsep.join([stub] + rest)
+            except Exception:
+                pass
+        if overrides:
+            env.update(overrides)
+        return env
+
     def get_path(self, *paths: str) -> "Path":
         """Return the path.
 
@@ -229,19 +336,33 @@ class BaseEnviron(abc.ABC):
         Returns:
             logging.Logger: The operation result.
         """
-        return logging.getLogger(self.name)
+        return self.get_logger()
+
+    @cached_property(lock=True)
+    def logging(self) -> "LoggingManager":
+        """The :class:`LoggingManager` owning redaction, context and levels.
+
+        Returns:
+            LoggingManager: The operation result.
+
+        Constructing it is side-effect free; redaction is installed lazily on
+        the first ``get_logger``/``bootstrap``/``configure`` call (spec §5.4).
+        """
+        from ._logging import LoggingManager
+
+        return LoggingManager(self)
 
     def get_logger(self, name: str = None) -> "logging.Logger":
-        """Return the logger.
+        """Return a named logger with redaction active (spec §3.2/§5.4).
 
         Args:
-            name (str): Name to resolve.
+            name (str): Name to resolve (prefixed with the environment name).
 
         Returns:
             logging.Logger: The operation result.
         """
-        name = f"{self.name}.{name}" if name else self.name
-        return logging.getLogger(name)
+        full = f"{self.name}.{name}" if name else self.name
+        return self.logging.get_logger(full)
 
     @cached_classproperty(lock=True)
     def global_config(self) -> "ConfigDict":
@@ -256,19 +377,23 @@ class BaseEnviron(abc.ABC):
 
         data_path = os.environ.get(f"{prefix}_DATA_PATH", None)
         temp_path = os.environ.get(f"{prefix}_TEMP_PATH", None)
-        if not (data_path and temp_path):
-            storage_path = os.environ.get(f"{prefix}_PATH", None)
-            if not storage_path:
-                storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
-                if not storage_path:
-                    storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
-            if not data_path:
-                data_path = os.path.join(storage_path, "data")
-            if not temp_path:
-                temp_path = os.path.join(storage_path, "temp")
+        # Storage root is always resolved so EnvironmentPaths can derive the
+        # cache/config/logs/downloads directories under it even when both
+        # DATA_PATH and TEMP_PATH are supplied explicitly via env.
+        storage_path = (
+            os.environ.get(f"{prefix}_PATH", None)
+            or os.environ.get(f"{prefix}_STORAGE_PATH", None)
+        )
+        if not storage_path:
+            storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
+        if not data_path:
+            data_path = os.path.join(storage_path, "data")
+        if not temp_path:
+            temp_path = os.path.join(storage_path, "temp")
 
         return ConfigDict(
             DEBUG=False,
+            STORAGE_PATH=storage_path,
             DATA_PATH=data_path,
             TEMP_PATH=temp_path,
         )
@@ -334,9 +459,9 @@ class BaseEnviron(abc.ABC):
 
         config = ConfigDict()
 
-        develop_path = environ.get_path("assets", "develop", "tools.yml")
-        data_path = environ.get_data_path("tools", "tools.json")
-        asset_path = environ.get_path("assets", "tools.json")
+        develop_path = self.get_path("assets", "develop", "tools.yml")
+        data_path = self.get_data_path("tools", "tools.json")
+        asset_path = self.get_path("assets", "tools.json")
 
         if os.path.exists(data_path):
             config.update_from_file(data_path, json.load)
@@ -347,6 +472,13 @@ class BaseEnviron(abc.ABC):
             config.update_from_file(develop_path, yaml.safe_load)
 
         tools = Tools(self, config)
+        # NOTE (spec §10.11/§19.2): this still mutates the global os.environ so
+        # that subprocesses invoking tools by name (e.g. objection/frida calling
+        # "adb" internally) resolve the stub. Removing it requires migrating all
+        # tool-spawning call sites to environ.subprocess_env() (which prepends
+        # the stub without mutating) -- a §10 follow-up gated on real tool
+        # resolution testing. environ.subprocess_env() is the clean path for new
+        # code (e.g. ToolRunner) today.
         paths = os.environ["PATH"].split(os.pathsep)
         stub_path = str(tools.stub_path)
         if stub_path not in paths:

@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
-from linktools.platform import get_free_port
+from linktools.system import get_free_port
 from linktools.runtime import Process
 from linktools.types import Stoppable
 from linktools.utils import get_hash_ident

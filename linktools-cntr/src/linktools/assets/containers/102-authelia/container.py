@@ -94,7 +94,7 @@ class Container(BaseContainer):
     def acl_rules(self):
         result = None
 
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             result = settings.get(f"{self._key_prefix}_acl_rules", default=None)
             if result is None:
                 result = {}
@@ -106,7 +106,7 @@ class Container(BaseContainer):
     def oidc_clients(self):
         result = None
 
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             result = settings.get(f"{self._key_prefix}_oidc_clients", default=None)
             if result is None:
                 port = self.get_config("NGINX_HTTPS_PORT")
@@ -168,7 +168,7 @@ class Container(BaseContainer):
         self.manager.change_file_owner(secret_path, "root", recursive=True)
         self.manager.change_file_owner(config_path, "root", recursive=True)
 
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
             settings.set(f"{self._key_prefix}_oidc_clients", self.oidc_clients)
 
@@ -177,7 +177,7 @@ class Container(BaseContainer):
             self.on_removed(context)
 
     def on_removed(self, context: "EventContext"):
-        with self.settings.session() as settings:
+        with self.settings.transaction() as settings:
             settings.pop(f"{self._key_prefix}_acl_rules", None)
             settings.pop(f"{self._key_prefix}_oidc_clients", None)
 

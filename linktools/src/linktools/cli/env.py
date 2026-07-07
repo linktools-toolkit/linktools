@@ -54,7 +54,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     from .. import utils, metadata
     from ..core import environ as _environ
-    from ..platform import get_interpreter, get_interpreter_ident
+    from ..system import get_interpreter, get_interpreter_ident
     from ..runtime import popen
     from .command import SubCommand, CommandError, iter_entry_points_capabilities
 

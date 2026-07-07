@@ -17,6 +17,12 @@ import weakref as _weakref
 from pathlib import Path as _Path
 
 
+# Monotonic clock for in-process deadlines. Spec §3.6/§6.2: wall-clock changes
+# (NTP, DST, manual) must never affect timeout/scheduling correctness; persistent
+# TTLs use UTC unix timestamps via time.time() elsewhere.
+_now = _time.monotonic
+
+
 class __MissingType:
     __eq__ = lambda l, r: \
         l is r or type(l) is type(r)
@@ -68,48 +74,90 @@ def get_args(tp):
 
 
 class Timeout:
-    """Track timeout state and compute remaining time for operations."""
+    """Track a monotonic deadline for an in-process operation.
 
-    _timeout: "float | None"
-    _deadline: "float | None"
+    Uses :func:`time.monotonic` so wall-clock adjustments (NTP jumps, DST,
+    manual changes) never affect correctness -- see spec §3.6 and §6.2.
+
+    Semantics:
+    * ``None`` means wait forever (infinite).
+    * ``0`` means the deadline has already passed.
+    * Negative values are rejected with ``ValueError``.
+    * :attr:`remaining` / :attr:`expired` are the canonical reads;
+      :meth:`check` / :meth:`ensure` are retained as conveniences.
+    """
 
     def __new__(cls, timeout: "TimeoutType" = None):
         if isinstance(timeout, cls):
             return timeout
-        if isinstance(timeout, (float, int, type(None))):
+        if timeout is None or isinstance(timeout, (float, int)):
+            if timeout is not None and timeout < 0:
+                raise ValueError("timeout must be non-negative, got %r" % (timeout,))
             t = super().__new__(cls)
             t._timeout = timeout
             t._deadline = None
             t.reset()
             return t
-        raise TypeError(f"Timeout/int/float was expects, got {type(timeout)}")
+        raise TypeError("Timeout/int/float/None expected, got %s" % type(timeout).__name__)
 
     @property
-    def remain(self) -> "float | None":
-        timeout = None
-        if self._deadline is not None:
-            timeout = max(self._deadline - _time.time(), 0)
-        return timeout
+    def timeout(self) -> "_t.Optional[float]":
+        """Configured duration in seconds, or ``None`` for infinite."""
+        return self._timeout
 
     @property
-    def deadline(self) -> "float | None":
+    def deadline(self) -> "_t.Optional[float]":
+        """Monotonic deadline, or ``None`` when the timeout is infinite."""
         return self._deadline
 
-    def reset(self) -> None:
-        if self._timeout is not None and self._timeout >= 0:
-            self._deadline = _time.time() + self._timeout
+    @property
+    def remaining(self) -> "_t.Optional[float]":
+        """Seconds left until the deadline, clamped at 0; ``None`` if infinite."""
+        if self._deadline is None:
+            return None
+        return max(self._deadline - _now(), 0)
+
+    @property
+    def expired(self) -> bool:
+        """``True`` once the deadline has passed; never ``True`` when infinite."""
+        return self._deadline is not None and _now() >= self._deadline
 
     def check(self) -> bool:
-        if self._deadline is not None and _time.time() > self._deadline:
-            return False
-        return True
+        """Return ``True`` while time remains (the inverse of :attr:`expired`)."""
+        return not self.expired
 
-    def ensure(self, err_type: "_t.Callable[[str], Exception]" = TimeoutError, message: str = "Timeout") -> None:
-        if not self.check():
+    def reset(self) -> None:
+        """Recompute the deadline from the current monotonic time."""
+        if self._timeout is not None:
+            self._deadline = _now() + self._timeout
+        else:
+            self._deadline = None
+
+    def ensure(self, err_type: type = TimeoutError, message: str = "Timeout") -> None:
+        """Raise ``err_type(message)`` if the deadline has passed."""
+        if self.expired:
             raise err_type(message)
 
-    def __repr__(self):
-        return f"Timeout(timeout={self._timeout})"
+    def split(self, timeout: "TimeoutType" = None) -> "Timeout":
+        """Return a child timeout bounded by both ``timeout`` and our budget.
+
+        The child never outlives the parent: its deadline is the sooner of
+        ``now + timeout`` and this timeout's own deadline. ``timeout=None``
+        yields a child that shares the parent's remaining (possibly infinite)
+        budget. Negative ``timeout`` is rejected by :meth:`Timeout.__new__`.
+        """
+        if isinstance(timeout, Timeout):
+            timeout = timeout._timeout
+        if self._deadline is None:
+            # Parent is infinite: child is governed only by the requested value.
+            return Timeout(timeout)
+        remaining = self.remaining
+        if timeout is None:
+            return Timeout(remaining)
+        return Timeout(min(timeout, remaining))
+
+    def __repr__(self) -> str:
+        return "Timeout(timeout=%r)" % (self._timeout,)
 
 
 class Stoppable(_abc.ABC):

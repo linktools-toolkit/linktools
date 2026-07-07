@@ -12,10 +12,6 @@ _basic_cache_types = (type(None), int, float, bool, complex)
 _file_cache_backup_suffix = ".backup"
 
 
-def _filter_cache_items(d: "dict[_t.Any, _t.Any]") -> "dict[_t.Any, _t.Any]":
-    return {k: v for k, v in d.items() if v}
-
-
 class _CacheLock:
 
     def __init__(self, cache: "FileCache", namespace: str, key: str = None):
@@ -26,7 +22,7 @@ class _CacheLock:
         self._lock = FileLock(str(path / f"{key or ''}.lock"))
 
     def acquire(self, timeout: "TimeoutType" = None):
-        self._lock.acquire(Timeout(timeout).remain)
+        self._lock.acquire(Timeout(timeout).remaining)
 
     def release(self):
         self._lock.release()
@@ -130,11 +126,17 @@ class _CacheSession(_t.Generic[T]):
         self._lock.release()
 
     def set(self, key: str, value: "T", ttl: int = None) -> None:
-        self._data[key] = _filter_cache_items({
+        # Store the full record unfiltered: falsy values (False/0/""/[]/{}) and
+        # None must round-trip reliably, and existence is decided by row
+        # presence rather than truthiness (spec §7.5). ttl=0 means "already
+        # expired" and must not be coerced to None (= infinite) (spec §7.4).
+        if ttl is not None:
+            ttl = int(ttl)
+        self._data[key] = {
             "data": self._cache.serialize(value),
-            "ttl": int(ttl) if ttl else None,
+            "ttl": ttl,
             "ts": int(_time.time()),
-        })
+        }
 
     def update(self, **kwargs: "T") -> None:
         for key, value in kwargs.items():
@@ -142,10 +144,13 @@ class _CacheSession(_t.Generic[T]):
 
     def _get(self, key: str) -> "dict[str, _t.Any] | None":
         value = self._data.get(key, None)
-        if value:
+        if value is not None:
             timestamp = value.get("ts", None)
             ttl = value.get("ttl", None)
-            if timestamp and ttl and timestamp + ttl < _time.time():
+            # Expiry is decided by presence (ttl is not None), never by
+            # truthiness -- ttl=0 means "already expired" (spec §7.4/§7.5).
+            if timestamp is not None and ttl is not None \
+                    and timestamp + ttl < _time.time():
                 self._data.pop(key)
                 return None
             return value
@@ -202,7 +207,9 @@ class _CacheSession(_t.Generic[T]):
             value["ts"] = int(_time.time())
             self._data[key] = value
         else:
-            result = default
+            # Missing key: store initial + delta (not just the default), so the
+            # first increment is never lost (spec §7.7).
+            result = default + delta
             self.set(key, result)
         return result
 

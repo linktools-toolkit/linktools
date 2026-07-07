@@ -36,6 +36,23 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from linktools.types import MISSING
+from linktools.errors import CliError
+
+# §16.6 CLI-006: when True, prompt/confirm/choose never block for input.
+# Set by the CLI framework when --no-input / --yes is passed. prompt/choose
+# without a default raise CliError; confirm defaults to True.
+_no_input = False
+
+
+def set_no_input(enabled=True):
+    """Enable or disable non-interactive mode (spec §16.6)."""
+    global _no_input
+    _no_input = bool(enabled)
+
+
+def is_no_input():
+    """Return whether non-interactive mode is active."""
+    return _no_input
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -748,6 +765,10 @@ def prompt(
     Returns:
         PromptResultType: The operation result.
     """
+    if _no_input:
+        if default is not MISSING:
+            return default
+        raise CliError("prompt requires interaction but no-input mode is active: " + prompt)
     if not _is_rich_available():
         return _plain_prompt(
             prompt, type=type, default=default, allow_empty=allow_empty,
@@ -785,6 +806,10 @@ def choose(
     Returns:
         T: The operation result.
     """
+    if _no_input:
+        if default is not MISSING:
+            return default
+        raise CliError("choose requires interaction but no-input mode is active: " + prompt)
     if not _is_rich_available():
         return _plain_choose(
             prompt, choices, title=title, default=default,
@@ -845,6 +870,8 @@ def confirm(
     Returns:
         bool: The operation result.
     """
+    if _no_input:
+        return default if default is not MISSING else True
     if not _is_rich_available():
         return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(

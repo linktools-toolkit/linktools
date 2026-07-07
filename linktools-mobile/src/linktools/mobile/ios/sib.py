@@ -11,7 +11,7 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, timeoutable
-from linktools.platform import get_free_port
+from linktools.system import get_free_port
 from linktools.runtime import Process
 from linktools.types import Stoppable
 

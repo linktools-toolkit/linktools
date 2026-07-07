@@ -103,7 +103,7 @@ class FridaServer(get_derived_type(frida.core.Device),  # proxy for frida.core.D
                         if self.is_running:
                             _logger.info("Frida server is running ...")
                             return True
-                        time.sleep(min(timeout.remain, 0.5))
+                        time.sleep(min(timeout.remaining, 0.5))
                     _logger.debug("Kill frida server ...")
                     utils.ignore_errors(self._stop, kwargs=dict(force=True))
                 except Exception as e:
