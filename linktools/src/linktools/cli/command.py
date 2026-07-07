@@ -165,16 +165,11 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
         try:
             module = import_module(name, spec=finder.find_spec(name))
             info = _CommandInfo()
-            if is_package:
-                info.id = name[len(prefix):]
-                info.parent_id = getattr(module, "__parent__", None) or name[len(prefix):name.rfind(".")]
-                info.module = module.__name__
-                info.command = None
-                info.command_name = getattr(module, "__command__", None) or info.id[info.id.rfind(".") + 1:]
-                info.command_description = getattr(module, "__description__", None) or ""
-                info.order = getattr(module, "__order__", None) or info.command_name
-                yield info
-            elif hasattr(module, "command") and isinstance(module.command, BaseCommand):
+            # A package or module that exposes a `command` attribute (a BaseCommand
+            # instance) is discovered as a command node directly. This lets a
+            # sub-package act as a single command (e.g. `lt ai <subcommand>`) when
+            # its `__init__.py` re-exports `command`, matching the cntr pattern.
+            if hasattr(module, "command") and isinstance(module.command, BaseCommand):
                 info.id = name[len(prefix):]
                 info.parent_id = module.command.parent or name[len(prefix):name.rfind(".")]
                 info.module = module.command.module
@@ -182,6 +177,15 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
                 info.command_name = module.command.name
                 info.command_description = module.command.description
                 info.order = module.command.order
+                yield info
+            elif is_package:
+                info.id = name[len(prefix):]
+                info.parent_id = getattr(module, "__parent__", None) or name[len(prefix):name.rfind(".")]
+                info.module = module.__name__
+                info.command = None
+                info.command_name = getattr(module, "__command__", None) or info.id[info.id.rfind(".") + 1:]
+                info.command_description = getattr(module, "__description__", None) or ""
+                info.order = getattr(module, "__order__", None) or info.command_name
                 yield info
         except Exception as e:
             if callable(onerror):
