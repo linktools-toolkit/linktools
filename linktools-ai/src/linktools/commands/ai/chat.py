@@ -276,3 +276,5 @@ async def _list_pending_approvals(storage) -> list:
 #   python -m linktools.commands.ai.chat
 if __name__ == "__main__":
     Command().main()
+
+command = Command()
