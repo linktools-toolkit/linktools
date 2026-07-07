@@ -7,9 +7,6 @@
 subscription, ``emit`` honors a configurable exception policy, and callbacks run
 against a snapshot outside the registration lock (so a callback may cancel
 itself or register new handlers without deadlocking).
-
-:class:`EventHandlerMixin` keeps the legacy mixin API mobile depends on and
-delegates to an EventBus, so there is a single dispatch implementation.
 """
 
 import threading as _threading
@@ -132,44 +129,3 @@ class EventBus(object):
                     collected.append(e)
         if collected:
             raise collected[0]
-
-
-# --------------------------------------------------------------------------- #
-# Legacy mixin API (mobile depends on it); delegates to a single EventBus.
-# --------------------------------------------------------------------------- #
-
-_event_handler_lock = _threading.RLock()
-_event_handler_name = "__EventHandlerMixin_event_handler"
-
-
-class EventHandlerMixin(object):
-    """Dispatch named events to registered handlers (delegates to EventBus)."""
-
-    @property
-    def _event_handler(self):
-        # type: () -> EventBus
-        value = getattr(self, _event_handler_name, None)
-        if value is None:
-            with _event_handler_lock:
-                value = getattr(self, _event_handler_name, None)
-                if value is None:
-                    value = EventBus()
-                    setattr(self, _event_handler_name, value)
-        return value
-
-    def on(self, event, callback, times=None):
-        # type: (str, _t.Callable, _t.Optional[int]) -> Subscription
-        _get_logger().debug("Register event `%s` handler `%s`" % (event, callback))
-        return self._event_handler.on(event, callback, times=times)
-
-    def off(self, event, callback):
-        # type: (str, _t.Callable) -> None
-        _get_logger().debug("Unregister event `%s` handler `%s`" % (event, callback))
-        self._event_handler.off(event, callback)
-
-    def once(self, event, callback):
-        # type: (str, _t.Callable) -> Subscription
-        return self._event_handler.once(event, callback)
-
-    def trigger(self, event, *args, **kwargs):
-        self._event_handler.emit(event, *args, **kwargs)

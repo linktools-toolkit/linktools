@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Tests for EventBus + EventHandlerMixin (spec §15.2)."""
+"""Tests for EventBus (spec §15.2)."""
 import pytest
 
 from linktools.runtime.events import (
-    EventBus, EventHandlerMixin, LOG_AND_CONTINUE, RAISE_FIRST, COLLECT, STOP,
+    EventBus, LOG_AND_CONTINUE, RAISE_FIRST, COLLECT, STOP,
 )
 
 
@@ -111,16 +111,3 @@ def test_callback_can_cancel_self_during_emit():
     bus.emit("e", 1)
     bus.emit("e", 2)
     assert seen == [(1,)]  # cancelled itself; second emit not delivered
-
-
-# EventHandlerMixin delegation ------------------------------------------------
-
-def test_event_handler_mixin_delegates():
-    class M(EventHandlerMixin):
-        pass
-
-    m = M()
-    hits = []
-    m.on("x", lambda *a, **k: hits.append((a, k)))
-    m.trigger("x", 1, foo=2)
-    assert hits == [((1,), {"foo": 2})]

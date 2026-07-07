@@ -51,6 +51,23 @@ if TYPE_CHECKING:
     from .._download import DownloadManager
 
 
+
+
+class ConfigDict(dict):
+    """Minimal dict subclass for tool config loading (v2: replaces old _config.ConfigDict)."""
+    def update_from_file(self, filename, load, silent=False):
+        try:
+            with open(filename, "rb") as f:
+                obj = load(f)
+        except OSError as e:
+            if silent:
+                return False
+            raise
+        if isinstance(obj, dict):
+            self.update(obj)
+        return True
+
+
 class BaseEnviron(abc.ABC):
     """Base environment abstraction for config, paths, tools, and logging."""
 
@@ -353,15 +370,17 @@ class BaseEnviron(abc.ABC):
         return LoggingManager(self)
 
     def get_logger(self, name: str = None) -> "logging.Logger":
-        """Return a named logger with redaction active (spec §3.2/§5.4).
+        """Return a named logger with redaction active (spec §3.2/§5.4, v2 §4.3).
 
-        Args:
-            name (str): Name to resolve (prefixed with the environment name).
-
-        Returns:
-            logging.Logger: The operation result.
+        Avoids double-prefixing: if ``name`` already starts with the environment
+        name (e.g. ``linktools.ssh``), it is used as-is.
         """
-        full = f"{self.name}.{name}" if name else self.name
+        if name and (name == self.name or name.startswith(self.name + ".")):
+            full = name
+        elif name:
+            full = "%s.%s" % (self.name, name)
+        else:
+            full = self.name
         return self.logging.get_logger(full)
 
     @cached_classproperty(lock=True)
@@ -371,7 +390,7 @@ class BaseEnviron(abc.ABC):
         Returns:
             ConfigDict: The operation result.
         """
-        from ._config import ConfigDict
+        # ConfigDict is defined above (inlined)
 
         prefix = f"{metadata.__name__}".upper()
 
@@ -399,37 +418,61 @@ class BaseEnviron(abc.ABC):
         )
 
     def _create_config(self) -> "Config":
-        from ._config import Config, ConfigDict
+        """Build the new Config (ConfigSchema-backed, v2 §3 main path).
 
-        return Config(
+        Sources (§8.2 precedence):
+        EnvironmentSource > RuntimeOverrideSource > PersistentSource >
+        DefaultSource (schema defaults).
+        """
+        from ._config_schema import (
+            Config as NewConfig, ConfigSchema,
+            EnvironmentSource, RuntimeOverrideSource,
+            PersistentSource, DefaultSource,
+        )
+
+        schema = ConfigSchema()
+        prefix = self.name.upper() + "_"
+        return NewConfig(
             self,
-            ConfigDict(),
-            namespace="MAIN",
-            env_prefix=f"{self.name.upper()}_"
+            schema,
+            sources=[
+                EnvironmentSource(prefix),
+                RuntimeOverrideSource(),
+                PersistentSource(self.config_store, "main"),
+                DefaultSource(schema),
+            ],
         )
 
     @cached_property(lock=True)
     def config(self) -> "Config":
-        """Config.
-
-        Returns:
-            Config: The operation result.
-        """
+        """Config (v2 §3: new ConfigSchema-backed main path)."""
         return self._create_config()
 
-    def wrap_config(self, namespace: str = MISSING, env_prefix: str = MISSING) -> "Config":
-        """Return a scoped configuration wrapper.
+    def wrap_config(self, namespace=MISSING, env_prefix=MISSING):
+        """Return a scoped Config (v2 §3: new Config, not ConfigWrapper).
 
-        Args:
-            namespace (str): Argparse namespace to update.
-            env_prefix (str): The env_prefix value.
-
-        Returns:
-            Config: The operation result.
+        Each call returns a fresh Config with its own schema + sources, so
+        sub-managers (cntr) can define their own fields independently.
         """
-        from ._config import ConfigWrapper
+        from ._config_schema import (
+            Config as NewConfig, ConfigSchema,
+            EnvironmentSource, RuntimeOverrideSource,
+            PersistentSource, DefaultSource,
+        )
 
-        return ConfigWrapper(self.config, namespace=namespace, env_prefix=env_prefix)
+        schema = ConfigSchema()
+        prefix = (env_prefix if env_prefix is not MISSING else "")
+        ns = namespace if namespace is not MISSING else "main"
+        return NewConfig(
+            self,
+            schema,
+            sources=[
+                EnvironmentSource(prefix),
+                RuntimeOverrideSource(),
+                PersistentSource(self.config_store, ns),
+                DefaultSource(schema),
+            ],
+        )
 
     def get_config(self, key: str, type: "type[T]" = None, default: "Any" = MISSING) -> "T":
         """Return a configuration value.
@@ -455,7 +498,7 @@ class BaseEnviron(abc.ABC):
 
     def _create_tools(self) -> "Tools":
         from ._tools import Tools
-        from ._config import ConfigDict
+        # ConfigDict is defined above (inlined)
 
         config = ConfigDict()
 
@@ -472,18 +515,8 @@ class BaseEnviron(abc.ABC):
             config.update_from_file(develop_path, yaml.safe_load)
 
         tools = Tools(self, config)
-        # NOTE (spec §10.11/§19.2): this still mutates the global os.environ so
-        # that subprocesses invoking tools by name (e.g. objection/frida calling
-        # "adb" internally) resolve the stub. Removing it requires migrating all
-        # tool-spawning call sites to environ.subprocess_env() (which prepends
-        # the stub without mutating) -- a §10 follow-up gated on real tool
-        # resolution testing. environ.subprocess_env() is the clean path for new
-        # code (e.g. ToolRunner) today.
-        paths = os.environ["PATH"].split(os.pathsep)
-        stub_path = str(tools.stub_path)
-        if stub_path not in paths:
-            paths.append(stub_path)
-            os.environ["PATH"] = os.pathsep.join(paths)
+        # v2 §9.1: do NOT mutate os.environ["PATH"]. Subprocesses that need the
+        # tools stub resolve it via env.subprocess_env() (Tool.popen, ToolRunner).
         return tools
 
     @cached_property(lock=True)
@@ -574,8 +607,8 @@ class Environ(BaseEnviron):
     def _create_config(self):
         config = super()._create_config()
 
-        # Initialize download-related defaults.
-        config.update(
+        # Initialize download-related defaults on the new Config.
+        config.update_defaults(
             DEFAULT_USER_AGENT=
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "

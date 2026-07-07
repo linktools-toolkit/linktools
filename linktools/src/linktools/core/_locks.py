@@ -18,6 +18,8 @@ Acquired locks are context managers::
     with environ.locks.file_lock(path):
         ...
 """
+import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any, Union
@@ -51,10 +53,19 @@ class LockManager(object):
 
     def file_lock(self, path):
         # type: (PathLike) -> Any
-        """Return a lock guarding the given file path (context manager)."""
-        from filelock import FileLock
+        """Return a lock guarding the given file path (spec §6.2).
 
-        return FileLock(str(path))
+        The lock file lives under ``lock_dir`` (keyed by the sha256 of the
+        absolute target path), NOT on the business file itself — so the target
+        is never polluted with a ``.lock`` sidecar.
+        """
+        from filelock import FileLock
+        import hashlib
+
+        self._lock_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(os.path.abspath(str(path)).encode()).hexdigest()[:16]
+        target = self._lock_dir / (digest + ".lock")
+        return FileLock(str(target))
 
     def process_lock(self, name):
         # type: (str) -> Any

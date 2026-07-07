@@ -200,12 +200,13 @@ def test_context_fields_reach_records(manager):
 
 
 def test_install_filter_is_idempotent(manager):
-    original = logging.getLogRecordFactory()
+    # The global environ may already have a redactor active (via get_logger);
+    # verify this manager doesn't double-wrap and restores to the prior state.
+    factory_before = logging.getLogRecordFactory()
     manager.install_filter()
     first = logging.getLogRecordFactory()
     manager.install_filter()  # must not double-wrap
     second = logging.getLogRecordFactory()
     assert first is second
-    assert first is not original
     manager.remove_filter()
-    assert logging.getLogRecordFactory() is original
+    assert logging.getLogRecordFactory() is factory_before

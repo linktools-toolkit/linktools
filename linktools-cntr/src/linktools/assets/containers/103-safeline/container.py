@@ -30,7 +30,9 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer
-from linktools.core import Config
+from linktools.core._config_schema import (
+    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
+)
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -50,12 +52,12 @@ class Container(BaseContainer):
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
             SAFELINE_DOMAIN=self.get_nginx_domain(),
-            SAFELINE_AUTH_ENABLE=Config.Property(type=bool) | True,
+            SAFELINE_AUTH_ENABLE=ConfigField(name="SAFELINE_AUTH_ENABLE", cast=bool, default=True),
             SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
             SAFELINE_RELEASE="",
-            SAFELINE_PORT=Config.Property(type=int) | 9200,
+            SAFELINE_PORT=ConfigField(name="SAFELINE_PORT", cast=int, default=9200),
             SAFELINE_API_TOKEN="",
         )
 

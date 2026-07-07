@@ -42,7 +42,7 @@ from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING
 
 from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
-from ..core import environ, BaseCapability, ConfigProperty
+from ..core import environ, BaseCapability, ConfigField
 from ..decorator import cached_property
 from ..types import MISSING
 from ..rich import get_log_handler, init_logging, _is_rich_available
@@ -564,7 +564,8 @@ class SubCommandGroup(SubCommand):
             Any: The operation result.
         """
         attr_name = f"__subcommand_help_{id(self):x}__"
-        assert hasattr(args, attr_name)
+        if not hasattr(args, attr_name):
+            raise CommandError("subcommand help not available")
         func = getattr(args, attr_name)
         return func()
 
@@ -648,7 +649,7 @@ class _SubCommandMethod(SubCommand):
             parameter = signature.parameters[dest] if not no_param else None
             if "config" in argument_kwargs:
                 config = argument_kwargs.get("config")
-                if isinstance(config, ConfigProperty):
+                if isinstance(config, ConfigField):
                     if "action" not in argument_kwargs:
                         argument_kwargs.setdefault("action", ConfigAction)
                         annotation = _resolve_annotation(parameter)
@@ -683,7 +684,8 @@ class _SubCommandMethod(SubCommand):
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
-        assert hasattr(args, attr_name)
+        if not hasattr(args, attr_name):
+            raise CommandError("subcommand actions not available")
         actions = getattr(args, attr_name)
 
         method_args = []
@@ -1233,7 +1235,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         class VerboseAction(Action):
 
             def __call__(self, parser, namespace, values, option_string=None):
-                logging.root.setLevel(logging.DEBUG)
+                environ.logging.set_level("root", logging.DEBUG)
 
         class SilentAction(Action):
 
@@ -1244,7 +1246,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
             def __call__(self, parser, namespace, values, option_string=None):
                 environ.global_config["DEBUG"] = True
-                environ.logger.setLevel(logging.DEBUG)
+                environ.logging.set_level(environ.name, logging.DEBUG)
 
         class NoInputAction(Action):
 
@@ -1434,7 +1436,7 @@ class CommandMain:
                 exc_info=True if self.command.environ.debug else None,
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
-        except:
+        except Exception:
             if self.command.environ.debug and _is_rich_available():
                 from rich import get_console
                 get_console().print_exception(show_locals=True)

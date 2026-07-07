@@ -41,7 +41,12 @@ TimeoutType = _t.Union["Timeout", float, int, None]
 
 
 if _t.TYPE_CHECKING:
-    from .core._config import ConfigDict, Config, ConfigKeyType, ConfigLiteralType, ConfigType, ConfigTypeMap  # noqa
+    from .core._environ import ConfigDict  # noqa
+    from typing import Any, Dict, Union
+    ConfigKeyType = str
+    ConfigType = Any
+    ConfigLiteralType = str
+    ConfigTypeMap = Dict[str, Any]
     from .core._tools import Tools, Tool, ToolExecError  # noqa
     from .core._url import UrlFile, UrlFileValidatorType  # noqa
     from .core._environ import BaseEnviron as _BaseEnviron  # noqa
@@ -171,7 +176,7 @@ class Stoppable(_abc.ABC):
     def _stop_on_error(self, callback: "_t.Callable[P, T]", *args: "P.args", **kwargs: "P.kwargs") -> "T":
         try:
             return callback(*args, **kwargs)
-        except:
+        except Exception:
             self.stop()
             raise
 

@@ -35,6 +35,7 @@ from collections import ChainMap
 from typing import TYPE_CHECKING, Tuple, List
 
 from linktools import utils
+from linktools.errors import ToolDefinitionError
 from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
 from linktools.system import get_interpreter, get_interpreter_ident, get_shell_path, get_system
 from linktools.runtime import Process, popen
@@ -263,57 +264,74 @@ class Tool(metaclass=ToolMeta):
         }
 
         depends_on = utils.get_item(config, "depends_on") or []
-        assert isinstance(depends_on, (str, Tuple, List)), \
-            f"{self} depends_on type error, " \
-            f"str/tuple/list was expects, got {type(depends_on)}"
+        if not isinstance(depends_on, (str, tuple, list)):
+            raise ToolDefinitionError(
+                "%s depends_on type error: str/tuple/list expected, got %s" % (self, type(depends_on)))
         if isinstance(depends_on, str):
             depends_on = [depends_on]
         for dependency in depends_on:
-            assert dependency in self._tools.all, \
-                f"{self}.depends_on error: not found Tool<{dependency}>"
+            if dependency not in self._tools.all:
+                raise ToolDefinitionError(
+                    "%s.depends_on error: not found Tool<%s>" % (self, dependency))
         config["depends_on"] = depends_on
 
         # download url
         download_url = utils.get_item(config, "download_url") or ""
-        assert isinstance(download_url, str), \
-            f"{self} download_url type error, " \
-            f"str was expects, got {type(download_url)}"
+        if not isinstance(download_url, str):
+            raise ToolDefinitionError(
+                "%s download_url type error: str expected, got %s" % (self, type(download_url)))
         config["download_url"] = download_url.format(tools=self._tools, **config)
 
         unpack_path = utils.get_item(config, "unpack_path") or ""
-        assert isinstance(unpack_path, str), \
-            f"{self} unpack_path type error, " \
-            f"str was expects, got {type(unpack_path)}"
+        if not isinstance(unpack_path, str):
+            raise ToolDefinitionError(
+                "%s unpack_path type error: str expected, got %s" % (self, type(unpack_path)))
 
         target_path = utils.get_item(config, "target_path") or ""
-        assert isinstance(target_path, str), \
-            f"{self} target_path type error, " \
-            f"str was expects, got {type(target_path)}"
+        if not isinstance(target_path, str):
+            raise ToolDefinitionError(
+                "%s target_path type error: str expected, got %s" % (self, type(target_path)))
 
         absolute_path = utils.get_item(config, "absolute_path") or ""
-        assert isinstance(absolute_path, str), \
-            f"{self} absolute_path type error, " \
-            f"str was expects, got {type(absolute_path)}"
+        if not isinstance(absolute_path, str):
+            raise ToolDefinitionError(
+                "%s absolute_path type error: str expected, got %s" % (self, type(absolute_path)))
 
         if download_url and not unpack_path and not target_path:
             target_path = utils.guess_file_name(download_url)
 
         # target path: {target_path}
         # unpack path: {unpack_path}
-        # root path: {data_path}/tools/{unpack_path}/
-        # absolute path: {data_path}/tools/{unpack_path}/{target_path}
+        # v2 layout: tools/<name>/versions/<version>-<platform>-<arch>/
+        # root path: {data_path}/tools/{name}/versions/{version}-{platform}-{arch}/
         config["target_path"] = target_path = target_path.format(tools=self._tools, **config)
         config["unpack_path"] = unpack_path = unpack_path.format(tools=self._tools, **config)
-        paths = ["tools"]
-        if not utils.is_empty(unpack_path):
-            paths.append(unpack_path)
-        else:
-            paths.append(
-                f"{self.name}-{self.version}"
-                if self.version
-                else self.name
-            )
-        config["root_path"] = root_path = str(self._tools.environ.get_data_path(*paths))
+
+        # v2 multi-version path resolution.
+        version_slug = self.version or "unknown"
+        platform_arch = "%s-%s" % (self._tools.environ.system, self._tools.environ.machine)
+        version_dir = "%s-%s" % (version_slug, platform_arch)
+        config["root_path"] = root_path = str(self._tools.environ.get_data_path(
+            "tools", self.name, "versions", version_dir))
+
+        # Check if the active.json pointer redirects to a different version.
+        active_path = self._tools.environ.get_data_path("tools", self.name, "active.json")
+        if os.path.isfile(str(active_path)):
+            import json
+            try:
+                with open(str(active_path)) as f:
+                    active = json.load(f)
+                active_ver = active.get("version", "")
+                active_pa = active.get("platform_arch", "")
+                if active_ver and active_pa:
+                    alt_dir = "%s-%s" % (active_ver, active_pa)
+                    alt_root = str(self._tools.environ.get_data_path(
+                        "tools", self.name, "versions", alt_dir))
+                    if os.path.isdir(alt_root):
+                        root_path = alt_root
+                        config["root_path"] = root_path
+            except Exception:
+                pass
 
         if absolute_path:
             config["absolute_path"] = absolute_path.format(tools=self._tools, **config)
@@ -326,9 +344,9 @@ class Tool(metaclass=ToolMeta):
         cmdline = utils.get_item(config, "cmdline")
         if cmdline in (MISSING, None):
             cmdline = config["name"]
-        assert isinstance(cmdline, str), \
-            f"{self} cmdline type error, " \
-            f"str was expects, got {type(cmdline)}"
+        if not isinstance(cmdline, str):
+            raise ToolDefinitionError(
+                "%s cmdline type error: str expected, got %s" % (self, type(cmdline)))
         config["cmdline"] = cmdline
 
         if not utils.is_empty(cmdline):
@@ -345,9 +363,9 @@ class Tool(metaclass=ToolMeta):
         else:
             executable_cmdline = utils.get_item(config, "executable_cmdline")
             if executable_cmdline:
-                assert isinstance(executable_cmdline, (str, tuple, list)), \
-                    f"{self} executable_cmdline type error, " \
-                    f"str/tuple/list was expects, got {type(executable_cmdline)}"
+                if not isinstance(executable_cmdline, (str, tuple, list)):
+                    raise ToolDefinitionError(
+                        "%s executable_cmdline type error: str/tuple/list expected, got %s" % (self, type(executable_cmdline)))
             else:
                 # if executable_cmdline is empty,
                 # set absolute_path as executable_cmdline
@@ -435,22 +453,26 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[dependency]
             tool.prepare()
 
-        # download and unzip file
+        # download and extract (v2 §8.7: safe_extract instead of shutil.unpack_archive)
         if not self.exists:
             self._tools.logger.info(f"Download {self}: {self.download_url}")
             with self._tools.environ.get_url_file(self.download_url) as url_file:
                 if not self.exists:
                     temp_dir = self._tools.environ.get_temp_path("tools", "cache")
                     temp_path = url_file.save(temp_dir)
+                    os.makedirs(self.root_path, exist_ok=True)
                     if not utils.is_empty(self.unpack_path):
-                        self._tools.logger.debug(f"Unpack {self} to {self.root_path}")
-                        os.makedirs(self.root_path, exist_ok=True)
-                        shutil.unpack_archive(temp_path, self.root_path)
+                        self._tools.logger.debug(f"Extract {self} to {self.root_path}")
+                        utils.safe_extract(temp_path, self.root_path)
                         os.remove(temp_path)
                     else:
                         self._tools.logger.debug(f"Move {self} to {self.absolute_path}")
-                        os.makedirs(self.root_path, exist_ok=True)
+                        os.makedirs(os.path.dirname(self.absolute_path) or self.root_path, exist_ok=True)
                         shutil.move(temp_path, self.absolute_path)
+
+                    # v2 §8.3: write manifest + active.json pointer
+                    self._write_manifest()
+                    self._set_active()
 
         if not os.access(self._stub.path, os.X_OK):
             self._tools.logger.debug(f"Create {self._stub}")
@@ -465,19 +487,21 @@ class Tool(metaclass=ToolMeta):
                 os.chmod(self.absolute_path, 0o0755)
 
     def clear(self) -> None:
-        """Clear cached or generated data."""
+        """Clear cached or generated data (v2: removes version dir + active.json)."""
         if self._stub.exists:
             self._tools.logger.debug(f"Delete {self._stub}")
             self._stub.remove()
         if not self.exists:
             self._tools.logger.debug(f"{self} does not exist, skip")
             return
-        if not utils.is_empty(self.unpack_path):
+        # Remove the version dir.
+        if self.root_path and os.path.isdir(self.root_path):
             self._tools.logger.debug(f"Delete {self.root_path}")
             shutil.rmtree(self.root_path, ignore_errors=True)
-        elif not utils.is_empty(self.root_path):
-            self._tools.logger.debug(f"Delete {self.root_path}")
-            shutil.rmtree(self.root_path, ignore_errors=True)
+        # Remove the active.json pointer.
+        active_path = str(self._tools.environ.get_data_path("tools", self.name, "active.json"))
+        if os.path.isfile(active_path):
+            utils.ignore_errors(os.remove, args=(active_path,))
 
     def popen(self, *args: "Any", **kwargs) -> "Process":
         """Start a process for this tool.
@@ -491,10 +515,13 @@ class Tool(metaclass=ToolMeta):
         """
         self.prepare()
 
+        # §9.1/v2 §9.1: pass the tools-stub PATH via subprocess_env instead of
+        # relying on the global os.environ mutation.
+        env = self._tools.environ.subprocess_env()
         if self.environment:
-            env = kwargs.setdefault("default_env", {})
             for key, value in self.environment.items():
                 env.setdefault(key, value)
+        kwargs.setdefault("default_env", env)
 
         # java or other
         executable_cmdline = self.executable_cmdline
@@ -548,6 +575,32 @@ class Tool(metaclass=ToolMeta):
         """
         from ..cli import env
         return utils.list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
+
+    def _write_manifest(self):
+        """Write manifest.json in the version dir (v2 §8.3)."""
+        import json
+        manifest = {
+            "schema": 1,
+            "name": self.name,
+            "version": self.version,
+            "platform": self._tools.environ.system,
+            "architecture": self._tools.environ.machine,
+            "source_url": self.download_url,
+            "installed_at": _now_iso(),
+            "entrypoint": self.absolute_path,
+        }
+        manifest_path = os.path.join(self.root_path, "manifest.json")
+        utils.atomic_write(manifest_path, json.dumps(manifest, indent=2))
+
+    def _set_active(self):
+        """Write active.json pointing at this version (v2 §8.3)."""
+        import json
+        active = {
+            "version": self.version or "unknown",
+            "platform_arch": "%s-%s" % (self._tools.environ.system, self._tools.environ.machine),
+        }
+        active_path = str(self._tools.environ.get_data_path("tools", self.name, "active.json"))
+        utils.atomic_write(active_path, json.dumps(active, indent=2))
 
 
 class Tools(object):
@@ -641,3 +694,9 @@ class Tools(object):
             result[name] = Tool(self, name, value)
 
         return result
+
+
+def _now_iso():
+    # type: () -> str
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

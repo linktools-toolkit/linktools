@@ -36,7 +36,9 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.core import Config
+from linktools.core._config_schema import (
+    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
+)
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -56,18 +58,25 @@ class Container(BaseContainer):
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
             AUTHELIA_LDAP_HOST="lldap",
-            AUTHELIA_LDAP_PORT=Config.Alias(type=int) | 3890,
-            AUTHELIA_LDAP_ADDRESS=Config.Lazy(
-                lambda cfg: f"ldap://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_PORT')}"),
-            AUTHELIA_LDAP_WEB_PORT=Config.Alias(type=int) | 17170,
-            AUTHELIA_LDAP_WEB_ADDRESS=Config.Lazy(
-                lambda cfg: f"http://{cfg.get('AUTHELIA_LDAP_HOST')}:{cfg.get('AUTHELIA_LDAP_WEB_PORT')}"),
+            AUTHELIA_LDAP_PORT=ConfigField(name="AUTHELIA_LDAP_PORT", cast=int, default=3890),
+            AUTHELIA_LDAP_ADDRESS=ConfigField(name="AUTHELIA_LDAP_ADDRESS", provider=LazyProvider(
+                lambda r: f"ldap://{r.get('AUTHELIA_LDAP_HOST')}:{r.get('AUTHELIA_LDAP_PORT')}")),
+            AUTHELIA_LDAP_WEB_PORT=ConfigField(name="AUTHELIA_LDAP_WEB_PORT", cast=int, default=17170),
+            AUTHELIA_LDAP_WEB_ADDRESS=ConfigField(name="AUTHELIA_LDAP_WEB_ADDRESS", provider=LazyProvider(
+                lambda r: f"http://{r.get('AUTHELIA_LDAP_HOST')}:{r.get('AUTHELIA_LDAP_WEB_PORT')}")),
             AUTHELIA_LDAP_USER="admin",
-            AUTHELIA_LDAP_PASSWORD=Config.Alias("LLDAP_ADMIN_PASSWORD") | Config.Prompt(cached=True),
-            AUTHELIA_LDAP_BASE_DN=Config.Alias("LLDAP_BASE_DN") | "dc=example,dc=org",
-            AUTHELIA_MIN_AUTH_LEVEL=Config.Alias(type=int) | 2,
-            AUTHELIA_OIDC_CLIENT_SECRET=Config.Alias(cached=True) | utils.random_string(20),
-            AUTHELIA_ADMIN_AUTH_ENABLE=Config.Property(type=bool) | True,
+            AUTHELIA_LDAP_PASSWORD=ConfigField(name="AUTHELIA_LDAP_PASSWORD", provider=ChainProvider(
+                AliasProvider("LLDAP_ADMIN_PASSWORD"), PromptProvider("AUTHELIA_LDAP_PASSWORD"),
+            )),
+            AUTHELIA_LDAP_BASE_DN=ConfigField(
+                name="AUTHELIA_LDAP_BASE_DN", default="dc=example,dc=org",
+                provider=AliasProvider("LLDAP_BASE_DN"),
+            ),
+            AUTHELIA_MIN_AUTH_LEVEL=ConfigField(name="AUTHELIA_MIN_AUTH_LEVEL", cast=int, default=2),
+            AUTHELIA_OIDC_CLIENT_SECRET=ConfigField(
+                name="AUTHELIA_OIDC_CLIENT_SECRET", default=utils.random_string(20),
+            ),
+            AUTHELIA_ADMIN_AUTH_ENABLE=ConfigField(name="AUTHELIA_ADMIN_AUTH_ENABLE", cast=bool, default=True),
         )
 
     @cached_property

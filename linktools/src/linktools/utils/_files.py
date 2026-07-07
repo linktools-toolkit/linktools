@@ -133,7 +133,7 @@ def remove_file(path) -> None:
     else:
         try:
             os.remove(path)
-        except:
+        except Exception:
             pass
 
 
@@ -150,7 +150,7 @@ def clear_directory(path) -> None:
         else:
             try:
                 os.remove(target_path)
-            except:
+            except Exception:
                 pass
 
 

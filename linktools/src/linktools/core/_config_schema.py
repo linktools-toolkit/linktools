@@ -34,7 +34,8 @@ __all__ = [
     "ConfigSource", "EnvironmentSource", "RuntimeOverrideSource",
     "PersistentSource", "FileSource", "DefaultSource",
     "AliasProvider", "LazyProvider", "PromptProvider", "ConfirmProvider",
-    "ErrorProvider", "ConfigResolver", "ResolvedConfig",
+    "ErrorProvider", "ChainProvider",
+    "ConfigResolver", "ResolvedConfig", "Config",
 ]
 
 
@@ -84,6 +85,19 @@ class ErrorProvider(object):
     def __init__(self, message):
         # type: (str) -> None
         self.message = message
+
+
+class ChainProvider(object):
+    """Try multiple providers in order until one yields a value (v2 §3.7).
+
+    Replaces the old Config DSL's ``|`` operator: ``Prompt() | Lazy(fn) |
+    default`` becomes ``ChainProvider(PromptProvider(...), LazyProvider(fn))``
+    with ``default`` on the ConfigField.
+    """
+
+    def __init__(self, *providers):
+        # type: (*Any) -> None
+        self.providers = list(providers)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,17 +199,28 @@ class RuntimeOverrideSource(ConfigSource):
 
 
 class PersistentSource(ConfigSource):
-    """Reads from a ConfigStore-backed namespace (§8.5)."""
+    """Reads/writes from a ConfigStore (§8.5), key-prefixed by namespace."""
 
     name = "persistent"
 
     def __init__(self, store, namespace="config"):
-        self._ns = store.namespace(namespace)
+        self._store = store
+        self._prefix = (namespace + ".") if namespace else ""
+
+    def _full(self, key):
+        return self._prefix + key
 
     def get(self, key):
-        if key in self._ns:
-            return (self._ns.get(key), True)
+        full = self._full(key)
+        if full in self._store:
+            return (self._store.get(full), True)
         return (MISSING, False)
+
+    def set(self, key, value):
+        self._store.set(self._full(key), value)
+
+    def delete(self, key):
+        return self._store.delete(self._full(key))
 
 
 class FileSource(ConfigSource):
@@ -243,6 +268,31 @@ class ConfigResolver(object):
         # type: (ConfigSchema, Sequence[ConfigSource]) -> None
         self._schema = schema
         self._sources = list(sources)
+        self._memo = {}  # type: Dict[str, ResolvedConfig]
+
+    def clear_memo(self):
+        # type: () -> None
+        """Clear the resolution memo (§3.8 reload)."""
+        self._memo.clear()
+
+    def get(self, key, type=None, default=MISSING):
+        # type: (str, Any, Any) -> Any
+        """Convenience: resolve and return the value (for LazyProvider lambdas).
+
+        LazyProvider receives the resolver as its argument; this method lets
+        lambdas do ``r.get("OTHER_KEY")`` without needing the full Config wrapper.
+        """
+        try:
+            result = self.resolve(key)
+            value = result.value
+        except Exception:
+            return default
+        if type is not None and value is not MISSING:
+            try:
+                value = type(value)
+            except (TypeError, ValueError):
+                return default
+        return value
 
     # -- internals ---------------------------------------------------------
 
@@ -285,6 +335,18 @@ class ConfigResolver(object):
 
     def resolve(self, key, _stack=None):
         # type: (str, Optional[List[str]]) -> ResolvedConfig
+        # Memo: cache top-level resolutions so interactive prompts (PromptProvider)
+        # only ask once per session (§3.7/§3.8). Skip memo during recursive
+        # resolution (alias/lazy chains with _stack) to avoid partial caching.
+        if _stack is None and key in self._memo:
+            return self._memo[key]
+        result = self._resolve_inner(key, _stack)
+        if _stack is None:
+            self._memo[key] = result
+        return result
+
+    def _resolve_inner(self, key, _stack=None):
+        # type: (str, Optional[List[str]]) -> ResolvedConfig
         field = self._schema.get(key)
         if field is None:
             raise ConfigNotFoundError("unknown config key %r" % (key,))
@@ -324,6 +386,15 @@ class ConfigResolver(object):
         if isinstance(provider, ErrorProvider):
             raise ConfigError(provider.message)
 
+        if isinstance(provider, ChainProvider):
+            # Try each sub-provider in order until one yields a value.
+            for sub in provider.providers:
+                try:
+                    return self._try_provider(sub, field, key, _stack)
+                except Exception:
+                    continue
+            # All sub-providers failed; fall through to sources/default.
+
         source_name, raw, present = self._first_present(field)
         if present:
             return ResolvedConfig(self._cast_validate(field, raw), field, source_name, raw)
@@ -334,6 +405,41 @@ class ConfigResolver(object):
         if field.required:
             raise ConfigNotFoundError("required config %r is not set" % (key,))
         raise ConfigNotFoundError("config %r is not set and has no default" % (key,))
+
+    def _try_provider(self, provider, field, key, _stack=None):
+        # type: (Any, ConfigField, str, Optional[List[str]]) -> ResolvedConfig
+        """Dispatch a single provider (used by ChainProvider and resolve)."""
+        if isinstance(provider, AliasProvider):
+            stack = list(_stack or [])
+            if key in stack:
+                chain = stack[stack.index(key):] + [key]
+                raise ConfigCycleError("config alias cycle: " + " -> ".join(chain))
+            stack.append(key)
+            return self.resolve(provider.target, _stack=stack)
+
+        if isinstance(provider, LazyProvider):
+            value = provider.func(self)
+            return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
+
+        if isinstance(provider, PromptProvider):
+            from ..rich import prompt
+            value = prompt(
+                provider.message or field.name,
+                default=provider.default,
+                password=provider.password,
+                choices=provider.choices,
+            )
+            return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
+
+        if isinstance(provider, ConfirmProvider):
+            from ..rich import confirm
+            value = confirm(provider.message or field.name, default=provider.default)
+            return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
+
+        if isinstance(provider, ErrorProvider):
+            raise ConfigError(provider.message)
+
+        raise ConfigNotFoundError("unknown provider type: %r" % type(provider).__name__)
 
     def explain(self, key):
         # type: (str) -> dict
@@ -361,3 +467,163 @@ class ConfigResolver(object):
             "deprecated": field.deprecated,
             "description": field.description,
         }
+
+
+# --------------------------------------------------------------------------- #
+# Config: user-facing API wrapping ConfigResolver (v2 §3.5)
+# --------------------------------------------------------------------------- #
+
+class Config(object):
+    """The user-facing config, backed by ConfigResolver (v2 §3.5).
+
+    Provides get/set/persist/remove/unset/explain/reload — the v2 contract.
+    ``set`` writes to RuntimeOverrideSource (current process); ``persist`` writes
+    to PersistentSource (user-editable JSON). ``get`` resolves through the full
+    source chain with §8.2 precedence.
+    """
+
+    def __init__(self, environ, schema, sources):
+        # type: (Any, ConfigSchema, Sequence[ConfigSource]) -> None
+        self._environ = environ
+        self._schema = schema
+        self._sources = list(sources)
+        self._resolver = ConfigResolver(schema, self._sources)
+
+    @property
+    def schema(self):
+        # type: () -> ConfigSchema
+        return self._schema
+
+    def define(self, field):
+        # type: (ConfigField) -> "Config"
+        self._schema.define(field)
+        return self
+
+    def _find(self, source_class):
+        for s in self._sources:
+            if isinstance(s, source_class):
+                return s
+        return None
+
+    def get(self, key, type=None, default=MISSING):
+        # type: (str, Optional[type], Any) -> Any
+        try:
+            result = self._resolver.resolve(key)
+            value = result.value
+        except ConfigNotFoundError:
+            return default
+        if type is not None and value is not MISSING:
+            try:
+                value = type(value)
+            except (TypeError, ValueError) as exc:
+                if default is not MISSING:
+                    return default
+                raise ConfigCastError("cannot cast %r for %s: %s" % (value, key, exc))
+        return value
+
+    def set(self, key, value):
+        # type: (str, Any) -> None
+        """Runtime override (v2 §3.5: current process only)."""
+        runtime = self._find(RuntimeOverrideSource)
+        if runtime is None:
+            raise ConfigError("no RuntimeOverrideSource configured")
+        runtime.set(key, value)
+
+    def persist(self, key, value):
+        # type: (str, Any) -> None
+        """Write to the persistent user store (v2 §3.5)."""
+        persistent = self._find(PersistentSource)
+        if persistent is None:
+            raise ConfigError("no PersistentSource configured")
+        persistent.set(key, value)
+
+    def unset(self, key):
+        # type: (str) -> None
+        """Remove a runtime override (v2 §3.5)."""
+        runtime = self._find(RuntimeOverrideSource)
+        if runtime:
+            runtime.clear(key)
+
+    def remove(self, key):
+        # type: (str) -> None
+        """Remove a persistent value (v2 §3.5)."""
+        persistent = self._find(PersistentSource)
+        if persistent:
+            persistent.delete(key)
+
+    def explain(self, key):
+        # type: (str) -> dict
+        return self._resolver.explain(key)
+
+    def reload(self, clear_runtime=False):
+        # type: (bool) -> None
+        """Re-read sources + clear memo (v2 §3.8)."""
+        if clear_runtime:
+            runtime = self._find(RuntimeOverrideSource)
+            if runtime:
+                runtime.clear()
+        self._resolver.clear_memo()
+
+    def keys(self):
+        # type: () -> List[str]
+        known = set()
+        for name in self._schema._fields:
+            known.add(name)
+        for source in self._sources:
+            data = getattr(source, "_data", None)
+            if isinstance(data, dict):
+                known.update(data.keys())
+            ns = getattr(source, "_ns", None)
+            if ns is not None:
+                try:
+                    known.update(ns.keys())
+                except Exception:
+                    pass
+        return sorted(known)
+
+    def update_defaults(self, **kwargs):
+        # type: (**Any) -> "Config"
+        """Register multiple config defaults at once (cntr compatibility).
+
+        Accepts a mix of ConfigField, ChainProvider/Provider, or plain values.
+        Plain values become ConfigField(name=key, default=value).
+        Old ConfigProperty chains (Config.Prompt|Lazy|Alias) are also detected
+        and wrapped for short-term coexistence during cntr migration.
+        """
+        for key, value in kwargs.items():
+            if isinstance(value, ConfigField):
+                if value.name != key:
+                    value = ConfigField(
+                        name=key, default=value.default, cast=value.cast,
+                        validator=value.validator, aliases=value.aliases,
+                        required=value.required, secret=value.secret,
+                        description=value.description, deprecated=value.deprecated,
+                        provider=value.provider)
+                self._schema.define(value)
+            elif hasattr(value, "providers") or hasattr(value, "target") or \
+                    hasattr(value, "func") or hasattr(value, "message"):
+                # It's a new provider (ChainProvider/AliasProvider/Lazy/etc.)
+                self._schema.define(ConfigField(name=key, provider=value))
+            elif hasattr(value, "get") and hasattr(value, "load") and \
+                    hasattr(value, "_default"):
+                # Old ConfigProperty chain (Config.Prompt|Lazy|Alias|...).
+                # Extract the default from the chain tail and use it.
+                default = getattr(value, "_default", MISSING)
+                if default is MISSING:
+                    default = None
+                self._schema.define(ConfigField(name=key, default=default))
+            else:
+                self._schema.define(ConfigField(name=key, default=value))
+        return self
+
+    def cast(self, value, type=None):
+        # type: (Any, Any) -> Any
+        """Standalone type cast (cntr compatibility)."""
+        if type is None or type is MISSING:
+            return value
+        if type == "path":
+            import os
+            return os.path.abspath(os.path.expanduser(str(value)))
+        if callable(type):
+            return type(value)
+        return value

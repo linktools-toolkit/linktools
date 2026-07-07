@@ -11,6 +11,7 @@ from dulwich.repo import Repo as DulwichRepo
 
 from linktools.errors import GitError
 from linktools.git import GitRepository, GitSyncPolicy
+from linktools.core import environ
 
 _AUTHOR = b"Test User <test@example.com>"
 
@@ -43,28 +44,28 @@ class TestGit(unittest.TestCase):
             return f.read()
 
     def test_clone(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
         self.assertTrue(os.path.isdir(os.path.join(self.clone_path, ".git")))
         self.assertEqual(self._read(self.clone_path, "a.txt"), "hello")
 
     def test_clone_branch(self):
         porcelain.branch_create(self.remote_path, "feature")
-        GitRepository.clone(self.remote_path, self.clone_path, branch="feature")
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path, branch="feature")
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         self.assertIn("feature", repo.heads)
 
     def test_heads(self):
         porcelain.branch_create(self.remote_path, "feature")
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         # Single-branch shallow clone only fetches the default branch.
         self.assertEqual(repo.heads, ["master"])
 
     def test_is_dirty(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         self.assertFalse(repo.is_dirty())
 
@@ -73,8 +74,8 @@ class TestGit(unittest.TestCase):
         self.assertTrue(repo.is_dirty())
 
     def test_status(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
@@ -90,8 +91,8 @@ class TestGit(unittest.TestCase):
         self.assertIn(b"b.txt", repo.status().staged["add"])
 
     def test_commit(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "b.txt"), "w") as f:
@@ -103,8 +104,8 @@ class TestGit(unittest.TestCase):
         self.assertFalse(repo.is_dirty())
 
     def test_commit_all(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
@@ -114,8 +115,8 @@ class TestGit(unittest.TestCase):
         self.assertFalse(repo.is_dirty())
 
     def test_push(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "b.txt"), "w") as f:
@@ -130,8 +131,8 @@ class TestGit(unittest.TestCase):
         self.assertEqual(remote_heads[b"master"].decode(), sha)
 
     def test_git_proxy_stash_and_pop(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
@@ -146,8 +147,8 @@ class TestGit(unittest.TestCase):
         self.assertEqual(self._read(self.clone_path, "a.txt"), "dirty change")
 
     def test_git_proxy_reset_hard(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
@@ -158,8 +159,8 @@ class TestGit(unittest.TestCase):
         self.assertEqual(self._read(self.clone_path, "a.txt"), "hello")
 
     def test_git_proxy_checkout(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         porcelain.branch_create(self.clone_path, "local-branch")
 
@@ -170,8 +171,8 @@ class TestGit(unittest.TestCase):
         self.assertEqual(porcelain.active_branch(self.clone_path), b"master")
 
     def test_pull_fast_forward(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         self._commit(self.remote_path, "b.txt", "world", "second")
@@ -180,8 +181,8 @@ class TestGit(unittest.TestCase):
         self.assertEqual(self._read(self.clone_path, "b.txt"), "world")
 
     def test_pull_diverged_raises(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         self._commit(self.remote_path, "b.txt", "remote change", "remote second")
@@ -191,8 +192,8 @@ class TestGit(unittest.TestCase):
             repo.pull(reset=False)
 
     def test_pull_reset(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         self._commit(self.remote_path, "b.txt", "remote change", "remote second")
@@ -205,8 +206,8 @@ class TestGit(unittest.TestCase):
 
     def test_create_head_from_remote_branch(self):
         porcelain.branch_create(self.remote_path, "feature")
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         self.assertNotIn("feature", repo.heads)
 
@@ -216,8 +217,8 @@ class TestGit(unittest.TestCase):
         self.assertIn("feature", repo.heads)
 
     def test_create_head_missing_branch_raises(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         with self.assertRaises(GitError):
@@ -228,14 +229,14 @@ class TestGit(unittest.TestCase):
         os.makedirs(not_a_repo)
 
         with self.assertRaises(NotGitRepository):
-            GitRepository(not_a_repo)
+            GitRepository(environ, not_a_repo)
 
     def test_clone_target_exists_raises(self):
         # Atomic clone (§12.2): refuse to clobber an existing target rather
         # than leaving a half-merged repository.
         os.makedirs(self.clone_path)
         with self.assertRaises(GitError):
-            GitRepository.clone(self.remote_path, self.clone_path)
+            GitRepository.clone(environ, self.remote_path, self.clone_path)
 
     def test_clone_failure_leaves_no_partial(self):
         # If the clone fails mid-way, no staging dir or partial repo survives
@@ -246,15 +247,15 @@ class TestGit(unittest.TestCase):
         with mock.patch("linktools.git.repository.porcelain.clone",
                         side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                GitRepository.clone(self.remote_path, self.clone_path)
+                GitRepository.clone(environ, self.remote_path, self.clone_path)
         self.assertFalse(os.path.exists(self.clone_path))
         leftovers = [p for p in os.listdir(self._tmp_dir)
                      if p.startswith("clone.staging-")]
         self.assertEqual(leftovers, [])
 
     def test_sync_reset_policy(self):
-        GitRepository.clone(self.remote_path, self.clone_path)
-        repo = GitRepository(self.clone_path)
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         self._commit(self.remote_path, "b.txt", "remote change", "remote second")
         self._commit(self.clone_path, "c.txt", "local change", "local second")

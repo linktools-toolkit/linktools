@@ -38,7 +38,9 @@ from dulwich.errors import NotGitRepository
 
 from linktools import utils
 from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
-from linktools.core import Config
+from linktools.core._config_schema import (
+    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider,
+)
 from linktools.decorator import cached_property
 from linktools.errors import GitDivergedError
 from linktools.git import GitRepository, GitSyncPolicy
@@ -89,7 +91,10 @@ class ContainerManager:
     @property
     def configs(self) -> "dict[str, Any]":
         return dict(
-            HOST=Config.Prompt() | Config.Lazy(lambda cfg: get_lan_ip()),
+            HOST=ConfigField(name="HOST", provider=ChainProvider(
+                PromptProvider("HOST"),
+                LazyProvider(lambda r: get_lan_ip()),
+            )),
             DOCKER_HOST="/var/run/docker.sock",
 
             COMPOSE_PROJECT_NAME=self.name,
@@ -97,19 +102,33 @@ class ContainerManager:
             SERVICE_LOG_DRIVER="json-file",
             SERVICE_LOG_MAX_SIZE="10m",
 
-            DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
-            DOCKER_UID=Config.Lazy(lambda cfg: get_uid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_GID=Config.Lazy(lambda cfg: get_gid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_TYPE=Config.Lazy(lambda cfg: \
-                Config.Alias("CONTAINER_TYPE") | Config.Prompt(choices=["docker", "docker-rootless"], cached=True) \
-                if self.system == "linux" and os.getuid() != 0 \
-                else "docker"
-            ),
+            DOCKER_USER=ConfigField(name="DOCKER_USER", provider=ChainProvider(
+                PromptProvider("DOCKER_USER"),
+            ), default=os.environ.get("SUDO_USER", self.user).replace(" ", "")),
+            DOCKER_UID=ConfigField(name="DOCKER_UID", provider=LazyProvider(
+                lambda r: get_uid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_GID=ConfigField(name="DOCKER_GID", provider=LazyProvider(
+                lambda r: get_gid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_TYPE=ConfigField(name="DOCKER_TYPE", default="docker", provider=(
+                ChainProvider(
+                    AliasProvider("CONTAINER_TYPE"),
+                    PromptProvider("DOCKER_TYPE", choices=["docker", "docker-rootless"]),
+                ) if self.system == "linux" and os.getuid() != 0 else None
+            )),
 
-            DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("app"),
-            DOCKER_APP_DATA_PATH=Config.Alias("DOCKER_APP_PATH", type="path"),
-            DOCKER_USER_DATA_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("user_data"),
-            DOCKER_DOWNLOAD_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("download"),
+            DOCKER_APP_PATH=ConfigField(name="DOCKER_APP_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_APP_PATH"),
+            ), default=str(self.data_path.joinpath("app"))),
+            DOCKER_APP_DATA_PATH=ConfigField(name="DOCKER_APP_DATA_PATH", cast="path",
+                                             provider=AliasProvider("DOCKER_APP_PATH")),
+            DOCKER_USER_DATA_PATH=ConfigField(name="DOCKER_USER_DATA_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_USER_DATA_PATH"),
+            ), default=str(self.data_path.joinpath("user_data"))),
+            DOCKER_DOWNLOAD_PATH=ConfigField(name="DOCKER_DOWNLOAD_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_DOWNLOAD_PATH"),
+            ), default=str(self.data_path.joinpath("download"))),
         )
 
     @property
@@ -570,7 +589,7 @@ class ContainerManager:
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
-                GitRepository.clone(url, repo_path, branch)
+                GitRepository.clone(self.environ, url, repo_path, branch)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
 
             else:
@@ -596,14 +615,14 @@ class ContainerManager:
 
             if repo_type == "git" and not os.path.exists(repo_path):
                 self.logger.info(f"Update git repository: {url}")
-                GitRepository.clone(url, repo_path, branch)
+                GitRepository.clone(self.environ, url, repo_path, branch)
                 continue
 
             if not os.path.exists(repo_path):
                 continue
 
             try:
-                repo = GitRepository(repo_path)
+                repo = GitRepository(self.environ, repo_path)
             except NotGitRepository:
                 self.logger.debug(f"Invalid git repository, skip: {url}")
                 continue

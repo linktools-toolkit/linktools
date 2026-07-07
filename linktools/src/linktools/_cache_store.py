@@ -172,21 +172,42 @@ class CacheNamespace(object):
 
     # -- write -------------------------------------------------------------
 
+    # SQLite ≥3.24 supports ON CONFLICT … DO UPDATE (UPSERT).  Python 3.6 may
+    # ship an older SQLite, so detect once and fall back to INSERT-or-UPDATE.
+    _SUPPORTS_UPSERT = sqlite3.sqlite_version_info >= (3, 24, 0)
+
     def set(self, key, value, ttl=None):
         # type: (str, Any, Optional[float]) -> None
         expires_at = self._compute_expiry(ttl)
         blob = self._codec.encode(value)  # may raise CacheCodecError
         now = time.time()
-        self._conn().execute(
-            "INSERT INTO cache_entries(namespace, key, value, codec, created_at,"
-            " updated_at, expires_at, version) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, 1) "
-            "ON CONFLICT(namespace, key) DO UPDATE SET "
-            "value=excluded.value, codec=excluded.codec, "
-            "updated_at=excluded.updated_at, expires_at=excluded.expires_at, "
-            "version=cache_entries.version + 1",
-            (self._name, key, blob, self._codec.mime, now, now, expires_at),
-        )
+        conn = self._conn()
+        if CacheNamespace._SUPPORTS_UPSERT:
+            conn.execute(
+                "INSERT INTO cache_entries(namespace, key, value, codec, created_at,"
+                " updated_at, expires_at, version) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(namespace, key) DO UPDATE SET "
+                "value=excluded.value, codec=excluded.codec, "
+                "updated_at=excluded.updated_at, expires_at=excluded.expires_at, "
+                "version=cache_entries.version + 1",
+                (self._name, key, blob, self._codec.mime, now, now, expires_at),
+            )
+        else:
+            # Fallback for older SQLite: try INSERT, on conflict UPDATE.
+            cur = conn.execute(
+                "UPDATE cache_entries SET value=?, codec=?, updated_at=?,"
+                " expires_at=?, version=version+1"
+                " WHERE namespace=? AND key=?",
+                (blob, self._codec.mime, now, expires_at, self._name, key),
+            )
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO cache_entries(namespace, key, value, codec,"
+                    " created_at, updated_at, expires_at, version)"
+                    " VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+                    (self._name, key, blob, self._codec.mime, now, now, expires_at),
+                )
 
     @staticmethod
     def _compute_expiry(ttl):

@@ -2,6 +2,7 @@
 """Tests for LockManager (§7.11) and atomic file utils (§17.1)."""
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -60,10 +61,16 @@ def test_different_process_locks_are_independent(manager):
         a.release()
 
 
-def test_file_lock_targets_the_given_path(manager, tmp_path):
+def test_file_lock_uses_lock_dir_not_business_file(manager, tmp_path):
+    # §6.2: file_lock must NOT lock the business file itself; the lock lives
+    # under lock_dir keyed by the sha256 of the absolute target path.
     target = tmp_path / "f.bin"
     lock = manager.file_lock(target)
-    assert str(target) in str(lock.lock_file)
+    # lock_file is under lock_dir, NOT on the target
+    assert manager.lock_dir in Path(lock.lock_file).parents
+    assert str(target) not in str(lock.lock_file)
+    # no .lock sidecar pollutes the target's directory
+    assert not list(tmp_path.glob("*.lock"))
 
 
 def test_sanitize_drops_separators():

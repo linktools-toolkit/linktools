@@ -18,7 +18,48 @@ import contextlib
 import logging
 import re
 import threading
-from typing import Any, Dict, List, Optional, Pattern, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple, Union
+
+# --------------------------------------------------------------------------- #
+# Global LogRecordFactory manager (v2 §4.2)
+#
+# Multiple LoggingManagers (one per Environment) each register a redactor; the
+# global factory chains ALL active redactors so no Environment overwrites
+# another's. Ref-counted: the factory is installed when the first redactor
+# registers and restored when the last unregisters.
+# --------------------------------------------------------------------------- #
+
+_factory_lock = threading.Lock()
+_original_factory = logging.getLogRecordFactory()
+_active_redactors = {}  # type: Dict[int, Callable[[logging.LogRecord], None]]
+_factory_installed = False
+
+
+def _chained_factory(*args, **kwargs):
+    record = _original_factory(*args, **kwargs)
+    for redactor in list(_active_redactors.values()):
+        redactor(record)
+    return record
+
+
+def _register_redactor(key, redactor):
+    # type: (int, Callable[[logging.LogRecord], None]) -> None
+    global _factory_installed
+    with _factory_lock:
+        _active_redactors[key] = redactor
+        if not _factory_installed:
+            logging.setLogRecordFactory(_chained_factory)
+            _factory_installed = True
+
+
+def _unregister_redactor(key):
+    # type: (int) -> None
+    global _factory_installed
+    with _factory_lock:
+        _active_redactors.pop(key, None)
+        if not _active_redactors and _factory_installed:
+            logging.setLogRecordFactory(_original_factory)
+            _factory_installed = False
 
 __all__ = ["LoggingManager"]
 
@@ -133,20 +174,20 @@ class LoggingManager(object):
 
     def install_filter(self):
         # type: () -> None
-        """Install global redaction + context annotation (idempotent)."""
+        """Register this manager's redactor with the global factory (v2 §4.2).
+
+        Idempotent. Multiple managers can register concurrently; the global
+        chained factory applies ALL active redactors to each record.
+        """
         if self._installed:
             return
-        self._old_factory = logging.getLogRecordFactory()
         manager = self
 
-        def _factory(*args, **kwargs):
-            record = manager._old_factory(*args, **kwargs)
+        def _redact(record):
+            # Context annotation
             for key, value in manager.current_context().items():
                 record.__dict__.setdefault(key, value)
             # Redact the FINAL formatted message, never the raw format string.
-            # Redacting record.msg directly would turn "password=%s" into
-            # "password=***" and then getMessage()'s %-format would raise
-            # TypeError (not all args converted), dropping the record.
             try:
                 message = record.getMessage()
             except Exception:
@@ -154,20 +195,16 @@ class LoggingManager(object):
             if isinstance(message, str):
                 record.msg = manager.redact(message)
                 record.args = ()
-            return record
 
-        logging.setLogRecordFactory(_factory)
-        self._factory = _factory
+        _register_redactor(id(self), _redact)
         self._installed = True
 
     def remove_filter(self):
         # type: () -> None
-        """Restore the previous record factory."""
-        if self._installed and self._old_factory is not None:
-            logging.setLogRecordFactory(self._old_factory)
+        """Unregister this manager's redactor (v2 §4.2)."""
+        if self._installed:
+            _unregister_redactor(id(self))
             self._installed = False
-            self._factory = None
-            self._old_factory = None
 
     # -- logger access (§3.2) ----------------------------------------------
 

@@ -348,7 +348,7 @@ if __name__ == '__main__':
             class Main(CommandMain):
 
                 def init_logging(self):
-                    logging.basicConfig(level=logging.CRITICAL)
+                    environ.logging.bootstrap()
 
             return Main(self)
 

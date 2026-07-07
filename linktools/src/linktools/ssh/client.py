@@ -35,17 +35,23 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ssh")
 
 _channel_logger = environ.get_logger("ssh.channel")
-# Route the level through the LoggingManager (spec §13.9/§5.8): the SSH module
-# must not call logger.setLevel directly.
+# v2 §4.5: route level through LoggingManager, not direct setLevel.
 environ.logging.set_level("ssh.channel", logging.CRITICAL)
 
 
 class SSHClient(paramiko.SSHClient):
-    """Paramiko SSH client with shell, transfer, and forwarding helpers."""
+    """Paramiko SSH client with shell, transfer, and forwarding helpers.
+
+    Default host-key policy is STRICT (RejectPolicy) per v2 §11.3. Callers
+    that need to accept unknown keys (e.g. iOS USB-forwarded loopback
+    connections) must explicitly set INSECURE/AutoAddPolicy.
+    """
 
     def __init__(self):
         super().__init__()
         self.set_log_channel(_channel_logger.name)
+        # v2 §11.3: STRICT default; overrides paramiko's AutoAddPolicy.
+        self.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def connect_with_pwd(self, hostname, port=22, username=None, password=None, **kwargs):
         """Connect and fall back to password authentication when needed."""

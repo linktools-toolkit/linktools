@@ -88,8 +88,36 @@ class ToolInstaller(object):
 
     def is_installed(self, name, version):
         # type: (str, str) -> bool
+        """Check whether a version is fully installed (v2 §8.5).
+
+        Not just manifest existence: validates schema, name/version match, and
+        that the active pointer is valid.
+        """
         target = self._version_dir(name, version)
-        return (target / "manifest.json").exists()
+        manifest_path = target / "manifest.json"
+        if not manifest_path.exists():
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+        except (ValueError, OSError):
+            return False
+        # Manifest schema + name/version match.
+        if manifest.get("schema") != _MANIFEST_SCHEMA:
+            return False
+        if manifest.get("name") != name or manifest.get("version") != version:
+            return False
+        # v2 §8.5: active pointer must be valid (exists + points at an installed
+        # version), but the version being checked does NOT have to be active.
+        active = self.active_version(name)
+        if active is None:
+            return False
+        if not (self._base / name / active / "manifest.json").exists():
+            return False
+        # Listed files must still exist.
+        for rel in manifest.get("files", []):
+            if not (target / rel).exists():
+                return False
+        return True
 
     def install(self, definition, *, source_url, sha256=None, version=None,
                 downloader=None):

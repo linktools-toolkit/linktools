@@ -71,8 +71,9 @@ class GitHead(object):
 class GitRepository(object):
     """Pure-Python git repository wrapper backed by dulwich."""
 
-    def __init__(self, path):
-        # type: (PathType) -> None
+    def __init__(self, environ, path):
+        # type: (Any, PathType) -> None
+        self._environ = environ
         self._path = str(path)
         self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
         self.git = _GitProxy(self._path)
@@ -91,10 +92,10 @@ class GitRepository(object):
 
     @contextlib.contextmanager
     def _write_lock(self):
-        # Serialise write operations on this repository path. Read-only status
-        # (spec §12.8) intentionally takes no lock.
+        # Serialise write operations on this repository path (v2 §9.3: uses the
+        # injected environ's LockManager, not the module-level global).
         key = "git-repo:" + utils.get_hash(self._path, "sha256")
-        with environ.locks.process_lock(key):
+        with self._environ.locks.process_lock(key):
             yield
 
     # -- reads -------------------------------------------------------------
@@ -223,8 +224,8 @@ class GitRepository(object):
     # -- clone (§12.2 atomic) ---------------------------------------------
 
     @classmethod
-    def clone(cls, url, repo_path=None, branch=None):
-        # type: (str, str, str) -> "GitRepository"
+    def clone(cls, environ, url, repo_path=None, branch=None):
+        # type: (Any, str, str, str) -> "GitRepository"
         """Shallow-clone, atomically: clone to staging -> rename (spec §12.2).
 
         An interrupted clone leaves only the staging dir behind, never a
@@ -250,4 +251,4 @@ class GitRepository(object):
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        return cls(target)
+        return cls(environ, target)

@@ -38,7 +38,7 @@ from jinja2 import Environment, TemplateError, FileSystemLoader
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
-from linktools.core import Config
+from linktools.core._config_schema import LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import Error
 from linktools.runtime import lazy_load
@@ -199,7 +199,7 @@ class NginxMixin:
                 return root_domain
             return f"{name}.{root_domain}"
 
-        return Config.Lazy(get_domain)
+        return LazyProvider(get_domain)
 
     def write_nginx_conf(
             self: "BaseContainer", domain: str, *,

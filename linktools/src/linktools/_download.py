@@ -186,6 +186,16 @@ class HttpTransport(DownloadTransport):
         try:
             response = _urlrequest.urlopen(req, timeout=request.timeout)
         except _urlerror.HTTPError as exc:
+            # §7.3: 416 Range Not Satisfiable -- the .part may already be complete.
+            if exc.code == 416 and have > 0 and part.exists():
+                part_size = part.stat().st_size
+                expected = (meta or {}).get("size")
+                if expected is not None and part_size >= expected:
+                    # Part is complete; nothing more to download.
+                    return
+                # Otherwise the part is stale; delete and fall through to re-download.
+                _discard(part)
+                raise DownloadError("server returned 416 and part is incomplete; will restart")
             raise DownloadHttpError(exc.code, str(exc))
         except _urlerror.URLError as exc:
             raise DownloadError("transport error for %s: %s" % (request.url, exc))
@@ -193,6 +203,19 @@ class HttpTransport(DownloadTransport):
         try:
             code = response.getcode()
             appending = have > 0 and code == 206
+            # §7.3: on 206, verify Content-Range start == have.
+            if appending:
+                cr = response.headers.get("Content-Range", "")
+                # Format: "bytes <start>-<end>/<total>"
+                try:
+                    start_str = cr.split(" ")[-1].split("-")[0]
+                    start = int(start_str)
+                    if start != have:
+                        # Server returned a different range; restart from scratch.
+                        appending = False
+                        have = 0
+                except (ValueError, IndexError):
+                    pass  # Can't parse; trust the server's 206.
             mode = "ab" if appending else "wb"
             written = have if appending else 0
             total = response.length  # may be None
@@ -303,12 +326,22 @@ class DownloadManager(object):
                 # Network failure: keep .part for a future resume.
                 raise last_error
 
+            # §7.4: hash-mismatch retry-once. If validation fails, discard the
+            # .part and re-download from scratch exactly once; a second failure
+            # raises DownloadError (not retried indefinitely).
             if validator is not None:
                 try:
                     validator.validate(part)
                 except DownloadError:
                     _discard(part)
-                    raise
+                    transport.fetch(request, part, on_progress=on_progress, meta=meta)
+                    try:
+                        validator.validate(part)
+                    except DownloadError:
+                        _discard(part)
+                        raise
+
+            final_size = os.path.getsize(part)
 
             final_size = os.path.getsize(part)
             utils.atomic_replace(part, destination)
