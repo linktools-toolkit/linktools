@@ -453,25 +453,41 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[dependency]
             tool.prepare()
 
-        # download and extract (v2 §8.7: safe_extract instead of shutil.unpack_archive)
+        # download and extract (v4 §9.5: manifest in staging BEFORE target)
         if not self.exists:
             self._tools.logger.info(f"Download {self}: {self.download_url}")
             with self._tools.environ.get_url_file(self.download_url) as url_file:
                 if not self.exists:
+                    import uuid as _uuid
                     temp_dir = self._tools.environ.get_temp_path("tools", "cache")
                     temp_path = url_file.save(temp_dir)
-                    os.makedirs(self.root_path, exist_ok=True)
-                    if not utils.is_empty(self.unpack_path):
-                        self._tools.logger.debug(f"Extract {self} to {self.root_path}")
-                        utils.safe_extract(temp_path, self.root_path)
-                        os.remove(temp_path)
-                    else:
-                        self._tools.logger.debug(f"Move {self} to {self.absolute_path}")
-                        os.makedirs(os.path.dirname(self.absolute_path) or self.root_path, exist_ok=True)
-                        shutil.move(temp_path, self.absolute_path)
 
-                    # v2 §8.3: write manifest + active.json pointer
-                    self._write_manifest()
+                    # v4 §9.5: staging dir — everything happens here before atomic move.
+                    staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
+                    os.makedirs(staging, exist_ok=True)
+                    try:
+                        if not utils.is_empty(self.unpack_path):
+                            self._tools.logger.debug(f"Extract {self} to {staging}")
+                            utils.safe_extract(temp_path, staging)
+                            os.remove(temp_path)
+                        else:
+                            target_in_staging = os.path.join(
+                                staging,
+                                os.path.relpath(self.absolute_path, self.root_path))
+                            os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
+                            shutil.move(temp_path, target_in_staging)
+
+                        # v4 §9.5: write manifest INSIDE staging before move.
+                        self._write_manifest(staging)
+                        # Atomic move: target appears only when fully installed.
+                        if os.path.exists(self.root_path):
+                            shutil.rmtree(self.root_path, ignore_errors=True)
+                        os.replace(staging, self.root_path)
+                    except BaseException:
+                        shutil.rmtree(staging, ignore_errors=True)
+                        raise
+
+                    # Active pointer after successful activation.
                     self._set_active()
 
         if not os.access(self._stub.path, os.X_OK):
@@ -576,9 +592,10 @@ class Tool(metaclass=ToolMeta):
         from ..cli import env
         return utils.list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
 
-    def _write_manifest(self):
-        """Write manifest.json in the version dir (v2 §8.3)."""
+    def _write_manifest(self, target_dir=None):
+        """Write manifest.json (v4 §9.5: inside staging before move)."""
         import json
+        target_dir = target_dir or self.root_path
         manifest = {
             "schema": 1,
             "name": self.name,
@@ -589,7 +606,7 @@ class Tool(metaclass=ToolMeta):
             "installed_at": _now_iso(),
             "entrypoint": self.absolute_path,
         }
-        manifest_path = os.path.join(self.root_path, "manifest.json")
+        manifest_path = os.path.join(target_dir, "manifest.json")
         utils.atomic_write(manifest_path, json.dumps(manifest, indent=2))
 
     def _set_active(self):

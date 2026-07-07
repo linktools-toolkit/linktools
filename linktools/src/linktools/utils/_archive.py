@@ -150,13 +150,19 @@ def safe_extract(archive_path, dest, *, max_files=_DEFAULT_MAX_FILES,
     # type: (Any, Any, int, int, int) -> None
     """Extract ``archive_path`` (zip or tar) into ``dest`` safely (§10.7).
 
+    v4 §9.10: ``dest`` must be empty (no existing files). This prevents
+    accidental overwrite of existing tool installations.
     Refuses path traversal, absolute/drive paths, symlink/hardlink/device/fifo
-    entries, and enforces file-count / per-file / total-size caps. Every member
-    is verified to resolve within ``dest``.
+    entries, and enforces file-count / per-file / total-size caps.
     """
     archive_path = str(archive_path)
     dest = str(dest)
     os.makedirs(dest, exist_ok=True)
+    # v4 §9.10: dest must be empty.
+    if os.path.isdir(dest) and os.listdir(dest):
+        from ..errors import ToolArchiveError
+        raise ToolArchiveError(
+            "safe_extract destination is not empty: %s" % dest)
     kind = _detect(archive_path)
     if kind == "zip":
         _extract_zip(archive_path, dest, max_files, max_total_size, max_file_size)

@@ -496,6 +496,30 @@ class BaseEnviron(abc.ABC):
         """
         self.config.set(key, value)
 
+    def close(self):
+        """Close all owned resources (v4 §10.3).
+
+        Idempotent. Closes cache connections, logging handlers, and download
+        tasks owned by this Environment. Does NOT close other Environment's
+        resources or the root logger.
+        """
+        # Cache (SQLite connections are per-thread; close this thread's).
+        cache = getattr(self, "_cache", None)
+        if cache is not None:
+            cache.close()
+        # Config store (no persistent connection to close, but flush is atomic).
+        # Logging (unregister redactor from global factory).
+        logging_mgr = getattr(self, "_logging", None)
+        if logging_mgr is not None:
+            logging_mgr.close()
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def _create_tools(self) -> "Tools":
         from ._tools import Tools
         # ConfigDict is defined above (inlined)

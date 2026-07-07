@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .errors import ConfigError
+from .types import MISSING
 from .utils import atomic_write
 
 __all__ = ["ConfigStore"]
@@ -88,9 +89,16 @@ class ConfigStore(object):
 
     # -- read ---------------------------------------------------------------
 
-    def get(self, key, default=None):
+    def get(self, key, default=MISSING):
         # type: (str, Any) -> Any
-        return self._data.get(key, default)
+        """Return the value for ``key``, or ``default`` if absent (v4 §3.4).
+
+        Uses MISSING as the sentinel so stored None is distinguishable from
+        a missing key (``key in store`` vs ``store.get(key) is None``).
+        """
+        if key in self._data:
+            return self._data[key]
+        return default
 
     def __contains__(self, key):
         # type: (str) -> bool

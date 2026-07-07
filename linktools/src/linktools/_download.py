@@ -167,91 +167,102 @@ class HttpTransport(DownloadTransport):
     def fetch(self, request, part, on_progress=None, meta=None):
         part = Path(part)
         part.parent.mkdir(parents=True, exist_ok=True)
-        headers = dict(self._base_headers)
-        headers.update(request.headers)
 
-        have = part.stat().st_size if (request.resume and part.exists()) else 0
-        if have > 0:
-            # Ask to continue; If-Range guards against a changed remote file.
-            headers["Range"] = "bytes=%d-" % have
-            if meta is not None:
-                etag = meta.get("etag")
-                last_mod = meta.get("last_modified")
-                if etag:
-                    headers["If-Range"] = etag
-                elif last_mod:
-                    headers["If-Range"] = last_mod
+        # v4 §8.3: retry loop. If Content-Range validation fails (missing,
+        # parse-failed, or start != have), close the response, delete .part,
+        # and re-request without Range. At most 2 attempts (resume + 1 restart).
+        for _attempt in range(2):
+            headers = dict(self._base_headers)
+            headers.update(request.headers)
+            have = part.stat().st_size if (request.resume and part.exists()) else 0
+            if have > 0:
+                # Ask to continue; If-Range guards against a changed remote file.
+                headers["Range"] = "bytes=%d-" % have
+                if meta is not None:
+                    etag = meta.get("etag")
+                    last_mod = meta.get("last_modified")
+                    if etag:
+                        headers["If-Range"] = etag
+                    elif last_mod:
+                        headers["If-Range"] = last_mod
 
-        req = _urlrequest.Request(request.url, headers=headers)
-        try:
-            response = _urlrequest.urlopen(req, timeout=request.timeout)
-        except _urlerror.HTTPError as exc:
-            # §7.3: 416 Range Not Satisfiable -- the .part may already be complete.
-            if exc.code == 416 and have > 0 and part.exists():
-                part_size = part.stat().st_size
-                expected = (meta or {}).get("size")
-                if expected is not None and part_size >= expected:
-                    # Part is complete; nothing more to download.
-                    return
-                # Otherwise the part is stale; delete and fall through to re-download.
-                _discard(part)
-                raise DownloadError("server returned 416 and part is incomplete; will restart")
-            raise DownloadHttpError(exc.code, str(exc))
-        except _urlerror.URLError as exc:
-            raise DownloadError("transport error for %s: %s" % (request.url, exc))
+            req = _urlrequest.Request(request.url, headers=headers)
+            try:
+                response = _urlrequest.urlopen(req, timeout=request.timeout)
+            except _urlerror.HTTPError as exc:
+                # §7.3: 416 Range Not Satisfiable -- the .part may already be complete.
+                if exc.code == 416 and have > 0 and part.exists():
+                    part_size = part.stat().st_size
+                    expected = (meta or {}).get("size")
+                    if expected is not None and part_size >= expected:
+                        return  # Part is complete; nothing more to download.
+                    _discard(part)
+                    raise DownloadError("server returned 416 and part is incomplete; will restart")
+                raise DownloadHttpError(exc.code, str(exc))
+            except _urlerror.URLError as exc:
+                raise DownloadError("transport error for %s: %s" % (request.url, exc))
 
-        try:
-            code = response.getcode()
-            appending = have > 0 and code == 206
-            # §7.3: on 206, verify Content-Range start == have.
-            if appending:
-                cr = response.headers.get("Content-Range", "")
-                # Format: "bytes <start>-<end>/<total>"
-                try:
-                    start_str = cr.split(" ")[-1].split("-")[0]
-                    start = int(start_str)
-                    if start != have:
-                        # Server returned a different range; restart from scratch.
-                        appending = False
-                        have = 0
-                except (ValueError, IndexError):
-                    pass  # Can't parse; trust the server's 206.
-            mode = "ab" if appending else "wb"
-            written = have if appending else 0
-            total = response.length  # may be None
-            content_encoding = ""
-            # Capture resume tokens + filename for next time.
-            if meta is not None:
-                meta["url"] = request.url
-                etag = response.headers.get("ETag")
-                last_mod = response.headers.get("Last-Modified")
-                if etag:
-                    meta["etag"] = etag
-                if last_mod:
-                    meta["last_modified"] = last_mod
-                disposition = response.headers.get("Content-Disposition")
-                if disposition:
-                    _, params = utils.parse_header(disposition)
-                    if "filename" in params:
-                        meta["filename"] = params["filename"]
-            content_encoding = response.headers.get("Content-Encoding", "") or ""
-            with open(part, mode) as handle:
-                while True:
-                    chunk = response.read(_CHUNK)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    written += len(chunk)
-                    if on_progress is not None:
-                        on_progress(DownloadProgress(downloaded=written, total=total))
-                handle.flush()
-                os.fsync(handle.fileno())
-            # urllib does not auto-decompress; handle Content-Encoding: gzip so
-            # the landed file matches what requests would have produced.
-            if content_encoding.lower() == "gzip":
-                _gunzip_inplace(part)
-        finally:
-            response.close()
+            try:
+                code = response.getcode()
+                appending = have > 0 and code == 206
+                # v4 §8.2: STRICT Content-Range validation on 206.
+                if appending:
+                    cr = response.headers.get("Content-Range", "")
+                    restart_needed = False
+                    if not cr:
+                        restart_needed = True
+                    else:
+                        try:
+                            range_spec = cr.strip().split(" ")[-1]
+                            start_str = range_spec.split("-")[0]
+                            start = int(start_str)
+                            if start != have:
+                                restart_needed = True
+                        except (ValueError, IndexError):
+                            restart_needed = True
+                    if restart_needed:
+                        response.close()
+                        _discard(part)
+                        continue  # restart loop without Range
+
+                mode = "ab" if appending else "wb"
+                written = have if appending else 0
+                total = response.length  # may be None
+                content_encoding = ""
+                if meta is not None:
+                    meta["url"] = request.url
+                    etag = response.headers.get("ETag")
+                    last_mod = response.headers.get("Last-Modified")
+                    if etag:
+                        meta["etag"] = etag
+                    if last_mod:
+                        meta["last_modified"] = last_mod
+                    disposition = response.headers.get("Content-Disposition")
+                    if disposition:
+                        _, params = utils.parse_header(disposition)
+                        if "filename" in params:
+                            meta["filename"] = params["filename"]
+                content_encoding = response.headers.get("Content-Encoding", "") or ""
+                with open(part, mode) as handle:
+                    while True:
+                        chunk = response.read(_CHUNK)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        written += len(chunk)
+                        if on_progress is not None:
+                            on_progress(DownloadProgress(downloaded=written, total=total))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if content_encoding.lower() == "gzip":
+                    _gunzip_inplace(part)
+                return  # success
+            finally:
+                response.close()
+
+        # If we get here, the loop exhausted without returning (shouldn't happen
+        # normally — the second attempt has have=0 so no Range is sent).
+        raise DownloadError("download failed after Content-Range restart")
 
 
 # --------------------------------------------------------------------------- #

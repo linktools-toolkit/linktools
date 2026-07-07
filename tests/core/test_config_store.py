@@ -43,7 +43,10 @@ def test_persists_across_instances(store, tmp_path):
 def test_remove(store):
     store.save(a=1, b=2)
     assert store.remove("a") is True
-    assert store.get("a") is None
+    # v4 §3.4: get returns MISSING (not None) for absent keys
+    from linktools.types import MISSING
+    assert store.get("a") is MISSING
+    assert "a" not in store
     assert store.get("b") == 2
     assert store.remove("nope") is False  # nothing removed
 

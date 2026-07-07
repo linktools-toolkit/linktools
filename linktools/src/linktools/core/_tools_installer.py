@@ -61,7 +61,7 @@ class ToolInstaller(object):
     # -- internals ---------------------------------------------------------
 
     def _lock(self, name):
-        return self._environ.locks.process_lock("tool-install:" + name)
+        return self._environ.locks.process_lock("tool:" + name)
 
     def _version_dir(self, name, version):
         # type: (str, str) -> Path
@@ -116,6 +116,14 @@ class ToolInstaller(object):
         # Listed files must still exist.
         for rel in manifest.get("files", []):
             if not (target / rel).exists():
+                return False
+        # v4 §9.7: entrypoint must exist and (on POSIX) be executable.
+        entrypoint = manifest.get("entrypoint")
+        if entrypoint:
+            ep_path = target / entrypoint if not os.path.isabs(entrypoint) else Path(entrypoint)
+            if not ep_path.exists():
+                return False
+            if os.name != "nt" and not os.access(str(ep_path), os.X_OK):
                 return False
         return True
 

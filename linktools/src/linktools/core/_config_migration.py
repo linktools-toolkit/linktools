@@ -33,6 +33,36 @@ class ConfigMigration(object):
         self._store = config_store
         self._logger = logger
 
+    # v4 §4.4: built-in key map covering core + cntr configuration keys.
+    DEFAULT_KEY_MAP = {
+        # Core
+        "DEBUG": "debug",
+        "DATA_PATH": "data.path",
+        "TEMP_PATH": "temp.path",
+        "STORAGE_PATH": "storage.path",
+        "DEFAULT_USER_AGENT": "download.user_agent",
+        "DEFAULT_WAN_IP_URL": "network.wan_ip_url",
+        # Cntr container manager
+        "HOST": "container.host",
+        "DOCKER_HOST": "container.docker_host",
+        "COMPOSE_PROJECT_NAME": "container.compose_project_name",
+        "SERVICE_RESTART_POLICY": "container.service_restart_policy",
+        "SERVICE_LOG_DRIVER": "container.service_log_driver",
+        "SERVICE_LOG_MAX_SIZE": "container.service_log_max_size",
+        "DOCKER_USER": "container.docker_user",
+        "DOCKER_UID": "container.docker_uid",
+        "DOCKER_GID": "container.docker_gid",
+        "DOCKER_TYPE": "container.docker_type",
+        "DOCKER_APP_PATH": "container.docker_app_path",
+        "DOCKER_APP_DATA_PATH": "container.docker_app_data_path",
+        "DOCKER_USER_DATA_PATH": "container.docker_user_data_path",
+        "DOCKER_DOWNLOAD_PATH": "container.docker_download_path",
+        # Cntr installed state (already migrated via _migrate.py)
+        "INSTALLED_CONTAINERS": "container.installed_containers",
+        "INSTALLED_REPOS": "container.installed_repos",
+        "RUNNING_CONTAINERS": "container.running_containers",
+    }
+
     def _log(self, level, msg):
         if self._logger is not None:
             getattr(self._logger, level)(msg)
@@ -86,7 +116,13 @@ class ConfigMigration(object):
         (e.g. {"LOG_LEVEL": "logging.level"}). Unmapped keys go to "legacy.<key>".
         """
         old_path = str(old_path)
-        key_map = key_map or {}
+        # v4 §4.4: use caller key_map merged over the built-in DEFAULT_KEY_MAP.
+        if key_map is None:
+            key_map = dict(ConfigMigration.DEFAULT_KEY_MAP)
+        else:
+            merged = dict(ConfigMigration.DEFAULT_KEY_MAP)
+            merged.update(key_map)
+            key_map = merged
         report = {"migrated": {}, "skipped": [], "legacy": []}
 
         if not os.path.isfile(old_path):

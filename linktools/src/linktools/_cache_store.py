@@ -176,38 +176,54 @@ class CacheNamespace(object):
     # ship an older SQLite, so detect once and fall back to INSERT-or-UPDATE.
     _SUPPORTS_UPSERT = sqlite3.sqlite_version_info >= (3, 24, 0)
 
+    def _exec_in_tx(self, conn, fn):
+        """Execute fn inside a transaction; if one is already active, just run fn."""
+        if getattr(self._store._tx_owner, "value", None) is not None:
+            return fn(conn)
+        self._begin(conn)
+        try:
+            result = fn(conn)
+            conn.execute("COMMIT")
+            return result
+        except BaseException:
+            self._rollback(conn)
+            raise
+
     def set(self, key, value, ttl=None):
         # type: (str, Any, Optional[float]) -> None
         expires_at = self._compute_expiry(ttl)
-        blob = self._codec.encode(value)  # may raise CacheCodecError
+        blob = self._codec.encode(value)
         now = time.time()
         conn = self._conn()
-        if CacheNamespace._SUPPORTS_UPSERT:
-            conn.execute(
-                "INSERT INTO cache_entries(namespace, key, value, codec, created_at,"
-                " updated_at, expires_at, version) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, 1) "
-                "ON CONFLICT(namespace, key) DO UPDATE SET "
-                "value=excluded.value, codec=excluded.codec, "
-                "updated_at=excluded.updated_at, expires_at=excluded.expires_at, "
-                "version=cache_entries.version + 1",
-                (self._name, key, blob, self._codec.mime, now, now, expires_at),
-            )
-        else:
-            # Fallback for older SQLite: try INSERT, on conflict UPDATE.
-            cur = conn.execute(
-                "UPDATE cache_entries SET value=?, codec=?, updated_at=?,"
-                " expires_at=?, version=version+1"
-                " WHERE namespace=? AND key=?",
-                (blob, self._codec.mime, now, expires_at, self._name, key),
-            )
-            if cur.rowcount == 0:
-                conn.execute(
-                    "INSERT INTO cache_entries(namespace, key, value, codec,"
-                    " created_at, updated_at, expires_at, version)"
-                    " VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+
+        def _do_set(c):
+            if CacheNamespace._SUPPORTS_UPSERT:
+                c.execute(
+                    "INSERT INTO cache_entries(namespace, key, value, codec, created_at,"
+                    " updated_at, expires_at, version) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, 1) "
+                    "ON CONFLICT(namespace, key) DO UPDATE SET "
+                    "value=excluded.value, codec=excluded.codec, "
+                    "updated_at=excluded.updated_at, expires_at=excluded.expires_at, "
+                    "version=cache_entries.version + 1",
                     (self._name, key, blob, self._codec.mime, now, now, expires_at),
                 )
+            else:
+                cur = c.execute(
+                    "UPDATE cache_entries SET value=?, codec=?, updated_at=?,"
+                    " expires_at=?, version=version+1"
+                    " WHERE namespace=? AND key=?",
+                    (blob, self._codec.mime, now, expires_at, self._name, key),
+                )
+                if cur.rowcount == 0:
+                    c.execute(
+                        "INSERT INTO cache_entries(namespace, key, value, codec,"
+                        " created_at, updated_at, expires_at, version)"
+                        " VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+                        (self._name, key, blob, self._codec.mime, now, now, expires_at),
+                    )
+
+        self._exec_in_tx(conn, _do_set)
 
     @staticmethod
     def _compute_expiry(ttl):
@@ -221,11 +237,14 @@ class CacheNamespace(object):
 
     def delete(self, key):
         # type: (str) -> bool
-        cur = self._conn().execute(
-            "DELETE FROM cache_entries WHERE namespace=? AND key=?",
-            (self._name, key),
-        )
-        return cur.rowcount > 0
+        conn = self._conn()
+        def _do_delete(c):
+            cur = c.execute(
+                "DELETE FROM cache_entries WHERE namespace=? AND key=?",
+                (self._name, key),
+            )
+            return cur.rowcount > 0
+        return self._exec_in_tx(conn, _do_delete)
 
     def increment(self, key, delta=1, initial=0):
         # type: (str, int, int) -> int
