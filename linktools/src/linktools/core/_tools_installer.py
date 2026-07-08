@@ -3,10 +3,21 @@
 
 """ToolInstaller: transactional managed-tool installation (spec §10.6/§10.8/§10.9).
 
-Standalone build (Phase 5 PR 11). Composes the persistence foundation:
-DownloadManager (download+validate), utils.safe_extract (§10.7), LockManager
-(install lock), utils.atomic_write (manifest + active pointer). The legacy
-Tool.prepare (core/_tools.py) stays until consumers migrate.
+STATUS (fix-plan §5): this is a STANDALONE / EXPERIMENTAL module. It is NOT the
+current Tools main path. The real business install path is ``Tool.prepare`` in
+``core/_tools.py`` (which composes DownloadManager + safe_extract + staging +
+atomic move + manifest + active pointer directly). Do NOT add new business code
+that depends on ``ToolInstaller`` -- it is kept here as a candidate future main
+path and is exercised only by its own unit tests.
+
+It will only become the main path after the Tool.prepare characterization
+harness (fix-plan §5.4: adb/jadx/apktool/dependency/executable_cmdline/active
+fake configs + clear/stub/chmod tests) exists, so the layout switch can be made
+without breaking real tool resolution.
+
+Composes the persistence foundation: DownloadManager (download+validate),
+utils.safe_extract (§10.7), LockManager (install lock), utils.atomic_write
+(manifest + active pointer).
 
 Layout (spec §10.9 multi-version)::
 

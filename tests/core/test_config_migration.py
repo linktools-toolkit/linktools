@@ -73,7 +73,7 @@ def test_same_key_in_different_sections_does_not_collide(setup):
 def test_migrate_writes_to_config_store(setup):
     store, old, _ = setup
     _write_old(old, {"HOST": "1.2.3.4"})
-    report = ConfigMigration(store).migrate(old, key_map={"HOST": "network.host"})
+    report = ConfigMigration(store).migrate(old, key_map={"CONTAINER.CACHE.HOST": "network.host"})
     assert "CONTAINER.CACHE.HOST" in report["migrated"]
     assert store.get("network.host") == "1.2.3.4"
 
@@ -93,7 +93,7 @@ def test_migrate_skips_existing(setup):
     store, old, _ = setup
     store.set("network.host", "newer")
     _write_old(old, {"HOST": "older"})
-    report = ConfigMigration(store).migrate(old, key_map={"HOST": "network.host"})
+    report = ConfigMigration(store).migrate(old, key_map={"CONTAINER.CACHE.HOST": "network.host"})
     assert "CONTAINER.CACHE.HOST" in report["skipped"]
     assert store.get("network.host") == "newer"  # not overwritten
 
@@ -110,9 +110,86 @@ def test_migrate_flags_secret_keys(setup):
 def test_migrate_dry_run_writes_nothing(setup):
     store, old, _ = setup
     _write_old(old, {"HOST": "1.2.3.4"})
-    report = ConfigMigration(store).migrate(old, key_map={"HOST": "network.host"}, dry_run=True)
+    report = ConfigMigration(store).migrate(old, key_map={"CONTAINER.CACHE.HOST": "network.host"}, dry_run=True)
     assert "CONTAINER.CACHE.HOST" in report["migrated"]
     assert "network.host" not in store  # nothing written
+
+
+# --------------------------------------------------------------------------- #
+# fix-plan PR-1 §1.3.2/§1.3.3: full-key priority + ambiguous bare-key safety
+# --------------------------------------------------------------------------- #
+
+def test_full_key_map_beats_bare_key_map(setup):
+    store, old, _ = setup
+    _write_old(old, {"HOST": "h"})
+    # both full and bare provided for the same source key; the full key wins
+    ConfigMigration(store).migrate(old, key_map={
+        "CONTAINER.CACHE.HOST": "full.wins",
+        "HOST": "bare.loses",
+    })
+    assert store.get("full.wins") == "h"
+    assert "bare.loses" not in store
+
+
+def test_ambiguous_bare_key_not_auto_mapped(setup):
+    store, old, _ = setup
+    _write_sections(old, {
+        "MAIN.CACHE": {"CUSTOM": "a"},
+        "CONTAINER.CACHE": {"CUSTOM": "b"},
+    })
+    # bare CUSTOM is ambiguous (2 sections) and only a bare map is given -> the
+    # bare fallback is refused so the two sections do not collapse onto one key
+    ConfigMigration(store).migrate(old, key_map={"CUSTOM": "should.not.win"})
+    assert "should.not.win" not in store
+    assert store.get("legacy.main.cache.custom") == "a"
+    assert store.get("legacy.container.cache.custom") == "b"
+
+
+def test_ambiguous_bare_key_mapped_via_full_keys(setup):
+    store, old, _ = setup
+    _write_sections(old, {
+        "MAIN.CACHE": {"HOST": "a"},
+        "CONTAINER.CACHE": {"HOST": "b"},
+    })
+    # explicit full-key mappings disambiguate the same bare key
+    ConfigMigration(store).migrate(old, key_map={
+        "MAIN.CACHE.HOST": "core.host",
+        "CONTAINER.CACHE.HOST": "container.host",
+    })
+    assert store.get("core.host") == "a"
+    assert store.get("container.host") == "b"
+
+
+def test_migrate_uses_one_batch_save(setup):
+    # fix-plan §1.3.4: plan once, write once via store.save (not per-key set)
+    store, old, _ = setup
+    calls = {"save": 0, "set": 0}
+    real_save, real_set = store.save, store.set
+
+    def spy_save(**kw):
+        calls["save"] += 1
+        return real_save(**kw)
+
+    def spy_set(key, value):
+        calls["set"] += 1
+        return real_set(key, value)
+
+    store.save = spy_save
+    store.set = spy_set
+    _write_old(old, {"HOST": "1", "PORT": "2"})
+    ConfigMigration(store).migrate(old, key_map={
+        "CONTAINER.CACHE.HOST": "h", "CONTAINER.CACHE.PORT": "p"})
+    assert calls["save"] == 1  # one atomic batch write
+    assert calls["set"] == 0   # no per-key writes
+
+
+def test_secret_entry_has_no_raw_value_in_report(setup):
+    # fix-plan §1.5: secret raw values must never appear in the report
+    store, old, _ = setup
+    _write_old(old, {"DB_PASSWORD": "p4ss"})
+    report = ConfigMigration(store).migrate(old)
+    entry = [e for e in report["entries"] if e["secret"]][0]
+    assert "value" not in entry
 
 
 # --------------------------------------------------------------------------- #

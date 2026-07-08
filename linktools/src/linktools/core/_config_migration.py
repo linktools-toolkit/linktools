@@ -77,15 +77,48 @@ class ConfigMigration(object):
             self._config_dir = Path(str(getattr(config_store, "path", "."))).parent
 
     # built-in key map covering core + cntr configuration keys.
+    # Section-qualified keys (SECTION.KEY) are authoritative; the bare-key
+    # entries are a convenience fallback used ONLY when the bare key is
+    # unambiguous (fix-plan §1.3.2/§1.3.3).
     DEFAULT_KEY_MAP = {
-        # Core
+        # -- explicit section-qualified mappings (preferred) --
+        # Core (legacy ConfigCacheParser stored core under MAIN.CACHE)
+        "MAIN.CACHE.DEBUG": "debug",
+        "MAIN.CACHE.DATA_PATH": "data.path",
+        "MAIN.CACHE.TEMP_PATH": "temp.path",
+        "MAIN.CACHE.STORAGE_PATH": "storage.path",
+        "MAIN.CACHE.DEFAULT_USER_AGENT": "download.user_agent",
+        "MAIN.CACHE.DEFAULT_WAN_IP_URL": "network.wan_ip_url",
+        # Cntr container manager (legacy CONTAINER.CACHE)
+        "CONTAINER.CACHE.HOST": "container.host",
+        "CONTAINER.CACHE.DOCKER_HOST": "container.docker_host",
+        "CONTAINER.CACHE.COMPOSE_PROJECT_NAME": "container.compose_project_name",
+        "CONTAINER.CACHE.SERVICE_RESTART_POLICY": "container.service_restart_policy",
+        "CONTAINER.CACHE.SERVICE_LOG_DRIVER": "container.service_log_driver",
+        "CONTAINER.CACHE.SERVICE_LOG_MAX_SIZE": "container.service_log_max_size",
+        "CONTAINER.CACHE.DOCKER_USER": "container.docker_user",
+        "CONTAINER.CACHE.DOCKER_UID": "container.docker_uid",
+        "CONTAINER.CACHE.DOCKER_GID": "container.docker_gid",
+        "CONTAINER.CACHE.DOCKER_TYPE": "container.docker_type",
+        "CONTAINER.CACHE.DOCKER_APP_PATH": "container.docker_app_path",
+        "CONTAINER.CACHE.DOCKER_APP_DATA_PATH": "container.docker_app_data_path",
+        "CONTAINER.CACHE.DOCKER_USER_DATA_PATH": "container.docker_user_data_path",
+        "CONTAINER.CACHE.DOCKER_DOWNLOAD_PATH": "container.docker_download_path",
+        # Cntr flare container: FLARE_DOMAIN is canonical; the legacy
+        # misspelling FLARE_DOAMIN maps to the same new key.
+        "CONTAINER.CACHE.FLARE_DOMAIN": "container.flare.domain",
+        "CONTAINER.CACHE.FLARE_DOAMIN": "container.flare.domain",
+        # Cntr installed state (also migrated via _migrate.py)
+        "CONTAINER.CACHE.INSTALLED_CONTAINERS": "container.installed_containers",
+        "CONTAINER.CACHE.INSTALLED_REPOS": "container.installed_repos",
+        "CONTAINER.CACHE.RUNNING_CONTAINERS": "container.running_containers",
+        # -- bare-key fallback (only for unambiguous single-section configs) --
         "DEBUG": "debug",
         "DATA_PATH": "data.path",
         "TEMP_PATH": "temp.path",
         "STORAGE_PATH": "storage.path",
         "DEFAULT_USER_AGENT": "download.user_agent",
         "DEFAULT_WAN_IP_URL": "network.wan_ip_url",
-        # Cntr container manager
         "HOST": "container.host",
         "DOCKER_HOST": "container.docker_host",
         "COMPOSE_PROJECT_NAME": "container.compose_project_name",
@@ -100,11 +133,8 @@ class ConfigMigration(object):
         "DOCKER_APP_DATA_PATH": "container.docker_app_data_path",
         "DOCKER_USER_DATA_PATH": "container.docker_user_data_path",
         "DOCKER_DOWNLOAD_PATH": "container.docker_download_path",
-        # Cntr flare container: FLARE_DOMAIN is the canonical key; the legacy
-        # misspelling FLARE_DOAMIN is mapped too so old user configs migrate.
         "FLARE_DOMAIN": "container.flare.domain",
         "FLARE_DOAMIN": "container.flare.domain",
-        # Cntr installed state (already migrated via _migrate.py)
         "INSTALLED_CONTAINERS": "container.installed_containers",
         "INSTALLED_REPOS": "container.installed_repos",
         "RUNNING_CONTAINERS": "container.running_containers",
@@ -134,15 +164,32 @@ class ConfigMigration(object):
             merged.update(key_map)
         return merged
 
-    def _resolve_new_key(self, section, key, key_map):
+    def _resolve_new_key(self, section, key, key_map, ambiguous_keys=None):
         """Map an old (section, key) to a new namespaced key.
 
-        Fallback order (spec §4.3): SECTION.KEY -> KEY -> legacy.SECTION.KEY.
+        Resolution order (fix-plan §1.3.2):
+          1. explicit ``SECTION.KEY``
+          2. normalized ``section.key``
+          3. bare ``KEY`` -- only if that bare key is NOT ambiguous (i.e. it
+             does not appear in more than one section); ambiguous bare keys
+             must be mapped via the full ``SECTION.KEY`` or they are preserved
+          4. otherwise ``legacy.<section>.<key>`` (never dropped)
+
+        Returning ``mapped_legacy_bare`` for the bare-key fallback lets callers
+        distinguish an explicit full-key mapping from an ambiguous-prone bare one.
         """
+        ambiguous_keys = ambiguous_keys or set()
         full = "%s.%s" % (section, key)
-        for candidate in (full, key, _normalize(full), _normalize(key)):
-            if candidate in key_map:
-                return key_map[candidate], "mapped"
+        if full in key_map:
+            return key_map[full], "mapped"
+        nfull = _normalize(full)
+        if nfull in key_map:
+            return key_map[nfull], "mapped"
+        if key in key_map and key not in ambiguous_keys:
+            return key_map[key], "mapped_legacy_bare"
+        nkey = _normalize(key)
+        if nkey in key_map and nkey not in ambiguous_keys:
+            return key_map[nkey], "mapped_legacy_bare"
         return ("legacy.%s.%s" % (_normalize(section), _normalize(key)),
                 "unknown_key_preserved")
 
@@ -213,12 +260,18 @@ class ConfigMigration(object):
     ) -> "dict[str, Any]":
         """Read old config and write to ConfigStore. Returns a report.
 
-        Each old ``<section>.<key>`` is mapped via ``key_map`` (fallback
-        SECTION.KEY -> KEY), unmapped keys are preserved at
-        ``legacy.<section>.<key>``, and keys already present are skipped. The
-        report records every entry with old_key/new_key/reason; secret keys are
-        flagged so callers can mask them.
+        Each old ``<section>.<key>`` is mapped via ``key_map``. Bare-key
+        fallback is only used when the bare key is unambiguous (appears in a
+        single section); otherwise the key must be mapped via its full
+        ``SECTION.KEY`` or it is preserved at ``legacy.<section>.<key>`` so two
+        same-named keys in different sections never collapse (fix-plan §1.3.2).
+
+        Writes are planned first and applied in a single batch via
+        ``store.save()`` so an interrupted migration cannot leave a half-written
+        new store (fix-plan §1.3.4).
         """
+        from collections import defaultdict
+
         old_path = str(old_path)
         key_map = self._merged_key_map(key_map)
         report = {"migrated": [], "skipped": [], "legacy": [], "entries": []}
@@ -227,45 +280,69 @@ class ConfigMigration(object):
             self._log("warning", "ConfigMigration: old config not found: %s" % old_path)
             return report
 
-        for section, key, value in self._read_old(old_path):
+        entries = self._read_old(old_path)
+        # A bare key present in >1 section is ambiguous: refuse to auto-map it
+        # via the bare-key fallback (would collapse the sections onto one key).
+        by_key = defaultdict(set)
+        for section, key, _ in entries:
+            by_key[key].add(section)
+        ambiguous_keys = {k for k, secs in by_key.items() if len(secs) > 1}
+
+        # Plan every entry first; apply as one batch write below.
+        planned = {}  # new_key -> value
+        for section, key, value in entries:
             full = "%s.%s" % (section, key)
-            new_key, reason = self._resolve_new_key(section, key, key_map)
+            new_key, reason = self._resolve_new_key(
+                section, key, key_map, ambiguous_keys)
             secret = _is_secret(full)
-            if new_key in self._store:
+            # Skip if already in the store OR already claimed in this pass
+            # (do not overwrite an existing/newer value or a sibling mapping).
+            if new_key in self._store or new_key in planned:
                 report["skipped"].append(full)
                 report["entries"].append({"old_key": full, "new_key": new_key,
                                           "reason": "skipped_exists", "secret": secret})
                 continue
-            if not dry_run:
-                self._store.set(new_key, value)
+            planned[new_key] = value
             if reason == "unknown_key_preserved":
                 report["legacy"].append(full)
             else:
                 report["migrated"].append(full)
+            # NOTE: the raw value is intentionally NOT stored in the report, so
+            # secret values can never leak into logs/CLI output (fix-plan §1.5).
             report["entries"].append({"old_key": full, "new_key": new_key,
                                       "reason": reason, "secret": secret})
+
+        if planned and not dry_run:
+            self._store.save(**planned)  # one locked, atomic batch write
 
         self._log("info", "ConfigMigration: migrated %d, skipped %d, legacy %d" % (
             len(report["migrated"]), len(report["skipped"]), len(report["legacy"])))
         return report
 
-    # -- verify (§4.8: full, not a spot-check) ----------------------------
+    # -- verify (§4.8 / fix-plan §1.3.5: full check) ----------------------
 
     def verify(self, report: "dict[str, Any] | None" = None) -> bool:
         """Verify the new ConfigStore is fully readable.
 
         Every key in the store must be retrievable. If a migration ``report`` is
-        supplied, every mapped/legacy new_key it claims must also be present.
+        supplied, every mapped/legacy new_key it claims must be present and
+        readable, and no secret entry may carry a raw ``value`` field.
         """
         try:
             for key in self._store.keys():
                 _ = self._store.get(key)
             if report is not None:
                 for entry in report.get("entries", []):
-                    if entry["reason"] in ("mapped", "unknown_key_preserved"):
+                    if entry["reason"] in ("mapped", "mapped_legacy_bare",
+                                            "unknown_key_preserved"):
                         if entry["new_key"] not in self._store:
                             self._log("error", "ConfigMigration.verify: missing %s" % entry["new_key"])
                             return False
+                        _ = self._store.get(entry["new_key"])  # must be readable
+                    if entry.get("secret") and "value" in entry:
+                        self._log("error", "ConfigMigration.verify: secret value leaked for %s"
+                                  % entry["new_key"])
+                        return False
             return True
         except Exception as exc:
             self._log("error", "ConfigMigration.verify failed: %s" % exc)

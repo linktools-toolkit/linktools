@@ -377,3 +377,59 @@ def test_resume_416_incomplete_restarts_full(manager, tmp_path):
 def _HttpTransport():
     from linktools._download import HttpTransport
     return HttpTransport()
+
+
+# --------------------------------------------------------------------------- #
+# PR-3 (fix-plan §3.3): hash-mismatch retry-once / second-fail semantics
+# --------------------------------------------------------------------------- #
+
+class _ScriptedTransport:
+    """Serves a scripted sequence of payloads so hash-retry can be exercised.
+
+    Used instead of a real HTTP server: fetch N writes payloads[N] to ``part``
+    (clamping to the last), so a [bad, good] sequence models a transient bad
+    fetch that a retry fixes.
+    """
+
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+        self._i = 0
+        self.fetches = 0
+
+    def fetch(self, request, part, on_progress=None, meta=None):
+        from pathlib import Path
+        payload = self._payloads[min(self._i, len(self._payloads) - 1)]
+        self._i += 1
+        self.fetches += 1
+        Path(part).parent.mkdir(parents=True, exist_ok=True)
+        with open(part, "wb") as f:
+            f.write(payload)
+        if meta is not None:
+            meta["url"] = request.url
+
+
+def test_hash_mismatch_retry_once_then_succeeds(manager, tmp_path):
+    # First fetch lands bad content (hash mismatch); the retry lands good
+    # content and the download succeeds.
+    good = b"good-content"
+    bad = b"bad-content"
+    dst = tmp_path / "dst.bin"
+    req = DownloadRequest(url="mem://x", destination=dst,
+                          sha256=hashlib.sha256(good).hexdigest())
+    transport = _ScriptedTransport([bad, good])
+    result = manager.download(req, transport=transport)
+    assert transport.fetches == 2          # exactly one retry
+    assert result.path.read_bytes() == good
+
+
+def test_second_hash_mismatch_fails(manager, tmp_path):
+    # Both fetches are wrong -> retry once, then fail; no infinite loop, no dst.
+    bad = b"bad-content"
+    dst = tmp_path / "dst.bin"
+    req = DownloadRequest(url="mem://x", destination=dst,
+                          sha256=hashlib.sha256(b"different").hexdigest())
+    transport = _ScriptedTransport([bad, bad])
+    with pytest.raises(DownloadError):
+        manager.download(req, transport=transport)
+    assert transport.fetches == 2          # initial + one retry, not infinite
+    assert not dst.exists()                # no half-installed file exposed

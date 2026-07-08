@@ -456,45 +456,71 @@ class Tool(metaclass=ToolMeta):
 
         # download and extract (manifest in staging BEFORE target)
         if not self.exists:
-            self._tools.logger.info(f"Download {self}: {self.download_url}")
-            import uuid as _uuid
-            from .._download import DownloadRequest
-            temp_dir = self._tools.environ.get_temp_path("tools", "cache")
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = str(temp_dir / utils.guess_file_name(self.download_url))
-            # DownloadManager owns atomic landing / resume / hash validation;
-            # call it directly rather than through the legacy UrlFile facade so
-            # the install path no longer depends on it (spec §3.7).
-            self._tools.environ.downloads.download(DownloadRequest(
-                url=self.download_url, destination=temp_path))
+            # Tool-level lock (fix-plan §2.3.3): serializes concurrent
+            # installs of the same tool across processes. Dependencies are
+            # prepared above, outside this lock.
+            with self._tools.environ.locks.process_lock("tool:" + self.name):
+                if not self.exists:  # re-check under lock; another process may have installed it
+                    self._tools.logger.info(f"Download {self}: {self.download_url}")
+                    import uuid as _uuid
+                    from .._download import DownloadRequest
+                    temp_dir = self._tools.environ.get_temp_path("tools", "cache")
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    temp_path = str(temp_dir / utils.guess_file_name(self.download_url))
+                    # DownloadManager owns atomic landing / resume / hash
+                    # validation; call it directly (fix-plan §2.3.1). sha256/size
+                    # are passed only when the tool definition declares them.
+                    self._tools.environ.downloads.download(DownloadRequest(
+                        url=self.download_url, destination=temp_path,
+                        sha256=self.get("sha256", None) or None,
+                        size=self.get("size", None) or None,
+                    ))
 
-            # staging dir — everything happens here before atomic move.
-            staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
-            os.makedirs(staging, exist_ok=True)
-            try:
-                if not utils.is_empty(self.unpack_path):
-                    self._tools.logger.debug(f"Extract {self} to {staging}")
-                    utils.safe_extract(temp_path, staging)
-                    os.remove(temp_path)
-                else:
-                    target_in_staging = os.path.join(
-                        staging,
-                        os.path.relpath(self.absolute_path, self.root_path))
-                    os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
-                    shutil.move(temp_path, target_in_staging)
+                    # staging dir — everything happens here before atomic move.
+                    staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
+                    os.makedirs(staging, exist_ok=True)
+                    corrupt = None
+                    try:
+                        if not utils.is_empty(self.unpack_path):
+                            self._tools.logger.debug(f"Extract {self} to {staging}")
+                            utils.safe_extract(temp_path, staging)
+                            os.remove(temp_path)
+                        else:
+                            target_in_staging = os.path.join(
+                                staging,
+                                os.path.relpath(self.absolute_path, self.root_path))
+                            os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
+                            shutil.move(temp_path, target_in_staging)
 
-                # write manifest INSIDE staging before move.
-                self._write_manifest(staging)
-                # Atomic move: target appears only when fully installed.
-                if os.path.exists(self.root_path):
-                    shutil.rmtree(self.root_path, ignore_errors=True)
-                os.replace(staging, self.root_path)
-            except BaseException:
-                shutil.rmtree(staging, ignore_errors=True)
-                raise
+                        # write manifest INSIDE staging before move.
+                        self._write_manifest(staging)
 
-            # Active pointer after successful activation.
-            self._set_active()
+                        # Swap an existing (incomplete) root aside, then atomically
+                        # put staging in its place. If the final move fails, restore
+                        # the old dir so the tool stays usable (fix-plan §2.3.2).
+                        if os.path.exists(self.root_path):
+                            corrupt = self._make_corrupt_path(self.root_path)
+                            os.replace(self.root_path, corrupt)
+                        try:
+                            os.replace(staging, self.root_path)
+                            staging = None  # consumed
+                        except BaseException:
+                            if not os.path.exists(self.root_path) and corrupt \
+                                    and os.path.exists(corrupt):
+                                os.replace(corrupt, self.root_path)
+                                corrupt = None
+                            raise
+                        if corrupt:
+                            shutil.rmtree(corrupt, ignore_errors=True)
+                    except BaseException:
+                        if staging and os.path.exists(staging):
+                            shutil.rmtree(staging, ignore_errors=True)
+                        if corrupt and os.path.exists(corrupt):
+                            shutil.rmtree(corrupt, ignore_errors=True)
+                        raise
+
+                    # Active pointer after successful activation.
+                    self._set_active()
 
         if not os.access(self._stub.path, os.X_OK):
             self._tools.logger.debug(f"Create {self._stub}")
@@ -598,10 +624,26 @@ class Tool(metaclass=ToolMeta):
         from ..cli import env
         return utils.list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
 
+    def _make_corrupt_path(self, root_path):
+        """Return a unique path under the tools tree to quarantine a bad install.
+
+        Lives next to the version dir (same filesystem, inside the tools tree)
+        so os.replace stays atomic and a bad target never escapes the tools dir.
+        """
+        import uuid as _uuid
+        corrupt_base = os.path.join(os.path.dirname(root_path), ".corrupt")
+        os.makedirs(corrupt_base, exist_ok=True)
+        return os.path.join(corrupt_base, "%s-%s" % (
+            os.path.basename(root_path), _uuid.uuid4().hex[:8]))
+
     def _write_manifest(self, target_dir=None):
         """Write manifest.json (v4 §9.5: inside staging before move)."""
         import json
         target_dir = target_dir or self.root_path
+        # entrypoint is stored relative to the install root so the same manifest
+        # is valid whether read from staging or the final version dir (fix-plan §2.3.4).
+        entrypoint = os.path.relpath(self.absolute_path, self.root_path) \
+            if self.absolute_path else ""
         manifest = {
             "schema": 1,
             "name": self.name,
@@ -610,7 +652,7 @@ class Tool(metaclass=ToolMeta):
             "architecture": self._tools.environ.machine,
             "source_url": self.download_url,
             "installed_at": _now_iso(),
-            "entrypoint": self.absolute_path,
+            "entrypoint": entrypoint,
         }
         manifest_path = os.path.join(target_dir, "manifest.json")
         utils.atomic_write(manifest_path, json.dumps(manifest, indent=2))

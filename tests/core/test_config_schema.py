@@ -245,3 +245,17 @@ def test_require_present_returns_value():
 def test_environ_debug_is_bool():
     from linktools.core import environ
     assert isinstance(environ.debug, bool)
+
+
+def test_unknown_key_raises_when_allow_unknown_false():
+    # With allow_unknown disabled, an unknown key must raise (not resolve to a
+    # value); explain() still returns a found=False dict rather than crashing.
+    schema = ConfigSchema(allow_unknown=False)
+    r = ConfigResolver(schema, sources=[DefaultSource(schema)])
+    with pytest.raises(ConfigNotFoundError):
+        r.resolve("NOPE")
+    info = r.explain("NOPE")
+    assert info["found"] is False
+    cfg = Config(environ=None, schema=schema, sources=[DefaultSource(schema)])
+    with pytest.raises(ConfigNotFoundError):
+        cfg.get("NOPE")
