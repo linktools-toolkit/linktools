@@ -6,9 +6,9 @@ import os
 
 import pytest
 
-from linktools._config_store import ConfigStore
+from linktools.core import ConfigStore
 from linktools.core._locks import LockManager
-from linktools.core._config_migration import ConfigMigration
+from linktools.core import ConfigMigration
 
 
 @pytest.fixture

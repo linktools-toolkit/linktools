@@ -48,14 +48,10 @@ if _t.TYPE_CHECKING:
     ConfigLiteralType = str
     ConfigTypeMap = Dict[str, Any]
     from .core._tools import Tools, Tool, ToolExecError  # noqa
-    from .core._url import UrlFile, UrlFileValidatorType  # noqa
+    from .core._download import UrlFile, UrlFileValidatorType  # noqa
     from .core._environ import BaseEnviron as _BaseEnviron  # noqa
 
-    # ParamSpec is 3.10+; use typing_extensions fallback for 3.6 compat.
-    try:
-        P = _t.ParamSpec("P")
-    except AttributeError:
-        P = None  # type: ignore
+    P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
 
 

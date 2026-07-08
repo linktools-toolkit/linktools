@@ -28,7 +28,7 @@
 """
 from typing import TYPE_CHECKING
 
-from linktools.core._config_schema import (
+from linktools.core import (
     ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
 from linktools.decorator import cached_property

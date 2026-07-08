@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from linktools._config_store import ConfigStore
+from linktools.core import ConfigStore
 from linktools.core._locks import LockManager
 from linktools.errors import ConfigError
 

@@ -8,16 +8,16 @@ import threading
 
 import pytest
 
-from linktools._download import (
+from linktools.core import (
     DownloadManager,
     DownloadRequest,
     FileTransport,
     HashValidator,
     SizeValidator,
     CompositeValidator,
-    DownloadError,
 )
-from linktools._cache_store import CacheStore
+from linktools.errors import DownloadError
+from linktools.cache import CacheStore
 from linktools.core._locks import LockManager
 from linktools.types import MISSING
 
@@ -154,7 +154,7 @@ def test_http_transport_200(manager, tmp_path):
     while "port" not in handle:
         _t.sleep(0.01)
     try:
-        from linktools._download import HttpTransport
+        from linktools.core import HttpTransport
         url = "http://127.0.0.1:%d/file.bin" % handle["port"]
         req = DownloadRequest(url=url, destination=tmp_path / "dst.bin",
                               sha256=hashlib.sha256(body).hexdigest())
@@ -190,7 +190,7 @@ def test_http_gzip_and_content_disposition(manager, tmp_path):
     th.daemon = True
     th.start()
     try:
-        from linktools._download import HttpTransport
+        from linktools.core import HttpTransport
         url = "http://127.0.0.1:%d/x" % port
         req = DownloadRequest(url=url, destination=tmp_path / "dst.bin",
                               sha256=hashlib.sha256(raw).hexdigest())
@@ -375,7 +375,7 @@ def test_resume_416_incomplete_restarts_full(manager, tmp_path):
 
 
 def _HttpTransport():
-    from linktools._download import HttpTransport
+    from linktools.core import HttpTransport
     return HttpTransport()
 
 

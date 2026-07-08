@@ -41,7 +41,7 @@ from .ios import GoIOS, GoIOSError, GoIOSDevice
 if TYPE_CHECKING:
     from collections.abc import Callable
     from linktools.cli import CommandParser
-    from linktools._cache_store import CacheStore
+    from linktools.cache import CacheStore
 
 
 class DeviceCache:

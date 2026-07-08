@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from linktools._cache_store import CacheStore, JsonCodec, BytesCodec
+from linktools.cache import CacheStore, JsonCodec, BytesCodec
 from linktools.errors import (
     CacheValueError, CacheCodecError, CacheBusyError,
 )
@@ -76,7 +76,7 @@ def test_ttl_negative_is_rejected(ns):
 
 def test_ttl_expires_after_time(ns, monkeypatch):
     # The store uses time.time() (UTC unix) for persistent TTL.
-    import linktools._cache_store as mod
+    import linktools.cache as mod
     clock = [1000.0]
     monkeypatch.setattr(mod.time, "time", lambda: clock[0])
     ns.set("k", "v", ttl=10)         # expires at 1010
@@ -140,6 +140,15 @@ def test_transaction_rolls_back_on_error(ns):
             raise RuntimeError("boom")
     assert ns.get("a", default="nope") == "nope"
     assert ns.get("keep") == "yes"  # pre-existing data untouched
+
+
+def test_increment_inside_transaction(ns):
+    # increment() must compose with an outer transaction (uses _exec_in_tx,
+    # not a nested _begin) -- two increments in one tx accumulate to 2.
+    with ns.transaction():
+        assert ns.increment("n") == 1
+        assert ns.increment("n") == 2
+    assert ns.get("n") == 2
 
 
 # --------------------------------------------------------------------------- #

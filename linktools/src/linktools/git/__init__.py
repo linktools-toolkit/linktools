@@ -7,15 +7,27 @@ Public API (stable -- cntr depends on it)::
 
     from linktools.git import GitRepository, GitHead, GitSyncPolicy
     from linktools.git import GitError, GitDivergedError
+
+``import linktools.git`` does NOT require dulwich: only ``GitRepository`` /
+``GitHead`` do (they need the optional ``linktools[git]`` extra). ``GitSyncPolicy``
+and ``GitProgressStream`` are dulwich-free and always importable. Without dulwich
+the repository classes become placeholders that raise ``ModuleError`` on use.
 """
 
-from linktools.errors import GitError, GitDivergedError
-
-from .repository import GitRepository, GitHead
-from .sync import GitSyncPolicy
-from .progress import GitProgressStream
+from linktools.errors import GitError, GitDivergedError, missing_optional_class
 
 __all__ = [
     "GitRepository", "GitHead", "GitSyncPolicy", "GitProgressStream",
     "GitError", "GitDivergedError",
 ]
+
+
+# dulwich-free modules -- always importable.
+from .sync import GitSyncPolicy
+from .progress import GitProgressStream
+
+try:
+    from .repository import GitRepository, GitHead
+except ImportError as _exc:  # dulwich not installed
+    GitRepository = missing_optional_class("GitRepository", "git", _exc)
+    GitHead = missing_optional_class("GitHead", "git", _exc)

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.core._config_schema import (
+from linktools.core import (
     ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
 from linktools.decorator import cached_property

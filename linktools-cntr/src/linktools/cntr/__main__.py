@@ -36,7 +36,7 @@ from dulwich.errors import GitProtocolError
 from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ
-from linktools.core._config_schema import ConfigField
+from linktools.core import ConfigField
 from linktools.rich import confirm, choose
 from linktools.errors import ConfigError, GitError
 from .container import ContainerError
@@ -190,7 +190,7 @@ class ConfigCommand(BaseCommand):
     @subcommand_argument("--backup", action="store_true", default=False,
                          help="backup old config before migrating")
     def on_command_migrate(self, dry_run: bool, backup: bool):
-        from linktools.core._config_migration import ConfigMigration
+        from linktools.core import ConfigMigration
         old_path = str(manager.environ.paths.config / "settings.json")
         mig = ConfigMigration(manager.environ.config_store, self.logger)
         info = mig.inspect(old_path)

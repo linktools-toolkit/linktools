@@ -38,7 +38,7 @@ from jinja2 import Environment, TemplateError, FileSystemLoader
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
-from linktools.core._config_schema import LazyProvider
+from linktools.core import LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import Error
 from linktools.runtime import lazy_load

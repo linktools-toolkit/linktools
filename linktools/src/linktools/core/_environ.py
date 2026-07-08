@@ -46,9 +46,9 @@ if TYPE_CHECKING:
     from ._paths import EnvironmentPaths
     from ._logging import LoggingManager
     from ._locks import LockManager
-    from .._cache_store import CacheStore
-    from .._config_store import ConfigStore
-    from .._download import DownloadManager
+    from ..cache import CacheStore
+    from ._config import ConfigStore
+    from ._download import DownloadManager
 
 
 class ConfigDict(dict):
@@ -207,7 +207,7 @@ class BaseEnviron(abc.ABC):
         ``environ.cache.namespace(name)`` for isolated key spaces. Per-thread
         connections are managed inside the store.
         """
-        from .._cache_store import CacheStore
+        from ..cache import CacheStore
 
         self.paths.ensure_cache()
         return CacheStore(self.paths.cache / "cache.db")
@@ -223,7 +223,7 @@ class BaseEnviron(abc.ABC):
         INSTALLED_CONTAINERS) that must NOT live in the cache. Distinct file and
         lifecycle from ``cache``; written atomically under a process lock.
         """
-        from .._config_store import ConfigStore
+        from ._config import ConfigStore
 
         self.paths.ensure_config()
         return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
@@ -238,7 +238,7 @@ class BaseEnviron(abc.ABC):
         Locks via ``self.locks``, stores resume metadata in ``self.cache``;
         consumers migrate from the legacy UrlFile (core/_url.py) to this.
         """
-        from .._download import DownloadManager
+        from ._download import DownloadManager
 
         return DownloadManager(self)
 
@@ -422,7 +422,7 @@ class BaseEnviron(abc.ABC):
         EnvironmentSource > RuntimeOverrideSource > PersistentSource >
         DefaultSource (schema defaults).
         """
-        from ._config_schema import (
+        from ._config import (
             Config as NewConfig, ConfigSchema,
             EnvironmentSource, RuntimeOverrideSource,
             PersistentSource, DefaultSource,
@@ -457,7 +457,7 @@ class BaseEnviron(abc.ABC):
         Each call returns a fresh Config with its own schema + sources, so
         sub-managers (cntr) can define their own fields independently.
         """
-        from ._config_schema import (
+        from ._config import (
             Config as NewConfig, ConfigSchema,
             EnvironmentSource, RuntimeOverrideSource,
             PersistentSource, DefaultSource,
@@ -583,7 +583,7 @@ class BaseEnviron(abc.ABC):
         Returns:
             UrlFile: The operation result.
         """
-        from ._url import HttpFile, LocalFile
+        from ._download import HttpFile, LocalFile
 
         if not isinstance(url, str):
             url = str(url)

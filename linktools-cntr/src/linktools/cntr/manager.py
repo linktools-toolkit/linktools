@@ -38,7 +38,7 @@ from dulwich.errors import NotGitRepository
 
 from linktools import utils
 from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
-from linktools.core._config_schema import (
+from linktools.core import (
     ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider,
 )
 from linktools.decorator import cached_property

@@ -247,6 +247,22 @@ class ModuleError(CapabilityError):
     """A linktools module/capability cannot be loaded or used."""
 
 
+def missing_optional_class(name, extra, exc):
+    """Return a placeholder class that raises ``ModuleError`` on instantiation.
+
+    Used by packages that depend on an optional extra (e.g. ``linktools[git]``
+    needs dulwich) so ``import linktools.git`` never fails on a missing dep --
+    only actually *using* the class does. Defined once here (next to
+    ``ModuleError``) so git/ssh/... share one implementation.
+    """
+    class _MissingOptional(object):
+        def __init__(self, *args, **kwargs):
+            raise ModuleError(
+                "%s requires optional dependency extra `%s`: %s" % (name, extra, exc))
+    _MissingOptional.__name__ = name
+    return _MissingOptional
+
+
 class DownloadHttpError(DownloadError):
     """A download failed with a specific HTTP status code.
 

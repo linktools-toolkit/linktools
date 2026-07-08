@@ -359,7 +359,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 environ.logger.info(_json.dumps(payload, indent=2, default=str))
 
         def run(self, args: "argparse.Namespace"):
-            from linktools.core._config_migration import ConfigMigration
+            from linktools.core import ConfigMigration
             from linktools.rich import confirm, is_no_input
 
             store = environ.config_store

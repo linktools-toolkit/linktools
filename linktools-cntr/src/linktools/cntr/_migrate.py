@@ -5,7 +5,7 @@
 
 cntr historically stored its persistent user state (INSTALLED_CONTAINERS /
 INSTALLED_REPOS) in three successive formats. This module consolidates all of
-them into the persistent :class:`linktools._config_store.ConfigStore`, in age
+them into the persistent :class:`linktools.core.ConfigStore`, in age
 order:
 
   1. ``<data>/config/containers.yml``   -- the original JSON file (very old)

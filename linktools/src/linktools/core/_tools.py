@@ -455,7 +455,7 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[dependency]
             tool.prepare()
 
-        # ToolInstaller is the single install orchestrator (fix-plan §3.3.3):
+ # ToolInstaller is the single install orchestrator :
         # Tool.prepare keeps dependency resolution, the stub, and chmod, but
         # delegates the download/extract/manifest/active transaction. The lock,
         # corrupt-move rollback, and manifest-in-staging live there now.
@@ -581,7 +581,7 @@ class Tool(metaclass=ToolMeta):
         import json
         target_dir = target_dir or self.root_path
         # entrypoint is stored relative to the install root so the same manifest
-        # is valid whether read from staging or the final version dir (fix-plan §2.3.4).
+ # is valid whether read from staging or the final version dir .
         entrypoint = os.path.relpath(self.absolute_path, self.root_path) \
             if self.absolute_path else ""
         manifest = {

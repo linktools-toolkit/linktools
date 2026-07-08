@@ -11,7 +11,7 @@ import os
 import pytest
 
 from linktools.cache import FileCache  # legacy, used to set up the source data
-from linktools._config_store import ConfigStore
+from linktools.core import ConfigStore
 from linktools.core._locks import LockManager
 from linktools.cntr._migrate import migrate_legacy_container_settings
 

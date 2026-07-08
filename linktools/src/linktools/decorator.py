@@ -36,14 +36,10 @@ from linktools.types import Timeout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import Any, TypeVar
+    from typing import Any, ParamSpec, TypeVar
 
     T = TypeVar("T")
-    try:
-        from typing import ParamSpec
-        P = ParamSpec("P")
-    except ImportError:
-        P = Any  # type: ignore
+    P = ParamSpec("P")
     WRAPPER = Callable[[T], T]
 
 

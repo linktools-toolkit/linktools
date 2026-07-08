@@ -51,7 +51,7 @@ __all__ = ["ToolInstallation", "ToolInstaller"]
 
 _MANIFEST_SCHEMA = 1
 
-# safe_extract caps (spec §7.7): tighter than the generic defaults so a
+# safe_extract caps : tighter than the generic defaults so a
 # malicious / oversized archive cannot exhaust disk during a tool install.
 _MAX_FILES = 20000
 _MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024      # 2 GiB
@@ -83,7 +83,7 @@ class ToolInstaller(object):
     # -- internals ---------------------------------------------------------
 
     def _lock(self, name):
-        # Unified tool-level lock (spec §7.6): install/remove/activate/gc/repair
+ # Unified tool-level lock : install/remove/activate/gc/repair
         # all serialize on the same key.
         return self._environ.locks.process_lock("tool:" + name)
 
@@ -122,7 +122,7 @@ class ToolInstaller(object):
         except OSError:
             shutil.rmtree(str(target), ignore_errors=True)
 
-    # -- state (spec §7.3) ------------------------------------------------
+ # -- state ------------------------------------------------
 
     def is_installation_complete(self, name: str, version: str) -> bool:
         """Whether a version dir is a fully usable installation.
@@ -187,12 +187,12 @@ class ToolInstaller(object):
         """Backward-compatible alias for :meth:`is_installation_complete`."""
         return self.is_installation_complete(name, version)
 
-    # -- install (spec §7.4) ----------------------------------------------
+ # -- install ----------------------------------------------
 
     def install(self, definition, *, source_url, sha256=None, version=None,
                 downloader=None):
         """Install ``definition`` from ``source_url`` transactionally."""
-        from .._download import DownloadRequest
+        from ._download import DownloadRequest
 
         name = definition.name
         version = version or definition.version or "unknown"
@@ -208,7 +208,7 @@ class ToolInstaller(object):
                 return ToolInstallation(target, name, version, manifest)
 
             # A half-written target blocks the atomic move; quarantine it so
-            # the install can proceed from scratch (§7.5).
+ # the install can proceed from scratch .
             if target.exists():
                 self._quarantine(target)
 
@@ -228,7 +228,7 @@ class ToolInstaller(object):
                                    max_file_size=_MAX_SINGLE_FILE)
                 archive.unlink()
 
-                # Validate the entrypoint inside staging BEFORE the move (§7.4):
+ # Validate the entrypoint inside staging BEFORE the move :
                 # the target must never appear without a usable entrypoint.
                 if entrypoint:
                     ep = extract_root / entrypoint
@@ -260,7 +260,7 @@ class ToolInstaller(object):
             self._set_active(name, version)
             return ToolInstallation(target, name, version, manifest)
 
-    # -- main-path install: Tool delegation (fix-plan §3.3.3) -------------
+ # -- main-path install: Tool delegation -------------
 
     def install_tool(self, tool):
         """Install a (legacy) ``Tool`` object into its config-resolved layout.
@@ -273,7 +273,7 @@ class ToolInstaller(object):
         in-line Tool.prepare block (locked by test_tools_prepare.py).
         """
         import uuid as _uuid
-        from .._download import DownloadRequest
+        from ._download import DownloadRequest
 
         env = tool._tools.environ
         name = tool.name
@@ -334,7 +334,7 @@ class ToolInstaller(object):
                 tool._write_manifest(staging)
 
                 # Swap an existing (incomplete) root aside, atomically put
-                # staging in place, restore on failure (fix-plan §2.3.2).
+ # staging in place, restore on failure .
                 if os.path.exists(tool.root_path):
                     corrupt = tool._make_corrupt_path(tool.root_path)
                     os.replace(tool.root_path, corrupt)

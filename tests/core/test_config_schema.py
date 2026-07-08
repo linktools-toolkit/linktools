@@ -7,7 +7,7 @@ secret masking in explain, and multi-instance isolation.
 """
 import pytest
 
-from linktools.core._config_schema import (
+from linktools.core import (
     Config, ConfigField, ConfigSchema, ConfigResolver,
     EnvironmentSource, RuntimeOverrideSource, DefaultSource,
 )
@@ -147,7 +147,7 @@ def test_explain_masks_secret_value(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_alias_cycle_detected():
-    from linktools.core._config_schema import AliasProvider
+    from linktools.core import AliasProvider
     schema = ConfigSchema()
     schema.define(ConfigField(name="A", provider=AliasProvider("B")))
     schema.define(ConfigField(name="B", provider=AliasProvider("A")))
