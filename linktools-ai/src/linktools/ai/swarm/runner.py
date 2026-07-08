@@ -273,42 +273,33 @@ class SwarmRunner:
             )
             return result
         except asyncio.CancelledError:
-            # Package 2: real cancel path -- CancelledError surfaces here
-            # either from task.cancel() interrupting an in-flight await inside
+            # Package 2/P1-1 (actionable-fix-spec, current-review round): real
+            # cancel path -- CancelledError surfaces here either from
+            # task.cancel() interrupting an in-flight await inside
             # strategy.run() (child agent call, store I/O, ...) or from one of
             # the token.raise_if_cancelled() checks above. Mirrors
-            # AgentRunner.execute()'s own CancelledError handler: transition
-            # through CANCELLING (distinguishing "cancel requested" from
-            # "actually stopped") to CANCELLED, best-effort (a concurrent
-            # terminal transition losing this race is not itself an error --
-            # the warning keeps genuine failures visible).
+            # AgentRunner.execute()'s own CancelledError handler exactly,
+            # including the race AgentRunner already defends against but this
+            # handler previously did not: Runtime.cancel(run_id) may have
+            # ALREADY transitioned the driving Run to CANCELLING (via
+            # run_controller.cancel(), which is what triggered this
+            # CancelledError in the first place) before this handler runs. A
+            # naive "always transition RUNNING -> CANCELLING first" would then
+            # hit InvalidRunTransitionError (CANCELLING is not a valid SOURCE
+            # for a CANCELLING target) and never reach CANCELLED, leaving the
+            # run stuck in CANCELLING forever. _finalize_cancelled_run/
+            # _finalize_cancelled_swarm_run re-read current status and either
+            # (a) skip if already terminal, (b) go straight to CANCELLED if
+            # already CANCELLING, or (c) do the normal two-step transition.
             try:
-                driving_current = await self._run_store.get(context.run_id)
-                if driving_current is not None and driving_current.status not in (
-                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
-                ):
-                    cancelling = await self._run_store.transition(
-                        context.run_id, RunStatus.CANCELLING,
-                        expected_version=driving_current.version,
-                    )
-                    await self._run_store.transition(
-                        context.run_id, RunStatus.CANCELLED,
-                        expected_version=cancelling.version,
-                    )
+                await self._finalize_cancelled_run(context.run_id)
             except Exception as transition_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition driving run %s to CANCELLED: %s",
                     context.run_id, transition_exc,
                 )
             try:
-                swarm_current = await self._swarm_store.get_run(swarm_run.id)
-                if swarm_current is not None and swarm_current.status not in (
-                    SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
-                ):
-                    await self._swarm_store.update_run(
-                        swarm_run.id, expected_version=swarm_current.version,
-                        status=SwarmStatus.CANCELLED,
-                    )
+                await self._finalize_cancelled_swarm_run(swarm_run.id)
             except Exception as swarm_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition swarm run %s to CANCELLED: %s",
@@ -657,6 +648,68 @@ class SwarmRunner:
         # state) to PENDING so resume() can re-drive them. On FileSwarmStore
         # this is a documented no-op.
         await self._swarm_store.reclaim_expired_tasks(swarm_run_id)
+
+    # -- cancellation finalization ---------------------------------------------
+
+    async def _finalize_cancelled_run(self, run_id: str) -> None:
+        """Drive the driving RunRecord to CANCELLED after a real
+        ``CancelledError`` was observed (P1-1, current-review-actionable-fix
+        round). Mirrors ``AgentRunner.execute()``'s own CancelledError
+        handler: re-reads current status rather than assuming RUNNING, since
+        ``Runtime.cancel(run_id)`` may have ALREADY transitioned it to
+        CANCELLING (that transition is precisely what preceded the
+        ``run_controller.cancel()`` call that produced this CancelledError).
+
+        * Already terminal (SUCCEEDED/FAILED/CANCELLED): no-op -- a
+          concurrent terminal transition winning this race is not an error.
+        * Already CANCELLING: go straight to CANCELLED -- attempting
+          RUNNING/WAITING_APPROVAL/PAUSED -> CANCELLING again would hit
+          InvalidRunTransitionError (CANCELLING is not a valid source for a
+          CANCELLING target) and never reach CANCELLED.
+        * Otherwise: the normal two-step CANCELLING -> CANCELLED transition."""
+        current = await self._run_store.get(run_id)
+        if current is None:
+            return
+        if current.status in (
+            RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+        ):
+            return
+        if current.status == RunStatus.CANCELLING:
+            await self._run_store.transition(
+                run_id, RunStatus.CANCELLED, expected_version=current.version,
+            )
+            return
+        cancelling = await self._run_store.transition(
+            run_id, RunStatus.CANCELLING, expected_version=current.version,
+        )
+        await self._run_store.transition(
+            run_id, RunStatus.CANCELLED, expected_version=cancelling.version,
+        )
+
+    async def _finalize_cancelled_swarm_run(self, swarm_run_id: str) -> None:
+        """Same finalization semantics as :meth:`_finalize_cancelled_run`,
+        for the SwarmRun record."""
+        current = await self._swarm_store.get_run(swarm_run_id)
+        if current is None:
+            return
+        if current.status in (
+            SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
+        ):
+            return
+        if current.status == SwarmStatus.CANCELLING:
+            await self._swarm_store.update_run(
+                swarm_run_id, expected_version=current.version,
+                status=SwarmStatus.CANCELLED,
+            )
+            return
+        cancelling = await self._swarm_store.update_run(
+            swarm_run_id, expected_version=current.version,
+            status=SwarmStatus.CANCELLING,
+        )
+        await self._swarm_store.update_run(
+            swarm_run_id, expected_version=cancelling.version,
+            status=SwarmStatus.CANCELLED,
+        )
 
     # -- helpers --------------------------------------------------------------
 

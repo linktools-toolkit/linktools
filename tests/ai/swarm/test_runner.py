@@ -664,6 +664,81 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
     assert "timeout" in driving.error.message.lower()
 
 
+def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path):
+    """P1-1 (current-review-actionable-fix-spec §5): reproduces the exact
+    race Runtime.cancel(run_id) creates -- it transitions the driving Run to
+    CANCELLING BEFORE calling run_controller.cancel(), which is what actually
+    delivers the CancelledError into SwarmRunner.run(). Before the fix,
+    SwarmRunner's CancelledError handler unconditionally tried
+    RUNNING -> CANCELLING first, which fails with InvalidRunTransitionError
+    when the record is ALREADY CANCELLING (CANCELLING is not a valid source
+    for a CANCELLING target) -- silently swallowed by the best-effort
+    except-Exception wrapper, leaving the run stuck in CANCELLING forever."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("coord-out")
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        compiler=compiler,
+    )
+
+    async def slow_coordinator(swarm_run, completed, limits):
+        await asyncio.sleep(10)
+        return ()
+
+    spec = _spec(
+        kind="coordinator_delegation",
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+        config={"coordinator_fn": slow_coordinator},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-0"),
+    }
+    context = _driving_context("drive-cancel-race", "shared-session")
+
+    async def _scenario():
+        task = asyncio.ensure_future(
+            runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+        )
+        # Give run() a chance to create the driving RunRecord and register
+        # with run_controller (mirrors AgentRunner.execute()'s own startup).
+        for _ in range(50):
+            if stores.run_controller.get_token(context.run_id) is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("run() never registered with run_controller")
+
+        # Replicate exactly what Runtime.cancel(run_id) does: transition to
+        # CANCELLING FIRST, then signal the controller.
+        driving = await stores.run_store.get(context.run_id)
+        await stores.run_store.transition(
+            context.run_id, RunStatus.CANCELLING, expected_version=driving.version,
+        )
+        await stores.run_controller.cancel(context.run_id)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_scenario())
+
+    async def _verify():
+        driving = await stores.run_store.get(context.run_id)
+        return driving
+    driving = asyncio.run(_verify())
+    assert driving.status is RunStatus.CANCELLED, (
+        f"driving run stuck at {driving.status} -- must reach CANCELLED "
+        f"even when it was already CANCELLING before the CancelledError handler ran"
+    )
+
+
 # --- 6. SwarmLimits.max_total_tokens accumulation (GAP-09) ------------------
 
 def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
