@@ -405,6 +405,38 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             ),
         )
         if completed is None:
+            # The worker succeeded, but this attempt's completion write lost
+            # the fencing race -- ownership moved to a reclaim or cancel, so
+            # the task's real terminal status belongs to whoever owns it
+            # now. This attempt is neither SUCCEEDED (its write never landed)
+            # nor a genuine worker FAILED, but the RUNNING row already
+            # written above must still be closed out -- leaving it RUNNING
+            # forever would be a permanent, misleading gap in the audit
+            # trail. AttemptStatus has no third terminal state, so record it
+            # FAILED with an error_type that distinguishes "superseded" from
+            # an actual worker error for anyone reading the trail.
+            try:
+                await ctx.swarm_store.record_attempt(replace(
+                    current_attempt,
+                    status=AttemptStatus.FAILED,
+                    finished_at=_now(),
+                    error=RunErrorInfo(
+                        error_type="Superseded",
+                        message=(
+                            "worker succeeded but complete_task lost a "
+                            "fencing race (task reclaimed or cancelled by "
+                            "another owner) before this attempt's "
+                            "completion could be recorded"
+                        ),
+                    ),
+                ))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "swarm task %s: failed to close out the superseded "
+                    "attempt's audit row: %s", claimed.id, exc,
+                )
             return None
         claimed = completed
 

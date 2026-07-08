@@ -1085,9 +1085,12 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     the worker was running -- genuinely losing ownership (a different
     active_run_id now owns the task), not just racing a stale version. That
     is a persistence conflict, not a worker failure: _run_task must not
-    record a FAILED attempt, must not retry the worker, and must not call
-    fail_task() on a task whose work actually succeeded -- it just discards
-    this attempt's (superseded) result and returns None."""
+    retry the worker and must not call fail_task() on a task whose work
+    actually succeeded -- it discards this attempt's (superseded) result and
+    returns None. The attempt's audit row, already written RUNNING before
+    the worker started, must still be closed out (FAILED/"Superseded") --
+    not left stuck RUNNING forever -- so a human reading the trail later can
+    see this attempt actually finished, and why it doesn't own the result."""
     from linktools.ai.swarm.models import AttemptStatus
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
@@ -1151,13 +1154,21 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     assert call_count["n"] == 1
     assert result is None
 
-    # No FAILED attempt was recorded (the worker did not fail) and fail_task
-    # was never called (the task's real status -- whatever the reclaiming
-    # caller set it to -- must be left alone).
-    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
-    assert all(a.status is not AttemptStatus.FAILED for a in attempts)
+    # fail_task was never called -- the task's real status (whatever the
+    # reclaiming caller set it to) must be left alone.
     after = swarm_store._tasks["task-1"]
     assert after.status is not SwarmTaskStatus.FAILED
+
+    # The attempt's audit row is closed out, not left stuck RUNNING: it is
+    # recorded FAILED (AttemptStatus has no other terminal state) but tagged
+    # "Superseded" -- distinguishable from a genuine worker error -- rather
+    # than silently vanishing from the trail.
+    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts) == 1
+    assert attempts[0].status is AttemptStatus.FAILED
+    assert attempts[0].error is not None
+    assert attempts[0].error.error_type == "Superseded"
+    assert attempts[0].finished_at is not None
 
 
 def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_path):
