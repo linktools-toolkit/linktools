@@ -151,6 +151,51 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
         assert bound[name] is shared, f"{name} does not share the UoW session"
 
 
+def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):
+    """Package 6 (actionable-fix-spec §9.3): normal (non-UoW) SessionStore
+    mode supports concurrent appenders to the SAME session -- the
+    unique-(session_id, sequence) retry loop in append_messages resolves the
+    race, so N concurrent appends each get a distinct, gapless sequence."""
+    from linktools.ai.session.models import MessageRole, NewSessionMessage
+    storage, _ = _sqlalchemy_storage(tmp_path)
+
+    async def _run():
+        await storage.sessions.create(_session_record())
+
+        async def _append(i: int):
+            return await storage.sessions.append_messages(
+                "session-1", (NewSessionMessage(role=MessageRole.USER, content=f"m{i}", run_id=None),),
+            )
+        return await asyncio.gather(*(_append(i) for i in range(10)))
+
+    results = asyncio.run(_run())
+    sequences = sorted(batch[0].sequence for batch in results)
+    assert sequences == list(range(1, 11)), f"expected 1..10 with no duplicates, got {sequences}"
+
+
+def test_sqlalchemy_session_append_in_uow_single_writer(tmp_path):
+    """Package 6 (§9.3): a SINGLE writer appending to a session inside an
+    explicit UnitOfWork works normally (the documented boundary is multiple
+    CONCURRENT UoW-mode writers to the same session, not UoW-mode append
+    itself)."""
+    from linktools.ai.session.models import MessageRole, NewSessionMessage
+    storage, _ = _sqlalchemy_storage(tmp_path)
+
+    async def _run():
+        await storage.sessions.create(_session_record())
+        async with storage.transaction() as tx:
+            persisted = await tx.sessions.append_messages(
+                "session-1", (NewSessionMessage(role=MessageRole.USER, content="hi", run_id=None),),
+            )
+        return persisted
+
+    persisted = asyncio.run(_run())
+    assert [m.sequence for m in persisted] == [1]
+    # Committed: visible through the top-level (non-UoW) store afterward.
+    messages = asyncio.run(storage.sessions.list_messages("session-1"))
+    assert [m.content for m in messages] == ["hi"]
+
+
 def test_sqlalchemy_storage_uow_commits_all_stores_on_success(tmp_path):
     """A clean exit commits every tx.* write -- both stores persist."""
     from linktools.ai.agent.approval import build_approval_request
@@ -199,13 +244,20 @@ def test_sqlalchemy_storage_uow_rolls_back_all_stores_on_failure(tmp_path):
     assert fetched_approval is None, "approval leaked after UoW rollback"
 
 
-def test_sqlalchemy_uow_idempotency_conflict_does_not_poison_transaction(tmp_path):
-    """P0-7 (review doc §7.6): a unique-(scope,key) collision on
-    tx.idempotency.reserve() must not poison the surrounding UnitOfWork. Before
-    the SAVEPOINT fix, the IntegrityError raised on flush() left the shared
-    AsyncSession's transaction unusable, so a subsequent tx.runs.create() in
-    the same unit would itself fail (or silently be dropped) instead of
-    committing normally."""
+def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_path):
+    """Revised from the original P0-7 SAVEPOINT-based fix (see
+    storage/sqlalchemy/idempotency.py's reserve() docstring/comment): a
+    session.begin_nested() SAVEPOINT that releases cleanly was measured to
+    NOT reliably participate in a LATER, unrelated failure's rollback of the
+    enclosing transaction under sqlite+aiosqlite -- a correctness risk worse
+    than the isolation SAVEPOINT bought. reserve() no longer uses
+    begin_nested() in UoW mode, so a genuine (scope, key) collision now
+    aborts the WHOLE enclosing transaction (the accepted tradeoff: this
+    requires two concurrent callers racing the exact same idempotency key
+    within the exact same UnitOfWork, which does not happen in this
+    codebase's actual call sites). This test documents and locks in that
+    behavior: tx.runs.create() called AFTER a collision must NOT silently
+    commit -- the whole unit fails."""
     storage, _ = _sqlalchemy_storage(tmp_path)
     run = _run_record()
 
@@ -213,20 +265,20 @@ def test_sqlalchemy_uow_idempotency_conflict_does_not_poison_transaction(tmp_pat
         async with storage.transaction() as tx:
             first = await tx.idempotency.reserve("scope-1", "key-1", "hash-a")
             assert first is None  # fresh reservation
-            # Same (scope, key) but the SAME hash: reserve() returns the
-            # existing RESERVED record rather than raising -- exercise the
-            # actual conflict path (different hash) instead.
+            # Same (scope, key), DIFFERENT hash -> a genuine collision.
             with pytest.raises(Exception):
                 await tx.idempotency.reserve("scope-1", "key-1", "hash-b")
-            # The collision above must NOT have poisoned tx's shared session --
-            # this write must still commit when the `async with` exits cleanly.
-            await tx.runs.create(run)
+            # The session is now in a failed state (SQLAlchemy's
+            # PendingRollbackError) -- any further use of tx.* in this same
+            # transaction is expected to fail too.
+            with pytest.raises(Exception):
+                await tx.runs.create(run)
         return await storage.runs.get(run.id)
 
     fetched_run = asyncio.run(_run())
-    assert fetched_run is not None, (
-        "tx.runs.create() did not survive the UoW after an idempotency "
-        "conflict -- the conflict poisoned the shared transaction"
+    assert fetched_run is None, (
+        "tx.runs.create() must not have committed -- the collision aborted "
+        "the whole enclosing transaction"
     )
 
 

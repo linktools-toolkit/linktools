@@ -47,21 +47,30 @@ class SwarmStore(Protocol):
         ...
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+        self, task_id: str, result: RunResult, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
-        """Mark the task SUCCEEDED. ``expected_version`` (when supplied) is a
-        fencing token -- the CLAIMED task's version right after set_active_run
-        -- so a worker whose lease already expired (and was reclaimed to a new
-        owner) cannot clobber the new owner's progress with its own stale
-        completion (review doc §19/P0-5). ``None`` preserves the legacy
-        unconditional-write behavior for callers with no version in hand."""
+        """Mark the task SUCCEEDED. Package 4 (actionable-fix-spec §7):
+        ``expected_version`` is now a MANDATORY fencing token -- the CLAIMED
+        task's version right after set_active_run -- so a worker whose lease
+        already expired (and was reclaimed to a new owner) cannot clobber the
+        new owner's progress with its own stale completion. The update is
+        additionally conditioned on the task still being in CLAIMED status,
+        and (when ``active_run_id`` is supplied) on it still matching the
+        task's current ``active_run_id`` -- a second fencing dimension so a
+        worker driving a since-superseded child Run cannot complete the task
+        even if it somehow still held a matching version. There is no more
+        ``expected_version=None`` legacy bypass."""
         ...
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+        self, task_id: str, error: RunErrorInfo, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
-        """Mark the task FAILED (bumping ``attempts``). Same fencing-token
-        semantics as :meth:`complete_task`."""
+        """Mark the task FAILED (bumping ``attempts``). Same mandatory
+        fencing-token semantics as :meth:`complete_task`."""
         ...
 
     async def list_tasks(

@@ -151,11 +151,18 @@ class _MemorySwarmStore(SwarmStore):
         self._tasks[task_id] = updated
         return updated
 
-    async def complete_task(self, task_id: str, result, *, expected_version=None) -> SwarmTask:
+    async def complete_task(
+        self, task_id: str, result, *, expected_version: int, active_run_id=None,
+    ) -> SwarmTask:
         current = self._tasks[task_id]
-        if expected_version is not None and current.version != expected_version:
+        if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
+            )
+        if active_run_id is not None and current.active_run_id != active_run_id:
+            raise SwarmConflictError(
+                f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                f"found {current.active_run_id!r}"
             )
         done = replace(
             current,
@@ -167,11 +174,18 @@ class _MemorySwarmStore(SwarmStore):
         self._tasks[task_id] = done
         return done
 
-    async def fail_task(self, task_id: str, error, *, expected_version=None) -> SwarmTask:
+    async def fail_task(
+        self, task_id: str, error, *, expected_version: int, active_run_id=None,
+    ) -> SwarmTask:
         current = self._tasks[task_id]
-        if expected_version is not None and current.version != expected_version:
+        if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
+            )
+        if active_run_id is not None and current.active_run_id != active_run_id:
+            raise SwarmConflictError(
+                f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                f"found {current.active_run_id!r}"
             )
         failed = replace(
             current,

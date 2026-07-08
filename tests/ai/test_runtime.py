@@ -36,6 +36,34 @@ def test_runtime_build_assembles_storage_compiler_runner(tmp_path):
     assert runtime.compiler is not None
 
 
+def test_runtime_build_no_longer_accepts_workdir(tmp_path):
+    """Package 8 (actionable-fix-spec §11): Runtime.build() must not depend
+    on a bare `workdir: Path` param -- the caller builds its own
+    ExecutionBackend and passes it via `execution=`."""
+    from linktools.ai.model.router import ModelRouter
+    storage = FileStorage(root=tmp_path)
+    with pytest.raises(TypeError):
+        Runtime.build(
+            storage=storage, model_router=ModelRouter(registry=_registry()),
+            workdir=tmp_path,
+        )
+
+
+def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
+    """`execution=` (Package 8's replacement for `workdir=`) gives the
+    compiled agent builtin file/terminal tools via the SAME ExecutionBackend
+    machinery `workdir=` used to construct internally."""
+    from linktools.ai.execution.local import LocalExecutionBackend
+    from linktools.ai.model.router import ModelRouter
+    storage = FileStorage(root=tmp_path)
+    backend = LocalExecutionBackend(runtime_dir=tmp_path / "workdir")
+    runtime = Runtime.build(
+        storage=storage, model_router=ModelRouter(registry=_registry()),
+        execution=backend,
+    )
+    assert runtime.runner._execution is backend
+
+
 def test_runtime_run_creates_session_when_none_given_and_returns_result(tmp_path):
     from linktools.ai.model.router import ModelRouter
     storage = FileStorage(root=tmp_path)

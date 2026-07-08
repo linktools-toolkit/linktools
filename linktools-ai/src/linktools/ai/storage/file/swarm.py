@@ -448,21 +448,30 @@ class FileSwarmStore:
             )
 
     def _complete_task_sync(
-        self, task_id: str, result: RunResult, *, expected_version: "int | None",
+        self, task_id: str, result: RunResult, *,
+        expected_version: int,
+        active_run_id: "str | None",
     ) -> SwarmTask:
+        # Package 4: expected_version is mandatory -- no more unconditional
+        # legacy path. Held under self._lock (see complete_task) so the
+        # read-check-write is atomic within this process.
         path = self._task_path(task_id)
         if not path.exists():
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
-        if expected_version is not None:
-            if current.version != expected_version:
-                raise SwarmConflictError(
-                    f"expected version {expected_version}, found {current.version}"
-                )
-            if current.status != SwarmTaskStatus.CLAIMED:
-                raise SwarmConflictError(
-                    f"task {task_id} is not claimed (status={current.status.value})"
-                )
+        if current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        if current.status != SwarmTaskStatus.CLAIMED:
+            raise SwarmConflictError(
+                f"task {task_id} is not claimed (status={current.status.value})"
+            )
+        if active_run_id is not None and current.active_run_id != active_run_id:
+            raise SwarmConflictError(
+                f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                f"found {current.active_run_id!r}"
+            )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         updated = SwarmTask(
             id=current.id,
@@ -487,29 +496,38 @@ class FileSwarmStore:
         return updated
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+        self, task_id: str, result: RunResult, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._complete_task_sync, task_id, result, expected_version=expected_version,
+                self._complete_task_sync, task_id, result,
+                expected_version=expected_version, active_run_id=active_run_id,
             )
 
     def _fail_task_sync(
-        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None",
+        self, task_id: str, error: RunErrorInfo, *,
+        expected_version: int,
+        active_run_id: "str | None",
     ) -> SwarmTask:
         path = self._task_path(task_id)
         if not path.exists():
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
-        if expected_version is not None:
-            if current.version != expected_version:
-                raise SwarmConflictError(
-                    f"expected version {expected_version}, found {current.version}"
-                )
-            if current.status != SwarmTaskStatus.CLAIMED:
-                raise SwarmConflictError(
-                    f"task {task_id} is not claimed (status={current.status.value})"
-                )
+        if current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
+        if current.status != SwarmTaskStatus.CLAIMED:
+            raise SwarmConflictError(
+                f"task {task_id} is not claimed (status={current.status.value})"
+            )
+        if active_run_id is not None and current.active_run_id != active_run_id:
+            raise SwarmConflictError(
+                f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                f"found {current.active_run_id!r}"
+            )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         updated = SwarmTask(
             id=current.id,
@@ -534,11 +552,14 @@ class FileSwarmStore:
         return updated
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+        self, task_id: str, error: RunErrorInfo, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._fail_task_sync, task_id, error, expected_version=expected_version,
+                self._fail_task_sync, task_id, error,
+                expected_version=expected_version, active_run_id=active_run_id,
             )
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":

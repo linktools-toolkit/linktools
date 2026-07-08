@@ -259,6 +259,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             )
             await ctx.swarm_store.complete_task(
                 claimed.id, result, expected_version=claimed.version,
+                active_run_id=child_run_id,
             )
             await ctx.swarm_store.record_attempt(replace(
                 current_attempt,
@@ -281,7 +282,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     await ctx.swarm_store.fail_task(claimed.id, RunErrorInfo(
         error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",
         message=str(last_exc) if last_exc is not None else "",
-    ), expected_version=claimed.version)
+    ), expected_version=claimed.version, active_run_id=child_run_id)
     return None
 
 

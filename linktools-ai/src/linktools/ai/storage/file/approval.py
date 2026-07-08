@@ -30,6 +30,7 @@ from ...agent.approval import (
     ApprovalRequest,
     ApprovalStatus,
     build_approval_request,
+    check_dedupe_conflict,
 )
 from ...errors import (
     ApprovalConflictError,
@@ -177,6 +178,9 @@ class FileApprovalStore:
             r for r in self._list_for_run_sync(run_id) if r.tool_call_id == tool_call_id
         ]
         if existing:
+            # Package 3 (§6.4.3): same dedupe key reused with a different
+            # tool_name/arguments is a conflict, not a replay.
+            check_dedupe_conflict(existing[-1], tool_name=tool_name, arguments=arguments)
             return existing[-1]
         request = build_approval_request(
             run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,

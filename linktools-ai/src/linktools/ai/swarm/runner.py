@@ -26,7 +26,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
@@ -39,13 +39,11 @@ from ..errors import (
     SwarmRunNotFoundError,
 )
 
-if TYPE_CHECKING:
-    from ..knowledge.retriever import Retriever
-    from ..memory.store import MemoryStore
 from ..events.payloads import SwarmCompleted, SwarmStarted
 from ..events.store import EventStore
-from ..run.checkpoint import CheckpointStore
+from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
+from ..run.controller import RunController
 from ..run.models import (
     RunErrorInfo,
     RunInput,
@@ -69,8 +67,17 @@ _LOGGER = logging.getLogger(__name__)
 class SwarmRunner:
     """Orchestrates one Swarm invocation end-to-end. Construct once, call
     ``run()`` per invocation. ``resume()`` re-enters the strategy after a
-    partial run; ``cancel()`` flips the SwarmRun + in-flight child Runs to
-    CANCELLED at the store level."""
+    partial run; ``cancel()`` propagates real cancellation through
+    ``RunController`` when wired (Package 1/2, actionable-fix-spec).
+
+    SwarmRunner does NOT assemble an AgentRunner itself -- Runtime is the
+    single assembly point (actionable-fix-spec §4). The caller (normally
+    ``Runtime.build()``) must hand in the SAME ``AgentRunner`` instance used
+    for top-level Agent runs, so Swarm worker Runs get identical Tool/Policy/
+    Middleware/UoW/Cancellation semantics instead of a second, divergent
+    execution path. Passing ``run_controller`` (the SAME instance
+    ``agent_runner`` was built with) is what makes ``cancel()`` able to
+    actually stop an in-flight child Run -- see ``cancel()``."""
 
     def __init__(
         self,
@@ -79,30 +86,27 @@ class SwarmRunner:
         run_store: RunStore,
         session_store: SessionStore,
         event_store: EventStore,
-        checkpoint_store: CheckpointStore,
         compiler: AgentCompiler,
-        memory_store: "MemoryStore | None" = None,
-        retriever: "Retriever | None" = None,
+        agent_runner: AgentRunner,
+        run_controller: "RunController | None" = None,
     ) -> None:
         self._swarm_store = swarm_store
         self._run_store = run_store
         self._session_store = session_store
         self._event_store = event_store
         self._compiler = compiler
-        # One AgentRunner is reused for every child Run the strategy spawns.
-        # SwarmRunner never calls it directly -- it is handed to the
-        # SwarmExecutionContext so strategy._run_task can drive worker Runs.
-        # memory_store + retriever are forwarded so the same Phase-5 prompt
-        # injection that AgentRunner applies to top-level runs also applies to
-        # each swarm worker Run (default None -> no change -> no injection).
-        self._agent_runner = AgentRunner(
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-            checkpoint_store=checkpoint_store,
-            memory_store=memory_store,
-            retriever=retriever,
-        )
+        # Reused for every child Run the strategy spawns -- injected by the
+        # caller (Runtime.build()), never constructed here. SwarmRunner never
+        # calls it directly -- it is handed to the SwarmExecutionContext so
+        # strategy._run_task can drive worker Runs.
+        self._agent_runner = agent_runner
+        # Package 2: the SAME RunController agent_runner was built with, so
+        # cancel() can (a) stop the swarm's own driving coroutine and (b)
+        # signal an active child Run's in-flight asyncio.Task -- the child's
+        # own AgentRunner.execute() already registers with this controller
+        # (since it's the same instance), so a real cancel() call here has a
+        # real effect on the child, not just a store-level status flip.
+        self._run_controller = run_controller
 
     # -- run() ----------------------------------------------------------------
 
@@ -158,7 +162,23 @@ class SwarmRunner:
         # version is now 2 after the PENDING -> RUNNING update.
         swarm_version = swarm_run.version
 
+        # Package 2 (actionable-fix-spec §5): register the driving coroutine
+        # + a fresh CancellationToken with run_controller, mirroring
+        # AgentRunner.execute()'s own registration. Runtime.cancel(run_id) /
+        # SwarmRunner.cancel() can then call run_controller.cancel(run_id)
+        # to actually interrupt this coroutine (task.cancel()) instead of
+        # only flipping store status. None (default) preserves the old
+        # store-only behavior for callers that don't wire a controller.
+        token: "CancellationToken | None" = None
+        if self._run_controller is not None:
+            token = CancellationToken()
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                await self._run_controller.register(context.run_id, current_task, token)
+
         try:
+            if token is not None:
+                await token.raise_if_cancelled()
             # 3. SwarmStarted event (store assigns the next sequence).
             await self._event_store.append(
                 stream_id=context.run_id,
@@ -221,6 +241,13 @@ class SwarmRunner:
             )
             swarm_version = swarm_run.version
 
+            # Package 2: re-check right before committing success -- a cancel
+            # that raced in while strategy.run() was wrapping up (and didn't
+            # happen to land on an in-flight await) must not still write a
+            # successful result.
+            if token is not None:
+                await token.raise_if_cancelled()
+
             # 5. write ONLY the final aggregate to the shared/parent Session.
             if spec.context_policy.write_aggregate_to_session:
                 await self._write_aggregate(context, result)
@@ -245,6 +272,49 @@ class SwarmRunner:
                 payload=SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
+        except asyncio.CancelledError:
+            # Package 2: real cancel path -- CancelledError surfaces here
+            # either from task.cancel() interrupting an in-flight await inside
+            # strategy.run() (child agent call, store I/O, ...) or from one of
+            # the token.raise_if_cancelled() checks above. Mirrors
+            # AgentRunner.execute()'s own CancelledError handler: transition
+            # through CANCELLING (distinguishing "cancel requested" from
+            # "actually stopped") to CANCELLED, best-effort (a concurrent
+            # terminal transition losing this race is not itself an error --
+            # the warning keeps genuine failures visible).
+            try:
+                driving_current = await self._run_store.get(context.run_id)
+                if driving_current is not None and driving_current.status not in (
+                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                ):
+                    cancelling = await self._run_store.transition(
+                        context.run_id, RunStatus.CANCELLING,
+                        expected_version=driving_current.version,
+                    )
+                    await self._run_store.transition(
+                        context.run_id, RunStatus.CANCELLED,
+                        expected_version=cancelling.version,
+                    )
+            except Exception as transition_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition driving run %s to CANCELLED: %s",
+                    context.run_id, transition_exc,
+                )
+            try:
+                swarm_current = await self._swarm_store.get_run(swarm_run.id)
+                if swarm_current is not None and swarm_current.status not in (
+                    SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
+                ):
+                    await self._swarm_store.update_run(
+                        swarm_run.id, expected_version=swarm_current.version,
+                        status=SwarmStatus.CANCELLED,
+                    )
+            except Exception as swarm_exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "failed to transition swarm run %s to CANCELLED: %s",
+                    swarm_run.id, swarm_exc,
+                )
+            raise
         except Exception as exc:
             # Best-effort cleanup: flip both records to FAILED, then re-raise.
             # The driving Run's expected version is the post-RUNNING version
@@ -282,6 +352,9 @@ class SwarmRunner:
                     swarm_run.id, swarm_exc,
                 )
             raise
+        finally:
+            if self._run_controller is not None:
+                await self._run_controller.unregister(context.run_id)
 
     # -- resume() -------------------------------------------------------------
 
@@ -399,16 +472,58 @@ class SwarmRunner:
     # -- cancel() -------------------------------------------------------------
 
     async def cancel(self, swarm_run_id: str) -> None:
-        """Store-level cancel (Decision #4): no live asyncio task cancellation.
-        Flips the SwarmRun to CANCELLED, then enumerates CLAIMED tasks and
-        transitions each task's child Run (located via ``task.active_run_id``,
-        the Phase-5A handle set by strategy._run_task) to CANCELLED best-effort."""
+        """Real cancel when a RunController is wired (Package 2,
+        actionable-fix-spec §5): transitions the SwarmRun and driving Run to
+        CANCELLING and signals ``run_controller.cancel()`` for the driving
+        run and every active child run, so an in-flight asyncio.Task (the
+        swarm's own coroutine, or a child AgentRunner.execute()) actually
+        stops -- not just a store-level status flip. Falls back to the old
+        store-only CANCELLED transition when no controller is wired, or when
+        a given run/child has no live registration (e.g. a stale record from
+        a crashed worker, or cross-process where RunController cannot see
+        the other process's tasks).
+
+        Idempotent: a SwarmRun already in a terminal status is a no-op."""
         current = await self._swarm_store.get_run(swarm_run_id)
         if current is None:
             raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
-        await self._swarm_store.update_run(
-            swarm_run_id, expected_version=current.version, status=SwarmStatus.CANCELLED
+        if current.status in (
+            SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
+        ):
+            return  # already terminal -- no-op
+
+        driving_run_id = current.run_id
+        driving_in_flight = (
+            self._run_controller is not None
+            and self._run_controller.get_token(driving_run_id) is not None
         )
+        if driving_in_flight:
+            # CANCELLING first (§5.4.5): the driving run()'s own
+            # CancelledError handler finishes CANCELLING -> CANCELLED once it
+            # actually stops. Both the SwarmRun and the driving RunRecord go
+            # through this two-step transition.
+            driving_record = await self._run_store.get(driving_run_id)
+            if driving_record is not None and driving_record.status not in (
+                RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                RunStatus.CANCELLING,
+            ):
+                await self._run_store.transition(
+                    driving_run_id, RunStatus.CANCELLING,
+                    expected_version=driving_record.version,
+                )
+            await self._swarm_store.update_run(
+                swarm_run_id, expected_version=current.version,
+                status=SwarmStatus.CANCELLING,
+            )
+            await self._run_controller.cancel(driving_run_id)
+        else:
+            # No in-flight task (or no controller wired) -- nothing to
+            # actually stop, so go straight to CANCELLED (pre-Package-2
+            # behavior, preserved for the store-only / cross-process case).
+            await self._swarm_store.update_run(
+                swarm_run_id, expected_version=current.version,
+                status=SwarmStatus.CANCELLED,
+            )
 
         claimed = await self._swarm_store.list_tasks(
             swarm_run_id, status=SwarmTaskStatus.CLAIMED
@@ -431,9 +546,29 @@ class SwarmRunner:
                 child = await self._run_store.get(task.active_run_id)
                 if child is None:
                     continue
-                await self._run_store.transition(
-                    task.active_run_id, RunStatus.CANCELLED, expected_version=child.version
+                if child.status in (
+                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                ):
+                    continue
+                child_in_flight = (
+                    self._run_controller is not None
+                    and self._run_controller.get_token(task.active_run_id) is not None
                 )
+                if child_in_flight:
+                    if child.status != RunStatus.CANCELLING:
+                        child = await self._run_store.transition(
+                            task.active_run_id, RunStatus.CANCELLING,
+                            expected_version=child.version,
+                        )
+                    # The child's OWN AgentRunner.execute() -- registered with
+                    # this SAME run_controller instance -- has its own
+                    # CancelledError handler that finishes CANCELLING ->
+                    # CANCELLED once it actually stops.
+                    await self._run_controller.cancel(task.active_run_id)
+                else:
+                    await self._run_store.transition(
+                        task.active_run_id, RunStatus.CANCELLED, expected_version=child.version
+                    )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to cancel child run %s for swarm run %s: %s",
@@ -498,10 +633,12 @@ class SwarmRunner:
                 if child.status == RunStatus.SUCCEEDED and child.result is not None:
                     await self._swarm_store.complete_task(
                         task.id, child.result, expected_version=task.version,
+                        active_run_id=task.active_run_id,
                     )
                 elif child.status == RunStatus.FAILED and child.error is not None:
                     await self._swarm_store.fail_task(
                         task.id, child.error, expected_version=task.version,
+                        active_run_id=task.active_run_id,
                     )
                 elif child.status == RunStatus.RUNNING:
                     # Worker may still be alive -- leave it. If the worker is

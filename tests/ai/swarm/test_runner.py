@@ -20,7 +20,9 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.runner import AgentRunner
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.run.controller import RunController
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import (
     SwarmLimitExceededError,
@@ -135,7 +137,10 @@ def _spec(
 
 
 class _Stores:
-    """Wires the five file-backed stores under tmp_path subdirs."""
+    """Wires the five file-backed stores under tmp_path subdirs, plus one
+    Runtime-style AgentRunner + RunController -- SwarmRunner no longer builds
+    its own AgentRunner (Package 1: it must reuse the one Runtime.build()
+    assembles), so tests build it here exactly like Runtime.build() does."""
 
     def __init__(self, tmp_path: Path) -> None:
         self.run_store = FileRunStore(root=tmp_path / "runs")
@@ -143,6 +148,12 @@ class _Stores:
         self.event_store = FileEventStore(root=tmp_path / "events")
         self.checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
         self.swarm_store = FileSwarmStore(root=tmp_path / "swarm")
+        self.run_controller = RunController()
+        self.agent_runner = AgentRunner(
+            run_store=self.run_store, session_store=self.session_store,
+            event_store=self.event_store, checkpoint_store=self.checkpoint_store,
+            run_controller=self.run_controller,
+        )
 
     def seed_shared_session(self, session_id: str) -> None:
         asyncio.run(self.session_store.create(SessionRecord(
@@ -174,7 +185,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     spec = _spec(
@@ -274,7 +285,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store,
+        agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -294,6 +305,156 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
     assert child.status is RunStatus.CANCELLED
 
 
+def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
+    """Package 2 (actionable-fix-spec §5): when the driving run AND the
+    active child run are both registered with the SAME RunController (as
+    Runtime.build() wires them), cancel() must go through CANCELLING first
+    (not straight to CANCELLED) and must call run_controller.cancel() for
+    BOTH -- proving it's signaling the controller, not just flipping store
+    status. Uses real (but idle) asyncio.Tasks as the "in-flight" registration
+    so run_controller.get_token(...) returns non-None, matching what
+    AgentRunner.execute()/SwarmRunner.run() do for real in-flight runs."""
+    from linktools.ai.swarm.runner import SwarmRunner
+    from linktools.ai.run.cancellation import CancellationToken
+
+    stores = _Stores(tmp_path)
+    now = _NOW
+
+    async def _seed():
+        await stores.run_store.create(RunRecord(
+            id="drive-run-2", root_run_id="drive-run-2", parent_run_id=None,
+            session_id="shared", runnable_id="swarm-spec-1",
+            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
+            input=RunInput(prompt="x"), result=None, error=None, version=1,
+            created_at=now, started_at=now, finished_at=None,
+        ))
+        await stores.swarm_store.create_run(SwarmRun(
+            id="swarm-2", run_id="drive-run-2", round=1, status=SwarmStatus.RUNNING,
+            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+            created_at=now, updated_at=now,
+        ))
+        await stores.run_store.create(RunRecord(
+            id="child-run-2", root_run_id="drive-run-2", parent_run_id="drive-run-2",
+            session_id="swarm:swarm-2:task-2", runnable_id="worker-a",
+            runnable_type=RunnableType.AGENT, status=RunStatus.RUNNING,
+            input=RunInput(prompt="sub"), result=None, error=None, version=1,
+            created_at=now, started_at=now, finished_at=None,
+        ))
+        await stores.swarm_store.create_task(SwarmTask(
+            id="task-2", swarm_run_id="swarm-2", parent_task_id=None,
+            assigned_agent_id="worker-a", description="x", status=SwarmTaskStatus.CLAIMED,
+            dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
+            attempts=1, version=1, claimed_at=now, lease_expires_at=None,
+            created_at=now, updated_at=now,
+            active_run_id="child-run-2",
+        ))
+        # Register both the driving run and the active child as "in-flight"
+        # with the SAME RunController -- exactly what Runtime.build()-wired
+        # SwarmRunner.run()/AgentRunner.execute() do for real runs.
+        driving_task = asyncio.ensure_future(asyncio.sleep(100))
+        child_task = asyncio.ensure_future(asyncio.sleep(100))
+        await stores.run_controller.register("drive-run-2", driving_task, CancellationToken())
+        await stores.run_controller.register("child-run-2", child_task, CancellationToken())
+        return driving_task, child_task
+
+    driving_task, child_task = asyncio.run(_seed())
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        compiler=_build_compiler("coord-out"),
+    )
+
+    async def _cancel():
+        await runner.cancel("swarm-2")
+        # Give the cancelled tasks a tick to observe cancellation.
+        for t in (driving_task, child_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+    asyncio.run(_cancel())
+
+    async def _verify():
+        swarm = await stores.swarm_store.get_run("swarm-2")
+        driving = await stores.run_store.get("drive-run-2")
+        child = await stores.run_store.get("child-run-2")
+        return swarm, driving, child
+    swarm, driving, child = asyncio.run(_verify())
+
+    # Real cancellation was signaled: the registered asyncio.Tasks were
+    # actually cancelled (not just a store-status flip).
+    assert driving_task.cancelled()
+    assert child_task.cancelled()
+    # Store transitioned through CANCELLING (SwarmRunner.run()'s own
+    # CancelledError handler would finish CANCELLING -> CANCELLED for a real
+    # run; here the driving/swarm records stay at CANCELLING because there is
+    # no real run() coroutine draining -- proving cancel() itself does NOT
+    # jump straight to CANCELLED when a controller registration exists).
+    assert swarm.status is SwarmStatus.CANCELLING
+    assert driving.status is RunStatus.CANCELLING
+    # The active child, however, cancel() DOES drive through to CANCELLING
+    # itself (no separate coroutine owns that transition for children).
+    assert child.status is RunStatus.CANCELLING
+
+
+def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    stores = _Stores(tmp_path)
+    now = _NOW
+
+    async def _seed():
+        await stores.run_store.create(RunRecord(
+            id="drive-run-3", root_run_id="drive-run-3", parent_run_id=None,
+            session_id="shared", runnable_id="swarm-spec-1",
+            runnable_type=RunnableType.SWARM, status=RunStatus.SUCCEEDED,
+            input=RunInput(prompt="x"), result=RunResult(output="done"), error=None,
+            version=2, created_at=now, started_at=now, finished_at=now,
+        ))
+        await stores.swarm_store.create_run(SwarmRun(
+            id="swarm-3", run_id="drive-run-3", round=1, status=SwarmStatus.SUCCEEDED,
+            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+            created_at=now, updated_at=now,
+        ))
+    asyncio.run(_seed())
+
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        compiler=_build_compiler("coord-out"),
+    )
+
+    async def _cancel():
+        await runner.cancel("swarm-3")  # must be a no-op, not raise
+    asyncio.run(_cancel())
+
+    async def _verify():
+        return await stores.swarm_store.get_run("swarm-3")
+    swarm = asyncio.run(_verify())
+    assert swarm.status is SwarmStatus.SUCCEEDED  # unchanged
+
+
+def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
+    """Package 1 (actionable-fix-spec §4): SwarmRunner must not construct its
+    own AgentRunner -- it stores exactly the instance it was given, so Swarm
+    worker Runs inherit the SAME Tool/Policy/Middleware/UoW/Cancellation
+    wiring as top-level Agent runs."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    stores = _Stores(tmp_path)
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store, run_store=stores.run_store,
+        session_store=stores.session_store, event_store=stores.event_store,
+        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        compiler=_build_compiler("coord-out"),
+    )
+    assert runner._agent_runner is stores.agent_runner
+    assert runner._run_controller is stores.run_controller
+
+
 def test_cancel_unknown_swarm_run_raises(tmp_path):
     from linktools.ai.swarm.runner import SwarmRunner
 
@@ -301,7 +462,7 @@ def test_cancel_unknown_swarm_run_raises(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store,
+        agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -323,7 +484,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     # coordinator that ALWAYS emits a task -> blows past max_rounds=1.
@@ -395,7 +556,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     spec = _spec(
@@ -438,7 +599,7 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store,
+        agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
     spec = _spec(
@@ -467,7 +628,7 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     async def slow_coordinator(swarm_run, completed, limits):
@@ -524,7 +685,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     spec = _spec(
@@ -570,7 +731,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     spec = _spec(
@@ -613,7 +774,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     runner = SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=compiler,
+        agent_runner=stores.agent_runner, compiler=compiler,
     )
 
     spec = _spec(
@@ -714,7 +875,7 @@ def _make_runner(stores: _Stores):
     return SwarmRunner(
         swarm_store=stores.swarm_store, run_store=stores.run_store,
         session_store=stores.session_store, event_store=stores.event_store,
-        checkpoint_store=stores.checkpoint_store, compiler=_build_compiler("ok"),
+        agent_runner=stores.agent_runner, compiler=_build_compiler("ok"),
     )
 
 
@@ -867,7 +1028,7 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
             runner = SwarmRunner(
                 swarm_store=swarm_store, run_store=stores.run_store,
                 session_store=stores.session_store, event_store=stores.event_store,
-                checkpoint_store=stores.checkpoint_store, compiler=_build_compiler("ok"),
+                agent_runner=stores.agent_runner, compiler=_build_compiler("ok"),
             )
             await runner.recover("swarm-1")
             return await swarm_store.list_tasks("swarm-1")

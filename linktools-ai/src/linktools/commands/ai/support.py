@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from linktools.cli import CommandError
 from linktools.core import environ
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.execution.local import LocalExecutionBackend
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import RuntimeModelConfig, model_registry
 from linktools.ai.model.router import ModelRouter
@@ -102,7 +103,7 @@ def build_runtime(args: "Namespace") -> Runtime:
     return Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=model_registry),
-        workdir=workdir,
+        execution=LocalExecutionBackend(runtime_dir=workdir),
     )
 
 

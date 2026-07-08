@@ -129,19 +129,23 @@ class SqlAlchemyIdempotencyStore:
                 expires_at=expires_at,
             )
 
+        # NOTE on NOT using session.begin_nested() in UoW mode: a released
+        # SAVEPOINT (no conflict -- the common case) was measured to NOT
+        # reliably participate in a LATER, unrelated failure's rollback of
+        # the enclosing transaction under sqlite+aiosqlite (see
+        # storage/sqlalchemy/approval.py's create_or_get_pending for the
+        # full writeup and repro). That correctness risk -- a reservation
+        # surviving a rollback it should have been part of -- is worse than
+        # the narrow benefit begin_nested() bought here (gracefully
+        # continuing the SAME transaction after a genuine (scope, key)
+        # collision, which requires two concurrent callers racing the exact
+        # same idempotency key). A real collision now fails the whole
+        # enclosing transaction instead; the (scope, key) UNIQUE constraint
+        # remains the actual data-integrity backstop regardless.
         try:
             if self._session is not None:
-                # §7.6/P0-7: in UoW mode, isolate the INSERT in a SAVEPOINT
-                # (session.begin_nested()) so a unique-constraint collision
-                # only rolls back this savepoint -- NOT the whole shared
-                # transaction. Without this, IntegrityError on flush() marks
-                # the outer AsyncSession's transaction as needing rollback,
-                # poisoning every other write the surrounding UnitOfWork made
-                # (tool idempotency would silently break approval/run/event
-                # writes sharing the same transaction).
-                async with self._session.begin_nested():
-                    self._session.add(_row())
-                    await self._session.flush()
+                self._session.add(_row())
+                await self._session.flush()
             else:
                 async def _insert(session):
                     session.add(_row())

@@ -229,6 +229,18 @@ class MemoryRow(Base):
 
 class ApprovalRow(Base):
     __tablename__ = "ai_approvals"
+    # Package 3 (actionable-fix-spec §6): the database-level dedupe backstop.
+    # (run_id, tool_call_id) IS the natural dedup key -- a pydantic-ai
+    # tool_call_id is minted fresh per invocation, so it never needs to be
+    # "released" after a terminal (approved/rejected) resolution for reuse by
+    # a genuinely different approval. A plain UNIQUE constraint (no separate
+    # dedupe_key column, no active/terminal partial-index games) is therefore
+    # both simpler and sufficient: create_or_get_pending()'s SELECT-then-
+    # INSERT is only a fast path -- this constraint is what actually prevents
+    # two concurrent callers from ever committing two rows for the same key.
+    __table_args__ = (
+        UniqueConstraint("run_id", "tool_call_id", name="uq_approval_run_tool_call"),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(128), index=True)

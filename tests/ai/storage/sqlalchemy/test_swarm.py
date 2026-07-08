@@ -321,12 +321,13 @@ def test_complete_task_stores_result(tmp_path):
         async with _store_ctx(tmp_path) as store:
             await store.create_run(_run())
             await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
             result = RunResult(output={"done": True}, token_usage={"input_tokens": 1}, metadata={"m": "n"})
-            completed = await store.complete_task("t-1", result)
+            completed = await store.complete_task("t-1", result, expected_version=claimed.version)
             assert completed.status == SwarmTaskStatus.SUCCEEDED
             assert completed.result.output == {"done": True}
             assert completed.result.metadata == {"m": "n"}
-            assert completed.version == 2
+            assert completed.version == claimed.version + 1
 
     asyncio.run(_run_case())
 
@@ -336,13 +337,14 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
         async with _store_ctx(tmp_path) as store:
             await store.create_run(_run())
             await store.create_task(_task(task_id="t-1", attempts=0))
+            claimed = await store.claim_task("swarm-1", "agent-a")
             err = RunErrorInfo(error_type="ValueError", message="boom", detail={"x": 1})
-            failed = await store.fail_task("t-1", err)
+            failed = await store.fail_task("t-1", err, expected_version=claimed.version)
             assert failed.status == SwarmTaskStatus.FAILED
             assert failed.error.error_type == "ValueError"
             assert failed.error.message == "boom"
             assert failed.attempts == 1
-            assert failed.version == 2
+            assert failed.version == claimed.version + 1
 
     asyncio.run(_run_case())
 
@@ -351,7 +353,7 @@ def test_complete_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
             with pytest.raises(SwarmTaskNotFoundError):
-                await store.complete_task("nope", RunResult(output=None))
+                await store.complete_task("nope", RunResult(output=None), expected_version=1)
 
     asyncio.run(_run_case())
 
@@ -360,7 +362,7 @@ def test_fail_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
             with pytest.raises(SwarmTaskNotFoundError):
-                await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"))
+                await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"), expected_version=1)
 
     asyncio.run(_run_case())
 
@@ -405,6 +407,96 @@ def test_fail_task_with_fencing_token_requires_claimed_status(tmp_path):
                     "t-1", RunErrorInfo(error_type="X", message="y"),
                     expected_version=claimed.version,
                 )
+
+    asyncio.run(_run_case())
+
+
+def test_complete_task_requires_expected_version_argument(tmp_path):
+    """Package 4 (actionable-fix-spec §7): expected_version is now mandatory
+    -- there is no more expected_version=None legacy bypass."""
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            with pytest.raises(TypeError):
+                await store.complete_task("t-1", RunResult(output="x"))  # missing kwarg
+
+    asyncio.run(_run_case())
+
+
+def test_fail_task_requires_expected_version_argument(tmp_path):
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            with pytest.raises(TypeError):
+                await store.fail_task("t-1", RunErrorInfo(error_type="X", message="y"))  # missing kwarg
+
+    asyncio.run(_run_case())
+
+
+def test_complete_task_conflicts_on_wrong_active_run_id(tmp_path):
+    """Package 4 (§7.2): a worker driving a since-superseded child Run (a
+    stale active_run_id) must not complete the task even if it somehow still
+    holds a matching version/status."""
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
+            await store.set_active_run("t-1", "run-real", expected_version=claimed.version)
+            with pytest.raises(SwarmConflictError):
+                await store.complete_task(
+                    "t-1", RunResult(output="x"),
+                    expected_version=claimed.version + 1,  # post-set_active_run version
+                    active_run_id="run-stale",
+                )
+
+    asyncio.run(_run_case())
+
+
+def test_fail_task_conflicts_on_wrong_active_run_id(tmp_path):
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
+            await store.set_active_run("t-1", "run-real", expected_version=claimed.version)
+            with pytest.raises(SwarmConflictError):
+                await store.fail_task(
+                    "t-1", RunErrorInfo(error_type="X", message="y"),
+                    expected_version=claimed.version + 1,
+                    active_run_id="run-stale",
+                )
+
+    asyncio.run(_run_case())
+
+
+def test_complete_and_fail_concurrent_only_one_wins(tmp_path):
+    """Package 4 (§7.9): complete_task and fail_task racing on the SAME
+    CLAIMED task must both target the same fencing token -- only one can
+    win; the loser observes a conflict, never a corrupted mixed state."""
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
+
+            results = await asyncio.gather(
+                store.complete_task("t-1", RunResult(output="ok"), expected_version=claimed.version),
+                store.fail_task(
+                    "t-1", RunErrorInfo(error_type="X", message="y"),
+                    expected_version=claimed.version,
+                ),
+                return_exceptions=True,
+            )
+            successes = [r for r in results if not isinstance(r, BaseException)]
+            failures = [r for r in results if isinstance(r, BaseException)]
+            assert len(successes) == 1, f"expected exactly one winner, got {results}"
+            assert len(failures) == 1
+            assert isinstance(failures[0], SwarmConflictError)
+            final = await store.get_run("swarm-1")
+            assert final is not None  # sanity: run row untouched by task race
 
     asyncio.run(_run_case())
 

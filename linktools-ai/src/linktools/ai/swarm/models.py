@@ -17,6 +17,13 @@ class SwarmStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     PAUSED = "paused"
+    # CANCELLING distinguishes "cancel requested" from "actually cancelled"
+    # (mirrors RunStatus.CANCELLING -- actionable-fix-spec §5.4.5):
+    # SwarmRunner.cancel() flips to CANCELLING while an in-flight swarm
+    # coroutine is still unwinding; the CancelledError handler in
+    # SwarmRunner.run() transitions CANCELLING -> CANCELLED once actually
+    # stopped.
+    CANCELLING = "cancelling"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -47,9 +54,12 @@ ALLOWED_SWARM_TRANSITIONS: "Mapping[SwarmStatus, frozenset[SwarmStatus]]" = {
     SwarmStatus.PENDING: frozenset({SwarmStatus.RUNNING}),
     SwarmStatus.RUNNING: frozenset({
         SwarmStatus.PAUSED, SwarmStatus.SUCCEEDED, SwarmStatus.FAILED,
-        SwarmStatus.CANCELLED,
+        SwarmStatus.CANCELLING, SwarmStatus.CANCELLED,
     }),
-    SwarmStatus.PAUSED: frozenset({SwarmStatus.RUNNING, SwarmStatus.CANCELLED}),
+    SwarmStatus.PAUSED: frozenset({
+        SwarmStatus.RUNNING, SwarmStatus.CANCELLING, SwarmStatus.CANCELLED,
+    }),
+    SwarmStatus.CANCELLING: frozenset({SwarmStatus.CANCELLED, SwarmStatus.FAILED}),
     SwarmStatus.SUCCEEDED: frozenset(),
     SwarmStatus.FAILED: frozenset(),
     SwarmStatus.CANCELLED: frozenset(),

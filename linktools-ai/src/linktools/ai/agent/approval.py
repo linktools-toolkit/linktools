@@ -79,6 +79,26 @@ def build_approval_request(
     )
 
 
+def check_dedupe_conflict(
+    existing: ApprovalRequest, *, tool_name: str, arguments: "Mapping[str, Any]",
+) -> None:
+    """Package 3 (actionable-fix-spec §6.4.3): when
+    ``create_or_get_pending()`` finds an existing request for
+    ``(run_id, tool_call_id)``, it must not silently hand back a request
+    that was actually for a DIFFERENT call -- same dedupe key reused with
+    different ``tool_name``/``arguments`` is a conflict, not a replay.
+    ``reason`` is deliberately excluded per spec (informational only, not a
+    call-identity field). Raises :class:`~linktools.ai.errors.ApprovalConflictError`."""
+    from ..errors import ApprovalConflictError
+
+    if existing.tool_name != tool_name or dict(existing.arguments) != dict(arguments):
+        raise ApprovalConflictError(
+            f"approval dedupe key (run_id={existing.run_id!r}, "
+            f"tool_call_id={existing.tool_call_id!r}) already exists with "
+            f"different tool_name/arguments"
+        )
+
+
 @runtime_checkable
 class ApprovalStore(Protocol):
     """Persistence contract for ApprovalRequest.

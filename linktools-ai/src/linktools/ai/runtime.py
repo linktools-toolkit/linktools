@@ -8,7 +8,6 @@ SwarmRunner (SwarmSpec)."""
 
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
@@ -58,10 +57,20 @@ class Runtime:
               model_router: "ModelRouter | None" = None,
               middleware_pipeline: "MiddlewarePipeline | None" = None,
               retriever: "Retriever | None" = None,
-              workdir: "Path | None" = None,
+              execution: "ExecutionBackend | None" = None,
               tool_executor: "ToolExecutor | None" = None,
               pause_on_approval: bool = False) -> "Runtime":
         """Assemble a Runtime from optional sub-components.
+
+        ``execution`` (Package 8, actionable-fix-spec §11): pass a pre-built
+        ``ExecutionBackend`` (e.g. ``LocalExecutionBackend(runtime_dir=...)``)
+        to give compiled agents builtin file/terminal tools. ``None``
+        (default) means conversational-only -- no builtin tools exposed.
+        Runtime.build() does not construct filesystem backends from a bare
+        path itself; the caller owns that decision (which backend
+        implementation, where it's rooted). This replaces the previous
+        ``workdir: Path`` parameter, which implicitly assumed
+        ``LocalExecutionBackend`` was the only possible choice.
 
         ``tool_executor`` is the override path for the Phase-6 policy rules:
         when ``None`` (default) the compiler builds its own default
@@ -97,17 +106,13 @@ class Runtime:
                 approval_store=storage.approvals,
                 pause_on_approval=True,
             )
-        # §17 (review-doc): ``workdir`` now routes to the ExecutionBackend --
-        # NOT to the compiler. AgentCompiler is stateless (no filesystem
+        # §17 (review-doc) / Package 8: the ExecutionBackend is never passed
+        # to AgentCompiler. AgentCompiler is stateless (no filesystem
         # surface); the builtin file/terminal tools are constructed at
         # execution time from this backend inside AgentRunner.execute() and
-        # passed via ``agent.iter(prompt, toolsets=[...])``. When ``workdir``
-        # is None, no backend is constructed and runs expose no builtin tools
-        # (conversational-only -- identical to the prior ``workdir=None`` path).
-        execution: "ExecutionBackend | None" = None
-        if workdir is not None:
-            from .execution.local import LocalExecutionBackend
-            execution = LocalExecutionBackend(runtime_dir=workdir)
+        # passed via ``agent.iter(prompt, toolsets=[...])``. ``execution is
+        # None`` means no backend -- runs expose no builtin tools
+        # (conversational-only).
         compiler = AgentCompiler(
             model_router=router,
             middleware_pipeline=middleware_pipeline,
@@ -153,10 +158,15 @@ class Runtime:
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
-            checkpoint_store=storage.checkpoints,
             compiler=compiler,
-            memory_store=storage.memories,
-            retriever=retriever,
+            # Package 1 (actionable-fix-spec §4): SwarmRunner reuses the SAME
+            # AgentRunner Runtime just assembled for top-level Agent runs --
+            # it does not build its own. Swarm worker Runs therefore inherit
+            # identical Tool/Policy/Middleware/UoW/ExecutionBackend/Approval
+            # semantics, and (Package 2, §5) the same RunController, so
+            # cancel() can actually stop an in-flight child Run.
+            agent_runner=runner,
+            run_controller=run_controller,
         )
         return cls(
             storage=storage, compiler=compiler, runner=runner,

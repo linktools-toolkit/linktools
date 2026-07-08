@@ -27,6 +27,7 @@ from ...agent.approval import (
     ApprovalRequest,
     ApprovalStatus,
     build_approval_request,
+    check_dedupe_conflict,
 )
 from ...errors import (
     ApprovalConflictError,
@@ -173,39 +174,92 @@ class SqlAlchemyApprovalStore:
             ) from exc
         return request
 
-    async def create_or_get_pending(
-        self, *, run_id: str, tool_call_id: str, tool_name: str,
-        reason: "str | None", arguments: "dict[str, Any]", approval_id: str,
-    ) -> ApprovalRequest:
-        # G1/G2 (review3 §5.4): dedup on (run_id, tool_call_id) BEFORE
-        # creating -- a retry, a duplicate model drive, or a re-entrant pause
-        # for the same tool_call reuses the existing request rather than
-        # creating a second PENDING one.
+    async def _find_by_run_and_tool_call(
+        self, run_id: str, tool_call_id: str,
+    ) -> "ApprovalRequest | None":
         async def _do(session):
-            existing_result = await session.execute(
+            result = await session.execute(
                 select(ApprovalRow)
                 .where(ApprovalRow.run_id == run_id, ApprovalRow.tool_call_id == tool_call_id)
                 .order_by(ApprovalRow.created_at.desc())
                 .limit(1)
             )
-            existing_row = existing_result.scalar_one_or_none()
-            if existing_row is not None:
-                return _row_to_request(existing_row)
-            request = build_approval_request(
-                run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
-                reason=reason, arguments=arguments, approval_id=approval_id,
-            )
-            session.add(ApprovalRow(
+            row = result.scalar_one_or_none()
+            return None if row is None else _row_to_request(row)
+        return await self._execute_in_session(_do)
+
+    async def create_or_get_pending(
+        self, *, run_id: str, tool_call_id: str, tool_name: str,
+        reason: "str | None", arguments: "dict[str, Any]", approval_id: str,
+    ) -> ApprovalRequest:
+        """Dedup on (run_id, tool_call_id) (Package 3, actionable-fix-spec
+        §6): a retry, a duplicate model drive, or a re-entrant pause for the
+        same tool_call reuses the existing request rather than creating a
+        second PENDING one. The SELECT-then-INSERT below is only the fast
+        path -- ``ai_approvals``'s ``uq_approval_run_tool_call`` UNIQUE
+        constraint is the actual backstop against two concurrent callers
+        both passing the SELECT check and both inserting. On the (rare)
+        collision, this method re-selects and returns the winner instead of
+        raising, so both callers observe the SAME persisted request."""
+        existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
+        if existing is not None:
+            check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments)
+            return existing
+
+        request = build_approval_request(
+            run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
+            reason=reason, arguments=arguments, approval_id=approval_id,
+        )
+
+        def _row() -> ApprovalRow:
+            return ApprovalRow(
                 id=request.id, run_id=request.run_id, tool_call_id=request.tool_call_id,
                 tool_name=request.tool_name, reason=request.reason,
                 arguments_json=json.dumps(dict(request.arguments)),
                 status=request.status.value, version=request.version,
                 created_at=request.created_at, resolved_at=request.resolved_at,
                 resolved_by=request.resolved_by, metadata_json=json.dumps(dict(request.metadata)),
-            ))
-            await session.flush()
+            )
+
+        # NOTE on NOT using session.begin_nested() here: a SAVEPOINT that
+        # releases cleanly (no conflict) was measured to NOT properly
+        # participate in a LATER, unrelated failure's rollback of the
+        # enclosing UnitOfWork transaction under sqlite+aiosqlite (the
+        # released savepoint's row survives even though the outer
+        # transaction as a whole rolls back) -- this is the documented
+        # pysqlite "implicit transaction" quirk SQLAlchemy normally papers
+        # over with a connect/begin event-listener workaround, which this
+        # library cannot install on a caller-supplied engine. Since
+        # AgentRunner's pause path depends on the approval write ACTUALLY
+        # rolling back when a later checkpoint/event write in the same UoW
+        # fails (see tests/ai/agent/test_runner_pause_atomic.py's rollback
+        # test), that guarantee matters more than isolating the (rare --
+        # RunController's one-task-per-run invariant makes a genuine
+        # concurrent same-(run_id, tool_call_id) race architecturally
+        # unreachable in practice) conflict path. A real conflict here
+        # therefore still fails the whole enclosing transaction (propagates
+        # to AgentRunner's generic except-Exception handler -> Run FAILED)
+        # rather than gracefully continuing within it -- the
+        # uq_approval_run_tool_call UNIQUE constraint remains the actual
+        # data-integrity backstop regardless.
+        try:
+            if self._session is not None:
+                self._session.add(_row())
+                await self._session.flush()
+            else:
+                async def _insert(session):
+                    session.add(_row())
+                await self._execute_in_session(_insert)
             return request
-        return await self._execute_in_session(_do)
+        except IntegrityError:
+            # Concurrent create_or_get_pending won the race between our
+            # SELECT and INSERT (normal mode only -- see the note above for
+            # why UoW mode does not attempt to recover from this here).
+            existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
+            if existing is not None:
+                check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments)
+                return existing
+            raise
 
     async def approve(
         self, approval_id: str, *, expected_version: int, resolved_by: str

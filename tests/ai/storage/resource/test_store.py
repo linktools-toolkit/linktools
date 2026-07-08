@@ -394,6 +394,29 @@ async def test_propfind_cursor_monotonic_progress(backend_factory):
 
 
 @pytest.mark.asyncio
+async def test_propfind_multi_overlay_merge_is_stable_and_non_duplicate(backend_factory):
+    """Package 7 (actionable-fix-spec §10.3.3): primary + TWO overlays, small
+    limit forcing many pages -- the merged listing must be stable (every
+    path appears in the final result) and non-duplicate (no path appears
+    twice across pages) regardless of which backend it came from."""
+    primary = backend_factory()
+    overlay1 = backend_factory(readonly=True)
+    overlay2 = backend_factory(readonly=True)
+    store = ResourceStore(primary=primary, overlays=(overlay1, overlay2))
+
+    await store.put(ResourcePath("/h/b.md"), b"primary-b")
+    await overlay1.raw_put(ResourcePath("/h/a.md"), b"overlay1-a", content_type=None, metadata={})
+    await overlay1.raw_put(ResourcePath("/h/c.md"), b"overlay1-c", content_type=None, metadata={})
+    await overlay2.raw_put(ResourcePath("/h/d.md"), b"overlay2-d", content_type=None, metadata={})
+
+    items, _ = await _propfind_all(store, ResourcePath("/h"), limit=2)
+    paths = [i.path.value for i in items]
+    assert set(paths) == {"/h/a.md", "/h/b.md", "/h/c.md", "/h/d.md"}
+    assert len(paths) == len(set(paths)), "propfind returned a duplicate path across pages"
+    assert paths == sorted(paths), "merged listing must be in stable sorted order"
+
+
+@pytest.mark.asyncio
 async def test_move_forwards_if_none_match_to_destination_write(backend_factory):
     store = ResourceStore(primary=backend_factory())
     await store.put(ResourcePath("/src.txt"), b"data")

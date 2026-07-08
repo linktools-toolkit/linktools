@@ -1,6 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemySessionStore: DB-backed SessionStore."""
+"""SqlAlchemySessionStore: DB-backed SessionStore.
+
+Concurrency boundary (Package 6, actionable-fix-spec §9): ``append_messages``
+is the sequence authority (G6) -- it reads MAX(sequence) for the session and
+assigns fresh ones inside the inserting transaction.
+
+* **Normal mode** (``session=None``, the common case -- each call opens its
+  own session + transaction): safe under concurrent appenders. A unique
+  ``(session_id, sequence)` collision from two callers racing to reserve the
+  same next sequence raises ``IntegrityError``, which is caught and retried
+  (up to 8 attempts, mirroring ``SqlAlchemyEventStore.append``) -- the retry
+  re-reads MAX(sequence), which now reflects the winner's committed row.
+
+* **Explicit UnitOfWork mode** (``session=<shared session>``, e.g. inside
+  ``AgentRunner``'s pause-path transaction): a SINGLE attempt only. A
+  sequence-conflict ``IntegrityError`` here cannot be retried (the shared
+  transaction would need to roll back and restart from the caller's
+  perspective, not just this store's), and -- per the same aiosqlite
+  SAVEPOINT limitation documented in ``storage/sqlalchemy/approval.py``
+  (a released SAVEPOINT does not reliably participate in a later outer
+  rollback) -- is NOT wrapped in ``session.begin_nested()`` either. **Two
+  concurrent tasks appending to the SAME session within the SAME explicit
+  UnitOfWork are therefore not supported** and will surface as an
+  unhandled ``IntegrityError`` propagating out of the transaction. This is a
+  deliberate scope boundary, not an oversight: every current caller
+  (AgentRunner, SwarmRunner) drives at most one UoW-mode session append per
+  transaction, so the scenario does not arise in practice. If a future
+  caller needs multiple concurrent UoW-mode writers to the same session, the
+  fix is a dedicated ``ai_session_counters(session_id, next_sequence)`` table
+  with an atomic ``UPDATE ... RETURNING`` (mirroring how ``claim_task``
+  allocates), NOT a broader retry loop -- see actionable-fix-spec §9.4."""
 
 import json
 import uuid

@@ -407,41 +407,36 @@ class SqlAlchemySwarmStore:
         return await self._execute_in_session(_do)
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+        self, task_id: str, result: RunResult, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
+        # Package 4 (actionable-fix-spec §7): expected_version is now
+        # MANDATORY -- there is no more unconditional legacy path. DB-level
+        # CAS via UPDATE ... WHERE version=:expected AND status='claimed'
+        # AND (active_run_id IS NULL OR active_run_id=:active_run_id): a
+        # worker whose lease already expired and was reclaimed to a new
+        # owner cannot overwrite the new owner's progress with a stale
+        # completion; a task no longer CLAIMED (already completed/failed by
+        # a racing writer) is not silently re-completed; and (when the
+        # caller supplies active_run_id) a worker driving a since-superseded
+        # child Run cannot complete the task even if its version still
+        # happened to match.
         async def _do(session):
             now = datetime.now(timezone.utc)
-            if expected_version is None:
-                # Legacy unconditional path (no fencing token supplied).
-                query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
-                )
-                row = query_result.scalar_one_or_none()
-                if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
-                row.status = SwarmTaskStatus.SUCCEEDED.value
-                row.result_json = _result_to_json(result)
-                row.version = row.version + 1
-                row.updated_at = now
-                await session.flush()
-                return _row_to_task(row)
-            # Fencing-token path (P0-5/G9): DB-level CAS via UPDATE ... WHERE
-            # version=:expected AND status='claimed' -- a worker whose lease
-            # already expired and was reclaimed to a new owner cannot
-            # overwrite the new owner's progress with a stale completion, and
-            # a task that's no longer CLAIMED (already completed/failed by a
-            # racing writer) is not silently re-completed.
             stmt = (
                 update(SwarmTaskRow)
                 .where(SwarmTaskRow.id == task_id)
                 .where(SwarmTaskRow.version == expected_version)
                 .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
-                .values(
-                    status=SwarmTaskStatus.SUCCEEDED.value,
-                    result_json=_result_to_json(result),
-                    version=SwarmTaskRow.version + 1,
-                    updated_at=now,
-                )
+            )
+            if active_run_id is not None:
+                stmt = stmt.where(SwarmTaskRow.active_run_id == active_run_id)
+            stmt = stmt.values(
+                status=SwarmTaskStatus.SUCCEEDED.value,
+                result_json=_result_to_json(result),
+                version=SwarmTaskRow.version + 1,
+                updated_at=now,
             )
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
@@ -455,8 +450,13 @@ class SqlAlchemySwarmStore:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
                     )
+                if row.status != SwarmTaskStatus.CLAIMED.value:
+                    raise SwarmConflictError(
+                        f"task {task_id} is not claimed (status={row.status})"
+                    )
                 raise SwarmConflictError(
-                    f"task {task_id} is not claimed (status={row.status})"
+                    f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                    f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
@@ -465,36 +465,27 @@ class SqlAlchemySwarmStore:
         return await self._execute_in_session(_do)
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+        self, task_id: str, error: RunErrorInfo, *,
+        expected_version: int,
+        active_run_id: "str | None" = None,
     ) -> SwarmTask:
+        # Package 4: same mandatory fencing as complete_task.
         async def _do(session):
             now = datetime.now(timezone.utc)
-            if expected_version is None:
-                query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
-                )
-                row = query_result.scalar_one_or_none()
-                if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
-                row.status = SwarmTaskStatus.FAILED.value
-                row.error_json = _error_to_json(error)
-                row.attempts = row.attempts + 1
-                row.version = row.version + 1
-                row.updated_at = now
-                await session.flush()
-                return _row_to_task(row)
             stmt = (
                 update(SwarmTaskRow)
                 .where(SwarmTaskRow.id == task_id)
                 .where(SwarmTaskRow.version == expected_version)
                 .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
-                .values(
-                    status=SwarmTaskStatus.FAILED.value,
-                    error_json=_error_to_json(error),
-                    attempts=SwarmTaskRow.attempts + 1,
-                    version=SwarmTaskRow.version + 1,
-                    updated_at=now,
-                )
+            )
+            if active_run_id is not None:
+                stmt = stmt.where(SwarmTaskRow.active_run_id == active_run_id)
+            stmt = stmt.values(
+                status=SwarmTaskStatus.FAILED.value,
+                error_json=_error_to_json(error),
+                attempts=SwarmTaskRow.attempts + 1,
+                version=SwarmTaskRow.version + 1,
+                updated_at=now,
             )
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
@@ -508,8 +499,13 @@ class SqlAlchemySwarmStore:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
                     )
+                if row.status != SwarmTaskStatus.CLAIMED.value:
+                    raise SwarmConflictError(
+                        f"task {task_id} is not claimed (status={row.status})"
+                    )
                 raise SwarmConflictError(
-                    f"task {task_id} is not claimed (status={row.status})"
+                    f"task {task_id} active_run_id mismatch: expected {active_run_id!r}, "
+                    f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)

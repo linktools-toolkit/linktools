@@ -19,6 +19,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+import pytest
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -221,11 +222,57 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
 
     result = asyncio.run(storage.approvals.create_or_get_pending(
         run_id="run-a3", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
-        reason="new-reason", arguments={"x": 2}, approval_id="approval-different",
+        reason="new-reason", arguments={"x": 1}, approval_id="approval-different",
     ))
     assert result.id == "approval-fixed", "dedup must return the EXISTING request, not create a new one"
     all_for_run = asyncio.run(storage.approvals.list_for_run("run-a3"))
     assert len(all_for_run) == 1, "a second PENDING approval must not have been created"
+
+
+def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
+    """Package 3 (§6.4.3): the SAME dedupe key (run_id, tool_call_id) reused
+    with DIFFERENT tool_name/arguments is a conflict, not a replay -- it must
+    raise rather than silently handing back the first call's request."""
+    from linktools.ai.agent.approval import build_approval_request
+    from linktools.ai.errors import ApprovalConflictError
+
+    storage = _sqlalchemy_storage(tmp_path)
+    _seed_session(storage, "session-a4")
+    pre_existing = build_approval_request(
+        run_id="run-a4", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
+        reason="prior", arguments={"x": 1}, approval_id="approval-fixed",
+    )
+    asyncio.run(storage.approvals.create(pre_existing))
+
+    with pytest.raises(ApprovalConflictError):
+        asyncio.run(storage.approvals.create_or_get_pending(
+            run_id="run-a4", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
+            reason="new-reason", arguments={"x": 2}, approval_id="approval-different",
+        ))
+
+
+def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_path):
+    """Package 3 (§6): the ai_approvals.uq_approval_run_tool_call UNIQUE
+    constraint is the real backstop -- N concurrent create_or_get_pending
+    calls for the SAME (run_id, tool_call_id) must all resolve to the SAME
+    persisted row, not each create their own."""
+    storage = _sqlalchemy_storage(tmp_path)
+    _seed_session(storage, "session-a5")
+
+    async def _attempt(i: int):
+        return await storage.approvals.create_or_get_pending(
+            run_id="run-a5", tool_call_id="tc-shared", tool_name=TOOL_NAME,
+            reason="r", arguments={"x": 1}, approval_id=f"approval-{i}",
+        )
+
+    async def _run_all():
+        return await asyncio.gather(*(_attempt(i) for i in range(10)))
+
+    results = asyncio.run(_run_all())
+    ids = {r.id for r in results}
+    assert len(ids) == 1, f"expected exactly one winning approval id, got {ids}"
+    all_for_run = asyncio.run(storage.approvals.list_for_run("run-a5"))
+    assert len(all_for_run) == 1, "concurrent create_or_get_pending must create exactly one row"
 
 
 # -- Tests: SqlAlchemy atomic rollback --------------------------------------

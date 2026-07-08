@@ -116,3 +116,34 @@ alongside `tests/` for `linktools` core.
 # from the repo root
 PYTHONPATH="linktools-ai/src:linktools/src" python -m pytest tests/ai/ -q
 ```
+
+## Production readiness (Runtime / vNext runtime surface)
+
+The sections above describe the older `LlmAgent`/`RuntimeAgent`/`AgentKernel`
+capability layer. The matrix below covers the separate, currently-active
+`Runtime`/`AgentRunner`/`SwarmRunner`/`storage.facade` surface
+(`linktools.ai.runtime.Runtime.build()` onward) that the `tests/ai/` suite
+actually exercises today.
+
+| Capability | Status | Notes |
+|---|---|---|
+| Single Agent run | Verifiable | Main path closed: CAS state transitions, real cancellation (RunController), Approval pause atomicity. |
+| Agent concurrent runs | Verifiable | Backed by DB-level CAS on `RunStore.transition`; relies on test coverage, not a formal load-test. |
+| Agent approval pause/resume | Verifiable | Approval persists atomically with checkpoint/transition/events on SqlAlchemy storage; DB-unique-constraint-backed dedup on `(run_id, tool_call_id)`. |
+| Swarm basic execution | Verifiable | `SwarmRunner` reuses the SAME `AgentRunner` `Runtime.build()` assembles for top-level runs -- worker Runs get identical Tool/Policy/Middleware/UoW wiring. |
+| Swarm cancel | Verifiable | Propagates through `RunController` to the driving run and every active child run (real `task.cancel()`, not just a store-status flip) when a controller is wired -- falls back to store-only cancel otherwise. |
+| Swarm task completion (`complete_task`/`fail_task`) | Verifiable | `expected_version` is mandatory; conditioned on `status='claimed'` and (optionally) `active_run_id`, so a reclaimed-and-superseded worker cannot clobber a new owner's result. |
+| Event run stream | Verifiable | `stream_id == run_id` for every current caller. |
+| Event custom (non-run) stream | Not yet supported | `EventEnvelope.stream_id` is a first-class field with its own `(stream_id, sequence)` DB constraint, but nothing currently mints a `stream_id != run_id`. |
+| `FileStorage` | Dev / single-process | No cross-process consistency guarantee; documented throughout the store implementations. |
+| `SqlAlchemyStorage` | Verifiable | CAS/UoW paths are unit-tested against SQLite; no Postgres integration test exists in this repo. |
+| `SqlAlchemyStorage` UoW + concurrent same-session writers | Not supported | A single UoW-mode `SessionStore.append_messages` writer is fine; two concurrent UoW-mode writers to the SAME session in the SAME transaction are not (see `storage/sqlalchemy/session.py` docstring) -- would need a dedicated sequence-counter table. |
+| Resource multi-backend `propfind` pagination | Verifiable | Regression-tested for shadow/whiteout/multi-overlay/small-`limit` pagination; still the simple literal-path cursor, not the spec's opaque token. |
+| `WorkspaceManager` | Experimental | `WorkspaceManager`/`LocalWorkspaceManager` exist but have no consumer in `Runtime`/`AgentRunner` -- not wired into the main path until a real caller needs it. |
+
+Known limitations worth calling out explicitly:
+
+- `FileStorage` is single-process only; do not point two processes at the same root.
+- Swarm cancel only stops what it can see: cross-process children (a different process's `RunController`) still only get the store-level `CANCELLING`/`CANCELLED` fallback.
+- Event streams are 1:1 with runs today regardless of the `stream_id` field's existence.
+- `SqlAlchemyStorage` does not use SAVEPOINT-based (`session.begin_nested()`) conflict isolation anywhere (`SqlAlchemyIdempotencyStore.reserve`, `ApprovalStore.create_or_get_pending`) due to a known aiosqlite limitation: a savepoint that releases cleanly does not reliably participate in a *later*, unrelated failure's rollback of the enclosing transaction (see either method's docstring for the full writeup). A genuine unique-key collision inside an explicit UnitOfWork therefore aborts the whole transaction rather than gracefully continuing within it -- acceptable given the current codebase's call sites never race the same key within the same transaction. Worth re-testing against a real Postgres/asyncpg backend if `begin_nested()` isolation is reconsidered there.

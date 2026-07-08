@@ -285,12 +285,13 @@ def test_complete_task_stores_result(tmp_path):
         store = FileSwarmStore(root=tmp_path)
         await store.create_run(_run())
         await store.create_task(_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-a")
         result = RunResult(output={"done": True}, token_usage={"input_tokens": 1}, metadata={"m": "n"})
-        completed = await store.complete_task("t-1", result)
+        completed = await store.complete_task("t-1", result, expected_version=claimed.version)
         assert completed.status == SwarmTaskStatus.SUCCEEDED
         assert completed.result.output == {"done": True}
         assert completed.result.metadata == {"m": "n"}
-        assert completed.version == 2
+        assert completed.version == claimed.version + 1
 
     asyncio.run(_run_case())
 
@@ -300,13 +301,14 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
         store = FileSwarmStore(root=tmp_path)
         await store.create_run(_run())
         await store.create_task(_task(task_id="t-1", attempts=0))
+        claimed = await store.claim_task("swarm-1", "agent-a")
         err = RunErrorInfo(error_type="ValueError", message="boom", detail={"x": 1})
-        failed = await store.fail_task("t-1", err)
+        failed = await store.fail_task("t-1", err, expected_version=claimed.version)
         assert failed.status == SwarmTaskStatus.FAILED
         assert failed.error.error_type == "ValueError"
         assert failed.error.message == "boom"
         assert failed.attempts == 1
-        assert failed.version == 2
+        assert failed.version == claimed.version + 1
 
     asyncio.run(_run_case())
 
@@ -315,7 +317,7 @@ def test_complete_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.complete_task("nope", RunResult(output=None))
+            await store.complete_task("nope", RunResult(output=None), expected_version=1)
 
     asyncio.run(_run_case())
 
@@ -324,7 +326,7 @@ def test_fail_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"))
+            await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"), expected_version=1)
 
     asyncio.run(_run_case())
 
@@ -401,7 +403,7 @@ def test_path_traversal_in_task_id_rejected(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(ValueError):
-            await store.complete_task("../evil", RunResult(output=None))
+            await store.complete_task("../evil", RunResult(output=None), expected_version=1)
 
     asyncio.run(_run_case())
 
