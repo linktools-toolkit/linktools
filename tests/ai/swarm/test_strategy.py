@@ -900,9 +900,11 @@ def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_
 
 def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementing_numbers(tmp_path):
     """With max_task_retries=2 and a worker that fails once then succeeds, the
-    audit trail records TWO attempts: #1=FAILED, #2=SUCCEEDED. The shared
-    run_id (Phase-5A child run id) is the same across both attempts because
-    they are iterations of the same _run_task call."""
+    audit trail records TWO attempts: #1=FAILED, #2=SUCCEEDED. Each attempt
+    gets its OWN fresh child run_id and scratch session -- reusing one across
+    attempts would make the retry's run_store.create() collide on the same
+    primary key under SqlAlchemy storage (a real UNIQUE-constraint failure
+    that silently turns every retry into a failure)."""
     from linktools.ai.swarm.models import AttemptStatus
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
@@ -966,11 +968,112 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     # first FAILED, second SUCCEEDED
     assert attempts[0].status is AttemptStatus.FAILED
     assert attempts[1].status is AttemptStatus.SUCCEEDED
-    # both share the same Phase-5A child run_id (one _run_task call = one run_id)
-    assert attempts[0].run_id == attempts[1].run_id
+    # each attempt mints its OWN child run_id -- reusing one across attempts
+    # is what caused the SqlAlchemy primary-key collision this test guards.
+    assert attempts[0].run_id != attempts[1].run_id
+    # the task's active_run_id tracks the CURRENT (latest) attempt's run_id
+    after = asyncio.run(swarm_store.list_tasks("swarm-1"))[0]
+    assert after.active_run_id == attempts[1].run_id
+    # each attempt also gets its own scratch session -- a failed attempt's
+    # partial conversation must never leak into the retry's prompt.
+    session_1 = f"swarm:swarm-1:task-1:{attempts[0].run_id}"
+    session_2 = f"swarm:swarm-1:task-1:{attempts[1].run_id}"
+    assert session_1 != session_2
+    assert asyncio.run(ctx.session_store.get(session_1)) is not None
+    assert asyncio.run(ctx.session_store.get(session_2)) is not None
     # FAILED attempt carries the error
     assert attempts[0].error is not None
     assert attempts[0].error.error_type == "RuntimeError"
     # SUCCEEDED attempt has no error and a finished_at
     assert attempts[1].error is None
     assert attempts[1].finished_at is not None
+
+
+def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
+    """Regression: ``ai_runs.id`` is a PRIMARY KEY in SqlAlchemyRunStore.
+    Retrying with the SAME child_run_id across attempts made the SECOND
+    ``run_store.create()`` call collide on that key and raise IntegrityError,
+    which turned a worker that would have succeeded on retry into a
+    permanently FAILED task. FileRunStore never caught this because it has no
+    uniqueness check and silently overwrites on create() -- this test uses
+    the real SqlAlchemy backend specifically so the collision cannot hide."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.spec import AgentSpec, PromptSpec
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
+    from linktools.ai.swarm.strategy import _run_task
+
+    call_state = {"n": 0}
+
+    def _flaky_model(messages, info):
+        call_state["n"] += 1
+        if call_state["n"] == 1:
+            raise RuntimeError("transient boom")
+        return ModelResponse(parts=[TextPart(content="recovered")])
+
+    async def _scenario():
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        run_store = SqlAlchemyRunStore(session_factory=session_factory)
+        session_store = FileSessionStore(root=tmp_path / "sessions")
+        event_store = FileEventStore(root=tmp_path / "events")
+        checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+        runner = AgentRunner(
+            run_store=run_store, session_store=session_store,
+            event_store=event_store, checkpoint_store=checkpoint_store,
+        )
+        await session_store.create(SessionRecord(
+            id="shared-session", parent_id=None, status=SessionStatus.ACTIVE,
+            version=1, created_at=_NOW, updated_at=_NOW,
+        ))
+
+        registry = ModelRegistry()
+        registry.register("flaky-model", model=FunctionModel(_flaky_model))
+        compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+        flaky_spec = AgentSpec(
+            id="worker-flaky", name="worker-flaky",
+            model=ModelPolicy(primary="flaky-model"),
+            instructions=PromptSpec(instructions="you are flaky"),
+            output_schema=str,
+        )
+        compiled_flaky = await compiler.compile(flaky_spec)
+
+        swarm_store = _MemorySwarmStore()
+        await swarm_store.create_run(SwarmRun(
+            id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+            created_at=_NOW, updated_at=_NOW,
+        ))
+        spec = _make_spec(
+            kind="coordinator_delegation", limits=_limits(),
+            agents=(AgentRef("coord"), AgentRef("worker-flaky")),
+            coordinator=AgentRef("coord"),
+        )
+        ctx = SwarmExecutionContext(
+            spec=spec, swarm_run=_swarm_run(), request=RunInput(prompt="do the work"),
+            parent_context=_parent_context(), agent_runner=runner, compiler=compiler,
+            agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
+            swarm_store=swarm_store,
+            run_store=run_store, session_store=session_store, event_store=event_store,
+        )
+        await swarm_store.create_task(SwarmTask(
+            id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
+            assigned_agent_id="worker-flaky", description="x",
+            status=SwarmTaskStatus.PENDING,
+            dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
+            attempts=0, version=1, claimed_at=None, lease_expires_at=None,
+            created_at=_NOW, updated_at=_NOW,
+        ))
+
+        return await _run_task(ctx, swarm_store._tasks["task-1"], max_task_retries=1)
+
+    result = asyncio.run(_scenario())
+    assert result is not None
+    assert result.output == "recovered"

@@ -10,8 +10,11 @@ use FunctionModel workers -- no real model calls.
 
 Workers run against per-task SCRATCH sessions (spec invariant: only the final
 aggregate is written to the shared/parent session). ``_run_task`` builds a CHILD
-RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}"`` and creates
-that SessionRecord before invoking AgentRunner.run.
+RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}:{child_run_id}"``
+and creates that SessionRecord before invoking AgentRunner.run. The
+``child_run_id`` suffix keeps each retry attempt's scratch session distinct
+(see the Phase-5A note below) so a failed attempt's partial conversation
+can never leak into the next attempt's prompt.
 
 Phase-5A invariant: the child RunRecord's id is NOT the task's id. ``_run_task``
 mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
@@ -200,34 +203,8 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     if claimed is None:
         return None
 
-    # Phase-5A: each execution mints a NEW child RunRecord id (decoupled from
-    # task.id). set_active_run records it on the task (bumping its version) so
-    # SwarmRunner.cancel can locate the in-flight child Run via active_run_id.
-    child_run_id = str(uuid.uuid4())
-    claimed = await ctx.swarm_store.set_active_run(
-        claimed.id, child_run_id, expected_version=claimed.version
-    )
-
-    scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}"
-    now = _now()
-    await ctx.session_store.create(SessionRecord(
-        id=scratch_session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    ))
-
-    child_context = RunContext(
-        run_id=child_run_id,
-        root_run_id=ctx.parent_context.root_run_id,
-        parent_run_id=ctx.swarm_run.run_id,
-        session_id=scratch_session_id,
-        runnable_id=claimed.assigned_agent_id,
-        runnable_type=RunnableType.AGENT,
-        user_id=ctx.parent_context.user_id,
-        tenant_id=ctx.parent_context.tenant_id,
-        workspace=None,
-    )
-
     last_exc: "BaseException | None" = None
+    child_run_id: "str | None" = None
     # Phase-5B (review doc §19.2): each retry iteration records one
     # SwarmTaskAttempt. ``base_attempt`` is the 1-based attempt number of the
     # FIRST iteration of this _run_task call. ``claimed.attempts`` is 0 on first
@@ -237,6 +214,42 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     # re-invocation of _run_task continues the numbering monotonically.
     base_attempt = claimed.attempts + 1
     for _attempt in range(max_task_retries + 1):
+        # Phase-5A: each attempt mints a FRESH child RunRecord id + scratch
+        # session, not just the first one. Reusing one child_run_id across
+        # attempts made AgentRunner.execute()'s run_store.create() collide on
+        # the same primary key from attempt #2 onward -- a real
+        # UNIQUE-constraint failure under SqlAlchemy storage that silently
+        # turned every retry into a failure (masked under FileStore, which
+        # overwrites on create() instead of rejecting the duplicate id).
+        # Reusing one scratch session would also leak a failed attempt's
+        # partial conversation into the retry's prompt, since AgentRunner
+        # always prepends list_messages(session_id) for a fresh, non-resume
+        # run. set_active_run records the fresh id on the task (bumping its
+        # version) so SwarmRunner.cancel can locate the in-flight child Run.
+        child_run_id = str(uuid.uuid4())
+        claimed = await ctx.swarm_store.set_active_run(
+            claimed.id, child_run_id, expected_version=claimed.version
+        )
+
+        scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
+        now = _now()
+        await ctx.session_store.create(SessionRecord(
+            id=scratch_session_id, parent_id=None, status=SessionStatus.ACTIVE,
+            version=1, created_at=now, updated_at=now,
+        ))
+
+        child_context = RunContext(
+            run_id=child_run_id,
+            root_run_id=ctx.parent_context.root_run_id,
+            parent_run_id=ctx.swarm_run.run_id,
+            session_id=scratch_session_id,
+            runnable_id=claimed.assigned_agent_id,
+            runnable_type=RunnableType.AGENT,
+            user_id=ctx.parent_context.user_id,
+            tenant_id=ctx.parent_context.tenant_id,
+            workspace=None,
+        )
+
         # Record the RUNNING attempt BEFORE invoking the worker so the audit
         # trail captures the start even if the worker never returns (crash
         # mid-run). record_attempt is an upsert on attempt.id, so the trailing
