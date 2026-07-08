@@ -135,9 +135,16 @@ class SessionMessageRow(Base):
 
 class EventRow(Base):
     __tablename__ = "ai_events"
-    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_event_run_sequence"),)
+    # G3/review3 §8.4: the uniqueness (and sequence-reservation) boundary is
+    # the STREAM, not the run -- stream_id is a distinct column so a future
+    # session/audit/root-run/swarm stream can coexist with a run's own stream
+    # without colliding on (run_id, sequence). Every current caller still
+    # passes stream_id == run_id, so this is a schema formalization, not a
+    # behavior change.
+    __table_args__ = (UniqueConstraint("stream_id", "sequence", name="uq_event_stream_sequence"),)
 
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(String(128), index=True)
     run_id: Mapped[str] = mapped_column(String(128), index=True)
     sequence: Mapped[int]
     occurred_at: Mapped[datetime]

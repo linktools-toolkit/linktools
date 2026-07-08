@@ -199,6 +199,37 @@ def test_sqlalchemy_storage_uow_rolls_back_all_stores_on_failure(tmp_path):
     assert fetched_approval is None, "approval leaked after UoW rollback"
 
 
+def test_sqlalchemy_uow_idempotency_conflict_does_not_poison_transaction(tmp_path):
+    """P0-7 (review doc §7.6): a unique-(scope,key) collision on
+    tx.idempotency.reserve() must not poison the surrounding UnitOfWork. Before
+    the SAVEPOINT fix, the IntegrityError raised on flush() left the shared
+    AsyncSession's transaction unusable, so a subsequent tx.runs.create() in
+    the same unit would itself fail (or silently be dropped) instead of
+    committing normally."""
+    storage, _ = _sqlalchemy_storage(tmp_path)
+    run = _run_record()
+
+    async def _run():
+        async with storage.transaction() as tx:
+            first = await tx.idempotency.reserve("scope-1", "key-1", "hash-a")
+            assert first is None  # fresh reservation
+            # Same (scope, key) but the SAME hash: reserve() returns the
+            # existing RESERVED record rather than raising -- exercise the
+            # actual conflict path (different hash) instead.
+            with pytest.raises(Exception):
+                await tx.idempotency.reserve("scope-1", "key-1", "hash-b")
+            # The collision above must NOT have poisoned tx's shared session --
+            # this write must still commit when the `async with` exits cleanly.
+            await tx.runs.create(run)
+        return await storage.runs.get(run.id)
+
+    fetched_run = asyncio.run(_run())
+    assert fetched_run is not None, (
+        "tx.runs.create() did not survive the UoW after an idempotency "
+        "conflict -- the conflict poisoned the shared transaction"
+    )
+
+
 def test_file_storage_exposes_file_swarm_store(tmp_path):
     from linktools.ai.storage.file.swarm import FileSwarmStore
     storage = FileStorage(root=tmp_path)

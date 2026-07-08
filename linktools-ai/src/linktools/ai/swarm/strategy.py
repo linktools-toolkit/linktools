@@ -257,7 +257,9 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             result = await ctx.agent_runner.run(
                 compiled, RunInput(prompt=claimed.input.prompt), child_context,
             )
-            await ctx.swarm_store.complete_task(claimed.id, result)
+            await ctx.swarm_store.complete_task(
+                claimed.id, result, expected_version=claimed.version,
+            )
             await ctx.swarm_store.record_attempt(replace(
                 current_attempt,
                 status=AttemptStatus.SUCCEEDED,
@@ -279,7 +281,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     await ctx.swarm_store.fail_task(claimed.id, RunErrorInfo(
         error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",
         message=str(last_exc) if last_exc is not None else "",
-    ))
+    ), expected_version=claimed.version)
     return None
 
 

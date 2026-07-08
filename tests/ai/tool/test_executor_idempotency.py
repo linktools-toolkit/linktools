@@ -292,6 +292,62 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 9. schema_version is folded into the request hash (P1-5): the SAME
+#    tool_name/arguments/scope but a DIFFERENT schema_version must hash
+#    differently, so a stale idempotency record from before a tool's input
+#    contract changed is never mistaken for a match against the new shape.
+# ---------------------------------------------------------------------------
+
+
+def test_schema_version_changes_the_request_hash():
+    from linktools.ai.tool.idempotency import compute_request_hash
+
+    h1 = compute_request_hash("tool-x", {"a": 1}, "r1", schema_version="1")
+    h2 = compute_request_hash("tool-x", {"a": 1}, "r1", schema_version="2")
+    assert h1 != h2
+
+    # Default schema_version is stable and matches explicit "1".
+    assert compute_request_hash("tool-x", {"a": 1}, "r1") == h1
+
+
+def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path):
+    """Same (scope, key, tool_name, arguments) but a bumped schema_version
+    changes the request hash (P1-5), so the executor correctly detects it as
+    a DIFFERENT request under the SAME idempotency_key -- the same outcome as
+    changing the arguments (test #2 above), not a silent cache replay. This is
+    the safe behavior: without schema_version in the hash, the second call
+    would incorrectly replay the first call's cached result even though the
+    tool's input contract changed shape."""
+    store = _file_store(tmp_path)
+    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    calls = {"n": 0}
+
+    async def _handler(value: int) -> int:
+        calls["n"] += 1
+        return value * 2
+
+    async def _run():
+        await executor.execute(
+            ToolRequest(tool_name="double", arguments={"value": 21}),
+            ToolContext(run_id="r1", session_id="s1"),
+            _handler,
+            idempotency_key="op-1",
+            schema_version="1",
+        )
+        with pytest.raises(IdempotencyConflictError):
+            await executor.execute(
+                ToolRequest(tool_name="double", arguments={"value": 21}),
+                ToolContext(run_id="r1", session_id="s1"),
+                _handler,
+                idempotency_key="op-1",
+                schema_version="2",
+            )
+
+    asyncio.run(_run())
+    assert calls["n"] == 1, "the conflicting (new-schema) call must not invoke the handler"
+
+
 def test_completed_record_survives_executor_replacement(tmp_path):
     store = _file_store(tmp_path)
     executor_a = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)

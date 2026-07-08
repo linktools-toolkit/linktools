@@ -152,6 +152,22 @@ async def test_put_different_content_bumps_version(backend_factory):
 
 
 @pytest.mark.asyncio
+async def test_put_content_type_change_alone_bumps_version(backend_factory):
+    """P1-4: same content + same metadata but a DIFFERENT content_type is
+    still a real change and must bump version/etag -- not be silently
+    dropped as a no-op."""
+    store = ResourceStore(primary=backend_factory())
+    first = await store.put(
+        ResourcePath("/a.txt"), b"same", options=WriteOptions(content_type="text/plain"),
+    )
+    second = await store.put(
+        ResourcePath("/a.txt"), b"same", options=WriteOptions(content_type="application/json"),
+    )
+    assert second.info.version == first.info.version + 1
+    assert second.info.content_type == "application/json"
+
+
+@pytest.mark.asyncio
 async def test_delete_missing_path_is_a_no_op_success(backend_factory):
     store = ResourceStore(primary=backend_factory())
     await store.delete(ResourcePath("/never/existed"))  # must not raise
@@ -195,6 +211,21 @@ async def test_idempotent_put_same_key_different_hash_conflicts(backend_factory)
     await store.put(ResourcePath("/a.txt"), b"x", options=WriteOptions(idempotency_key="k1"))
     with pytest.raises(IdempotencyConflictError):
         await store.put(ResourcePath("/a.txt"), b"different", options=WriteOptions(idempotency_key="k1"))
+
+
+@pytest.mark.asyncio
+async def test_idempotent_put_same_key_different_if_match_conflicts(backend_factory):
+    """P1-2: the PUT idempotency hash must cover if_match -- otherwise two
+    calls sharing an idempotency_key but differing only in their precondition
+    would hash identically, and the second call's precondition would never be
+    honored (it would just replay the first call's cached result)."""
+    store = ResourceStore(primary=backend_factory())
+    first = await store.put(ResourcePath("/a.txt"), b"x", options=WriteOptions(idempotency_key="k1"))
+    with pytest.raises(IdempotencyConflictError):
+        await store.put(
+            ResourcePath("/a.txt"), b"x",
+            options=WriteOptions(idempotency_key="k1", if_match=first.info.etag),
+        )
 
 
 @pytest.mark.asyncio
@@ -262,6 +293,104 @@ async def test_propfind_hides_deleted_overlay_only_path(backend_factory):
     await store.delete(ResourcePath("/agents/only-overlay.md"))
     page = await store.propfind(ResourcePath("/agents"), depth=Depth.ONE, limit=100, cursor=None)
     assert "/agents/only-overlay.md" not in {i.path.value for i in page.items}
+
+
+async def _propfind_all(store, path, *, depth=Depth.ONE, limit=2):
+    """Drive propfind() to exhaustion via its cursor, collecting every page.
+    Used by the G4 pagination regression tests below to prove the current
+    path-cursor implementation (not the spec's opaque ResourceStoreCursor)
+    still visits every item across primary+overlay without dropping any."""
+    items = []
+    cursor = None
+    pages = 0
+    seen_cursors = []
+    while True:
+        page = await store.propfind(path, depth=depth, limit=limit, cursor=cursor)
+        items.extend(page.items)
+        pages += 1
+        if page.cursor is None:
+            break
+        seen_cursors.append(page.cursor)
+        cursor = page.cursor
+        assert pages < 1000, "propfind pagination did not terminate"
+    return items, seen_cursors
+
+
+@pytest.mark.asyncio
+async def test_propfind_can_iterate_all_items_across_backends(backend_factory):
+    """G4: with a small page limit forcing many pages, propfind() must still
+    surface every item split across primary and overlay -- no item lost to
+    the per-backend limit+1 fetch/merge/cutoff dance."""
+    overlay = backend_factory(readonly=True)
+    primary = backend_factory()
+    store = ResourceStore(primary=primary, overlays=(overlay,))
+    expected = set()
+    for i in range(5):
+        await overlay.raw_put(ResourcePath(f"/d/overlay-{i:02d}.md"), f"o{i}".encode(), content_type=None, metadata={})
+        expected.add(f"/d/overlay-{i:02d}.md")
+    for i in range(5):
+        await store.put(ResourcePath(f"/d/primary-{i:02d}.md"), f"p{i}".encode())
+        expected.add(f"/d/primary-{i:02d}.md")
+
+    items, _ = await _propfind_all(store, ResourcePath("/d"), limit=2)
+    paths = [i.path.value for i in items]
+    assert set(paths) == expected
+    assert len(paths) == len(set(paths)), "propfind returned a duplicate path across pages"
+
+
+@pytest.mark.asyncio
+async def test_propfind_overlay_shadow_does_not_drop_later_items(backend_factory):
+    """G4: a primary path that shadows an overlay path (same path, primary
+    wins) sits interspersed lexically among many overlay-only paths. Paginate
+    with a small limit and verify every overlay-only path still surfaces --
+    the shadow resolution (dropping the overlay's copy of the shared path)
+    must not accidentally swallow neighboring pages' worth of overlay-only
+    items."""
+    overlay = backend_factory(readonly=True)
+    primary = backend_factory()
+    store = ResourceStore(primary=primary, overlays=(overlay,))
+    for i in range(6):
+        await overlay.raw_put(ResourcePath(f"/e/item-{i:02d}.md"), f"overlay-{i}".encode(), content_type=None, metadata={})
+    # item-03 is shadowed by primary with different content.
+    await overlay.raw_put(ResourcePath("/e/item-03.md"), b"overlay-shadowed", content_type=None, metadata={})
+    await store.put(ResourcePath("/e/item-03.md"), b"primary-wins")
+
+    items, _ = await _propfind_all(store, ResourcePath("/e"), limit=2)
+    by_path = {i.path.value: i for i in items}
+    assert set(by_path) == {f"/e/item-{i:02d}.md" for i in range(6)}
+    shadowed = await store.get(ResourcePath("/e/item-03.md"))
+    assert shadowed.content == b"primary-wins"
+
+
+@pytest.mark.asyncio
+async def test_propfind_whiteout_does_not_drop_later_overlay_items(backend_factory):
+    """G4: deleting (whiteout) one overlay-only path in the middle of a
+    lexically-sorted run of overlay-only paths must not drop the paths that
+    sort after it when paginating with a small limit."""
+    overlay = backend_factory(readonly=True)
+    primary = backend_factory()
+    store = ResourceStore(primary=primary, overlays=(overlay,))
+    for i in range(6):
+        await overlay.raw_put(ResourcePath(f"/f/item-{i:02d}.md"), f"overlay-{i}".encode(), content_type=None, metadata={})
+    await store.delete(ResourcePath("/f/item-03.md"))  # whiteout: hides overlay's item-03
+
+    items, _ = await _propfind_all(store, ResourcePath("/f"), limit=2)
+    paths = {i.path.value for i in items}
+    assert paths == {f"/f/item-{i:02d}.md" for i in range(6) if i != 3}
+
+
+@pytest.mark.asyncio
+async def test_propfind_cursor_monotonic_progress(backend_factory):
+    """G4: successive page cursors must strictly advance (lexically) so
+    pagination is guaranteed to terminate rather than looping on a page that
+    never moves forward."""
+    store = ResourceStore(primary=backend_factory())
+    for i in range(8):
+        await store.put(ResourcePath(f"/g/item-{i:02d}.md"), f"v{i}".encode())
+
+    _, cursors = await _propfind_all(store, ResourcePath("/g"), limit=3)
+    assert cursors == sorted(cursors), "cursor sequence must be non-decreasing"
+    assert len(cursors) == len(set(cursors)), "cursor must strictly advance, not repeat"
 
 
 @pytest.mark.asyncio

@@ -52,15 +52,20 @@ def build_approval_request(
     tool_name: str,
     reason: "str | None" = None,
     arguments: "Mapping[str, Any] | None" = None,
+    approval_id: "str | None" = None,
 ) -> ApprovalRequest:
-    """Mint a PENDING ApprovalRequest (uuid4 id, fresh UTC timestamps, version=1).
+    """Mint a PENDING ApprovalRequest (fresh UTC timestamps, version=1).
 
     ``arguments`` is copied into a plain dict so callers cannot mutate the
-    record's state by holding onto the source mapping.
+    record's state by holding onto the source mapping. ``approval_id``
+    (review3 §5.2/Package A) lets a caller that already minted an id --
+    ToolExecutor mints one for ``RunPaused.approval_id`` before this request
+    is ever persisted -- pass it through so the id reported to the caller
+    matches the id actually stored. Defaults to a fresh uuid4 when omitted.
     """
     now = datetime.now(timezone.utc)
     return ApprovalRequest(
-        id=str(uuid.uuid4()),
+        id=approval_id if approval_id is not None else str(uuid.uuid4()),
         run_id=run_id,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
@@ -90,9 +95,30 @@ class ApprovalStore(Protocol):
     for the run regardless of status, ordered by created_at. The resume gate
     (``ToolExecutor._already_approved``) consults it to recognize a call that
     was approved externally without re-persisting a PENDING duplicate.
+
+    ``create_or_get_pending`` (review3 §5.4/Package A, G1/G2) is the
+    dedup-aware entry point the RunPaused-handling suspension path uses
+    instead of a bare ``create``: a repeated tool_call_id for the same run_id
+    (retry, duplicate model drive, re-entrant pause) returns the EXISTING
+    pending/approved request rather than creating a second PENDING one.
     """
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest: ...
+
+    async def create_or_get_pending(
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        reason: "str | None",
+        arguments: "Mapping[str, Any]",
+        approval_id: str,
+    ) -> ApprovalRequest:
+        """Return the existing request for ``(run_id, tool_call_id)`` if one
+        already exists (PENDING or APPROVED/REJECTED -- any status), else
+        persist and return a fresh PENDING one built with ``approval_id``."""
+        ...
 
     async def get(self, approval_id: str) -> "ApprovalRequest | None": ...
 

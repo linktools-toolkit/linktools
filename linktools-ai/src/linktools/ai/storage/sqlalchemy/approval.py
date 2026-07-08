@@ -26,6 +26,7 @@ from ...agent.approval import (
     ALLOWED_APPROVAL_TRANSITIONS,
     ApprovalRequest,
     ApprovalStatus,
+    build_approval_request,
 )
 from ...errors import (
     ApprovalConflictError,
@@ -171,6 +172,40 @@ class SqlAlchemyApprovalStore:
                 f"approval already exists: {request.id}"
             ) from exc
         return request
+
+    async def create_or_get_pending(
+        self, *, run_id: str, tool_call_id: str, tool_name: str,
+        reason: "str | None", arguments: "dict[str, Any]", approval_id: str,
+    ) -> ApprovalRequest:
+        # G1/G2 (review3 §5.4): dedup on (run_id, tool_call_id) BEFORE
+        # creating -- a retry, a duplicate model drive, or a re-entrant pause
+        # for the same tool_call reuses the existing request rather than
+        # creating a second PENDING one.
+        async def _do(session):
+            existing_result = await session.execute(
+                select(ApprovalRow)
+                .where(ApprovalRow.run_id == run_id, ApprovalRow.tool_call_id == tool_call_id)
+                .order_by(ApprovalRow.created_at.desc())
+                .limit(1)
+            )
+            existing_row = existing_result.scalar_one_or_none()
+            if existing_row is not None:
+                return _row_to_request(existing_row)
+            request = build_approval_request(
+                run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
+                reason=reason, arguments=arguments, approval_id=approval_id,
+            )
+            session.add(ApprovalRow(
+                id=request.id, run_id=request.run_id, tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name, reason=request.reason,
+                arguments_json=json.dumps(dict(request.arguments)),
+                status=request.status.value, version=request.version,
+                created_at=request.created_at, resolved_at=request.resolved_at,
+                resolved_by=request.resolved_by, metadata_json=json.dumps(dict(request.metadata)),
+            ))
+            await session.flush()
+            return request
+        return await self._execute_in_session(_do)
 
     async def approve(
         self, approval_id: str, *, expected_version: int, resolved_by: str

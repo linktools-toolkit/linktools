@@ -75,7 +75,8 @@ class FileEventStore:
         occurred_at = datetime.now(timezone.utc)
         payload_type = type(payload).__name__
         raw = {
-            "event_id": event_id, "sequence": next_seq, "occurred_at": occurred_at.isoformat(),
+            "event_id": event_id, "stream_id": stream_id, "sequence": next_seq,
+            "occurred_at": occurred_at.isoformat(),
             "run_id": run_id, "root_run_id": root_run_id, "parent_run_id": parent_run_id,
             "session_id": session_id, "runnable_id": runnable_id,
             "payload_type": payload_type, "payload": asdict(payload),
@@ -83,7 +84,7 @@ class FileEventStore:
         path = stream_dir / f"{next_seq:010d}.json"
         path.write_text(json.dumps(raw))
         return EventEnvelope(
-            event_id=event_id, sequence=next_seq, occurred_at=occurred_at,
+            event_id=event_id, stream_id=stream_id, sequence=next_seq, occurred_at=occurred_at,
             run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
             session_id=session_id, runnable_id=runnable_id, payload=payload,
         )
@@ -119,24 +120,29 @@ class FileEventStore:
         payload_cls = getattr(_payloads_module, raw["payload_type"])
         payload = payload_cls(**raw["payload"])
         return EventEnvelope(
-            event_id=raw["event_id"], sequence=raw["sequence"], occurred_at=datetime.fromisoformat(raw["occurred_at"]),
+            event_id=raw["event_id"],
+            # G3: fall back to run_id for files written before stream_id
+            # became a first-class field -- every caller has always passed
+            # stream_id == run_id, so this default is exact, not a guess.
+            stream_id=raw.get("stream_id", raw["run_id"]),
+            sequence=raw["sequence"], occurred_at=datetime.fromisoformat(raw["occurred_at"]),
             run_id=raw["run_id"], root_run_id=raw["root_run_id"], parent_run_id=raw["parent_run_id"],
             session_id=raw["session_id"], runnable_id=raw["runnable_id"], payload=payload,
         )
 
-    def _list_sync(self, run_id: str, *, after_sequence: int, limit: int) -> EventPage:
-        run_dir = self._root / _validate_id_segment(run_id, kind="run_id")
-        if not run_dir.exists():
+    def _list_sync(self, stream_id: str, *, after_sequence: int, limit: int) -> EventPage:
+        stream_dir = self._root / _validate_id_segment(stream_id, kind="stream_id")
+        if not stream_dir.exists():
             return EventPage(items=(), cursor=None)
         items = []
-        for path in sorted(run_dir.glob("*.json")):
+        for path in sorted(stream_dir.glob("*.json")):
             envelope = self._load(path)
             if envelope.sequence <= after_sequence:
                 continue
             items.append(envelope)
         return EventPage(items=tuple(items[:limit]), cursor=None)
 
-    async def list(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+    async def list(self, stream_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
         return await asyncio.to_thread(
-            self._list_sync, run_id, after_sequence=after_sequence, limit=limit,
+            self._list_sync, stream_id, after_sequence=after_sequence, limit=limit,
         )

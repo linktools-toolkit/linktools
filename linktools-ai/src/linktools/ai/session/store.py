@@ -6,7 +6,7 @@ copy(), matching spec docs/linktools-ai.md section 19."""
 
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from .models import SessionMessage, SessionRecord, SessionStatus
+from .models import NewSessionMessage, SessionMessage, SessionRecord, SessionStatus
 
 
 @runtime_checkable
@@ -17,7 +17,14 @@ class SessionStore(Protocol):
     async def get(self, session_id: str) -> "SessionRecord | None":
         ...
 
-    async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
+    async def append_messages(
+        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        """Persist ``messages``, assigning ``id``/``sequence``/``created_at``
+        for each (G6/review3 §6.3: the store is the SOLE sequence authority,
+        not the caller). Returns the persisted messages in the same order,
+        with sequence numbers assigned contiguously starting after the
+        session's current max sequence."""
         ...
 
     async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":

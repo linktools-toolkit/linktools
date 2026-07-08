@@ -329,6 +329,44 @@ def test_fail_task_missing_raises_not_found(tmp_path):
     asyncio.run(_run_case())
 
 
+def test_complete_task_with_fencing_token_requires_claimed_status(tmp_path):
+    """G9: mirrors the SqlAlchemy contract -- a stale fencing token retry
+    against an already-completed task must be rejected, not silently
+    re-applied."""
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        await store.create_task(_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-a")
+        await store.complete_task(
+            "t-1", RunResult(output="first"), expected_version=claimed.version,
+        )
+        with pytest.raises(SwarmConflictError):
+            await store.complete_task(
+                "t-1", RunResult(output="stale-retry"), expected_version=claimed.version,
+            )
+
+    asyncio.run(_run_case())
+
+
+def test_fail_task_with_fencing_token_requires_claimed_status(tmp_path):
+    async def _run_case():
+        store = FileSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        await store.create_task(_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-a")
+        await store.complete_task(
+            "t-1", RunResult(output="first"), expected_version=claimed.version,
+        )
+        with pytest.raises(SwarmConflictError):
+            await store.fail_task(
+                "t-1", RunErrorInfo(error_type="X", message="y"),
+                expected_version=claimed.version,
+            )
+
+    asyncio.run(_run_case())
+
+
 # ---------------------------------------------------------------------------
 # 6. reclaim_expired_tasks always empty (single-process)
 # ---------------------------------------------------------------------------

@@ -174,6 +174,58 @@ def test_sqla_pause_writes_all_three_operations_atomically_on_success(tmp_path):
     payload_types = {type(e.payload).__name__ for e in event_page.items}
     assert "RunPaused" in payload_types
     assert "RunFailed" not in payload_types
+    assert "ApprovalRequested" in payload_types
+
+
+def test_sqla_pause_persists_approval_request_atomically(tmp_path):
+    """P0-6/G1 (review3 §5): the ApprovalRequest itself now commits through
+    the SAME UoW as checkpoint/transition/event -- ToolExecutor no longer
+    persists it directly. Verifies the approval is actually queryable through
+    storage.approvals after the pause completes."""
+    storage = _sqlalchemy_storage(tmp_path)
+    _seed_session(storage, "session-a2")
+    compiled, _ = _compile_with_storage(storage)
+    runner = _sqla_runner(storage)
+
+    events = asyncio.run(_collect(runner.run_stream(
+        compiled, RunInput(prompt="call the risky tool"),
+        _run_context("run-a2", "session-a2"),
+    )))
+    paused = [e for e in events if e["type"] == "paused"]
+    assert len(paused) == 1
+    approval_id = paused[0]["approval_id"]
+
+    approval = asyncio.run(storage.approvals.get(approval_id))
+    assert approval is not None, "ApprovalRequest was not persisted by the UoW"
+    assert approval.run_id == "run-a2"
+    assert approval.tool_name == TOOL_NAME
+    from linktools.ai.agent.approval import ApprovalStatus
+    assert approval.status is ApprovalStatus.PENDING
+
+
+def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_path):
+    """G2: pausing twice for the SAME (run_id, tool_call_id) -- e.g. a retried
+    lifecycle re-entering the pause path for the same tool call -- must reuse
+    the existing PENDING approval rather than creating a second one."""
+    storage = _sqlalchemy_storage(tmp_path)
+    _seed_session(storage, "session-a3")
+
+    from linktools.ai.agent.approval import build_approval_request
+    # Simulate: an approval already exists for this (run_id, tool_call_id)
+    # PRIOR to the pause handler running (e.g. a previous partial attempt).
+    pre_existing = build_approval_request(
+        run_id="run-a3", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
+        reason="prior", arguments={"x": 1}, approval_id="approval-fixed",
+    )
+    asyncio.run(storage.approvals.create(pre_existing))
+
+    result = asyncio.run(storage.approvals.create_or_get_pending(
+        run_id="run-a3", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
+        reason="new-reason", arguments={"x": 2}, approval_id="approval-different",
+    ))
+    assert result.id == "approval-fixed", "dedup must return the EXISTING request, not create a new one"
+    all_for_run = asyncio.run(storage.approvals.list_for_run("run-a3"))
+    assert len(all_for_run) == 1, "a second PENDING approval must not have been created"
 
 
 # -- Tests: SqlAlchemy atomic rollback --------------------------------------
@@ -238,8 +290,17 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     assert "RunPaused" not in payload_types, (
         "RunPaused event leaked past UoW rollback"
     )
+    assert "ApprovalRequested" not in payload_types, (
+        "ApprovalRequested event leaked past UoW rollback"
+    )
     # The outer handler's RunFailed append (not a RunPaused payload) succeeded.
     assert "RunFailed" in payload_types
+
+    # P0-6/G1: the ApprovalRequest write shares the SAME UoW, so it must also
+    # roll back -- no orphaned PENDING approval left behind after the run
+    # ended up FAILED.
+    pending = asyncio.run(storage.approvals.list_pending("run-r1"))
+    assert pending == (), "ApprovalRequest leaked past UoW rollback"
 
 
 # -- Tests: File mode stays non-atomic (§10.3) ------------------------------

@@ -98,9 +98,9 @@ class _StubEventStore:
         runnable_id: str,
         payload,
     ) -> EventEnvelope:
-        sequence = sum(1 for e in self.events if e.run_id == run_id) + 1
+        sequence = sum(1 for e in self.events if e.stream_id == stream_id) + 1
         envelope = EventEnvelope(
-            event_id=f"evt-{run_id}-{sequence}", sequence=sequence,
+            event_id=f"evt-{run_id}-{sequence}", stream_id=stream_id, sequence=sequence,
             occurred_at=datetime.now(timezone.utc), run_id=run_id,
             root_run_id=root_run_id, parent_run_id=parent_run_id,
             session_id=session_id, runnable_id=runnable_id, payload=payload,
@@ -109,10 +109,10 @@ class _StubEventStore:
         return envelope
 
     async def list(
-        self, run_id: str, *, after_sequence: int = 0, limit: int = 100
+        self, stream_id: str, *, after_sequence: int = 0, limit: int = 100
     ) -> EventPage:
         items = tuple(
-            e for e in self.events if e.run_id == run_id and e.sequence > after_sequence
+            e for e in self.events if e.stream_id == stream_id and e.sequence > after_sequence
         )
         return EventPage(items=items[:limit], cursor=None)
 

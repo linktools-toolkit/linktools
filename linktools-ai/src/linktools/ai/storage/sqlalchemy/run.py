@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import false, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import RunRow
@@ -91,28 +91,61 @@ class SqlAlchemyRunStore:
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
     ) -> RunRecord:
+        # §14.4 forbids a Python read-then-compare-then-flush for core state
+        # updates -- two concurrent transactions can both SELECT the same
+        # version under READ COMMITTED and both then unconditionally write,
+        # silently losing one update. The WHERE id=... AND version=:expected
+        # clause on the UPDATE itself is the atomic race-decider: at most one
+        # concurrent transition can ever match it (rowcount == 1).
+        #
+        # Valid source statuses are derived from ALLOWED_RUN_TRANSITIONS so the
+        # UPDATE's WHERE also enforces the transition-legality check
+        # atomically, not just the version.
+        valid_sources = tuple(
+            source.value for source, targets in ALLOWED_RUN_TRANSITIONS.items()
+            if target in targets
+        )
+        now = datetime.now(timezone.utc)
+        values: "dict" = {"status": target.value, "version": RunRow.version + 1}
+        if target == RunStatus.RUNNING:
+            # started_at is set only the first time RUNNING is reached; a
+            # resume (WAITING_APPROVAL -> RUNNING) must not clobber it.
+            values["started_at"] = func.coalesce(RunRow.started_at, now)
+        if target in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED):
+            values["finished_at"] = now
+        if result is not None:
+            values["result_json"] = json.dumps({
+                "output": result.output, "token_usage": dict(result.token_usage),
+                "metadata": dict(result.metadata),
+            })
+        if error is not None:
+            values["error_json"] = json.dumps({
+                "error_type": error.error_type, "message": error.message,
+                "detail": dict(error.detail),
+            })
+
         async def _do(session):
-            query_result = await session.execute(select(RunRow).where(RunRow.id == run_id))
-            row = query_result.scalar_one_or_none()
-            if row is None:
-                raise RunNotFoundError(f"run not found: {run_id}")
-            if row.version != expected_version:
-                raise RunConflictError(f"expected version {expected_version}, found {row.version}")
-            current_status = RunStatus(row.status)
-            if target not in ALLOWED_RUN_TRANSITIONS.get(current_status, frozenset()):
+            stmt = (
+                update(RunRow)
+                .where(RunRow.id == run_id)
+                .where(RunRow.version == expected_version)
+                .where(RunRow.status.in_(valid_sources) if valid_sources else false())
+                .values(**values)
+            )
+            result_proxy = await session.execute(stmt)
+            if result_proxy.rowcount == 0:
+                # WHERE didn't match: discriminate missing / stale-version /
+                # illegal-transition so the caller sees the right error class.
+                query_result = await session.execute(select(RunRow).where(RunRow.id == run_id))
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise RunNotFoundError(f"run not found: {run_id}")
+                if row.version != expected_version:
+                    raise RunConflictError(f"expected version {expected_version}, found {row.version}")
+                current_status = RunStatus(row.status)
                 raise InvalidRunTransitionError(f"cannot transition {current_status} -> {target}")
-            now = datetime.now(timezone.utc)
-            if target == RunStatus.RUNNING and row.started_at is None:
-                row.started_at = now
-            if target in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED):
-                row.finished_at = now
-            row.status = target.value
-            row.version = row.version + 1
-            if result is not None:
-                row.result_json = json.dumps({"output": result.output, "token_usage": dict(result.token_usage), "metadata": dict(result.metadata)})
-            if error is not None:
-                row.error_json = json.dumps({"error_type": error.error_type, "message": error.message, "detail": dict(error.detail)})
-            await session.flush()
+            query_result = await session.execute(select(RunRow).where(RunRow.id == run_id))
+            row = query_result.scalar_one()
             return _row_to_record(row)
         return await self._execute_in_session(_do)
 

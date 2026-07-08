@@ -202,36 +202,68 @@ class SqlAlchemySwarmStore:
         cost: "Decimal | None" = None,
         metadata: "dict | None" = None,
     ) -> SwarmRun:
+        # §14.4/P0-5: DB-level CAS via UPDATE ... WHERE version=:expected,
+        # mirroring SqlAlchemyRunStore.transition -- a Python read-check-mutate
+        # pattern is not safe under concurrent updates on a real (non-SQLite)
+        # backend. When a status change is requested, the WHERE clause also
+        # restricts to the set of source statuses ALLOWED_SWARM_TRANSITIONS
+        # permits, so the legality check is enforced atomically too.
+        valid_sources = None
+        if status is not None:
+            # A "same status" update (e.g. bumping token_usage without a real
+            # transition) is always allowed; a genuine transition additionally
+            # requires ``status`` to be a legal target of the source per
+            # ALLOWED_SWARM_TRANSITIONS.
+            valid_sources = tuple(
+                source.value for source in SwarmStatus
+                if source == status or status in ALLOWED_SWARM_TRANSITIONS.get(source, frozenset())
+            )
+
         async def _do(session):
+            values: "dict" = {
+                "version": SwarmRunRow.version + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            if status is not None:
+                values["status"] = status.value
+            if round is not None:
+                values["round"] = round
+            if token_usage is not None:
+                values["input_tokens"] = token_usage.input_tokens
+                values["output_tokens"] = token_usage.output_tokens
+            if cost is not None:
+                values["total_cost"] = str(cost)
+            if metadata is not None:
+                values["metadata_json"] = json.dumps(metadata)
+
+            stmt = (
+                update(SwarmRunRow)
+                .where(SwarmRunRow.id == swarm_run_id)
+                .where(SwarmRunRow.version == expected_version)
+            )
+            if valid_sources is not None:
+                stmt = stmt.where(SwarmRunRow.status.in_(valid_sources))
+            stmt = stmt.values(**values)
+            result_proxy = await session.execute(stmt)
+            if result_proxy.rowcount == 0:
+                query_result = await session.execute(
+                    select(SwarmRunRow).where(SwarmRunRow.id == swarm_run_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
+                if row.version != expected_version:
+                    raise SwarmConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
+                current = SwarmStatus(row.status)
+                raise InvalidSwarmTransitionError(
+                    f"cannot transition {current} -> {status}"
+                )
             query_result = await session.execute(
                 select(SwarmRunRow).where(SwarmRunRow.id == swarm_run_id)
             )
-            row = query_result.scalar_one_or_none()
-            if row is None:
-                raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
-            if row.version != expected_version:
-                raise SwarmConflictError(
-                    f"expected version {expected_version}, found {row.version}"
-                )
-            if status is not None and status.value != row.status:
-                current = SwarmStatus(row.status)
-                if status not in ALLOWED_SWARM_TRANSITIONS.get(current, frozenset()):
-                    raise InvalidSwarmTransitionError(
-                        f"cannot transition {current} -> {status}"
-                    )
-                row.status = status.value
-            if round is not None:
-                row.round = round
-            if token_usage is not None:
-                row.input_tokens = token_usage.input_tokens
-                row.output_tokens = token_usage.output_tokens
-            if cost is not None:
-                row.total_cost = str(cost)
-            if metadata is not None:
-                row.metadata_json = json.dumps(metadata)
-            row.version = row.version + 1
-            row.updated_at = datetime.now(timezone.utc)
-            await session.flush()
+            row = query_result.scalar_one()
             return _row_to_run(row)
         return await self._execute_in_session(_do)
 
@@ -374,62 +406,151 @@ class SqlAlchemySwarmStore:
             return _row_to_task(row)
         return await self._execute_in_session(_do)
 
-    async def complete_task(self, task_id: str, result: RunResult) -> SwarmTask:
+    async def complete_task(
+        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
         async def _do(session):
+            now = datetime.now(timezone.utc)
+            if expected_version is None:
+                # Legacy unconditional path (no fencing token supplied).
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                row.status = SwarmTaskStatus.SUCCEEDED.value
+                row.result_json = _result_to_json(result)
+                row.version = row.version + 1
+                row.updated_at = now
+                await session.flush()
+                return _row_to_task(row)
+            # Fencing-token path (P0-5/G9): DB-level CAS via UPDATE ... WHERE
+            # version=:expected AND status='claimed' -- a worker whose lease
+            # already expired and was reclaimed to a new owner cannot
+            # overwrite the new owner's progress with a stale completion, and
+            # a task that's no longer CLAIMED (already completed/failed by a
+            # racing writer) is not silently re-completed.
+            stmt = (
+                update(SwarmTaskRow)
+                .where(SwarmTaskRow.id == task_id)
+                .where(SwarmTaskRow.version == expected_version)
+                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                .values(
+                    status=SwarmTaskStatus.SUCCEEDED.value,
+                    result_json=_result_to_json(result),
+                    version=SwarmTaskRow.version + 1,
+                    updated_at=now,
+                )
+            )
+            result_proxy = await session.execute(stmt)
+            if result_proxy.rowcount == 0:
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                if row.version != expected_version:
+                    raise SwarmConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
+                raise SwarmConflictError(
+                    f"task {task_id} is not claimed (status={row.status})"
+                )
             query_result = await session.execute(
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
             )
-            row = query_result.scalar_one_or_none()
-            if row is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
-            now = datetime.now(timezone.utc)
-            row.status = SwarmTaskStatus.SUCCEEDED.value
-            row.result_json = _result_to_json(result)
-            row.version = row.version + 1
-            row.updated_at = now
-            await session.flush()
-            return _row_to_task(row)
+            return _row_to_task(query_result.scalar_one())
         return await self._execute_in_session(_do)
 
-    async def fail_task(self, task_id: str, error: RunErrorInfo) -> SwarmTask:
+    async def fail_task(
+        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
         async def _do(session):
+            now = datetime.now(timezone.utc)
+            if expected_version is None:
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                row.status = SwarmTaskStatus.FAILED.value
+                row.error_json = _error_to_json(error)
+                row.attempts = row.attempts + 1
+                row.version = row.version + 1
+                row.updated_at = now
+                await session.flush()
+                return _row_to_task(row)
+            stmt = (
+                update(SwarmTaskRow)
+                .where(SwarmTaskRow.id == task_id)
+                .where(SwarmTaskRow.version == expected_version)
+                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                .values(
+                    status=SwarmTaskStatus.FAILED.value,
+                    error_json=_error_to_json(error),
+                    attempts=SwarmTaskRow.attempts + 1,
+                    version=SwarmTaskRow.version + 1,
+                    updated_at=now,
+                )
+            )
+            result_proxy = await session.execute(stmt)
+            if result_proxy.rowcount == 0:
+                query_result = await session.execute(
+                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                )
+                row = query_result.scalar_one_or_none()
+                if row is None:
+                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                if row.version != expected_version:
+                    raise SwarmConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
+                raise SwarmConflictError(
+                    f"task {task_id} is not claimed (status={row.status})"
+                )
             query_result = await session.execute(
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
             )
-            row = query_result.scalar_one_or_none()
-            if row is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
-            now = datetime.now(timezone.utc)
-            row.status = SwarmTaskStatus.FAILED.value
-            row.error_json = _error_to_json(error)
-            row.attempts = row.attempts + 1
-            row.version = row.version + 1
-            row.updated_at = now
-            await session.flush()
-            return _row_to_task(row)
+            return _row_to_task(query_result.scalar_one())
         return await self._execute_in_session(_do)
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
+        # G9: a select-then-loop-mutate here raced against a concurrent
+        # renew_lease/complete_task/fail_task -- two overlapping
+        # reclaim_expired_tasks calls could both select the same expired rows
+        # before either commits, or a reclaim could stomp a lease a worker
+        # legitimately renewed a moment ago. A single bulk
+        # UPDATE ... WHERE status='claimed' AND lease_expires_at<:now
+        # re-evaluates BOTH conditions atomically in the database at UPDATE
+        # time, so a row a concurrent renew_lease just pushed past ``now`` is
+        # simply not matched -- there is no read-then-write gap to race in.
         async def _do(session):
             now = datetime.now(timezone.utc)
-            expired_result = await session.execute(
-                select(SwarmTaskRow)
+            stmt = (
+                update(SwarmTaskRow)
                 .where(SwarmTaskRow.swarm_run_id == swarm_run_id)
                 .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
                 .where(SwarmTaskRow.lease_expires_at < now)
+                .values(
+                    status=SwarmTaskStatus.PENDING.value,
+                    assigned_agent_id=None,
+                    claimed_at=None,
+                    lease_expires_at=None,
+                    version=SwarmTaskRow.version + 1,
+                    updated_at=now,
+                )
+                .returning(SwarmTaskRow.id)
             )
-            expired = expired_result.scalars().all()
-            reclaimed: list = []
-            for row in expired:
-                row.status = SwarmTaskStatus.PENDING.value
-                row.assigned_agent_id = None
-                row.claimed_at = None
-                row.lease_expires_at = None
-                row.version = row.version + 1
-                row.updated_at = now
-                reclaimed.append(_row_to_task(row))
-            await session.flush()
-            return tuple(reclaimed)
+            reclaimed_ids = [row.id for row in (await session.execute(stmt))]
+            if not reclaimed_ids:
+                return ()
+            query_result = await session.execute(
+                select(SwarmTaskRow).where(SwarmTaskRow.id.in_(reclaimed_ids))
+            )
+            return tuple(_row_to_task(row) for row in query_result.scalars())
         return await self._execute_in_session(_do)
 
     # -- lease renewal (review doc §19.4) --------------------------------

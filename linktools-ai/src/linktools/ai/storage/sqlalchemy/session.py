@@ -3,15 +3,17 @@
 """SqlAlchemySessionStore: DB-backed SessionStore."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import SessionMessageRow, SessionRow
-from ...errors import SessionError
-from ...session.models import MessageRole, SessionMessage, SessionRecord, SessionStatus
+from ...errors import SessionError, SessionSequenceConflictError
+from ...session.models import MessageRole, NewSessionMessage, SessionMessage, SessionRecord, SessionStatus
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -79,15 +81,59 @@ class SqlAlchemySessionStore:
             return None if row is None else _row_to_record(row)
         return await self._execute_in_session(_do)
 
-    async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
-        async def _do(db_session):
-            for message in messages:
-                db_session.add(SessionMessageRow(
-                    id=message.id, session_id=message.session_id, sequence=message.sequence, role=message.role.value,
-                    content_json=json.dumps(message.content), run_id=message.run_id, created_at=message.created_at,
-                    metadata_json=json.dumps(dict(message.metadata)),
-                ))
-        await self._execute_in_session(_do)
+    async def _append_one_batch(
+        self, session: AsyncSession, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        # G6/review3 §6.5: reserve the next sequence(s) inside the inserting
+        # transaction -- read MAX(sequence) for the session, assign
+        # contiguously, insert. Mirrors SqlAlchemyEventStore._append_one.
+        result = await session.execute(
+            select(func.max(SessionMessageRow.sequence)).where(SessionMessageRow.session_id == session_id)
+        )
+        next_seq = (result.scalar() or 0) + 1
+        persisted = []
+        for offset, message in enumerate(messages):
+            sequence = next_seq + offset
+            now = datetime.now(timezone.utc)
+            row_id = str(uuid.uuid4())
+            session.add(SessionMessageRow(
+                id=row_id, session_id=session_id, sequence=sequence, role=message.role.value,
+                content_json=json.dumps(message.content), run_id=message.run_id, created_at=now,
+                metadata_json=json.dumps(dict(message.metadata)),
+            ))
+            persisted.append(SessionMessage(
+                id=row_id, session_id=session_id, sequence=sequence, role=message.role,
+                content=message.content, run_id=message.run_id, created_at=now,
+                metadata=message.metadata,
+            ))
+        await session.flush()
+        return tuple(persisted)
+
+    async def append_messages(
+        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        if not messages:
+            return ()
+        if self._session is not None:
+            # UoW mode: single attempt -- a sequence-conflict IntegrityError
+            # would poison the shared transaction, and within one unit there
+            # is no concurrent appender to race against.
+            return await self._append_one_batch(self._session, session_id, messages)
+        last_exc: "BaseException | None" = None
+        for _ in range(8):
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        return await self._append_one_batch(session, session_id, messages)
+            except IntegrityError as exc:
+                # Unique (session_id, sequence) collision -- a concurrent
+                # append reserved the same sequence first. Retry to re-read MAX.
+                last_exc = exc
+                continue
+        raise SessionSequenceConflictError(
+            f"could not reserve a unique message sequence for session {session_id!r} "
+            f"after repeated conflicts"
+        ) from last_exc
 
     async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
         async def _do(db_session):

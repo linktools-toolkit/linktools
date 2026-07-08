@@ -3,13 +3,23 @@
 """ToolExecutor: consults PolicyEngine before a tool executes, translating
 its decision into the corresponding domain error.
 
-When ``approval_store`` is wired and policy returns REQUIRE_APPROVAL, the
-executor persists a PENDING ApprovalRequest and (if ``event_store`` is
-also wired) emits an ApprovalRequested event -- both BEFORE the
-ToolApprovalRequiredError is raised, so PolicyCapability still translates
-the raise into SkipToolExecution and the model sees the "approval needed"
-tool result. Default-None (no stores wired) preserves today's behavior
-identically: just raise, no persistence, no event."""
+Two distinct REQUIRE_APPROVAL paths:
+
+* ``pause_on_approval=False`` (legacy, direct-raise): when ``approval_store``
+  is wired, the executor persists a PENDING ApprovalRequest and (if
+  ``event_store`` is also wired) emits an ApprovalRequested event -- both
+  BEFORE ``ToolApprovalRequiredError`` is raised. Default-None (no stores
+  wired) preserves the original no-persistence behavior identically.
+
+* ``pause_on_approval=True`` (the Run-pause path): the executor does NOT
+  persist anything (review3 §5/Package A, P0-6/G1). It only mints a fresh
+  ``approval_id`` and raises ``RunPaused`` carrying every field needed to
+  build the ApprovalRequest -- AgentRunner's pause handler is the one that
+  actually calls ``ApprovalStore.create_or_get_pending`` (deduping on
+  (run_id, tool_call_id), G2), and on SqlAlchemy storage does so in the SAME
+  UnitOfWork as the checkpoint save + WAITING_APPROVAL transition + pause
+  events, so a crash between "approval persisted" and "run paused" is no
+  longer possible."""
 import asyncio
 import logging
 import uuid
@@ -65,14 +75,27 @@ class ToolExecutor:
             # of re-persisting a PENDING duplicate and re-raising.
             if await self._already_approved(request, context):
                 return
-            approval = await self._record_approval(request, context, decision.reason)
-            if self._pause_on_approval and approval is not None:
-                run_id = (
-                    self._run_id_resolver(context)
-                    if self._run_id_resolver is not None
-                    else context.run_id
+            run_id = (
+                self._run_id_resolver(context)
+                if self._run_id_resolver is not None
+                else context.run_id
+            )
+            if self._pause_on_approval:
+                # P0-6/G1: do NOT persist here. Mint the id and hand every
+                # field the suspension handler needs to AgentRunner via
+                # RunPaused -- the actual ApprovalStore write happens there,
+                # atomically with the checkpoint/transition/event writes.
+                tool_call_id = context.tool_call_id or str(uuid.uuid4())
+                raise RunPaused(
+                    run_id=run_id,
+                    approval_id=str(uuid.uuid4()),
+                    tool_call_id=tool_call_id,
+                    tool_name=request.tool_name,
+                    reason=decision.reason,
+                    arguments=dict(request.arguments),
                 )
-                raise RunPaused(run_id=run_id, approval_id=approval.id)
+            # Legacy direct-raise path: persist immediately (unchanged).
+            await self._record_approval(request, context, decision.reason)
             raise ToolApprovalRequiredError(
                 decision.reason or f"tool requires approval: {request.tool_name}"
             )
@@ -117,9 +140,9 @@ class ToolExecutor:
         With approval_store=None this is a no-op (default-None path: behavior
         identical to today).
 
-        The return value lets the ``pause_on_approval=True`` branch reach the
-        persisted ``approval.id`` for ``RunPaused(approval_id=...)`` without
-        re-doing the run_id resolution / build work.
+        Only used by the legacy ``pause_on_approval=False`` direct-raise path
+        -- the pause path (P0-6/G1) does NOT call this; it defers persistence
+        to AgentRunner's suspension handler instead (see ``check``).
 
         Event emission is best-effort: the EventStore assigns the sequence
         itself (review doc §8.1), so a failure here is logged and swallowed --
@@ -181,6 +204,7 @@ class ToolExecutor:
         timeout: "float | None" = None,
         max_retries: int = 0,
         idempotency_key: "str | None" = None,
+        schema_version: str = "1",
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -210,6 +234,13 @@ class ToolExecutor:
         - Fresh reservation -> handler runs; ``complete`` on success,
           ``fail`` on exception.
 
+        ``schema_version`` (default ``"1"``) is folded into the request hash
+        (P1-5) so a ToolSpec whose input contract changed shape bumps its
+        schema_version and gets a fresh hash -- a stale idempotency record
+        from before the change is never mistaken for a match. Callers that
+        have a ``ToolSpec`` in hand should pass ``spec.schema_version`` here;
+        omitting it preserves the pre-P1-5 hash formula's default.
+
         Default ``idempotency_store=None`` (or ``idempotency_key=None``)
         preserves today's no-idempotency behavior: the handler runs every
         call and nothing is persisted."""
@@ -221,7 +252,10 @@ class ToolExecutor:
         use_idempotency = self._idempotency_store is not None and idempotency_key is not None
         if use_idempotency:
             scope = context.run_id
-            request_hash = compute_request_hash(request.tool_name, request.arguments, scope)
+            request_hash = compute_request_hash(
+                request.tool_name, request.arguments, scope,
+                schema_version=schema_version,
+            )
             existing = await self._idempotency_store.reserve(scope, idempotency_key, request_hash)
             if existing is not None:
                 if existing.status is IdempotencyStatus.COMPLETED:

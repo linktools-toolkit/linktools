@@ -29,6 +29,7 @@ from ...agent.approval import (
     ALLOWED_APPROVAL_TRANSITIONS,
     ApprovalRequest,
     ApprovalStatus,
+    build_approval_request,
 )
 from ...errors import (
     ApprovalConflictError,
@@ -161,6 +162,38 @@ class FileApprovalStore:
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:
         return await asyncio.to_thread(self._create_sync, request)
+
+    def _create_or_get_pending_sync(
+        self, *, run_id: str, tool_call_id: str, tool_name: str,
+        reason: "str | None", arguments: dict, approval_id: str,
+    ) -> ApprovalRequest:
+        # G1/G2 (review3 §5.4): dedup on (run_id, tool_call_id) BEFORE
+        # creating -- a retry, a duplicate model drive, or a re-entrant pause
+        # for the same tool_call must reuse the existing request rather than
+        # creating a second PENDING one. Held under self._lock (see
+        # create_or_get_pending) so two concurrent callers can't both observe
+        # "no existing" and both create.
+        existing = [
+            r for r in self._list_for_run_sync(run_id) if r.tool_call_id == tool_call_id
+        ]
+        if existing:
+            return existing[-1]
+        request = build_approval_request(
+            run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
+            reason=reason, arguments=arguments, approval_id=approval_id,
+        )
+        return self._create_sync(request)
+
+    async def create_or_get_pending(
+        self, *, run_id: str, tool_call_id: str, tool_name: str,
+        reason: "str | None", arguments: dict, approval_id: str,
+    ) -> ApprovalRequest:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._create_or_get_pending_sync,
+                run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
+                reason=reason, arguments=arguments, approval_id=approval_id,
+            )
 
     async def approve(
         self, approval_id: str, *, expected_version: int, resolved_by: str

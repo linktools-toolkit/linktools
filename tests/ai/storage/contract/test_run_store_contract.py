@@ -180,6 +180,39 @@ async def test_list_children_returns_only_direct_children(store_factory):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_transitions_with_same_expected_version_only_one_succeeds(store_factory):
+    """P0-4/P1-6: N coroutines race to transition the SAME run from PENDING
+    to RUNNING using the SAME expected_version. Exactly one may succeed;
+    every other one must observe a conflict (RunConflictError) rather than
+    silently succeeding too (a lost update) or corrupting the version
+    counter. Exercises the DB-level CAS (SqlAlchemy) and the in-process lock
+    (File) that replaced the read-then-compare-then-write pattern."""
+    import asyncio
+
+    store = store_factory()
+    await store.create(_record())
+
+    successes = []
+    conflicts = []
+
+    async def _attempt():
+        try:
+            updated = await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
+            successes.append(updated)
+        except RunConflictError:
+            conflicts.append(1)
+
+    await asyncio.gather(*(_attempt() for _ in range(20)))
+
+    assert len(successes) == 1, f"expected exactly one winner, got {len(successes)}"
+    assert len(conflicts) == 19
+    assert successes[0].version == 2
+
+    final = await store.get("run-1")
+    assert final.version == 2, "version must have been bumped exactly once"
+
+
+@pytest.mark.asyncio
 async def test_path_traversal_in_run_id_is_rejected(tmp_path):
     store = FileRunStore(root=tmp_path)
     with pytest.raises(ValueError):

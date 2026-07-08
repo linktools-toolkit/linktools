@@ -109,13 +109,23 @@ class IdempotencyStore(Protocol):
 
 
 def compute_request_hash(
-    tool_name: str, arguments: "dict[str, Any]", scope: str
+    tool_name: str, arguments: "dict[str, Any]", scope: str,
+    *, schema_version: str = "1",
 ) -> str:
-    """SHA-256 of ``tool_name | normalized_args | scope`` (§11.3).
-    ``arguments`` are json-serialized with ``sort_keys=True`` so two dicts
-    that compare equal hash identically regardless of insertion order;
-    ``default=str`` keeps non-JSON-native values (Path, datetime, ...) stable
-    instead of raising. Schema-version inclusion is deferred until the
-    registry exposes a tool-schema version."""
-    payload = f"{tool_name}|{json.dumps(arguments, sort_keys=True, default=str)}|{scope}"
+    """SHA-256 of ``tool_name | schema_version | normalized_args | scope``
+    (§11.3/P1-5). ``arguments`` are json-serialized with ``sort_keys=True`` so
+    two dicts that compare equal hash identically regardless of insertion
+    order; ``default=str`` keeps non-JSON-native values (Path, datetime, ...)
+    stable instead of raising.
+
+    ``schema_version`` defaults to ``"1"`` so existing callers that don't pass
+    it (or a ToolSpec whose ``schema_version`` was never bumped) hash
+    identically to before this parameter was added. When a tool's input
+    contract changes, bumping ``ToolSpec.schema_version`` changes the hash for
+    every subsequent call, so a stale idempotency record from before the
+    schema change is never mistaken for a match against the new shape."""
+    payload = (
+        f"{tool_name}|{schema_version}|"
+        f"{json.dumps(arguments, sort_keys=True, default=str)}|{scope}"
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

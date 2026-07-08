@@ -316,7 +316,13 @@ class FileResourceBackend:
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
             if info is not None:
                 existing_content = self._data_path(path).read_bytes()
-                if existing_content == content and dict(info.metadata) == dict(options.metadata):
+                # P1-4: content_type must be part of the no-op comparison --
+                # a PUT that only changes content_type (same bytes, same
+                # metadata) is still a real change and must bump version/etag,
+                # not be silently dropped as a no-op.
+                if (existing_content == content
+                        and dict(info.metadata) == dict(options.metadata)
+                        and info.content_type == options.content_type):
                     new_info = info
                 else:
                     new_info = self._raw_put_sync(path, content, content_type=options.content_type, metadata=options.metadata)

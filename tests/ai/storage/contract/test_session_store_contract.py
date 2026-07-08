@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.session.models import MessageRole, SessionMessage, SessionRecord, SessionStatus
+from linktools.ai.session.models import MessageRole, NewSessionMessage, SessionRecord, SessionStatus
 from linktools.ai.storage.file.session import FileSessionStore
 
 
@@ -14,11 +14,10 @@ def _record(session_id="session-1") -> SessionRecord:
     return SessionRecord(id=session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1, created_at=now, updated_at=now)
 
 
-def _message(session_id="session-1", sequence=1, role=MessageRole.USER, content="hi") -> SessionMessage:
-    return SessionMessage(
-        id=f"{session_id}-{sequence}", session_id=session_id, sequence=sequence, role=role,
-        content=content, run_id=None, created_at=datetime.now(timezone.utc),
-    )
+def _message(role=MessageRole.USER, content="hi") -> NewSessionMessage:
+    # G6/review3 §6.2: the input shape carries no id/sequence/created_at --
+    # the SessionStore is the sole authority for assigning those.
+    return NewSessionMessage(role=role, content=content, run_id=None)
 
 
 @pytest.fixture(params=["file", "sqlalchemy"])
@@ -115,7 +114,12 @@ async def test_get_missing_returns_none(store_factory):
 async def test_append_then_list_messages_in_order(store_factory):
     store = store_factory()
     await store.create(_record())
-    await store.append_messages("session-1", (_message(sequence=1, content="hi"), _message(sequence=2, role=MessageRole.ASSISTANT, content="hello")))
+    persisted = await store.append_messages(
+        "session-1", (_message(content="hi"), _message(role=MessageRole.ASSISTANT, content="hello")),
+    )
+    # append_messages returns the persisted messages with store-assigned
+    # id/sequence/created_at (G6).
+    assert [m.sequence for m in persisted] == [1, 2]
     messages = await store.list_messages("session-1")
     assert [m.content for m in messages] == ["hi", "hello"]
     assert messages[1].role == MessageRole.ASSISTANT
@@ -125,9 +129,46 @@ async def test_append_then_list_messages_in_order(store_factory):
 async def test_list_messages_after_sequence_filters(store_factory):
     store = store_factory()
     await store.create(_record())
-    await store.append_messages("session-1", (_message(sequence=1), _message(sequence=2), _message(sequence=3)))
+    await store.append_messages("session-1", (_message(), _message(), _message()))
     messages = await store.list_messages("session-1", after_sequence=1)
     assert [m.sequence for m in messages] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_append_messages_assigns_sequence_the_store_never_reuses(store_factory):
+    """G6: the store -- not the caller -- assigns sequence numbers, and a
+    second append call continues from the session's current max rather than
+    restarting at 1."""
+    store = store_factory()
+    await store.create(_record())
+    first_batch = await store.append_messages("session-1", (_message(content="a"), _message(content="b")))
+    assert [m.sequence for m in first_batch] == [1, 2]
+    second_batch = await store.append_messages("session-1", (_message(content="c"),))
+    assert [m.sequence for m in second_batch] == [3]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_append_messages_never_assigns_duplicate_sequence(store_factory):
+    """G6: two coroutines racing to append to the SAME session must never be
+    assigned the same sequence number -- the store is the sole sequence
+    authority, so unlike the old caller-computed-sequence design, there is no
+    read-then-compute-then-write gap for concurrent appenders to race in."""
+    import asyncio
+
+    store = store_factory()
+    await store.create(_record())
+
+    async def _append(content: str):
+        return await store.append_messages("session-1", (_message(content=content),))
+
+    results = await asyncio.gather(*(_append(f"msg-{i}") for i in range(10)))
+    all_sequences = [batch[0].sequence for batch in results]
+    assert sorted(all_sequences) == list(range(1, 11)), (
+        f"expected sequences 1..10 with no duplicates, got {sorted(all_sequences)}"
+    )
+    messages = await store.list_messages("session-1")
+    assert len(messages) == 10
+    assert [m.sequence for m in messages] == list(range(1, 11))
 
 
 @pytest.mark.asyncio
@@ -145,7 +186,7 @@ async def test_sessions_are_isolated(store_factory):
     store = store_factory()
     await store.create(_record(session_id="session-a"))
     await store.create(_record(session_id="session-b"))
-    await store.append_messages("session-a", (_message(session_id="session-a", sequence=1),))
+    await store.append_messages("session-a", (_message(),))
     messages_a = await store.list_messages("session-a")
     messages_b = await store.list_messages("session-b")
     assert len(messages_a) == 1

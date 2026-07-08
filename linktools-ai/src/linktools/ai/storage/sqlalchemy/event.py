@@ -72,14 +72,14 @@ class SqlAlchemyEventStore:
         payload: EventPayload,
     ) -> EventEnvelope:
         result = await session.execute(
-            select(func.max(EventRow.sequence)).where(EventRow.run_id == stream_id)
+            select(func.max(EventRow.sequence)).where(EventRow.stream_id == stream_id)
         )
         current = result.scalar()
         next_seq = (current or 0) + 1
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc)
         row = EventRow(
-            event_id=event_id, run_id=run_id, sequence=next_seq,
+            event_id=event_id, stream_id=stream_id, run_id=run_id, sequence=next_seq,
             occurred_at=occurred_at, root_run_id=root_run_id, parent_run_id=parent_run_id,
             session_id=session_id, runnable_id=runnable_id,
             payload_type=type(payload).__name__,
@@ -88,7 +88,7 @@ class SqlAlchemyEventStore:
         session.add(row)
         await session.flush()
         return EventEnvelope(
-            event_id=event_id, sequence=next_seq, occurred_at=occurred_at,
+            event_id=event_id, stream_id=stream_id, sequence=next_seq, occurred_at=occurred_at,
             run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
             session_id=session_id, runnable_id=runnable_id, payload=payload,
         )
@@ -132,7 +132,7 @@ class SqlAlchemyEventStore:
                             session_id=session_id, runnable_id=runnable_id, payload=payload,
                         )
             except IntegrityError as exc:
-                # Unique (run_id, sequence) collision -- a concurrent append
+                # Unique (stream_id, sequence) collision -- a concurrent append
                 # reserved the same sequence first. Retry to re-read MAX.
                 last_exc = exc
                 continue
@@ -145,16 +145,17 @@ class SqlAlchemyEventStore:
         payload_cls = getattr(_payloads_module, row.payload_type)
         payload = payload_cls(**json.loads(row.payload_json))
         return EventEnvelope(
-            event_id=row.event_id, sequence=row.sequence, occurred_at=_as_utc(row.occurred_at),
+            event_id=row.event_id, stream_id=row.stream_id, sequence=row.sequence,
+            occurred_at=_as_utc(row.occurred_at),
             run_id=row.run_id, root_run_id=row.root_run_id, parent_run_id=row.parent_run_id,
             session_id=row.session_id, runnable_id=row.runnable_id, payload=payload,
         )
 
-    async def list(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+    async def list(self, stream_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
         async def _do(session):
             result = await session.execute(
                 select(EventRow)
-                .where(EventRow.run_id == run_id, EventRow.sequence > after_sequence)
+                .where(EventRow.stream_id == stream_id, EventRow.sequence > after_sequence)
                 .order_by(EventRow.sequence.asc())
                 .limit(limit)
             )

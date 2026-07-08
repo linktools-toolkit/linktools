@@ -30,6 +30,10 @@ class ToolSpec:
     approval: ApprovalMode = ApprovalMode.NEVER
     idempotent: bool = False
     timeout_seconds: "float | None" = None
+    # P1-5: bump when a tool's input contract changes shape so an idempotency
+    # hash computed under the old schema is never mistaken for a match
+    # against the new one (see tool/idempotency.py compute_request_hash).
+    schema_version: str = "1"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
@@ -79,6 +83,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         approval=_APPROVAL_LOOKUP[approval_key],
         idempotent=bool(payload.get("idempotent", False)),
         timeout_seconds=float(timeout) if timeout is not None else None,
+        schema_version=str(payload.get("schema_version", "1")),
         metadata=dict(payload.get("metadata") or {}),
     )
 

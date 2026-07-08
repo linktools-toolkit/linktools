@@ -72,27 +72,52 @@ class InvalidRunTransitionError(RunError):
 class RunPaused(RunError):
     """Raised by ToolExecutor (under ``pause_on_approval=True``) and propagated
     through pydantic-ai's tool-execution stack out to AgentRunner, which
-    checkpoints state, transitions the Run to WAITING_APPROVAL, and stops.
+    persists the ApprovalRequest, checkpoints state, transitions the Run to
+    WAITING_APPROVAL, and appends the pause events -- all atomically in one
+    UnitOfWork on SqlAlchemy storage (review3 §5, Package A / P0-6).
 
     This is a control-flow signal, NOT an error condition -- it's a RunError
     (not a ToolError) precisely so PolicyCapability.before_tool_execute (which
     only catches ToolDeniedError/ToolApprovalRequiredError -> SkipToolExecution)
     lets it propagate. AgentRunner catches it; nothing else should.
 
-    Carries both ids AgentRunner needs: ``run_id`` (already resolved through
-    ToolExecutor.run_id_resolver, so it matches the persisted ApprovalRequest)
-    and ``approval_id`` (the PENDING request the human must approve/reject)."""
+    ``approval_id`` is a fresh id MINTED here (not yet persisted anywhere) --
+    ToolExecutor no longer writes the ApprovalRequest itself; it only mints
+    the id so the id it reports is the same one AgentRunner's suspension
+    handler will actually persist. ``run_id`` is already resolved through
+    ToolExecutor.run_id_resolver. The remaining fields carry everything the
+    suspension handler needs to construct and persist the ApprovalRequest
+    without ToolExecutor touching the ApprovalStore. Only primitive types are
+    used here (no domain dataclass import) to keep this module dependency-free."""
 
-    def __init__(self, run_id: str, approval_id: str) -> None:
+    def __init__(
+        self, run_id: str, approval_id: str, *,
+        tool_call_id: "str | None" = None,
+        tool_name: "str | None" = None,
+        reason: "str | None" = None,
+        arguments: "dict | None" = None,
+        idempotency_key: "str | None" = None,
+    ) -> None:
         super().__init__(
             f"run paused waiting for approval: run_id={run_id} approval_id={approval_id}"
         )
         self.run_id = run_id
         self.approval_id = approval_id
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+        self.reason = reason
+        self.arguments = arguments or {}
+        self.idempotency_key = idempotency_key
 
 
 class SessionError(LinktoolsAIError):
     """Base class for Session-related errors."""
+
+
+class SessionSequenceConflictError(SessionError):
+    """Raised when the SessionStore cannot reserve a unique message sequence
+    after repeated conflicts (G6/review3 §6: the store is the sole sequence
+    authority, mirroring EventSequenceConflictError)."""
 
 
 class EventError(LinktoolsAIError):

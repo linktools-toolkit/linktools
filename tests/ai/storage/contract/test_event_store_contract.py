@@ -206,7 +206,87 @@ async def test_append_routing_fields_roundtrip(store_factory):
 
 
 @pytest.mark.asyncio
+async def test_event_envelope_has_stream_id(store_factory):
+    """G3/review3 §8.2: stream_id is a first-class EventEnvelope field."""
+    store = store_factory()
+    envelope = await _append(store)
+    assert envelope.stream_id == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_different_streams_can_share_sequence_number(store_factory):
+    """G3/review3 §8.4: the uniqueness boundary is (stream_id, sequence), not
+    (run_id, sequence) -- two DIFFERENT streams that happen to share a run_id
+    prefix (or, once a future caller mints stream_id != run_id, genuinely
+    different streams for the SAME run) must each independently start
+    sequence at 1 without colliding."""
+    store = store_factory()
+    a = await store.append(
+        stream_id="stream-a", run_id="run-shared", root_run_id="run-shared",
+        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        payload=RunStarted(run_id="run-shared", runnable_id="agent-1"),
+    )
+    b = await store.append(
+        stream_id="stream-b", run_id="run-shared", root_run_id="run-shared",
+        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        payload=RunStarted(run_id="run-shared", runnable_id="agent-1"),
+    )
+    assert a.sequence == 1
+    assert b.sequence == 1
+    assert a.stream_id == "stream-a"
+    assert b.stream_id == "stream-b"
+    page_a = await store.list("stream-a")
+    page_b = await store.list("stream-b")
+    assert len(page_a.items) == 1
+    assert len(page_b.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_unique_per_stream_not_per_run(store_factory):
+    """G3: appending twice to the SAME stream_id (even under different
+    run_id values, an edge case only possible once a caller decouples the
+    two) still assigns strictly increasing sequences within that stream."""
+    store = store_factory()
+    first = await store.append(
+        stream_id="shared-stream", run_id="run-x", root_run_id="run-x",
+        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        payload=RunStarted(run_id="run-x", runnable_id="agent-1"),
+    )
+    second = await store.append(
+        stream_id="shared-stream", run_id="run-y", root_run_id="run-y",
+        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        payload=RunStarted(run_id="run-y", runnable_id="agent-1"),
+    )
+    assert first.sequence == 1
+    assert second.sequence == 2
+    page = await store.list("shared-stream")
+    assert [e.sequence for e in page.items] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_path_traversal_in_run_id_is_rejected(tmp_path):
     store = FileEventStore(root=tmp_path)
     with pytest.raises(ValueError):
         await store.list("../../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_file_event_store_migrates_legacy_files_without_stream_id(tmp_path):
+    """G3/review3 §8.5: a FileEventStore event file written before stream_id
+    became a first-class field (no "stream_id" key in the JSON) must still
+    load, with stream_id defaulting to run_id -- exact, not a guess, since
+    every caller has always passed stream_id == run_id."""
+    import json
+
+    store = FileEventStore(root=tmp_path)
+    await _append(store, run_id="run-legacy")
+    # Simulate a pre-G3 file by rewriting it without the "stream_id" key.
+    stream_dir = tmp_path / "run-legacy"
+    event_path = next(stream_dir.glob("*.json"))
+    raw = json.loads(event_path.read_text())
+    del raw["stream_id"]
+    event_path.write_text(json.dumps(raw))
+
+    page = await store.list("run-legacy")
+    assert len(page.items) == 1
+    assert page.items[0].stream_id == "run-legacy"

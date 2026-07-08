@@ -78,6 +78,11 @@ class FileRunStore:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        # P1-6: serializes transition()'s read-check-write sequence so two
+        # coroutines racing to transition the SAME run within one process
+        # cannot both read the same version and both write -- a lost update.
+        # Mirrors FileSwarmStore's single-lock pattern (see storage/file/swarm.py).
+        self._lock = asyncio.Lock()
 
     def _path(self, run_id: str) -> Path:
         return self._root / f"{_validate_id_segment(run_id, kind='run_id')}.json"
@@ -140,10 +145,11 @@ class FileRunStore:
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
     ) -> RunRecord:
-        return await asyncio.to_thread(
-            self._transition_sync, run_id, target,
-            expected_version=expected_version, result=result, error=error,
-        )
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._transition_sync, run_id, target,
+                expected_version=expected_version, result=result, error=error,
+            )
 
     def _list_children_sync(self, run_id: str) -> "tuple[RunRecord, ...]":
         children = []

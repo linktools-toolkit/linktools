@@ -55,7 +55,7 @@ from ..run.models import (
     RunnableType,
 )
 from ..run.store import RunStore
-from ..session.models import MessageRole, SessionMessage
+from ..session.models import MessageRole, NewSessionMessage
 from ..session.store import SessionStore
 from .models import SwarmRun, SwarmStatus, SwarmTaskStatus, TokenUsage
 from .spec import SwarmSpec
@@ -496,9 +496,13 @@ class SwarmRunner:
             # transition doesn't abort the whole recovery pass.
             try:
                 if child.status == RunStatus.SUCCEEDED and child.result is not None:
-                    await self._swarm_store.complete_task(task.id, child.result)
+                    await self._swarm_store.complete_task(
+                        task.id, child.result, expected_version=task.version,
+                    )
                 elif child.status == RunStatus.FAILED and child.error is not None:
-                    await self._swarm_store.fail_task(task.id, child.error)
+                    await self._swarm_store.fail_task(
+                        task.id, child.error, expected_version=task.version,
+                    )
                 elif child.status == RunStatus.RUNNING:
                     # Worker may still be alive -- leave it. If the worker is
                     # actually dead, the next recover() pass after this Run
@@ -540,19 +544,15 @@ class SwarmRunner:
         self, context: RunContext, result: RunResult
     ) -> None:
         """Append the single aggregate assistant message to the shared/parent
-        Session. Sequence mirrors AgentRunner: prior count + 1."""
-        prior = await self._session_store.list_messages(context.session_id)
+        Session. G6: sequence is assigned by the SessionStore itself, not
+        computed here from `len(prior_messages) + 1`."""
         await self._session_store.append_messages(
             context.session_id,
             (
-                SessionMessage(
-                    id=f"{context.run_id}-aggregate",
-                    session_id=context.session_id,
-                    sequence=len(prior) + 1,
+                NewSessionMessage(
                     role=MessageRole.ASSISTANT,
                     content=str(result.output),
                     run_id=context.run_id,
-                    created_at=datetime.now(timezone.utc),
                 ),
             ),
         )

@@ -9,12 +9,13 @@ never runs on the event loop."""
 
 import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from ...errors import SessionError
-from ...session.models import MessageRole, SessionMessage, SessionRecord, SessionStatus
+from ...session.models import MessageRole, NewSessionMessage, SessionMessage, SessionRecord, SessionStatus
 
 
 def _validate_id_segment(value: str, *, kind: str) -> str:
@@ -59,6 +60,22 @@ class FileSessionStore:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        # G6/review3 §6.4: this store is the SOLE sequence authority --
+        # append_messages() reads the current max sequence and assigns fresh
+        # ones itself (mirroring FileEventStore), so the caller no longer
+        # computes `len(prior_messages) + 1`. The per-session lock still
+        # serializes the read-max-then-write so two concurrent coroutines
+        # appending to the same session cannot compute the same sequence.
+        self._locks: "dict[str, asyncio.Lock]" = {}
+        self._locks_guard = asyncio.Lock()
+
+    async def _session_lock(self, session_id: str) -> asyncio.Lock:
+        async with self._locks_guard:
+            lock = self._locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[session_id] = lock
+            return lock
 
     def _session_dir(self, session_id: str) -> Path:
         d = self._root / _validate_id_segment(session_id, kind="session_id")
@@ -85,13 +102,34 @@ class FileSessionStore:
     async def get(self, session_id: str) -> "SessionRecord | None":
         return await asyncio.to_thread(self._get_sync, session_id)
 
-    def _append_messages_sync(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
+    def _next_sequence_sync(self, session_id: str) -> int:
         messages_dir = self._session_dir(session_id) / "messages"
-        for message in messages:
-            (messages_dir / f"{message.sequence:010d}.json").write_text(json.dumps(_message_to_json(message)))
+        existing = list(messages_dir.glob("*.json"))
+        return max((int(p.stem) for p in existing), default=0) + 1
 
-    async def append_messages(self, session_id: str, messages: "tuple[SessionMessage, ...]") -> None:
-        await asyncio.to_thread(self._append_messages_sync, session_id, messages)
+    def _append_messages_sync(
+        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        messages_dir = self._session_dir(session_id) / "messages"
+        next_seq = self._next_sequence_sync(session_id)
+        persisted = []
+        for offset, message in enumerate(messages):
+            sequence = next_seq + offset
+            full = SessionMessage(
+                id=str(uuid.uuid4()), session_id=session_id, sequence=sequence,
+                role=message.role, content=message.content, run_id=message.run_id,
+                created_at=datetime.now(timezone.utc), metadata=message.metadata,
+            )
+            (messages_dir / f"{sequence:010d}.json").write_text(json.dumps(_message_to_json(full)))
+            persisted.append(full)
+        return tuple(persisted)
+
+    async def append_messages(
+        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        lock = await self._session_lock(session_id)
+        async with lock:
+            return await asyncio.to_thread(self._append_messages_sync, session_id, messages)
 
     def _list_messages_sync(self, session_id: str, *, after_sequence: int, limit: int) -> "tuple[SessionMessage, ...]":
         messages_dir = self._root / _validate_id_segment(session_id, kind="session_id") / "messages"
@@ -137,4 +175,6 @@ class FileSessionStore:
         status: "SessionStatus | None" = None,
         metadata: "Mapping[str, Any] | None" = None,
     ) -> SessionRecord:
-        return await asyncio.to_thread(self._update_sync, session_id, status=status, metadata=metadata)
+        lock = await self._session_lock(session_id)
+        async with lock:
+            return await asyncio.to_thread(self._update_sync, session_id, status=status, metadata=metadata)

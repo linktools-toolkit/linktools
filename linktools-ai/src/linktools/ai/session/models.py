@@ -47,3 +47,19 @@ class SessionMessage:
     run_id: "str | None"
     created_at: datetime
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class NewSessionMessage:
+    """Input shape for :meth:`SessionStore.append_messages` (review3 §6.2 /
+    G6). Deliberately carries no ``id``/``sequence``/``created_at`` -- the
+    SessionStore is the SOLE authority for assigning those (mirroring how
+    EventStore owns sequence assignment for events), so two concurrent
+    callers appending to the same session can never compute the same
+    sequence number themselves. The caller supplies only the semantic
+    content; the store returns the persisted :class:`SessionMessage` with
+    the fields it assigned."""
+    role: MessageRole
+    content: "str | Mapping[str, Any]"
+    run_id: "str | None"
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)

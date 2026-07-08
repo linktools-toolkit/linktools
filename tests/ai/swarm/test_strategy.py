@@ -151,8 +151,12 @@ class _MemorySwarmStore(SwarmStore):
         self._tasks[task_id] = updated
         return updated
 
-    async def complete_task(self, task_id: str, result) -> SwarmTask:
+    async def complete_task(self, task_id: str, result, *, expected_version=None) -> SwarmTask:
         current = self._tasks[task_id]
+        if expected_version is not None and current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
         done = replace(
             current,
             status=SwarmTaskStatus.SUCCEEDED,
@@ -163,8 +167,12 @@ class _MemorySwarmStore(SwarmStore):
         self._tasks[task_id] = done
         return done
 
-    async def fail_task(self, task_id: str, error) -> SwarmTask:
+    async def fail_task(self, task_id: str, error, *, expected_version=None) -> SwarmTask:
         current = self._tasks[task_id]
+        if expected_version is not None and current.version != expected_version:
+            raise SwarmConflictError(
+                f"expected version {expected_version}, found {current.version}"
+            )
         failed = replace(
             current,
             status=SwarmTaskStatus.FAILED,

@@ -89,17 +89,46 @@ class ResourceStore:
         Multi-backend merge caveat: a backend may return items past the cursor
         that are dropped by whiteout or shadowed by a higher-priority backend.
         The wasted fetch is correctness-neutral -- the next call's cursor
-        strictly advances (the limit-th path), so progress is guaranteed and
-        termination is reached when no backend has more items past the cursor."""
+        strictly advances, so progress is guaranteed and termination is
+        reached when no backend has more items past the cursor.
+
+        G4 fix: whiteout/shadow filtering can shrink the merged page BELOW
+        `limit` even though a backend still has unfetched items beyond its own
+        fetch window (e.g. a whiteout removes an item from the middle of this
+        page's candidate set, and the page that's left is short even though
+        more real items exist further out). Naively returning cursor=None
+        whenever ``len(items) <= limit`` would silently truncate the listing
+        in that case. So track (a) whether ANY backend's raw page reported
+        more available (a non-None page.cursor) and (b) the max path SCANNED
+        this round (returned or filtered) across every backend -- when (a) is
+        true, the next cursor is that max-scanned path (not just the last
+        RETURNED path), so the next call resumes strictly after everything
+        already examined. Filtering decisions (shadow/whiteout) are re-derived
+        from primary state at any cursor position, not from the cursor value
+        itself, so resuming past already-scanned-but-filtered paths never
+        skips a still-live item."""
         merged: "dict[str, ResourceInfo]" = {}
         # Fetch limit+1 from each backend so we can detect "more available"
         # without a second count query (spec §15.2 LIMIT :limit+1).
         fetch_limit = limit + 1
+        max_scanned: "str | None" = cursor
+        backend_has_more = False
+
+        def _note_page(page: ResourcePage) -> None:
+            nonlocal max_scanned, backend_has_more
+            if page.cursor is not None:
+                backend_has_more = True
+            for info in page.items:
+                if max_scanned is None or info.path.value > max_scanned:
+                    max_scanned = info.path.value
+
         for overlay in reversed(self._overlays):
             page = await overlay.raw_propfind(path, depth=depth, limit=fetch_limit, cursor=cursor)
+            _note_page(page)
             for info in page.items:
                 merged[info.path.value] = info
         primary_page = await self._primary.raw_propfind(path, depth=depth, limit=fetch_limit, cursor=cursor)
+        _note_page(primary_page)
         primary_paths = {info.path.value for info in primary_page.items}
         for info in primary_page.items:
             merged[info.path.value] = info
@@ -114,6 +143,13 @@ class ResourceStore:
             # More available: next page resumes strictly after the last path
             # we're returning this call. items[limit-1] is the limit-th item.
             return ResourcePage(items=items[:limit], cursor=items[limit - 1].path.value)
+        if backend_has_more:
+            # Under-full page (post-filter) but a backend still has unfetched
+            # candidates -- return everything we have and point the cursor
+            # past every path scanned this round, not just past what we
+            # returned, so no unscanned item is skipped and no scanned-but-
+            # filtered item is re-examined.
+            return ResourcePage(items=items, cursor=max_scanned)
         return ResourcePage(items=items, cursor=None)
 
     def _require_writable_primary(self) -> None:
@@ -137,7 +173,20 @@ class ResourceStore:
 
     async def put(self, path: ResourcePath, content: bytes, *, options: WriteOptions = WriteOptions()) -> Resource:
         self._require_writable_primary()
-        req_hash = _request_hash(path.value.encode(), content, (options.content_type or "").encode(), json.dumps(dict(options.metadata), sort_keys=True).encode())
+        # P1-2: the hash must cover every input that changes the operation's
+        # meaning, not just its payload -- otherwise two PUTs with the same
+        # path/content/metadata but DIFFERENT preconditions (if_match,
+        # if_none_match) or actor hash identically, and a replayed idempotency
+        # key would incorrectly return the first call's cached result instead
+        # of re-evaluating (or conflicting on) the differing preconditions.
+        req_hash = _request_hash(
+            b"put", path.value.encode(), content,
+            (options.content_type or "").encode(),
+            json.dumps(dict(options.metadata), sort_keys=True).encode(),
+            (options.if_match or "").encode(),
+            str(options.if_none_match).encode(),
+            (options.actor or "").encode(),
+        )
         # TOCTOU fix (spec section 16): when the primary backend implements the
         # atomic checked operation, delegate precondition + idempotency + mutate
         # to it as a single atomic call so a concurrent writer cannot interleave
@@ -161,7 +210,10 @@ class ResourceStore:
                 raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
 
         primary_state = await self._primary.raw_get(path)
-        if isinstance(primary_state, Found) and primary_state.resource.content == content and dict(primary_state.resource.info.metadata) == dict(options.metadata):
+        if (isinstance(primary_state, Found)
+                and primary_state.resource.content == content
+                and dict(primary_state.resource.info.metadata) == dict(options.metadata)
+                and primary_state.resource.info.content_type == options.content_type):
             info = primary_state.resource.info
         else:
             info = await self._primary.raw_put(path, content, content_type=options.content_type, metadata=options.metadata)
@@ -171,7 +223,14 @@ class ResourceStore:
 
     async def delete(self, path: ResourcePath, *, options: WriteOptions = WriteOptions()) -> None:
         self._require_writable_primary()
-        req_hash = _request_hash(path.value.encode())
+        # P1-2: same rationale as put() -- if_match/actor must be part of the
+        # hash so a replayed key with a different precondition/actor cannot be
+        # mistaken for the same request.
+        req_hash = _request_hash(
+            b"delete", path.value.encode(),
+            (options.if_match or "").encode(),
+            (options.actor or "").encode(),
+        )
         # TOCTOU fix: delegate to the atomic checked op when available (see put).
         if hasattr(self._primary, "raw_delete_checked"):
             await self._primary.raw_delete_checked(path, options=options, request_hash=req_hash)

@@ -46,9 +46,23 @@ class SwarmStore(Protocol):
         points at the most recent execution's child Run."""
         ...
 
-    async def complete_task(self, task_id: str, result: RunResult) -> SwarmTask: ...
+    async def complete_task(
+        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
+        """Mark the task SUCCEEDED. ``expected_version`` (when supplied) is a
+        fencing token -- the CLAIMED task's version right after set_active_run
+        -- so a worker whose lease already expired (and was reclaimed to a new
+        owner) cannot clobber the new owner's progress with its own stale
+        completion (review doc §19/P0-5). ``None`` preserves the legacy
+        unconditional-write behavior for callers with no version in hand."""
+        ...
 
-    async def fail_task(self, task_id: str, error: RunErrorInfo) -> SwarmTask: ...
+    async def fail_task(
+        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
+        """Mark the task FAILED (bumping ``attempts``). Same fencing-token
+        semantics as :meth:`complete_task`."""
+        ...
 
     async def list_tasks(
         self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None

@@ -57,7 +57,6 @@ class Runtime:
     def build(cls, *, storage: Storage,
               model_router: "ModelRouter | None" = None,
               middleware_pipeline: "MiddlewarePipeline | None" = None,
-              workspace_root: "str | Path | None" = None,
               retriever: "Retriever | None" = None,
               workdir: "Path | None" = None,
               tool_executor: "ToolExecutor | None" = None,
@@ -144,6 +143,10 @@ class Runtime:
             uow_factory=uow_factory,
             run_controller=run_controller,
             execution=execution,
+            # P0-6/G1: always wired so the pause path can persist the
+            # ApprovalRequest in File mode too (SqlAlchemy mode reaches it via
+            # tx.approvals inside the UoW instead).
+            approval_store=storage.approvals,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,

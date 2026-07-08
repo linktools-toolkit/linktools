@@ -166,6 +166,11 @@ class _StubStore:
     async def create(self, request):
         ...
 
+    async def create_or_get_pending(
+        self, *, run_id, tool_call_id, tool_name, reason, arguments, approval_id,
+    ):
+        ...
+
     async def get(self, approval_id):
         ...
 

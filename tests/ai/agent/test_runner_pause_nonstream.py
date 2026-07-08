@@ -72,12 +72,13 @@ def _seed_session(store, session_id) -> None:
     )))
 
 
-def _make_runner(tmp_path) -> AgentRunner:
+def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
     return AgentRunner(
         run_store=FileRunStore(root=tmp_path / "runs"),
         session_store=FileSessionStore(root=tmp_path / "sessions"),
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        approval_store=approval_store,
     )
 
 
@@ -99,7 +100,9 @@ def _compile(tmp_path, *, agent_id="agent-1") -> "tuple[AgentRunner, CompiledAge
     @compiled.pydantic_agent.tool
     async def risky(ctx, x: int) -> int:  # noqa: ANN001
         return x * 2
-    runner = _make_runner(tmp_path)
+    # P0-6/G1: the runner (not the executor) persists the ApprovalRequest now
+    # -- it must share the SAME approval_store instance the test asserts against.
+    runner = _make_runner(tmp_path, approval_store=approval_store)
     return runner, compiled, approval_store
 
 

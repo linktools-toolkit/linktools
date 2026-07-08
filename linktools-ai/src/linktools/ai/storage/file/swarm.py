@@ -447,11 +447,22 @@ class FileSwarmStore:
                 self._set_active_run_sync, task_id, run_id, expected_version=expected_version,
             )
 
-    def _complete_task_sync(self, task_id: str, result: RunResult) -> SwarmTask:
+    def _complete_task_sync(
+        self, task_id: str, result: RunResult, *, expected_version: "int | None",
+    ) -> SwarmTask:
         path = self._task_path(task_id)
         if not path.exists():
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
+        if expected_version is not None:
+            if current.version != expected_version:
+                raise SwarmConflictError(
+                    f"expected version {expected_version}, found {current.version}"
+                )
+            if current.status != SwarmTaskStatus.CLAIMED:
+                raise SwarmConflictError(
+                    f"task {task_id} is not claimed (status={current.status.value})"
+                )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         updated = SwarmTask(
             id=current.id,
@@ -475,15 +486,30 @@ class FileSwarmStore:
         _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
         return updated
 
-    async def complete_task(self, task_id: str, result: RunResult) -> SwarmTask:
+    async def complete_task(
+        self, task_id: str, result: RunResult, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
         async with self._lock:
-            return await asyncio.to_thread(self._complete_task_sync, task_id, result)
+            return await asyncio.to_thread(
+                self._complete_task_sync, task_id, result, expected_version=expected_version,
+            )
 
-    def _fail_task_sync(self, task_id: str, error: RunErrorInfo) -> SwarmTask:
+    def _fail_task_sync(
+        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None",
+    ) -> SwarmTask:
         path = self._task_path(task_id)
         if not path.exists():
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
+        if expected_version is not None:
+            if current.version != expected_version:
+                raise SwarmConflictError(
+                    f"expected version {expected_version}, found {current.version}"
+                )
+            if current.status != SwarmTaskStatus.CLAIMED:
+                raise SwarmConflictError(
+                    f"task {task_id} is not claimed (status={current.status.value})"
+                )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         updated = SwarmTask(
             id=current.id,
@@ -507,9 +533,13 @@ class FileSwarmStore:
         _atomic_write(path, json.dumps(_task_to_json(updated)).encode("utf-8"))
         return updated
 
-    async def fail_task(self, task_id: str, error: RunErrorInfo) -> SwarmTask:
+    async def fail_task(
+        self, task_id: str, error: RunErrorInfo, *, expected_version: "int | None" = None,
+    ) -> SwarmTask:
         async with self._lock:
-            return await asyncio.to_thread(self._fail_task_sync, task_id, error)
+            return await asyncio.to_thread(
+                self._fail_task_sync, task_id, error, expected_version=expected_version,
+            )
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
         # Single-process store: the in-process asyncio.Lock guarantees a task

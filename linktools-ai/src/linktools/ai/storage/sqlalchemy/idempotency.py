@@ -115,8 +115,8 @@ class SqlAlchemyIdempotencyStore:
         now = datetime.now(timezone.utc)
         record_id = str(uuid.uuid4())
 
-        async def _insert(session):
-            session.add(ToolIdempotencyRow(
+        def _row():
+            return ToolIdempotencyRow(
                 id=record_id,
                 scope=scope,
                 key=key,
@@ -127,17 +127,34 @@ class SqlAlchemyIdempotencyStore:
                 created_at=now,
                 completed_at=None,
                 expires_at=expires_at,
-            ))
+            )
 
         try:
-            await self._execute_in_session(_insert)
+            if self._session is not None:
+                # §7.6/P0-7: in UoW mode, isolate the INSERT in a SAVEPOINT
+                # (session.begin_nested()) so a unique-constraint collision
+                # only rolls back this savepoint -- NOT the whole shared
+                # transaction. Without this, IntegrityError on flush() marks
+                # the outer AsyncSession's transaction as needing rollback,
+                # poisoning every other write the surrounding UnitOfWork made
+                # (tool idempotency would silently break approval/run/event
+                # writes sharing the same transaction).
+                async with self._session.begin_nested():
+                    self._session.add(_row())
+                    await self._session.flush()
+            else:
+                async def _insert(session):
+                    session.add(_row())
+                await self._execute_in_session(_insert)
             return None
         except IntegrityError as exc:
             # Concurrent insert won the race (or this is a true duplicate).
-            # In UoW mode the IntegrityError has already poisoned the shared
-            # transaction; we still SELECT the existing row to surface the
-            # domain-correct answer (existing record or hash-conflict) so the
-            # caller sees the same outcome either backend would produce.
+            # The savepoint (UoW mode) or the failed transaction (normal mode)
+            # already rolled back just this insert -- the surrounding
+            # transaction (if any) is still usable. SELECT the existing row to
+            # surface the domain-correct answer (existing record or
+            # hash-conflict) so the caller sees the same outcome either
+            # backend would produce.
             existing = await self.get(scope, key)
             if existing is None:
                 # Should be impossible (the IntegrityError proves the row

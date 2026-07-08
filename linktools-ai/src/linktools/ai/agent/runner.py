@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING
 
 from ..errors import InvalidRunTransitionError, ModelPolicyExceededError, ModelRoutingError, RunConflictError, RunPaused
 from ..events.payloads import (
+    ApprovalRequested,
     RunCompleted,
     RunFailed,
     RunPaused as RunPausedEvent,
@@ -79,7 +80,7 @@ from ..run.models import (
     RunStatus,
 )
 from ..run.store import RunStore
-from ..session.models import MessageRole, SessionMessage
+from ..session.models import MessageRole, NewSessionMessage
 from ..session.store import SessionStore
 from .checkpoint_io import serialize_messages
 from .dependencies import AgentDependencies
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.toolsets import AbstractToolset
 
+    from ..agent.approval import ApprovalStore
     from ..execution.protocols import ExecutionBackend
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
@@ -122,6 +124,7 @@ class AgentRunner:
                  uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
                  run_controller: "RunController | None" = None,
                  execution: "ExecutionBackend | None" = None,
+                 approval_store: "ApprovalStore | None" = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -157,6 +160,13 @@ class AgentRunner:
         # ``workdir=None`` path. Holding the backend on the runner (not the
         # compiler) is what decouples AgentCompiler from the filesystem.
         self._execution = execution
+        # P0-6/G1 (review3 §5, Package A): File-mode approval persistence for
+        # the pause path (SqlAlchemy mode reaches the approval store via
+        # ``tx.approvals`` inside the UoW instead). None (default) means a
+        # RunPaused with a tool_call_id simply cannot persist its approval in
+        # File mode without this wired -- Runtime.build() always wires it
+        # from storage.approvals.
+        self._approval_store = approval_store
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -474,10 +484,11 @@ class AgentRunner:
                                             # tools already ran via __anext__.
                                             pass
                             except RunPaused as paused:
-                                # Pause path (canonical surface): save a real
-                                # checkpoint of the partial message history,
-                                # transition to WAITING_APPROVAL, emit a
-                                # RunPaused event -- all INSIDE the iter()
+                                # Pause path (canonical surface): persist the
+                                # ApprovalRequest, save a real checkpoint of the
+                                # partial message history, transition to
+                                # WAITING_APPROVAL, emit ApprovalRequested +
+                                # RunPaused events -- all INSIDE the iter()
                                 # context so ``run.all_messages()`` works. The
                                 # paused-event yield itself is deferred to
                                 # AFTER all context managers exit (see the
@@ -486,38 +497,77 @@ class AgentRunner:
                                 # generator without triggering a cross-task
                                 # cancel-scope exit.
                                 #
+                                # P0-6/G1 (review3 §5, Package A): ToolExecutor
+                                # no longer persists the ApprovalRequest itself
+                                # -- ``paused`` carries every field needed to
+                                # build it, and THIS handler is the one that
+                                # calls ``ApprovalStore.create_or_get_pending``
+                                # (deduping on (run_id, tool_call_id) -- G2),
+                                # so the approval write joins the same atomicity
+                                # story as checkpoint/transition/event below.
+                                #
                                 # §10.2 atomicity: when a UnitOfWork factory is
-                                # wired (SqlAlchemy), checkpoint + transition +
-                                # event share ONE transaction -- they commit
-                                # together on clean exit or rollback together
-                                # if ANY of them raises (which then propagates
-                                # to the outer generic-except -> FAILED). When
-                                # no factory is wired (File), cross-store
-                                # transactions are impossible, so the path
-                                # keeps its non-atomic best-effort shape
-                                # (§10.3): checkpoint + transition still
+                                # wired (SqlAlchemy), approval + checkpoint +
+                                # transition + events share ONE transaction --
+                                # they commit together on clean exit or rollback
+                                # together if ANY of them raises (which then
+                                # propagates to the outer generic-except ->
+                                # FAILED). When no factory is wired (File),
+                                # cross-store transactions are impossible, so
+                                # the path keeps its non-atomic best-effort
+                                # shape (§10.3): checkpoint + transition still
                                 # propagate (§3.3 forbids leaving them partial),
-                                # but the RunPaused event append is best-effort.
-                                checkpoint = RunCheckpoint(
-                                    id=str(uuid.uuid4()), run_id=context.run_id,
-                                    sequence=1, format="pydantic-ai-v1",
-                                    schema_version=1,
-                                    payload=serialize_messages(run.all_messages()),
-                                    created_at=datetime.now(timezone.utc),
-                                    metadata={"approval_id": paused.approval_id},
-                                )
-                                paused_payload = RunPausedEvent(
-                                    run_id=context.run_id,
-                                    reason=f"approval required: {paused.approval_id}",
-                                )
+                                # but the approval write and RunPaused/
+                                # ApprovalRequested event appends are
+                                # best-effort.
+                                # G2: create_or_get_pending may return an
+                                # EXISTING approval (dedup on tool_call_id)
+                                # whose id differs from the fresh
+                                # ``paused.approval_id`` ToolExecutor minted.
+                                # Resolve the id FIRST, then build the
+                                # checkpoint/event payloads from the resolved
+                                # id -- otherwise a dedup hit would leave the
+                                # checkpoint/events pointing at an id that was
+                                # never actually persisted. Mutating
+                                # ``paused.approval_id`` in place means the
+                                # final ``paused`` yield (below, after every
+                                # context manager exits) automatically reports
+                                # the resolved id too.
                                 if self._uow_factory is not None:
-                                    # Atomic (SqlAlchemy): all three writes bind
-                                    # to one AsyncSession + one transaction. Any
-                                    # failure rolls back checkpoint + transition
-                                    # AND propagates to the outer generic-except
+                                    # Atomic (SqlAlchemy): all writes bind to
+                                    # one AsyncSession + one transaction. Any
+                                    # failure rolls back everything AND
+                                    # propagates to the outer generic-except
                                     # handler so the Run ends up FAILED rather
                                     # than left in a half-paused state.
                                     async with self._uow_factory() as tx:
+                                        if paused.tool_call_id is not None:
+                                            approval = await tx.approvals.create_or_get_pending(
+                                                run_id=paused.run_id,
+                                                tool_call_id=paused.tool_call_id,
+                                                tool_name=paused.tool_name or "",
+                                                reason=paused.reason,
+                                                arguments=paused.arguments,
+                                                approval_id=paused.approval_id,
+                                            )
+                                            paused.approval_id = approval.id
+                                        checkpoint = RunCheckpoint(
+                                            id=str(uuid.uuid4()), run_id=context.run_id,
+                                            sequence=1, format="pydantic-ai-v1",
+                                            schema_version=1,
+                                            payload=serialize_messages(run.all_messages()),
+                                            created_at=datetime.now(timezone.utc),
+                                            metadata={"approval_id": paused.approval_id},
+                                        )
+                                        approval_requested_payload = ApprovalRequested(
+                                            approval_id=paused.approval_id,
+                                            tool_name=paused.tool_name or "",
+                                            reason=paused.reason or "",
+                                        )
+                                        paused_payload = RunPausedEvent(
+                                            run_id=context.run_id,
+                                            reason=f"approval required: {paused.approval_id}",
+                                        )
                                         await tx.checkpoints.save(checkpoint)
                                         # §3.3 + §6.3: WAITING_APPROVAL
                                         # transition MUST propagate. If it
@@ -538,23 +588,75 @@ class AgentRunner:
                                             parent_run_id=context.parent_run_id,
                                             session_id=context.session_id,
                                             runnable_id=context.runnable_id,
+                                            payload=approval_requested_payload,
+                                        )
+                                        await tx.events.append(
+                                            stream_id=context.run_id,
+                                            run_id=context.run_id,
+                                            root_run_id=context.root_run_id,
+                                            parent_run_id=context.parent_run_id,
+                                            session_id=context.session_id,
+                                            runnable_id=context.runnable_id,
                                             payload=paused_payload,
                                         )
                                 else:
                                     # File mode: non-atomic best-effort (§10.3).
                                     # Cross-store transactions are unavailable,
                                     # so checkpoint + transition propagate (§3.3
-                                    # forbids masking them) but the RunPaused
-                                    # event append stays best-effort -- the run
-                                    # is already WAITING_APPROVAL, so a missing
-                                    # event is an observability gap, not state
-                                    # corruption.
+                                    # forbids masking them) but the approval
+                                    # write and event appends stay best-effort
+                                    # -- the run is already WAITING_APPROVAL, so
+                                    # a missing approval/event is a recovery
+                                    # gap, not state corruption.
+                                    if (self._approval_store is not None
+                                            and paused.tool_call_id is not None):
+                                        try:
+                                            approval = await self._approval_store.create_or_get_pending(
+                                                run_id=paused.run_id,
+                                                tool_call_id=paused.tool_call_id,
+                                                tool_name=paused.tool_name or "",
+                                                reason=paused.reason,
+                                                arguments=paused.arguments,
+                                                approval_id=paused.approval_id,
+                                            )
+                                            paused.approval_id = approval.id
+                                        except Exception as exc:  # noqa: BLE001
+                                            _LOGGER.warning(
+                                                "failed to persist ApprovalRequest for run %s: %s",
+                                                context.run_id, exc,
+                                            )
+                                    checkpoint = RunCheckpoint(
+                                        id=str(uuid.uuid4()), run_id=context.run_id,
+                                        sequence=1, format="pydantic-ai-v1",
+                                        schema_version=1,
+                                        payload=serialize_messages(run.all_messages()),
+                                        created_at=datetime.now(timezone.utc),
+                                        metadata={"approval_id": paused.approval_id},
+                                    )
+                                    approval_requested_payload = ApprovalRequested(
+                                        approval_id=paused.approval_id,
+                                        tool_name=paused.tool_name or "",
+                                        reason=paused.reason or "",
+                                    )
+                                    paused_payload = RunPausedEvent(
+                                        run_id=context.run_id,
+                                        reason=f"approval required: {paused.approval_id}",
+                                    )
                                     await self._checkpoint_store.save(checkpoint)
                                     await self._run_store.transition(
                                         context.run_id, RunStatus.WAITING_APPROVAL,
                                         expected_version=running_version,
                                     )
                                     try:
+                                        await self._event_store.append(
+                                            stream_id=context.run_id,
+                                            run_id=context.run_id,
+                                            root_run_id=context.root_run_id,
+                                            parent_run_id=context.parent_run_id,
+                                            session_id=context.session_id,
+                                            runnable_id=context.runnable_id,
+                                            payload=approval_requested_payload,
+                                        )
                                         await self._event_store.append(
                                             stream_id=context.run_id,
                                             run_id=context.run_id,
@@ -650,12 +752,15 @@ class AgentRunner:
                                 kind="max_tokens",
                             )
 
+                    # G6: sequence is assigned by the SessionStore itself
+                    # (NewSessionMessage carries no id/sequence/created_at) --
+                    # the caller no longer computes `len(prior_messages) + 1`,
+                    # which could race with a concurrent Run appending to the
+                    # same session.
                     await self._session_store.append_messages(context.session_id, (
-                        SessionMessage(
-                            id=f"{context.run_id}-response", session_id=context.session_id,
-                            sequence=len(prior_messages) + 1, role=MessageRole.ASSISTANT,
+                        NewSessionMessage(
+                            role=MessageRole.ASSISTANT,
                             content=str(output), run_id=context.run_id,
-                            created_at=datetime.now(timezone.utc),
                         ),
                     ))
 

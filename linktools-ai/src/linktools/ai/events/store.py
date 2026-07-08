@@ -35,5 +35,5 @@ class EventStore(Protocol):
     ) -> EventEnvelope:
         ...
 
-    async def list(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+    async def list(self, stream_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
         ...

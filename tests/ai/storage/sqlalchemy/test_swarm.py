@@ -365,6 +365,73 @@ def test_fail_task_missing_raises_not_found(tmp_path):
     asyncio.run(_run_case())
 
 
+def test_complete_task_with_fencing_token_requires_claimed_status(tmp_path):
+    """G9: complete_task's fencing-token path (expected_version supplied) must
+    also require status='claimed' -- a task already completed/failed by a
+    racing writer must not be silently re-completed just because the version
+    it was claimed under still matches (it won't, since a real transition
+    also bumps the version, but the status check is the defense-in-depth
+    the spec calls for)."""
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
+            # First completion succeeds under the fencing token.
+            await store.complete_task(
+                "t-1", RunResult(output="first"), expected_version=claimed.version,
+            )
+            # A stale caller retrying with the SAME (now-consumed) fencing
+            # token must be rejected -- the task is no longer CLAIMED.
+            with pytest.raises(SwarmConflictError):
+                await store.complete_task(
+                    "t-1", RunResult(output="stale-retry"), expected_version=claimed.version,
+                )
+
+    asyncio.run(_run_case())
+
+
+def test_fail_task_with_fencing_token_requires_claimed_status(tmp_path):
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a")
+            await store.complete_task(
+                "t-1", RunResult(output="first"), expected_version=claimed.version,
+            )
+            with pytest.raises(SwarmConflictError):
+                await store.fail_task(
+                    "t-1", RunErrorInfo(error_type="X", message="y"),
+                    expected_version=claimed.version,
+                )
+
+    asyncio.run(_run_case())
+
+
+def test_reclaim_expired_tasks_is_atomic_under_concurrent_races(tmp_path):
+    """G9: reclaim_expired_tasks must not re-reclaim a task whose lease a
+    concurrent renew_lease just pushed into the future -- the bulk UPDATE's
+    WHERE clause re-evaluates lease_expires_at at UPDATE time, not at an
+    earlier SELECT time."""
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.create_run(_run())
+            await store.create_task(_task(task_id="t-1"))
+            claimed = await store.claim_task("swarm-1", "agent-a", lease_seconds=0)
+            # Renew the lease far into the future BEFORE reclaim runs.
+            renewed = await store.renew_lease(
+                "t-1", expected_version=claimed.version, lease_seconds=3600,
+            )
+            reclaimed = await store.reclaim_expired_tasks("swarm-1")
+            assert reclaimed == (), "a freshly-renewed lease must not be reclaimed"
+            still_claimed = await store.list_tasks("swarm-1", status=SwarmTaskStatus.CLAIMED)
+            assert len(still_claimed) == 1
+            assert still_claimed[0].version == renewed.version
+
+    asyncio.run(_run_case())
+
+
 # ---------------------------------------------------------------------------
 # 7. reclaim_expired_tasks: expired lease -> back to PENDING
 # ---------------------------------------------------------------------------
