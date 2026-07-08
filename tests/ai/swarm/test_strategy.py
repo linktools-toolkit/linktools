@@ -1438,3 +1438,85 @@ def test_run_task_set_active_run_storage_error_propagates(tmp_path):
         asyncio.run(_run_task(
             ctx, swarm_store._tasks["task-1"], max_task_retries=2,
         ))
+
+
+def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_path):
+    """Regression for the ownership hole in a retry-with-fresh-version design
+    for set_active_run: status == CLAIMED on a re-read proves only that
+    SOMEONE claimed the task, not that it is still THIS caller, because
+    claim_task never touches active_run_id.
+
+    Scenario: worker A claims the task (version=2). Before A calls
+    set_active_run, A's lease expires, reclaim_expired_tasks() resets the
+    task to PENDING, and worker B claims it fresh (version=4, CLAIMED). When
+    A's set_active_run(expected_version=2) finally runs and conflicts, it
+    must discard -- NOT retry with the fresh version=4, which would silently
+    overwrite active_run_id with A's child_run_id and steal B's claim."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    def _model_fn(messages, info):
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    ctx, swarm_store = _worker_ctx_and_task(tmp_path, _model_fn)
+
+    # Worker A claims first -- this is the stale reference _run_task will be
+    # driven with below, standing in for "A claimed this a while ago and is
+    # only now reaching set_active_run."
+    stale_claim = asyncio.run(swarm_store.claim_task("swarm-1", "worker-a"))
+    assert stale_claim is not None
+    assert stale_claim.version == 2
+
+    # Simulate the lease expiring and reclaim_expired_tasks() resetting the
+    # task to PENDING (bumping version, clearing claimed_at). Unlike the real
+    # SqlAlchemy/File implementations, _MemorySwarmStore.claim_task() (below)
+    # filters candidates by assigned_agent_id, so it is left as "worker-a"
+    # here rather than cleared -- irrelevant to the ownership race under
+    # test, which turns on status/version/active_run_id, not this field.
+    reclaimed = replace(
+        swarm_store._tasks["task-1"],
+        status=SwarmTaskStatus.PENDING,
+        claimed_at=None,
+        version=swarm_store._tasks["task-1"].version + 1,
+    )
+    swarm_store._tasks["task-1"] = reclaimed
+
+    # Worker B claims the reclaimed task for real -- the store's actual
+    # state is CLAIMED again, but now owned by B, not A.
+    b_claim = asyncio.run(swarm_store.claim_task("swarm-1", "worker-a"))
+    assert b_claim is not None
+    assert b_claim.version == 4
+
+    # Drive _run_task as worker A, still holding its STALE claim (version=2)
+    # from before the reclaim. claim_task is monkeypatched to hand back that
+    # stale record directly (bypassing the real store's claim queue, which
+    # would correctly refuse a second claim on an already-CLAIMED task).
+    async def _stale_claim_task(swarm_run_id, agent_id, **kwargs):
+        return stale_claim
+
+    swarm_store.claim_task = _stale_claim_task
+
+    set_active_run_calls = {"n": 0}
+    original_set_active_run = swarm_store.set_active_run
+
+    async def _counting_set_active_run(task_id, run_id, *, expected_version):
+        set_active_run_calls["n"] += 1
+        return await original_set_active_run(
+            task_id, run_id, expected_version=expected_version,
+        )
+
+    swarm_store.set_active_run = _counting_set_active_run
+
+    result = asyncio.run(_run_task(ctx, stale_claim, max_task_retries=2))
+
+    # Discarded, not retried: set_active_run was attempted exactly once (a
+    # wrongful retry-with-fresh-version would call it again with
+    # expected_version=4), and the worker model never ran.
+    assert result is None
+    assert set_active_run_calls["n"] == 1
+
+    # Critically: B's claim on the real store is untouched -- A's conflicting
+    # set_active_run must not have overwritten active_run_id.
+    after = swarm_store._tasks["task-1"]
+    assert after.version == 4
+    assert after.active_run_id is None
+    assert after.status is SwarmTaskStatus.CLAIMED

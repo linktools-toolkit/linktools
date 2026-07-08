@@ -181,9 +181,8 @@ async def _retry_fencing_conflict_once(
     op: "Callable[[int], Awaitable[SwarmTask]]",
 ) -> "SwarmTask | None":
     """Run a fenced SwarmTask write (``op(expected_version)`` -- a partial of
-    set_active_run/complete_task/fail_task with the version filled in) and
-    classify a ``SwarmConflictError`` instead of treating every conflict the
-    same:
+    complete_task/fail_task with the version filled in) and classify a
+    ``SwarmConflictError`` instead of treating every conflict the same:
 
     * Re-read the task. If ``still_owned(fresh)`` says this call still holds
       it, the conflict was just a stale ``expected_version`` (e.g. a lease
@@ -197,7 +196,16 @@ async def _retry_fencing_conflict_once(
 
     Any exception that is not a SwarmConflictError (e.g. SwarmTaskNotFoundError,
     a raw storage error) is not a fencing conflict this helper knows how to
-    interpret and is left to propagate to the caller."""
+    interpret and is left to propagate to the caller.
+
+    NOT used for set_active_run: ``still_owned`` needs an owner token this
+    same attempt uniquely holds (complete_task/fail_task use
+    ``active_run_id == child_run_id``, which only THIS attempt could have
+    set). set_active_run is what ASSIGNS that token in the first place, so
+    at that point there is no owner token yet to distinguish "still this
+    caller" from "a different worker also claimed it" -- both look
+    identical (status CLAIMED) on a re-read. See _run_task's set_active_run
+    call site, which discards on any conflict instead of retrying."""
     try:
         return await op(claimed.version)
     except asyncio.CancelledError:
@@ -288,22 +296,33 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # run. set_active_run records the fresh id on the task (bumping its
         # version) so SwarmRunner.cancel can locate the in-flight child Run.
         child_run_id = str(uuid.uuid4())
-        # set_active_run carries the same fencing semantics as complete_task
-        # below: a genuine conflict (ownership moved to a reclaim or cancel)
-        # means this attempt hasn't even started the worker yet, so there is
-        # no result to discard -- just stop. A conflict where this call still
-        # holds the task (status still CLAIMED -- e.g. a stale version from a
-        # lease renewal) is retried once with the fresh version instead.
-        claimed_after = await _retry_fencing_conflict_once(
-            ctx, claimed,
-            still_owned=lambda t: t.status is SwarmTaskStatus.CLAIMED,
-            op=lambda v: ctx.swarm_store.set_active_run(
-                claimed.id, child_run_id, expected_version=v,
-            ),
-        )
-        if claimed_after is None:
+        # Unlike complete_task/fail_task below, a set_active_run conflict is
+        # NOT retried with the fresh version -- it is discarded outright.
+        # complete_task/fail_task can safely retry-once because
+        # active_run_id == child_run_id is an owner token only THIS attempt
+        # could have set; set_active_run is what ASSIGNS that token in the
+        # first place, so at this point there is no owner token to check yet.
+        # status == CLAIMED on a re-read proves only that *someone* claimed
+        # the task, not that it is still this caller: claim_task never
+        # touches active_run_id, so after this task's lease expired,
+        # reclaim_expired_tasks() reset it PENDING, and a DIFFERENT worker
+        # re-claimed it, a re-read still shows CLAIMED -- retrying with that
+        # fresh version would silently steal the new owner's claim. No
+        # worker has run yet for this attempt either, so there is no result
+        # to lose by simply giving up.
+        try:
+            claimed = await ctx.swarm_store.set_active_run(
+                claimed.id, child_run_id, expected_version=claimed.version,
+            )
+        except asyncio.CancelledError:
+            raise
+        except SwarmConflictError as exc:
+            _LOGGER.warning(
+                "swarm task %s lost set_active_run's fencing race before "
+                "attempt %d started -- discarding: %s",
+                claimed.id, base_attempt + _attempt, exc,
+            )
             return None
-        claimed = claimed_after
 
         scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
         now = _now()
