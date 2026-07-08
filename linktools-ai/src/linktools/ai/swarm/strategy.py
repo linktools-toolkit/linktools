@@ -29,9 +29,19 @@ In the serial coordinator path the claimed task is the one just created; in the
 parallel fan-out path several coroutines may compete for tasks of the same agent,
 so ``_run_task`` processes the CLAIMED task (not the passed-in ``task``) and uses
 its id for the scratch session, complete/fail calls, and the active-run lookup.
-This keeps every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED)."""
+This keeps every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED).
+
+Retry vs fencing conflict: only an exception from the worker call itself
+(``ctx.agent_runner.run``) counts as an attempt failure that can trigger a
+retry / eventual ``fail_task()``. ``set_active_run``/``complete_task``/
+``record_attempt`` can also raise, but those are persistence fencing
+conflicts -- another caller already reclaimed (lease expiry) or cancelled
+this task -- not evidence the worker failed. ``_run_task`` logs those and
+returns ``None`` without retrying or re-failing a task whose real outcome
+belongs to someone else."""
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -49,6 +59,9 @@ from .limits import SwarmLimits
 from .models import AttemptStatus, SwarmRun, SwarmTask, SwarmTaskAttempt, SwarmTaskStatus, TaskInput
 from .spec import SwarmSpec, SwarmStrategySpec
 from .store import SwarmStore
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # --- coordinator_fn signature ------------------------------------------------
@@ -227,9 +240,25 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # run. set_active_run records the fresh id on the task (bumping its
         # version) so SwarmRunner.cancel can locate the in-flight child Run.
         child_run_id = str(uuid.uuid4())
-        claimed = await ctx.swarm_store.set_active_run(
-            claimed.id, child_run_id, expected_version=claimed.version
-        )
+        # set_active_run carries the same fencing semantics as complete_task
+        # below (see that comment): a conflict here means another caller
+        # already reclaimed or cancelled this task BEFORE this attempt even
+        # started the worker -- not a worker failure, so it must not retry
+        # the worker or call fail_task() either. Nothing has run yet, so
+        # there is no result to discard -- just stop.
+        try:
+            claimed = await ctx.swarm_store.set_active_run(
+                claimed.id, child_run_id, expected_version=claimed.version
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "swarm task %s lost a fencing race in set_active_run "
+                "(reclaimed or cancelled) before attempt %d started: %s",
+                claimed.id, base_attempt + _attempt, exc,
+            )
+            return None
 
         scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
         now = _now()
@@ -266,20 +295,20 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             error=None,
         )
         await ctx.swarm_store.record_attempt(current_attempt)
+
+        # Only a failure of the worker itself is a retry-worthy attempt
+        # failure. complete_task()/record_attempt() below can also raise --
+        # but those are persistence/fencing conflicts (the task was already
+        # reclaimed after its lease expired, or cancelled, by a different
+        # caller), not evidence the worker failed, so they must not be
+        # caught here and mistaken for a worker failure that warrants a
+        # retry or an eventual fail_task() call.
         try:
             result = await ctx.agent_runner.run(
                 compiled, RunInput(prompt=claimed.input.prompt), child_context,
             )
-            await ctx.swarm_store.complete_task(
-                claimed.id, result, expected_version=claimed.version,
-                active_run_id=child_run_id,
-            )
-            await ctx.swarm_store.record_attempt(replace(
-                current_attempt,
-                status=AttemptStatus.SUCCEEDED,
-                finished_at=_now(),
-            ))
-            return result
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             last_exc = exc
             await ctx.swarm_store.record_attempt(replace(
@@ -291,6 +320,47 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
                     message=str(exc),
                 ),
             ))
+            continue
+
+        # The worker succeeded. A fencing conflict here means someone else
+        # already superseded this task (reclaim after lease expiry, or
+        # cancel) -- this attempt's result is moot, not failed, so it must
+        # not trigger a retry or fail_task(). log-and-continue matches the
+        # best-effort conflict handling SwarmRunner already uses elsewhere
+        # for the same class of race.
+        try:
+            await ctx.swarm_store.complete_task(
+                claimed.id, result, expected_version=claimed.version,
+                active_run_id=child_run_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "worker for swarm task %s succeeded but complete_task lost "
+                "a fencing race (reclaimed or cancelled) -- discarding this "
+                "attempt's result: %s", claimed.id, exc,
+            )
+            return None
+
+        try:
+            await ctx.swarm_store.record_attempt(replace(
+                current_attempt,
+                status=AttemptStatus.SUCCEEDED,
+                finished_at=_now(),
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # The task itself is correctly SUCCEEDED at this point (the
+            # complete_task() call above did not raise) -- only the
+            # best-effort audit-trail write failed, so still return the
+            # real result rather than treating this as a failed attempt.
+            _LOGGER.warning(
+                "swarm task %s completed but recording its SUCCEEDED "
+                "attempt audit row failed: %s", claimed.id, exc,
+            )
+        return result
 
     await ctx.swarm_store.fail_task(claimed.id, RunErrorInfo(
         error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",

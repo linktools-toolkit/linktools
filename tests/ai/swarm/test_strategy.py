@@ -1077,3 +1077,160 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
     result = asyncio.run(_scenario())
     assert result is not None
     assert result.output == "recovered"
+
+
+def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp_path):
+    """A worker that ACTUALLY succeeds can still lose complete_task()'s
+    fencing check (version/status/active_run_id CAS) if another caller
+    reclaimed or cancelled the task while the worker was running. That is a
+    persistence conflict, not a worker failure: _run_task must not record a
+    FAILED attempt, must not retry the worker, and must not call fail_task()
+    on a task whose work actually succeeded -- it just discards this
+    attempt's (superseded) result and returns None."""
+    from linktools.ai.swarm.models import AttemptStatus
+    from linktools.ai.swarm.strategy import _run_task
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.models import AgentSpec
+    from linktools.ai.agent.spec import PromptSpec
+
+    call_count = {"n": 0}
+    swarm_store = _MemorySwarmStore()
+
+    def _model_fn(messages, info):
+        call_count["n"] += 1
+        # Simulate a concurrent reclaim landing WHILE this worker is
+        # in-flight: something else bumps the task's version behind
+        # _run_task's back, so its complete_task() CAS check (pinned to the
+        # version captured right after set_active_run) will lose the race.
+        current = swarm_store._tasks["task-1"]
+        swarm_store._tasks["task-1"] = replace(
+            current, version=current.version + 1,
+        )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    registry = ModelRegistry()
+    registry.register("worker-model", model=FunctionModel(_model_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    worker_spec = AgentSpec(
+        id="worker-a", name="worker-a",
+        model=ModelPolicy(primary="worker-model"),
+        instructions=PromptSpec(instructions="you work"),
+        output_schema=str,
+    )
+    compiled = asyncio.run(compiler.compile(worker_spec))
+
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled, "worker-a": compiled},
+        spec=spec, swarm_store=swarm_store,
+    )
+    _seed_worker_task(swarm_store)
+
+    result = asyncio.run(_run_task(
+        ctx, swarm_store._tasks["task-1"], max_task_retries=2,
+    ))
+
+    # The conflict is discarded, not retried: the worker model ran exactly
+    # once (a wrongful retry would call it again), and _run_task reports
+    # None rather than fabricating a result for a task it no longer owns.
+    assert call_count["n"] == 1
+    assert result is None
+
+    # No FAILED attempt was recorded (the worker did not fail) and fail_task
+    # was never called (the task's real status -- whatever the reclaiming
+    # caller set it to -- must be left alone).
+    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert all(a.status is not AttemptStatus.FAILED for a in attempts)
+    after = swarm_store._tasks["task-1"]
+    assert after.status is not SwarmTaskStatus.FAILED
+
+
+def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_path):
+    """A legitimate worker failure on attempt #1 schedules a retry. If, before
+    attempt #2 can even start, another caller reclaims or cancels the task
+    (bumping its version), attempt #2's set_active_run() loses that fencing
+    race. That is a persistence conflict discovered BEFORE the worker ever
+    ran again -- it must not be mistaken for a second worker failure (no
+    second model call), must not crash _run_task by propagating the raw
+    SwarmConflictError, and must not call fail_task() and overwrite whatever
+    terminal status the reclaiming caller already set."""
+    from linktools.ai.swarm.models import AttemptStatus
+    from linktools.ai.swarm.strategy import _run_task
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.models import AgentSpec
+    from linktools.ai.agent.spec import PromptSpec
+
+    call_count = {"n": 0}
+    swarm_store = _MemorySwarmStore()
+
+    def _model_fn(messages, info):
+        call_count["n"] += 1
+        # Attempt #1 fails for real (a genuine worker error). Simulate a
+        # concurrent reclaim/cancel landing in the gap between attempt #1's
+        # failure and attempt #2's set_active_run by bumping the task's
+        # version out from under _run_task's local `claimed`.
+        current = swarm_store._tasks["task-1"]
+        swarm_store._tasks["task-1"] = replace(
+            current, version=current.version + 1,
+        )
+        raise RuntimeError("transient boom")
+
+    registry = ModelRegistry()
+    registry.register("worker-model", model=FunctionModel(_model_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    worker_spec = AgentSpec(
+        id="worker-a", name="worker-a",
+        model=ModelPolicy(primary="worker-model"),
+        instructions=PromptSpec(instructions="you work"),
+        output_schema=str,
+    )
+    compiled = asyncio.run(compiler.compile(worker_spec))
+
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled, "worker-a": compiled},
+        spec=spec, swarm_store=swarm_store,
+    )
+    _seed_worker_task(swarm_store)
+
+    # max_task_retries=2 -> would be up to 3 iterations, but attempt #2's
+    # set_active_run should short-circuit after the FIRST failure.
+    result = asyncio.run(_run_task(
+        ctx, swarm_store._tasks["task-1"], max_task_retries=2,
+    ))
+
+    # No crash (SwarmConflictError did not propagate out of _run_task), and
+    # the worker model ran exactly once -- attempt #2 never started it.
+    assert result is None
+    assert call_count["n"] == 1
+
+    # Exactly one FAILED attempt (the real worker failure) -- no second one
+    # was fabricated for the set_active_run conflict, and fail_task() was
+    # never called to overwrite the task's status a second time.
+    attempts = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts) == 1
+    assert attempts[0].status is AttemptStatus.FAILED
