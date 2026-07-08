@@ -318,7 +318,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         if not isinstance(service, dict):
                             continue
                         service.setdefault("container_name", f"{self.manager.project_name}-{name}")
-                        service.setdefault("hostname", name)
                         service.setdefault("restart", self.get_config("SERVICE_RESTART_POLICY"))
                         service.setdefault("logging", {
                             "driver": self.get_config("SERVICE_LOG_DRIVER"),
@@ -326,6 +325,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                                 "max-size": self.get_config("SERVICE_LOG_MAX_SIZE"),
                             }
                         })
+                        network_mode = service.get("network_mode")
+                        if not (isinstance(network_mode, str) and (
+                            network_mode.startswith("container:")
+                            or network_mode.startswith("service:")
+                        )):
+                            service.setdefault("hostname", name)
                         if "image" not in service:
                             path = self.get_docker_file_path()
                             if path and os.path.exists(path):

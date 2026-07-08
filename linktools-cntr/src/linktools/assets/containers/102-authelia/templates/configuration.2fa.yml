@@ -12,7 +12,7 @@ webauthn:
   filtering:
     prohibit_backup_eligibility: false
   metadata:
-    enabled: true
+    enabled: false
     validate_trust_anchor: true
     validate_entry: true
     validate_status: true

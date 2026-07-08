@@ -174,6 +174,10 @@ class Container(BaseContainer):
             X_HEADER_ENABLE=not waf_enable
         )
         self.render_template(
+            self.get_source_path("templates", "header_all.conf"),
+            self.get_app_path("conf.d", "snippets", "header_all.conf"),
+        )
+        self.render_template(
             self.get_source_path("templates", "params.conf"),
             self.get_app_path("conf.d", "snippets", "params.conf")
         )
@@ -313,6 +317,7 @@ class Container(BaseContainer):
                     proxy_name="auth_location",
                     proxy_domain_name=proxy_domain_name,
                     proxy_conf=self.get_source_path("templates", "auth_location.conf"),
+                    waf_enable=waf_enable,
                 )
                 if auth_extra:
                     uris = auth_extra.get("oidc_redirect_uris", None)
