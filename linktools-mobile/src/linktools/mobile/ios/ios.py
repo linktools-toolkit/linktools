@@ -37,7 +37,6 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
 from linktools.system import get_free_port, is_port_free, wait_process
-from linktools.runtime import Process
 from linktools.types import Stoppable, Timeout
 
 if TYPE_CHECKING:
@@ -45,6 +44,7 @@ if TYPE_CHECKING:
     from typing import Any, TypeVar
     from linktools.ssh import SSHClient
     from linktools.types import TimeoutType
+    from linktools.runtime import Process
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="GoIOSDevice")
 

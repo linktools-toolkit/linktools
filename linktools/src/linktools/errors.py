@@ -47,21 +47,21 @@ __all__ = [
     "ModuleError", "DownloadHttpError", "ExecError",
     "ToolNotFound", "ToolNotSupport", "ToolExecError",
     "NoFreePortFoundError", "GitDivergedError",
-    # Cache subtree (§7.12).
+    # Cache subtree (
     "CacheValueError", "CacheCodecError", "CacheTransactionError",
     "CacheBackendError", "CacheBusyError", "CacheCorruptedError",
     "CacheBackupError", "CacheRestoreError",
-    # SSH subtree (§13.12).
+    # SSH subtree (
     "SSHConnectionError", "SSHAuthenticationError", "SSHHostKeyError",
     "SSHCommandError", "SSHChannelError", "SSHTransferError",
     "SSHForwardError", "SSHTimeoutError",
-    # Runtime subtrees (§15.1.5).
+    # Runtime subtrees (
     "ProcessStartError", "ProcessTimeoutError", "ProcessCleanupError",
-    # Config subtree (§8.12).
+    # Config subtree (
     "ConfigFieldError", "ConfigNotFoundError", "ConfigCastError",
     "ConfigValidationError", "ConfigLoadError", "ConfigPersistenceError",
     "ConfigCycleError", "ConfigPromptError",
-    # Tool subtree (§10.13).
+    # Tool subtree (
     "ToolDefinitionError", "ToolDependencyError", "ToolPlatformError",
     "ToolIntegrityError", "ToolArchiveError", "ToolInstallError",
     "ToolHealthcheckError",
@@ -77,15 +77,15 @@ class LinktoolsError(Exception):
     """
 
 
-# Retained alias for the migration cycle (spec §3.3). Same class object, two
+# Retained alias for the migration cycle (spec  Same class object, two
 # names, so ``isinstance(x, Error)`` and ``isinstance(x, LinktoolsError)``
 # agree and ``class X(Error)`` continues to work.
 Error = LinktoolsError
 
 
-# --------------------------------------------------------------------------- #
-# Domain roots (spec §18.1).
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Domain roots (spec 
+# ---------------------------------------------------------------------------
 
 class EnvironmentError(LinktoolsError):
     """Environment, path resolution or composition-root failures."""
@@ -239,9 +239,9 @@ class CliError(LinktoolsError):
     """A CLI-framework operation failed."""
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Specific exceptions, grouped under their domain root.
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 class ModuleError(CapabilityError):
     """A linktools module/capability cannot be loaded or used."""
@@ -254,8 +254,7 @@ class DownloadHttpError(DownloadError):
     secret-safe (URL redaction is applied by the download layer).
     """
 
-    def __init__(self, code, e):
-        # type: (int, object) -> None
+    def __init__(self, code: int, e: object) -> None:
         super().__init__(e)
         self.code = code
 

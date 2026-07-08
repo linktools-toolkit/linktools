@@ -34,9 +34,8 @@ __all__ = [
 ]
 
 
-def exit_code_for(error):
-    # type: (BaseException) -> int
-    """Return the §16.4 exit code for ``error`` by its domain."""
+def exit_code_for(error: BaseException) -> int:
+    """Return the exit code for error by its domain."""
     if isinstance(error, KeyboardInterrupt):
         return EXIT_INTERRUPT
     if isinstance(error, CliError):

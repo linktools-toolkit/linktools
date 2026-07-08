@@ -199,8 +199,9 @@ else:
 class ProcessResult(object):
     """Result of a completed process (v2 §12.1 RUN-PROC-002)."""
 
-    def __init__(self, args, returncode, stdout=None, stderr=None, duration=None, timed_out=False):
-        # type: (Any, int, Any, Any, float, bool) -> None
+    def __init__(self, args: "Any", returncode: int, stdout: "Any" = None,
+                 stderr: "Any" = None, duration: float = None,
+                 timed_out: bool = False) -> None:
         self.args = args
         self.returncode = returncode
         self.stdout = stdout
@@ -244,13 +245,11 @@ class Process(object):
         self._popen.wait()
 
     @classmethod
-    def start(cls, *args, **kwargs):
-        # type: (**Any) -> Process
+    def start(cls, *args: "Any", **kwargs: "Any") -> "Process":
         """Create and start a Process (v2 §12.1)."""
         return cls(*args, **kwargs)
 
-    def wait_for_result(self, timeout=None):
-        # type: (TimeoutType) -> ProcessResult
+    def wait_for_result(self, timeout: "TimeoutType" = None) -> "ProcessResult":
         """Wait for the process and return a ProcessResult (v2 §12.1)."""
         from ..types import Timeout
         timed_out = False
@@ -383,7 +382,7 @@ def popen(
         shell: bool = False, cwd: "PathType" = None,
         env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
         **kwargs
-) -> Process:
+) -> "Process":
     args = [str(arg) for arg in args]
 
     if capture_output is True:

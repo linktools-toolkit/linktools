@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ssh")
 
 _channel_logger = environ.get_logger("ssh.channel")
-# v2 §4.5: route level through LoggingManager, not direct setLevel.
+# route level through LoggingManager, not direct setLevel.
 environ.logging.set_level("ssh.channel", logging.CRITICAL)
 
 
@@ -50,7 +50,7 @@ class SSHClient(paramiko.SSHClient):
     def __init__(self):
         super().__init__()
         self.set_log_channel(_channel_logger.name)
-        # v2 §11.3: STRICT default; overrides paramiko's AutoAddPolicy.
+        # STRICT default; overrides paramiko's AutoAddPolicy.
         self.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def connect_with_pwd(self, hostname, port=22, username=None, password=None, **kwargs):
@@ -99,8 +99,7 @@ class SSHClient(paramiko.SSHClient):
                 if auth_exception is not None:
                     raise auth_exception from None
 
-    def open_shell(self, *args):
-        # type: (*Any) -> None
+    def open_shell(self, *args: "Any") -> None:
         """Open an interactive or command-backed SSH shell."""
         if len(args) > 0:
             stdin, stdout, stderr = self.exec_command(

@@ -27,7 +27,7 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 import functools
-from typing import Any
+from typing import TYPE_CHECKING
 
 import click
 from objection.state.app import app_state
@@ -36,6 +36,9 @@ from objection.utils.plugin import Plugin
 from linktools.capabilities.mobile import __cap_mobile__
 from linktools.core import environ
 from linktools.mobile.frida import FridaEvalCode, FridaScript, FridaScriptHandler, FridaSession
+
+if TYPE_CHECKING:
+    from typing import Any
 
 __description__ = f"{environ.name} plugin"
 

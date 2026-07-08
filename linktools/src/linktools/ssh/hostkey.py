@@ -17,8 +17,6 @@ Security posture (spec §13.4):
   ephemeral/loopback connections (e.g. a USB-forwarded iOS device).
 """
 
-import logging
-
 from linktools.core import environ
 
 __all__ = ["SSHHostKeyPolicy", "host_key_policy_class"]
@@ -36,8 +34,7 @@ class SSHHostKeyPolicy(object):
     ALL = (STRICT, ACCEPT_NEW, INSECURE)
 
 
-def host_key_policy_class(policy):
-    # type: (str) -> type
+def host_key_policy_class(policy: str) -> type:
     """Return the paramiko MissingHostKeyPolicy class for ``policy``.
 
     Lazily imports paramiko. ``STRICT`` returns paramiko's RejectPolicy; the
@@ -46,7 +43,7 @@ def host_key_policy_class(policy):
     import paramiko
 
     if policy == ACCEPT_NEW:
-        return paramiko.AutoAddPolicy  # TODO §13.4: atomic known_hosts write
+        return paramiko.AutoAddPolicy  # TODO  atomic known_hosts write
     if policy == INSECURE:
         environ.logger.warning(
             "Using insecure SSH host-key policy; host identity is NOT verified."

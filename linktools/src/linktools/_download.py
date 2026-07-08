@@ -20,15 +20,17 @@ file is detected (server returns 200 -> restart, never append a full response).
 """
 
 import os
-import shutil
 import time
 import urllib.error as _urlerror
 import urllib.request as _urlrequest
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from .errors import DownloadError, DownloadHttpError
 from . import utils
+
+if TYPE_CHECKING:
+    from typing import Callable
 
 __all__ = [
     "DownloadRequest", "DownloadResult", "DownloadProgress",
@@ -40,16 +42,15 @@ PathLike = Any  # str | os.PathLike
 _CHUNK = 1 << 16  # 64 KiB
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Request / result / progress
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 class DownloadRequest(object):
     """A download target (spec §9.2)."""
 
-    def __init__(self, url, destination, sha256=None, size=None,
-                 timeout=None, resume=True, headers=None, max_retries=3):
-        # type: (str, PathLike, Optional[str], Optional[int], Optional[float], bool, Optional[Dict[str, str]], int) -> None
+    def __init__(self, url: str, destination: "PathLike", sha256: "str | None" = None, size: "int | None" = None,
+                 timeout: "float | None" = None, resume: bool = True, headers: "dict[str, str] | None" = None, max_retries: int = 3) -> None:
         self.url = url
         self.destination = Path(destination)
         self.sha256 = sha256
@@ -60,41 +61,36 @@ class DownloadRequest(object):
         self.max_retries = max_retries
 
     @property
-    def lock_key(self):
-        # type: () -> str
+    def lock_key(self) -> str:
         # Prefer a content hash (stable across URL redirects/mirrors); fall back
         # to a hash of the URL.
         return (self.sha256 or utils.get_hash(self.url, "sha256"))[:64]
 
 
 class DownloadResult(object):
-    def __init__(self, path, size, from_cache):
-        # type: (Path, int, bool) -> None
+    def __init__(self, path: "Path", size: int, from_cache: bool) -> None:
         self.path = path
         self.size = size
         self.from_cache = from_cache
 
 
 class DownloadProgress(object):
-    def __init__(self, downloaded, total):
-        # type: (int, Optional[int]) -> None
+    def __init__(self, downloaded: int, total: "int | None") -> None:
         self.downloaded = downloaded
         self.total = total
 
 
-# --------------------------------------------------------------------------- #
-# Validators (§9.7)
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Validators (
+# ---------------------------------------------------------------------------
 
 class DownloadValidator(object):
-    def validate(self, path):
-        # type: (PathLike) -> None
+    def validate(self, path: "PathLike") -> None:
         raise NotImplementedError
 
 
 class SizeValidator(DownloadValidator):
-    def __init__(self, size):
-        # type: (int) -> None
+    def __init__(self, size: int) -> None:
         self.size = int(size)
 
     def validate(self, path):
@@ -104,8 +100,7 @@ class SizeValidator(DownloadValidator):
 
 
 class HashValidator(DownloadValidator):
-    def __init__(self, digest, algorithm="sha256"):
-        # type: (str, str) -> None
+    def __init__(self, digest: str, algorithm: str = "sha256") -> None:
         self.digest = digest.lower()
         self.algorithm = algorithm
 
@@ -115,8 +110,7 @@ class HashValidator(DownloadValidator):
 
 
 class CompositeValidator(DownloadValidator):
-    def __init__(self, validators):
-        # type: (List[DownloadValidator]) -> None
+    def __init__(self, validators: "list[DownloadValidator]") -> None:
         self._validators = list(validators)
 
     def validate(self, path):
@@ -124,13 +118,12 @@ class CompositeValidator(DownloadValidator):
             v.validate(path)
 
 
-# --------------------------------------------------------------------------- #
-# Transports (§9.3)
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Transports (
+# ---------------------------------------------------------------------------
 
 class DownloadTransport(object):
-    def fetch(self, request, part, on_progress=None, meta=None):
-        # type: (DownloadRequest, PathLike, Optional[Callable[[DownloadProgress], None]], Optional[Dict[str, Any]]) -> None
+    def fetch(self, request: "DownloadRequest", part: "PathLike", on_progress: "Callable[[DownloadProgress], None] | None" = None, meta: "dict[str, Any] | None" = None) -> None:
         raise NotImplementedError
 
 
@@ -160,15 +153,14 @@ class FileTransport(DownloadTransport):
 class HttpTransport(DownloadTransport):
     """HTTP fetch with optional resume (Range + If-Range, spec §9.5)."""
 
-    def __init__(self, headers=None):
-        # type: (Optional[Dict[str, str]]) -> None
+    def __init__(self, headers: "dict[str, str] | None" = None) -> None:
         self._base_headers = dict(headers or {})
 
     def fetch(self, request, part, on_progress=None, meta=None):
         part = Path(part)
         part.parent.mkdir(parents=True, exist_ok=True)
 
-        # v4 §8.3: retry loop. If Content-Range validation fails (missing,
+        # Retry loop. If Content-Range validation fails (missing,
         # parse-failed, or start != have), close the response, delete .part,
         # and re-request without Range. At most 2 attempts (resume + 1 restart).
         for _attempt in range(2):
@@ -190,14 +182,15 @@ class HttpTransport(DownloadTransport):
             try:
                 response = _urlrequest.urlopen(req, timeout=request.timeout)
             except _urlerror.HTTPError as exc:
-                # §7.3: 416 Range Not Satisfiable -- the .part may already be complete.
+                # 416 Range Not Satisfiable: check if .part is already complete.
                 if exc.code == 416 and have > 0 and part.exists():
                     part_size = part.stat().st_size
                     expected = (meta or {}).get("size")
                     if expected is not None and part_size >= expected:
                         return  # Part is complete; nothing more to download.
+                    # incomplete + 416 → restart without Range (not throw).
                     _discard(part)
-                    raise DownloadError("server returned 416 and part is incomplete; will restart")
+                    continue  # restart loop; have will be 0 next iteration
                 raise DownloadHttpError(exc.code, str(exc))
             except _urlerror.URLError as exc:
                 raise DownloadError("transport error for %s: %s" % (request.url, exc))
@@ -205,7 +198,7 @@ class HttpTransport(DownloadTransport):
             try:
                 code = response.getcode()
                 appending = have > 0 and code == 206
-                # v4 §8.2: STRICT Content-Range validation on 206.
+                # STRICT Content-Range validation on 206.
                 if appending:
                     cr = response.headers.get("Content-Range", "")
                     restart_needed = False
@@ -265,20 +258,18 @@ class HttpTransport(DownloadTransport):
         raise DownloadError("download failed after Content-Range restart")
 
 
-# --------------------------------------------------------------------------- #
-# Manager (§9.2, §9.4)
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Manager (
+# ---------------------------------------------------------------------------
 
 class DownloadManager(object):
-    def __init__(self, environ):
-        # type: (Any) -> None
+    def __init__(self, environ: "Any") -> None:
         self._environ = environ
 
     # -- internals ---------------------------------------------------------
 
-    def _build_validator(self, request):
-        # type: (DownloadRequest) -> Optional[DownloadValidator]
-        validators = []  # type: List[DownloadValidator]
+    def _build_validator(self, request: "DownloadRequest") -> "DownloadValidator | None":
+        validators: "list[DownloadValidator]" = []
         if request.size is not None:
             validators.append(SizeValidator(request.size))
         if request.sha256:
@@ -298,15 +289,14 @@ class DownloadManager(object):
 
     # -- public ------------------------------------------------------------
 
-    def download(self, request, transport=None, on_progress=None):
-        # type: (DownloadRequest, Optional[DownloadTransport], Optional[Callable[[DownloadProgress], None]]) -> DownloadResult
+    def download(self, request: "DownloadRequest", transport: "DownloadTransport | None" = None, on_progress: "Callable[[DownloadProgress], None] | None" = None) -> "DownloadResult":
         transport = transport or self._default_transport(request)
         destination = request.destination
         validator = self._build_validator(request)
         resume_ns = self._resume_namespace()
 
         with self._environ.locks.process_lock("download:" + request.lock_key):
-            # §9.4: an existing file that validates is reused as-is.
+            #  an existing file that validates is reused as-is.
             if destination.exists() and validator is not None:
                 try:
                     validator.validate(destination)
@@ -316,13 +306,13 @@ class DownloadManager(object):
 
             destination.parent.mkdir(parents=True, exist_ok=True)
             part = destination.parent / (destination.name + ".part")
-            meta = dict(resume_ns.get(request.lock_key, {}) or {})  # type: Dict[str, Any]
+            meta: "dict[str, Any]" = dict(resume_ns.get(request.lock_key, {}) or {})
 
-            # §9.6 retry: transport/network errors are retried with exponential
+            #  retry: transport/network errors are retried with exponential
             # backoff (cap 8s); validation failures are not retried here (a
             # hash-mismatch retry-once refinement is a follow-up).
             attempts = max(1, int(request.max_retries or 1))
-            last_error = None  # type: Optional[DownloadError]
+            last_error: "DownloadError | None" = None
             for attempt in range(attempts):
                 try:
                     transport.fetch(request, part, on_progress=on_progress, meta=meta)
@@ -337,7 +327,7 @@ class DownloadManager(object):
                 # Network failure: keep .part for a future resume.
                 raise last_error
 
-            # §7.4: hash-mismatch retry-once. If validation fails, discard the
+            #  hash-mismatch retry-once. If validation fails, discard the
             # .part and re-download from scratch exactly once; a second failure
             # raises DownloadError (not retried indefinitely).
             if validator is not None:
@@ -361,16 +351,14 @@ class DownloadManager(object):
             return DownloadResult(destination, final_size, from_cache=False)
 
 
-def _discard(path):
-    # type: (PathLike) -> None
+def _discard(path: "PathLike") -> None:
     try:
         os.remove(str(path))
     except FileNotFoundError:
         pass
 
 
-def _gunzip_inplace(path):
-    # type: (PathLike) -> None
+def _gunzip_inplace(path: "PathLike") -> None:
     """Decompress a gzip file in place (temp -> os.replace)."""
     import gzip
     import shutil as _shutil

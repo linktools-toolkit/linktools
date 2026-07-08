@@ -3,12 +3,18 @@
 
 """Wait helpers built on monotonic Timeout (spec §14.5 SYS-004)."""
 
+import subprocess
+import threading
+from typing import TYPE_CHECKING
+
 from ..decorator import timeoutable
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @timeoutable
-def wait_event(event, timeout):
-    # type: (threading.Event, Any) -> bool
+def wait_event(event: "threading.Event", timeout: "Any") -> bool:
     """Wait for ``event`` to be set, polling with the remaining timeout budget."""
     interval = 1
     while True:
@@ -22,8 +28,7 @@ def wait_event(event, timeout):
 
 
 @timeoutable
-def wait_thread(thread, timeout):
-    # type: (threading.Thread, Any) -> bool
+def wait_thread(thread: "threading.Thread", timeout: "Any") -> bool:
     """Wait for ``thread`` to terminate; return True if it did, False on timeout."""
     interval = 1
     while True:
@@ -41,11 +46,8 @@ def wait_thread(thread, timeout):
 
 
 @timeoutable
-def wait_process(process, timeout):
-    # type: (subprocess.Popen, Any) -> "int | None"
+def wait_process(process: "subprocess.Popen", timeout: "Any") -> "int | None":
     """Wait for ``process`` to exit; return its exit code or None on timeout."""
-    import subprocess
-
     interval = 1
     while True:
         t = timeout.remaining

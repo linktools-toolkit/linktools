@@ -25,7 +25,7 @@ import json
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from .errors import (
     CacheBackendError,
@@ -34,7 +34,9 @@ from .errors import (
     CacheTransactionError,
     CacheValueError,
 )
-from .types import MISSING, MissingType
+
+if TYPE_CHECKING:
+    from typing import Any, Iterator
 
 __all__ = ["CacheStore", "CacheNamespace", "CacheCodec", "JsonCodec", "BytesCodec"]
 
@@ -54,36 +56,32 @@ CREATE INDEX IF NOT EXISTS idx_cache_expiry ON cache_entries(expires_at);
 """
 
 
-# --------------------------------------------------------------------------- #
-# Codecs (§7.4)
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Codecs (
+# ---------------------------------------------------------------------------
 
 class CacheCodec(object):
     """(en|de)code cache values to/from bytes."""
 
     mime = "opaque"
 
-    def encode(self, value):
-        # type: (Any) -> bytes
+    def encode(self, value: "Any") -> bytes:
         raise NotImplementedError
 
-    def decode(self, blob):
-        # type: (bytes) -> Any
+    def decode(self, blob: bytes) -> "Any":
         raise NotImplementedError
 
 
 class JsonCodec(CacheCodec):
     mime = "json"
 
-    def encode(self, value):
-        # type: (Any) -> bytes
+    def encode(self, value: "Any") -> bytes:
         try:
             return json.dumps(value, ensure_ascii=False).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise CacheCodecError("value is not JSON-serialisable: %s" % exc)
 
-    def decode(self, blob):
-        # type: (bytes) -> Any
+    def decode(self, blob: bytes) -> "Any":
         try:
             return json.loads(blob.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
@@ -95,33 +93,29 @@ class BytesCodec(CacheCodec):
 
     mime = "bytes"
 
-    def encode(self, value):
-        # type: (Any) -> bytes
+    def encode(self, value: "Any") -> bytes:
         if not isinstance(value, (bytes, bytearray)):
             raise CacheCodecError("BytesCodec only accepts bytes, got %s" % type(value).__name__)
         return bytes(value)
 
-    def decode(self, blob):
-        # type: (bytes) -> Any
+    def decode(self, blob: bytes) -> "Any":
         return bytes(blob)
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Namespace
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 class CacheNamespace(object):
     """A key/value view over one :class:`CacheStore` namespace."""
 
-    def __init__(self, store, name, codec=None):
-        # type: (CacheStore, str, Optional[CacheCodec]) -> None
+    def __init__(self, store: "CacheStore", name: str, codec: "CacheCodec | None" = None) -> None:
         self._store = store
         self._name = name
         self._codec = codec or store.codec
 
     @property
-    def name(self):
-        # type: () -> str
+    def name(self) -> str:
         return self._name
 
     # -- internals ---------------------------------------------------------
@@ -129,8 +123,7 @@ class CacheNamespace(object):
     def _conn(self):
         return self._store._conn()
 
-    def _row(self, key):
-        # type: (str) -> Optional[sqlite3.Row]
+    def _row(self, key: str) -> "sqlite3.Row | None":
         """Return the live row for ``key``, deleting+dropping it if expired."""
         conn = self._conn()
         row = conn.execute(
@@ -148,8 +141,7 @@ class CacheNamespace(object):
             return None
         return row
 
-    def _decode(self, row):
-        # type: (sqlite3.Row) -> Any
+    def _decode(self, row: "sqlite3.Row") -> "Any":
         try:
             return self._codec.decode(row["value"])
         except CacheCodecError:
@@ -159,15 +151,13 @@ class CacheNamespace(object):
 
     # -- read --------------------------------------------------------------
 
-    def get(self, key, default=None):
-        # type: (str, Any) -> Any
+    def get(self, key: str, default: "Any" = None) -> "Any":
         row = self._row(key)
         if row is None:
             return default
         return self._decode(row)
 
-    def contains(self, key):
-        # type: (str) -> bool
+    def contains(self, key: str) -> bool:
         return self._row(key) is not None
 
     # -- write -------------------------------------------------------------
@@ -189,8 +179,7 @@ class CacheNamespace(object):
             self._rollback(conn)
             raise
 
-    def set(self, key, value, ttl=None):
-        # type: (str, Any, Optional[float]) -> None
+    def set(self, key: str, value: "Any", ttl: "float | None" = None) -> None:
         expires_at = self._compute_expiry(ttl)
         blob = self._codec.encode(value)
         now = time.time()
@@ -226,8 +215,7 @@ class CacheNamespace(object):
         self._exec_in_tx(conn, _do_set)
 
     @staticmethod
-    def _compute_expiry(ttl):
-        # type: (Optional[float]) -> Optional[float]
+    def _compute_expiry(ttl: "float | None") -> "float | None":
         if ttl is None:
             return None
         ttl = float(ttl)
@@ -235,8 +223,7 @@ class CacheNamespace(object):
             raise CacheValueError("ttl must be non-negative, got %r" % (ttl,))
         return time.time() + ttl
 
-    def delete(self, key):
-        # type: (str) -> bool
+    def delete(self, key: str) -> bool:
         conn = self._conn()
         def _do_delete(c):
             cur = c.execute(
@@ -246,8 +233,7 @@ class CacheNamespace(object):
             return cur.rowcount > 0
         return self._exec_in_tx(conn, _do_delete)
 
-    def increment(self, key, delta=1, initial=0):
-        # type: (str, int, int) -> int
+    def increment(self, key: str, delta: int = 1, initial: int = 0) -> int:
         """Atomically add ``delta`` (initial+delta when absent) (§7.7)."""
         conn = self._conn()
         self._begin(conn)
@@ -281,25 +267,22 @@ class CacheNamespace(object):
             self._rollback(conn)
             raise
 
-    # -- iteration (snapshots, §7.9) ---------------------------------------
+    # -- iteration (snapshots,  ---------------------------------------
 
-    def keys(self):
-        # type: () -> List[str]
+    def keys(self) -> "list[str]":
         return [k for k, _v in self._live_items()]
 
-    def items(self):
-        # type: () -> List[Tuple[str, Any]]
+    def items(self) -> "list[tuple[str, Any]]":
         return self._live_items()
 
-    def _live_items(self):
-        # type: () -> List[Tuple[str, Any]]
+    def _live_items(self) -> "list[tuple[str, Any]]":
         conn = self._conn()
         rows = conn.execute(
             "SELECT key, value, expires_at FROM cache_entries WHERE namespace=? "
             "ORDER BY key",
             (self._name,),
         ).fetchall()
-        out = []  # type: List[Tuple[str, Any]]
+        out: "list[tuple[str, Any]]" = []
         now = time.time()
         for row in rows:
             expires_at = row["expires_at"]
@@ -308,11 +291,10 @@ class CacheNamespace(object):
             out.append((row["key"], self._decode(row)))
         return out
 
-    # -- transaction (§7.5) ------------------------------------------------
+    # -- transaction ( ------------------------------------------------
 
     @contextlib.contextmanager
-    def transaction(self):
-        # type: () -> Iterator["CacheNamespace"]
+    def transaction(self) -> "Iterator[CacheNamespace]":
         """Run a batch of set/delete atomically; roll back on any error."""
         conn = self._conn()
         if getattr(self._store._tx_owner, "value", None) is not None:
@@ -347,15 +329,14 @@ class CacheNamespace(object):
             pass
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Store
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 class CacheStore(object):
     """A SQLite-backed cache database, opened lazily per thread."""
 
-    def __init__(self, path, codec=None):
-        # type: (Any, Optional[CacheCodec]) -> None
+    def __init__(self, path: "Any", codec: "CacheCodec | None" = None) -> None:
         self.path = str(path)
         self.codec = codec or JsonCodec()
         self._tls = threading.local()
@@ -363,8 +344,7 @@ class CacheStore(object):
         self._tx_owner.value = None
         self._init_db()
 
-    def _conn(self):
-        # type: () -> sqlite3.Connection
+    def _conn(self) -> "sqlite3.Connection":
         conn = getattr(self._tls, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.path, timeout=10.0, isolation_level=None)
@@ -380,19 +360,16 @@ class CacheStore(object):
     def _init_db(self):
         self._conn().executescript(_SCHEMA)
 
-    def namespace(self, name, codec=None):
-        # type: (str, Optional[CacheCodec]) -> CacheNamespace
+    def namespace(self, name: str, codec: "CacheCodec | None" = None) -> "CacheNamespace":
         return CacheNamespace(self, name, codec=codec)
 
-    def close(self):
-        # type: () -> None
+    def close(self) -> None:
         conn = getattr(self._tls, "conn", None)
         if conn is not None:
             conn.close()
             self._tls.conn = None
 
-    def __enter__(self):
-        # type: () -> "CacheStore"
+    def __enter__(self) -> "CacheStore":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

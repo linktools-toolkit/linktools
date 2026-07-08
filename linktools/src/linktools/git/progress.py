@@ -18,8 +18,7 @@ class GitProgressStream(object):
         self._tasks = {}
         self._buf = b""
 
-    def write(self, data):
-        # type: (bytes) -> int
+    def write(self, data: bytes) -> int:
         self._buf += data
         while True:
             nl = self._buf.find(b'\n')

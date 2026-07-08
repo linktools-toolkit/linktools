@@ -7,7 +7,10 @@ import time as _time
 import typing as _t
 
 from ..system import wait_thread
-from ..types import Timeout, TimeoutType
+from ..types import Timeout
+
+if _t.TYPE_CHECKING:
+    from ..types import TimeoutType
 
 
 _logger = None
@@ -69,7 +72,7 @@ class Reactor:
     def _run(self):
         running = True
         while running:
-            now = _time.monotonic()  # spec §15.3 RUN-REA-001: never wall-clock
+            now = _time.monotonic()  # spec  RUN-REA-001: never wall-clock
             fn = None
             timeout = None
             with self._lock:
@@ -92,7 +95,7 @@ class Reactor:
                         import traceback
                         self._on_error(e, traceback.format_exc())
                     self.signal_stop()
-                except Exception as e:  # §15.3 RUN-REA-006: never swallow KI/SystemExit/GeneratorExit
+                except Exception as e:  #  RUN-REA-006: never swallow KI/SystemExit/GeneratorExit
                     if self._on_error is not None:
                         import traceback
                         self._on_error(e, traceback.format_exc())
@@ -119,7 +122,7 @@ class Reactor:
         self.schedule(self._stop, delay)
 
     def schedule(self, fn: "_t.Callable[[], any]", delay: float = None, interval: float = None):
-        now = _time.monotonic()  # spec §15.3 RUN-REA-001
+        now = _time.monotonic()  # spec  RUN-REA-001
         when = now + delay if delay is not None else now
         with self._lock:
             item = _ReactorEvent(fn, when, interval)

@@ -20,20 +20,24 @@ import configparser
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from typing import Any
 
 __all__ = ["ConfigMigration"]
+
+PathLike = Union[str, Path]
 
 
 class ConfigMigration(object):
     """One-time config data migration (v2 §3.3)."""
 
-    def __init__(self, config_store, logger=None):
-        # type: (Any, Any) -> None
+    def __init__(self, config_store: "Any", logger: "Any" = None) -> None:
         self._store = config_store
         self._logger = logger
 
-    # v4 §4.4: built-in key map covering core + cntr configuration keys.
+    # built-in key map covering core + cntr configuration keys.
     DEFAULT_KEY_MAP = {
         # Core
         "DEBUG": "debug",
@@ -63,14 +67,13 @@ class ConfigMigration(object):
         "RUNNING_CONTAINERS": "container.running_containers",
     }
 
-    def _log(self, level, msg):
+    def _log(self, level: str, msg: str) -> None:
         if self._logger is not None:
             getattr(self._logger, level)(msg)
 
     # -- inspect -----------------------------------------------------------
 
-    def inspect(self, old_path):
-        # type: (PathLike) -> Dict[str, Any]
+    def inspect(self, old_path: "PathLike") -> "dict[str, Any]":
         """Read the old config file and report what would migrate (dry-run).
 
         Returns a dict with: keys found, total count, file exists.
@@ -93,14 +96,15 @@ class ConfigMigration(object):
 
     # -- backup ------------------------------------------------------------
 
-    def backup(self, old_path, backup_path=None):
-        # type: (PathLike, Optional[PathLike]) -> str
-        """Copy the old config to a backup file. Returns the backup path."""
+    def backup(self, old_path: "PathLike", backup_path: "PathLike | None" = None) -> str:
+        """Copy the old config to a timestamped backup file. Returns the backup path."""
         old_path = str(old_path)
         if not os.path.isfile(old_path):
             raise FileNotFoundError("old config not found: %s" % old_path)
         if backup_path is None:
-            backup_path = old_path + ".backup"
+            import datetime
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_path = "%s.backup.%s" % (old_path, ts)
         backup_path = str(backup_path)
         shutil.copy2(old_path, backup_path)
         self._log("info", "ConfigMigration.backup: %s -> %s" % (old_path, backup_path))
@@ -108,15 +112,19 @@ class ConfigMigration(object):
 
     # -- migrate -----------------------------------------------------------
 
-    def migrate(self, old_path, *, key_map=None):
-        # type: (PathLike, Optional[Dict[str, str]]) -> Dict[str, Any]
+    def migrate(
+        self,
+        old_path: "PathLike",
+        *,
+        key_map: "dict[str, str] | None" = None,
+    ) -> "dict[str, Any]":
         """Read old config and write to ConfigStore. Returns a report.
 
         ``key_map`` optionally maps old key names to new namespaced keys
         (e.g. {"LOG_LEVEL": "logging.level"}). Unmapped keys go to "legacy.<key>".
         """
         old_path = str(old_path)
-        # v4 §4.4: use caller key_map merged over the built-in DEFAULT_KEY_MAP.
+        # use caller key_map merged over the built-in DEFAULT_KEY_MAP.
         if key_map is None:
             key_map = dict(ConfigMigration.DEFAULT_KEY_MAP)
         else:
@@ -154,8 +162,7 @@ class ConfigMigration(object):
 
     # -- verify -----------------------------------------------------------
 
-    def verify(self):
-        # type: () -> bool
+    def verify(self) -> bool:
         """Verify the new ConfigStore is readable (keys can be retrieved)."""
         try:
             keys = self._store.keys()
@@ -168,8 +175,7 @@ class ConfigMigration(object):
 
     # -- rollback ---------------------------------------------------------
 
-    def rollback(self, backup_path, old_path):
-        # type: (PathLike, PathLike) -> None
+    def rollback(self, backup_path: "PathLike", old_path: "PathLike") -> None:
         """Restore the old config from a backup."""
         backup_path = str(backup_path)
         old_path = str(old_path)

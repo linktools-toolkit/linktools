@@ -18,8 +18,7 @@ def get_interpreter():
     return _interpreter
 
 
-def get_interpreter_ident():
-    # type: () -> str
+def get_interpreter_ident() -> str:
     """Return a stable identifier for the current interpreter (prefix + version)."""
     global _interpreter_ident
     if _interpreter_ident is None:

@@ -16,9 +16,12 @@ Every extracted path is verified to resolve inside the destination root.
 import os
 import tarfile
 import zipfile
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from ..errors import ToolArchiveError
+
+if TYPE_CHECKING:
+    from typing import Any
 
 __all__ = ["safe_extract"]
 
@@ -27,16 +30,14 @@ _DEFAULT_MAX_TOTAL = 10 * 1024 * 1024 * 1024  # 10 GiB
 _DEFAULT_MAX_FILE = 2 * 1024 * 1024 * 1024     # 2 GiB
 
 
-def _within(path, root):
-    # type: (str, str) -> bool
+def _within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
     except ValueError:
         return False
 
 
-def _check_member_name(name, dest):
-    # type: (str, str) -> str
+def _check_member_name(name: str, dest: str) -> str:
     """Reject dangerous entry names and return the resolved target path."""
     # Normalize separators and reject absolute / drive / traversal.
     norm = name.replace("\\", "/")
@@ -55,8 +56,7 @@ def _check_member_name(name, dest):
     return target
 
 
-def _detect(path):
-    # type: (str) -> str
+def _detect(path: str) -> str:
     with open(path, "rb") as handle:
         magic = handle.read(4)
     if magic.startswith(b"PK\x03\x04") or magic.startswith(b"PK\x05\x06"):
@@ -71,7 +71,7 @@ def _detect(path):
 
 
 def _extract_zip(path, dest, max_files, max_total, max_file):
-    seen = set()  # type: set
+    seen: set = set()
     total = 0
     with zipfile.ZipFile(path) as z:
         for info in z.infolist():
@@ -109,7 +109,7 @@ def _reject_zip_symlink(info, name):
 
 
 def _extract_tar(path, dest, max_files, max_total, max_file):
-    seen = set()  # type: set
+    seen: set = set()
     total = 0
     with tarfile.open(path) as t:
         for member in t.getmembers():
@@ -145,9 +145,10 @@ def _extract_tar(path, dest, max_files, max_total, max_file):
                     src.close()
 
 
-def safe_extract(archive_path, dest, *, max_files=_DEFAULT_MAX_FILES,
-                 max_total_size=_DEFAULT_MAX_TOTAL, max_file_size=_DEFAULT_MAX_FILE):
-    # type: (Any, Any, int, int, int) -> None
+def safe_extract(archive_path: "Any", dest: "Any", *,
+                 max_files: int = _DEFAULT_MAX_FILES,
+                 max_total_size: int = _DEFAULT_MAX_TOTAL,
+                 max_file_size: int = _DEFAULT_MAX_FILE) -> None:
     """Extract ``archive_path`` (zip or tar) into ``dest`` safely (§10.7).
 
     v4 §9.10: ``dest`` must be empty (no existing files). This prevents
@@ -158,7 +159,7 @@ def safe_extract(archive_path, dest, *, max_files=_DEFAULT_MAX_FILES,
     archive_path = str(archive_path)
     dest = str(dest)
     os.makedirs(dest, exist_ok=True)
-    # v4 §9.10: dest must be empty.
+    # dest must be empty.
     if os.path.isdir(dest) and os.listdir(dest):
         from ..errors import ToolArchiveError
         raise ToolArchiveError(

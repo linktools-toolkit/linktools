@@ -21,7 +21,7 @@ else:
 
 _system = _machine = None
 
-# §14.2 canonical architecture values + input aliases.
+#  canonical architecture values + input aliases.
 _ARCH_ALIASES = {
     "amd64": "x86_64",
     "aarch64": "arm64",
@@ -69,14 +69,12 @@ def is_windows(system=None):
     return _is_windows_like
 
 
-def normalize_platform(value):
-    # type: (str) -> str
+def normalize_platform(value: str) -> str:
     """Normalise an OS name to lowercase (spec §14.2)."""
     return (value or "").strip().lower()
 
 
-def normalize_arch(value):
-    # type: (str) -> str
+def normalize_arch(value: str) -> str:
     """Normalise an architecture alias to the canonical value (spec §14.2).
 
     ``amd64`` -> ``x86_64``, ``aarch64`` -> ``arm64``, ``armv7l`` -> ``arm`` ...

@@ -17,7 +17,7 @@ import weakref as _weakref
 from pathlib import Path as _Path
 
 
-# Monotonic clock for in-process deadlines. Spec §3.6/§6.2: wall-clock changes
+# Monotonic clock for in-process deadlines. Spec  wall-clock changes
 # (NTP, DST, manual) must never affect timeout/scheduling correctness; persistent
 # TTLs use UTC unix timestamps via time.time() elsewhere.
 _now = _time.monotonic
@@ -51,7 +51,11 @@ if _t.TYPE_CHECKING:
     from .core._url import UrlFile, UrlFileValidatorType  # noqa
     from .core._environ import BaseEnviron as _BaseEnviron  # noqa
 
-    P = _t.ParamSpec("P")
+    # ParamSpec is 3.10+; use typing_extensions fallback for 3.6 compat.
+    try:
+        P = _t.ParamSpec("P")
+    except AttributeError:
+        P = None  # type: ignore
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
 
 

@@ -24,10 +24,13 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from .. import utils
 from ..errors import ToolInstallError
+
+if TYPE_CHECKING:
+    from typing import Any
 
 __all__ = ["ToolInstallation", "ToolInstaller"]
 
@@ -37,8 +40,7 @@ _MANIFEST_SCHEMA = 1
 class ToolInstallation(object):
     """An installed tool tree (spec §10.2 ToolInstallation)."""
 
-    def __init__(self, root, name, version, manifest):
-        # type: (Path, str, str, dict) -> None
+    def __init__(self, root: "Path", name: str, version: str, manifest: dict) -> None:
         self.root = root
         self.name = name
         self.version = version
@@ -53,8 +55,7 @@ class ToolInstallation(object):
 
 
 class ToolInstaller(object):
-    def __init__(self, environ, base_dir):
-        # type: (Any, Any) -> None
+    def __init__(self, environ: "Any", base_dir: "Any") -> None:
         self._environ = environ
         self._base = Path(str(base_dir))
 
@@ -63,8 +64,7 @@ class ToolInstaller(object):
     def _lock(self, name):
         return self._environ.locks.process_lock("tool:" + name)
 
-    def _version_dir(self, name, version):
-        # type: (str, str) -> Path
+    def _version_dir(self, name: str, version: str) -> "Path":
         return self._base / name / version
 
     def _write_manifest(self, target, *, name, version, source_url, sha256, files):
@@ -86,8 +86,7 @@ class ToolInstaller(object):
 
     # -- public ------------------------------------------------------------
 
-    def is_installed(self, name, version):
-        # type: (str, str) -> bool
+    def is_installed(self, name: str, version: str) -> bool:
         """Check whether a version is fully installed (v2 §8.5).
 
         Not just manifest existence: validates schema, name/version match, and
@@ -106,7 +105,7 @@ class ToolInstaller(object):
             return False
         if manifest.get("name") != name or manifest.get("version") != version:
             return False
-        # v2 §8.5: active pointer must be valid (exists + points at an installed
+        # active pointer must be valid (exists + points at an installed
         # version), but the version being checked does NOT have to be active.
         active = self.active_version(name)
         if active is None:
@@ -117,7 +116,7 @@ class ToolInstaller(object):
         for rel in manifest.get("files", []):
             if not (target / rel).exists():
                 return False
-        # v4 §9.7: entrypoint must exist and (on POSIX) be executable.
+        # entrypoint must exist and (on POSIX) be executable.
         entrypoint = manifest.get("entrypoint")
         if entrypoint:
             ep_path = target / entrypoint if not os.path.isabs(entrypoint) else Path(entrypoint)
@@ -129,12 +128,10 @@ class ToolInstaller(object):
 
     def install(self, definition, *, source_url, sha256=None, version=None,
                 downloader=None):
-        """Install ``definition`` from ``source_url`` transactionally (§10.6).
+        """Install ``definition`` from ``source_url`` transactionally.
 
-        Downloads (validating ``sha256``) via ``downloader`` (defaults to
-        environ.downloads), safe-extracts into a staging dir, writes a manifest,
-        then atomically renames to the version dir and updates the active
-        pointer. Reuses an already-installed version.
+        Downloads, safe-extracts into staging, writes manifest INSIDE staging,
+        then atomically moves to target. Target only appears when fully installed.
         """
         from .._download import DownloadRequest
 
@@ -157,43 +154,42 @@ class ToolInstaller(object):
                                           sha256=sha256)
                 downloader.download(request)
 
-                # Safe extract into staging (§10.7): no traversal, no symlinks.
                 extract_root = staging / "root"
                 utils.safe_extract(archive, extract_root)
                 archive.unlink()
 
                 files = sorted(p.relative_to(extract_root).as_posix()
                                for p in extract_root.rglob("*") if p.is_file())
-                # Move the extracted tree into place under the version dir.
+                # write manifest INSIDE staging BEFORE atomic move.
+                manifest = self._write_manifest(
+                    extract_root, name=name, version=version,
+                    source_url=source_url, sha256=sha256, files=files)
+                # Atomic move: target appears only when fully installed.
                 target.parent.mkdir(parents=True, exist_ok=True)
                 _move_tree(extract_root, target)
-                manifest = self._write_manifest(
-                    target, name=name, version=version,
-                    source_url=source_url, sha256=sha256, files=files)
             except BaseException:
                 shutil.rmtree(staging, ignore_errors=True)
                 if target.exists():
                     shutil.rmtree(target, ignore_errors=True)
                 raise
             finally:
-                # staging was renamed away on success; remove any leftover.
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
 
             self._set_active(name, version)
             return ToolInstallation(target, name, version, manifest)
 
-    def active_version(self, name):
-        # type: (str) -> Optional[str]
+    def active_version(self, name: str) -> "str | None":
         pointer = self._base / name / "active.json"
         if not pointer.exists():
             return None
         return json.loads(pointer.read_text("utf-8")).get("version")
 
-    def remove(self, name, version, *, force=False):
-        # type: (str, str, bool) -> bool
+    def remove(self, name: str, version: str, *, force: bool = False) -> bool:
         """Remove an installed version; refuse the active one unless ``force``."""
-        with self._lock(name + ":remove"):
+        with self._lock(name):  # unified lock (same as install)
             if not self.is_installed(name, version):
                 return False
             if not force and self.active_version(name) == version:
@@ -204,26 +200,23 @@ class ToolInstaller(object):
             return True
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # helpers
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
-def _move_tree(src, dst):
-    # type: (Path, Path) -> None
+def _move_tree(src: "Path", dst: "Path") -> None:
     """Move ``src`` onto ``dst``; dst must not yet exist (atomic on same FS)."""
     if dst.exists():
         raise ToolInstallError("install target already exists: %s" % dst)
     os.replace(str(src), str(dst))
 
 
-def _safe_remove_within(path, root):
-    # type: (Path, Path) -> None
+def _safe_remove_within(path: "Path", root: "Path") -> None:
     if not utils.is_sub_path(str(path), str(root)):
         raise ToolInstallError("refusing to remove %r outside %r" % (str(path), str(root)))
     shutil.rmtree(str(path), ignore_errors=True)
 
 
-def _now_iso():
-    # type: () -> str
+def _now_iso() -> str:
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -42,7 +42,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
-    from linktools.types import T, ConfigDict, Config, Tools, Tool, UrlFile, PathType
+    from linktools.types import T, Config, Tools, Tool, UrlFile, PathType
     from ._paths import EnvironmentPaths
     from ._logging import LoggingManager
     from ._locks import LockManager
@@ -51,15 +51,13 @@ if TYPE_CHECKING:
     from .._download import DownloadManager
 
 
-
-
 class ConfigDict(dict):
     """Minimal dict subclass for tool config loading (v2: replaces old _config.ConfigDict)."""
     def update_from_file(self, filename, load, silent=False):
         try:
             with open(filename, "rb") as f:
                 obj = load(f)
-        except OSError as e:
+        except OSError:
             if silent:
                 return False
             raise
@@ -430,9 +428,9 @@ class BaseEnviron(abc.ABC):
             PersistentSource, DefaultSource,
         )
 
-        schema = ConfigSchema()
+        schema = ConfigSchema(allow_unknown=True)  # dynamic keys (DEBUG etc.)
         prefix = self.name.upper() + "_"
-        return NewConfig(
+        config = NewConfig(
             self,
             schema,
             sources=[
@@ -442,6 +440,11 @@ class BaseEnviron(abc.ABC):
                 DefaultSource(schema),
             ],
         )
+        # Register known core fields with defaults.
+        config.update_defaults(
+            DEBUG=False,
+        )
+        return config
 
     @cached_property(lock=True)
     def config(self) -> "Config":
@@ -460,7 +463,7 @@ class BaseEnviron(abc.ABC):
             PersistentSource, DefaultSource,
         )
 
-        schema = ConfigSchema()
+        schema = ConfigSchema(allow_unknown=True)  # Tools/cntr dynamic keys
         prefix = (env_prefix if env_prefix is not MISSING else "")
         ns = namespace if namespace is not MISSING else "main"
         return NewConfig(
@@ -539,7 +542,7 @@ class BaseEnviron(abc.ABC):
             config.update_from_file(develop_path, yaml.safe_load)
 
         tools = Tools(self, config)
-        # v2 §9.1: do NOT mutate os.environ["PATH"]. Subprocesses that need the
+        # do NOT mutate os.environ["PATH"]. Subprocesses that need the
         # tools stub resolve it via env.subprocess_env() (Tool.popen, ToolRunner).
         return tools
 

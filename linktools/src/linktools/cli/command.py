@@ -1323,7 +1323,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             exit_code = self.run(args) or 0
 
         except (CommandError, *self.known_errors) as e:
-            # Spec §16.4: map the error's domain to a stable exit code.
+            # Spec  map the error's domain to a stable exit code.
             from .exitcodes import exit_code_for
             exit_code = exit_code_for(e)
             error_type, error_message = e.__class__.__name__, str(e).strip()

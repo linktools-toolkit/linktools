@@ -28,7 +28,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 from ..errors import EnvironmentError
 from .. import utils
@@ -36,8 +36,7 @@ from .. import utils
 PathLike = Union[str, "os.PathLike[str]"]
 
 
-def _norm(path):
-    # type: (PathLike) -> Path
+def _norm(path: "PathLike") -> "Path":
     """Absolute, expanded, normalised -- matches utils.join_path semantics."""
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
@@ -47,20 +46,19 @@ class EnvironmentPaths(object):
 
     def __init__(
         self,
-        root,                # type: PathLike
-        storage,             # type: PathLike
+        root: "PathLike",
+        storage: "PathLike",
         *,
-        data=None,           # type: Optional[PathLike]
-        temp=None,           # type: Optional[PathLike]
-        cache=None,          # type: Optional[PathLike]
-        config=None,         # type: Optional[PathLike]
-        tools=None,          # type: Optional[PathLike]
-        downloads=None,      # type: Optional[PathLike]
-        logs=None,           # type: Optional[PathLike]
-        assets=None,         # type: Optional[PathLike]
-        readonly=False,      # type: bool
-    ):
-        # type: (...) -> None
+        data: "PathLike | None" = None,
+        temp: "PathLike | None" = None,
+        cache: "PathLike | None" = None,
+        config: "PathLike | None" = None,
+        tools: "PathLike | None" = None,
+        downloads: "PathLike | None" = None,
+        logs: "PathLike | None" = None,
+        assets: "PathLike | None" = None,
+        readonly: bool = False,
+    ) -> None:
         self._root = _norm(root)
         self._storage = _norm(storage)
         self._data = _norm(data) if data is not None else self._storage / "data"
@@ -77,59 +75,48 @@ class EnvironmentPaths(object):
     # -- getters (no side effects) ------------------------------------------
 
     @property
-    def root(self):
-        # type: () -> Path
+    def root(self) -> "Path":
         return self._root
 
     @property
-    def storage(self):
-        # type: () -> Path
+    def storage(self) -> "Path":
         return self._storage
 
     @property
-    def data(self):
-        # type: () -> Path
+    def data(self) -> "Path":
         return self._data
 
     @property
-    def temp(self):
-        # type: () -> Path
+    def temp(self) -> "Path":
         return self._temp
 
     @property
-    def cache(self):
-        # type: () -> Path
+    def cache(self) -> "Path":
         return self._cache
 
     @property
-    def config(self):
-        # type: () -> Path
+    def config(self) -> "Path":
         return self._config
 
     @property
-    def tools(self):
-        # type: () -> Path
+    def tools(self) -> "Path":
         return self._tools
 
     @property
-    def downloads(self):
-        # type: () -> Path
+    def downloads(self) -> "Path":
         return self._downloads
 
     @property
-    def logs(self):
-        # type: () -> Path
+    def logs(self) -> "Path":
         return self._logs
 
     @property
-    def assets(self):
-        # type: () -> Path
+    def assets(self) -> "Path":
         return self._assets
 
     # -- explicit creation --------------------------------------------------
 
-    def ensure(self, path):
-        # type: (PathLike) -> Path
+    def ensure(self, path: "PathLike") -> "Path":
         """Create ``path`` (and parents) unless this layout is read-only.
 
         Returns the normalised path either way; read-only layouts skip creation
@@ -140,38 +127,30 @@ class EnvironmentPaths(object):
             target.mkdir(parents=True, exist_ok=True)
         return target
 
-    def ensure_data(self):
-        # type: () -> Path
+    def ensure_data(self) -> "Path":
         return self.ensure(self._data)
 
-    def ensure_temp(self):
-        # type: () -> Path
+    def ensure_temp(self) -> "Path":
         return self.ensure(self._temp)
 
-    def ensure_cache(self):
-        # type: () -> Path
+    def ensure_cache(self) -> "Path":
         return self.ensure(self._cache)
 
-    def ensure_config(self):
-        # type: () -> Path
+    def ensure_config(self) -> "Path":
         return self.ensure(self._config)
 
-    def ensure_logs(self):
-        # type: () -> Path
+    def ensure_logs(self) -> "Path":
         return self.ensure(self._logs)
 
-    def ensure_downloads(self):
-        # type: () -> Path
+    def ensure_downloads(self) -> "Path":
         return self.ensure(self._downloads)
 
-    def ensure_tools(self):
-        # type: () -> Path
+    def ensure_tools(self) -> "Path":
         return self.ensure(self._tools)
 
     # -- safe deletion (root-protected) -------------------------------------
 
-    def safe_remove(self, path, root=None):
-        # type: (PathLike, Optional[PathLike]) -> None
+    def safe_remove(self, path: "PathLike", root: "PathLike | None" = None) -> None:
         """Remove a file or directory after verifying it is within ``root``.
 
         ``root`` defaults to the storage tree. A target that resolves outside
@@ -197,8 +176,7 @@ class EnvironmentPaths(object):
     # -- test helper --------------------------------------------------------
 
     @classmethod
-    def temporary(cls, prefix="linktools-paths-"):
-        # type: (str) -> "EnvironmentPaths"
+    def temporary(cls, prefix: str = "linktools-paths-") -> "EnvironmentPaths":
         """Build an isolated layout rooted at a fresh temp directory.
 
         ``root`` and ``storage`` share the temp directory; call ``cleanup()``
@@ -209,14 +187,13 @@ class EnvironmentPaths(object):
         paths._cleanup_target = storage  # type: ignore[attr-defined]
         return paths
 
-    def cleanup(self):
-        # type: () -> None
+    def cleanup(self) -> None:
         """Remove the temp storage created by :meth:`temporary` (no-op otherwise)."""
         target = getattr(self, "_cleanup_target", None)
         if target is not None and target.exists():
             shutil.rmtree(target, ignore_errors=True)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "EnvironmentPaths(storage=%r, root=%r, readonly=%r)" % (
             str(self._storage), str(self._root), self.readonly,
         )

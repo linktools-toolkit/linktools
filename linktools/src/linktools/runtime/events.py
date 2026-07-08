@@ -10,9 +10,12 @@ itself or register new handlers without deadlocking).
 """
 
 import threading as _threading
-import typing as _t
+from typing import TYPE_CHECKING
 
-# Exception policies (spec §15.2 RUN-EVT-002).
+if TYPE_CHECKING:
+    from typing import Callable
+
+# Exception policies (spec  RUN-EVT-002).
 LOG_AND_CONTINUE = "log_and_continue"  # default; CLI-friendly
 RAISE_FIRST = "raise_first"
 COLLECT = "collect"
@@ -43,8 +46,7 @@ class Subscription(object):
     def cancelled(self):
         return self._cancelled
 
-    def cancel(self):
-        # type: () -> None
+    def cancel(self) -> None:
         """Remove this subscription. Idempotent."""
         if self._cancelled:
             return
@@ -55,30 +57,26 @@ class Subscription(object):
 class EventBus(object):
     """A thread-safe named-event dispatcher (spec §15.2)."""
 
-    def __init__(self, exception_policy=LOG_AND_CONTINUE):
-        # type: (str) -> None
+    def __init__(self, exception_policy: str = LOG_AND_CONTINUE) -> None:
         if exception_policy not in _ALL_POLICIES:
             raise ValueError("unknown exception policy: %r" % (exception_policy,))
         self._policy = exception_policy
         self._lock = _threading.RLock()
         # event -> {callback: {"time": int, "max_times": Optional[int]}}
-        self._handlers = {}  # type: _t.Dict[str, _t.Dict]
+        self._handlers: "dict[str, dict]" = {}
 
     # -- registration ------------------------------------------------------
 
-    def on(self, event, callback, times=None):
-        # type: (str, _t.Callable, _t.Optional[int]) -> Subscription
+    def on(self, event: str, callback: "Callable", times: "int | None" = None) -> "Subscription":
         with self._lock:
             callbacks = self._handlers.setdefault(event, {})
             callbacks[callback] = {"time": 0, "max_times": times}
         return Subscription(self, event, callback)
 
-    def once(self, event, callback):
-        # type: (str, _t.Callable) -> Subscription
+    def once(self, event: str, callback: "Callable") -> "Subscription":
         return self.on(event, callback, times=1)
 
-    def off(self, event, callback):
-        # type: (str, _t.Callable) -> None
+    def off(self, event: str, callback: "Callable") -> None:
         self._remove(event, callback)
 
     def _remove(self, event, callback):
@@ -92,11 +90,10 @@ class EventBus(object):
 
     # -- dispatch ----------------------------------------------------------
 
-    def emit(self, event, *args, **kwargs):
-        # type: (str, *_t.Any, **_t.Any) -> None
+    def emit(self, event: str, *args, **kwargs) -> None:
         logger = _get_logger()
         # Snapshot under the lock; invoke outside it so callbacks may
-        # cancel themselves or register new handlers (§15.2 RUN-EVT-004).
+        # cancel themselves or register new handlers ( RUN-EVT-004).
         with self._lock:
             callbacks = self._handlers.get(event)
             if not callbacks:
@@ -118,7 +115,7 @@ class EventBus(object):
         for callback in invoke:
             try:
                 callback(*args, **kwargs)
-            except Exception as e:  # §15.2 RUN-EVT-002
+            except Exception as e:  #  RUN-EVT-002
                 if self._policy == LOG_AND_CONTINUE:
                     logger.warning("Event `%s` handler `%s` error" % (event, callback), exc_info=e)
                 elif self._policy == RAISE_FIRST:

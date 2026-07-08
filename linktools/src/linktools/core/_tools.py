@@ -32,13 +32,13 @@ import pathlib
 import shutil
 import warnings
 from collections import ChainMap
-from typing import TYPE_CHECKING, Tuple, List
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.errors import ToolDefinitionError
 from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
 from linktools.system import get_interpreter, get_interpreter_ident, get_shell_path, get_system
-from linktools.runtime import Process, popen
+from linktools.runtime import popen
 from linktools.decorator import cached_property, timeoutable
 from linktools.types import MISSING
 
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from typing import Any
     from ._environ import BaseEnviron
     from linktools.types import PathType, TimeoutType
+    from linktools.runtime import Process
 
 SUPPRESS = object()
 VALIDATE_KEYS = set()
@@ -61,13 +62,13 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
 
     # parse when block:
     # -----------------------------------------
-    #   field:
-    #     when:                                 <== when_block
-    #       - system: [darwin, linux]
-    #         then: xxx
-    #       - system: windows
-    #         then: yyy
-    #       - else: ~
+    #  field:
+    #  when: <== when_block
+    #  - system: [darwin, linux]
+    #  then: xxx
+    #  - system: windows
+    #  then: yyy
+    #  - else: ~
     # -----------------------------------------
     when_block = utils.get_item(value, "when", default=SUPPRESS)
     if when_block is SUPPRESS or not isinstance(when_block, (tuple, list)):
@@ -76,26 +77,26 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
 
     for cond_block in when_block:
         # -----------------------------------------
-        #   field:
-        #     when:
-        #       - system: [darwin, linux]
-        #         then: xxx                         <== then_block
-        #       - system: windows
-        #         then: yyy
-        #       - else: ~
+        #  field:
+        #  when:
+        #  - system: [darwin, linux]
+        #  then: xxx <== then_block
+        #  - system: windows
+        #  then: yyy
+        #  - else: ~
         # -----------------------------------------
         value = utils.get_item(cond_block, "then", default=SUPPRESS)
         if value != SUPPRESS:
             for key in VALIDATE_KEYS:
                 # parse validate block:
                 # -----------------------------------------
-                #   field:
-                #     when:
-                #       - system: [darwin, linux]           <== validate_block
-                #         then: xxx
-                #       - system: windows
-                #         then: yyy
-                #       - else: ~
+                #  field:
+                #  when:
+                #  - system: [darwin, linux] <== validate_block
+                #  then: xxx
+                #  - system: windows
+                #  then: yyy
+                #  - else: ~
                 # -----------------------------------------
                 choice = utils.get_item(cond_block, key, default=SUPPRESS)
                 if choice is not SUPPRESS:
@@ -110,13 +111,13 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
                 return value
 
         # -----------------------------------------
-        #   field:
-        #     when:
-        #       - system: [darwin, linux]
-        #         then: xxx
-        #       - system: windows
-        #         then: yyy
-        #       - else: ~                           <== else_block
+        #  field:
+        #  when:
+        #  - system: [darwin, linux]
+        #  then: xxx
+        #  - system: windows
+        #  then: yyy
+        #  - else: ~ <== else_block
         # -----------------------------------------
         value = utils.get_item(cond_block, "else", default=SUPPRESS)
         if value != SUPPRESS:
@@ -156,7 +157,7 @@ class ToolStub(object):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "wt") as fd:
             if self.system == "windows":
-                fd.write(f"@echo off\n")
+                fd.write("@echo off\n")
                 fd.write(f"{cmdline} %*\n")
             else:
                 fd.write(f"#!{shutil.which('sh')}\n")
@@ -213,7 +214,7 @@ class ToolMeta(type):
 
 class Tool(metaclass=ToolMeta):
     """Executable tool wrapper with prepare and run helpers."""
-    __default__: "Dict"
+    __default__: "dict"
 
     name: str = ToolProperty(default=MISSING, raw=True, internal=True)
     system: str = ToolProperty(default=MISSING, raw=True, internal=True, validate=True)
@@ -302,12 +303,12 @@ class Tool(metaclass=ToolMeta):
 
         # target path: {target_path}
         # unpack path: {unpack_path}
-        # v2 layout: tools/<name>/versions/<version>-<platform>-<arch>/
+        # layout: tools/<name>/versions/<version>-<platform>-<arch>/
         # root path: {data_path}/tools/{name}/versions/{version}-{platform}-{arch}/
         config["target_path"] = target_path = target_path.format(tools=self._tools, **config)
         config["unpack_path"] = unpack_path = unpack_path.format(tools=self._tools, **config)
 
-        # v2 multi-version path resolution.
+        # multi-version path resolution.
         version_slug = self.version or "unknown"
         platform_arch = "%s-%s" % (self._tools.environ.system, self._tools.environ.machine)
         version_dir = "%s-%s" % (version_slug, platform_arch)
@@ -453,7 +454,7 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[dependency]
             tool.prepare()
 
-        # download and extract (v4 §9.5: manifest in staging BEFORE target)
+        # download and extract (manifest in staging BEFORE target)
         if not self.exists:
             self._tools.logger.info(f"Download {self}: {self.download_url}")
             with self._tools.environ.get_url_file(self.download_url) as url_file:
@@ -462,7 +463,7 @@ class Tool(metaclass=ToolMeta):
                     temp_dir = self._tools.environ.get_temp_path("tools", "cache")
                     temp_path = url_file.save(temp_dir)
 
-                    # v4 §9.5: staging dir — everything happens here before atomic move.
+                    # staging dir — everything happens here before atomic move.
                     staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
                     os.makedirs(staging, exist_ok=True)
                     try:
@@ -477,7 +478,7 @@ class Tool(metaclass=ToolMeta):
                             os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
                             shutil.move(temp_path, target_in_staging)
 
-                        # v4 §9.5: write manifest INSIDE staging before move.
+                        # write manifest INSIDE staging before move.
                         self._write_manifest(staging)
                         # Atomic move: target appears only when fully installed.
                         if os.path.exists(self.root_path):
@@ -531,7 +532,7 @@ class Tool(metaclass=ToolMeta):
         """
         self.prepare()
 
-        # §9.1/v2 §9.1: pass the tools-stub PATH via subprocess_env instead of
+        #  pass the tools-stub PATH via subprocess_env instead of
         # relying on the global os.environ mutation.
         env = self._tools.environ.subprocess_env()
         if self.environment:
@@ -623,7 +624,7 @@ class Tool(metaclass=ToolMeta):
 class Tools(object):
 
     """Registry and factory for tools available in an environment."""
-    def __init__(self, environ: "BaseEnviron", config: "dict[str, Dict]"):
+    def __init__(self, environ: "BaseEnviron", config: "dict[str, Any]"):
         self.environ = environ
         self.logger = environ.get_logger("tools")
         self.config = environ.wrap_config(env_prefix="")
@@ -713,7 +714,6 @@ class Tools(object):
         return result
 
 
-def _now_iso():
-    # type: () -> str
+def _now_iso() -> str:
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

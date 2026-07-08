@@ -13,10 +13,13 @@ until common/mobile migrate; this formalises the §10.5 dependency contract:
 * a stable topological install order.
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING
 
 from ..errors import ToolDependencyError
 from .. import system as _system
+
+if TYPE_CHECKING:
+    from typing import Sequence
 
 __all__ = ["ToolDefinition", "ToolRegistry"]
 
@@ -24,10 +27,18 @@ __all__ = ["ToolDefinition", "ToolRegistry"]
 class ToolDefinition(object):
     """Static description of a managed tool (§10.3)."""
 
-    def __init__(self, name, version=None, depends_on=(), description="",
-                 platforms=None, architectures=None, sha256=None, size=None,
-                 entrypoint=None):
-        # type: (str, Optional[str], Sequence[str], str, Optional[Sequence[str]], Optional[Sequence[str]], Optional[str], Optional[int], Optional[str]) -> None
+    def __init__(
+        self,
+        name: str,
+        version: "str | None" = None,
+        depends_on: "Sequence[str]" = (),
+        description: str = "",
+        platforms: "Sequence[str] | None" = None,
+        architectures: "Sequence[str] | None" = None,
+        sha256: "str | None" = None,
+        size: "int | None" = None,
+        entrypoint: "str | None" = None,
+    ) -> None:
         self.name = name
         self.version = version
         self.depends_on = tuple(depends_on)
@@ -42,38 +53,36 @@ class ToolDefinition(object):
 class ToolRegistry(object):
     """A set of ToolDefinitions with dependency-graph validation (§10.5)."""
 
-    def __init__(self, current_system=None, current_arch=None):
-        # type: (Optional[str], Optional[str]) -> None
-        self._tools = {}  # type: Dict[str, ToolDefinition]
+    def __init__(
+        self,
+        current_system: "str | None" = None,
+        current_arch: "str | None" = None,
+    ) -> None:
+        self._tools: "dict[str, ToolDefinition]" = {}
         self._system = current_system  # lazily resolved if None
         self._arch_raw = current_arch
 
     # -- registration ------------------------------------------------------
 
-    def add(self, tool):
-        # type: (ToolDefinition) -> "ToolRegistry"
+    def add(self, tool: "ToolDefinition") -> "ToolRegistry":
         if tool.name in self._tools:
             raise ToolDependencyError("duplicate tool name: %s" % tool.name)
         self._tools[tool.name] = tool
         return self
 
-    def __contains__(self, name):
-        # type: (str) -> bool
+    def __contains__(self, name: str) -> bool:
         return name in self._tools
 
-    def get(self, name):
-        # type: (str) -> Optional[ToolDefinition]
+    def get(self, name: str) -> "ToolDefinition | None":
         return self._tools.get(name)
 
     @property
-    def names(self):
-        # type: () -> List[str]
+    def names(self) -> "list[str]":
         return list(self._tools.keys())
 
-    # -- §10.5 validation --------------------------------------------------
+    # --  validation --------------------------------------------------
 
-    def validate(self):
-        # type: () -> None
+    def validate(self) -> None:
         """Existence + self-dep + cycle checks; raises with the full chain."""
         for name, tool in self._tools.items():
             for dep in tool.depends_on:
@@ -86,8 +95,7 @@ class ToolRegistry(object):
         for start in self._tools:
             self._detect_cycle(start, [])
 
-    def _detect_cycle(self, name, stack):
-        # type: (str, List[str]) -> None
+    def _detect_cycle(self, name: str, stack: "list[str]") -> None:
         if name in stack:
             chain = stack[stack.index(name):] + [name]
             raise ToolDependencyError("cyclic tool dependency: " + " -> ".join(chain))
@@ -101,19 +109,18 @@ class ToolRegistry(object):
 
     # -- platform/arch availability ---------------------------------------
 
-    def _current_system(self):
+    def _current_system(self) -> str:
         if self._system is None:
             self._system = _system.get_system()
         return self._system
 
-    def _current_arch(self):
+    def _current_arch(self) -> str:
         # Canonical arch (amd64 -> x86_64, aarch64 -> arm64).
         if self._arch_raw is None:
             self._arch_raw = _system.normalize_arch(_system.get_machine())
         return self._arch_raw
 
-    def available(self):
-        # type: () -> List[str]
+    def available(self) -> "list[str]":
         sysname = self._current_system()
         arch = self._current_arch()
         out = []
@@ -127,15 +134,14 @@ class ToolRegistry(object):
 
     # -- ordering ----------------------------------------------------------
 
-    def topological_sort(self):
-        # type: () -> List[str]
+    def topological_sort(self) -> "list[str]":
         """Return tool names in dependency order (deps first), stable on ties."""
         self.validate()
-        order = []  # type: List[str]
-        seen = set()  # type: set
-        visiting = set()  # type: set
+        order: "list[str]" = []
+        seen: set = set()
+        visiting: set = set()
 
-        def visit(name):
+        def visit(name: str) -> None:
             if name in seen:
                 return
             if name in visiting:  # cycle (already validated, defensive)

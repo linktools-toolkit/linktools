@@ -37,7 +37,6 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, cached_classproperty, timeoutable
 from linktools.system import get_free_port
-from linktools.runtime import Process
 from linktools.types import Stoppable
 from linktools.utils import get_hash_ident
 from .types import App, UnixSocket, InetSocket, Process as ProcessInfo, File, SystemService
@@ -47,6 +46,7 @@ from ...capabilities.mobile import __cap_mobile__
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
     from typing import Any, TypeVar
+    from linktools.runtime import Process
     from linktools.types import TimeoutType
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="AdbDevice")

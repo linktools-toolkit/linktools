@@ -128,8 +128,8 @@ class _CacheSession(_t.Generic[T]):
     def set(self, key: str, value: "T", ttl: int = None) -> None:
         # Store the full record unfiltered: falsy values (False/0/""/[]/{}) and
         # None must round-trip reliably, and existence is decided by row
-        # presence rather than truthiness (spec §7.5). ttl=0 means "already
-        # expired" and must not be coerced to None (= infinite) (spec §7.4).
+        # presence rather than truthiness (spec  ttl=0 means "already
+        # expired" and must not be coerced to None (= infinite) (spec 
         if ttl is not None:
             ttl = int(ttl)
         self._data[key] = {
@@ -148,7 +148,7 @@ class _CacheSession(_t.Generic[T]):
             timestamp = value.get("ts", None)
             ttl = value.get("ttl", None)
             # Expiry is decided by presence (ttl is not None), never by
-            # truthiness -- ttl=0 means "already expired" (spec §7.4/§7.5).
+            # truthiness -- ttl=0 means "already expired" (spec 
             if timestamp is not None and ttl is not None \
                     and timestamp + ttl < _time.time():
                 self._data.pop(key)
@@ -208,7 +208,7 @@ class _CacheSession(_t.Generic[T]):
             self._data[key] = value
         else:
             # Missing key: store initial + delta (not just the default), so the
-            # first increment is never lost (spec §7.7).
+            # first increment is never lost (spec 
             result = default + delta
             self.set(key, result)
         return result

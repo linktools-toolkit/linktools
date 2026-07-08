@@ -21,7 +21,7 @@ def is_sub_path(path, root_path) -> bool:
         return False
 
 
-def join_path(root_path, *paths: str) -> Path:
+def join_path(root_path, *paths: str) -> "Path":
     target_path = str(root_path)
     for path in paths:
         parent_path = target_path
@@ -45,7 +45,7 @@ def ensure_within(path, root):
     return Path(os.path.abspath(str(path)))
 
 
-# Alias for the spec's preferred name (§17.2).
+# Alias for the spec's preferred name (
 safe_join = join_path
 
 

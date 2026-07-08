@@ -45,7 +45,7 @@ from linktools.decorator import cached_property
 from linktools.errors import GitDivergedError
 from linktools.git import GitRepository, GitSyncPolicy
 from linktools.types import MISSING
-from linktools.runtime import Process, import_module_file, popen
+from linktools.runtime import import_module_file, popen
 
 from . import _migrate
 from .container import BaseContainer, SimpleContainer, ContainerError
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from typing import Any
     from linktools.core import Environ
     from linktools.types import PathType
+    from linktools.runtime import Process
     from .context import EventContext
 
 
@@ -193,7 +194,7 @@ class ContainerManager:
 
     @cached_property
     def _migrated(self):
-        # One-time legacy -> ConfigStore migration (spec §21.2). Runs on first
+        # One-time legacy -> ConfigStore migration. Runs on first
         # access of any setting; idempotent.
         _migrate.migrate_legacy_container_settings(
             self._persistent_store, self.data_path, self.setting_path, self.logger

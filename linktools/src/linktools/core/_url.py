@@ -48,7 +48,7 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @cached_property(lock=True)
     def _lock(self):
-        # Per-download lock via the unified LockManager (spec §7.11/§9.9).
+        # Per-download lock via the unified LockManager (spec 
         from linktools.utils import get_hash_ident
         ident = "%s_%s" % (get_hash_ident(self._url), guess_file_name(self._url)[-100:])
         return self._environ.locks.process_lock("download:" + ident)

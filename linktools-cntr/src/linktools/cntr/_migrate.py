@@ -23,29 +23,27 @@ one release (spec §21.2 / §3.3).
 """
 import json
 import os
-from typing import Set
 
 from linktools.cache import FileCache  # legacy -- imported only for migration
 from linktools.utils import remove_file
 
 __all__ = ["PERSISTENT_KEYS", "migrate_legacy_container_settings"]
 
-# Keys whose lifecycle is "persistent user state" -> ConfigStore (spec §8.5).
+# Keys whose lifecycle is "persistent user state" -> ConfigStore.
 # Transient keys (RUNNING_CONTAINERS, per-container mount paths) are regenerable
 # and are NOT migrated; they move straight to the CacheStore.
 PERSISTENT_KEYS = ("INSTALLED_CONTAINERS", "INSTALLED_REPOS")
 
 
-def _remove(path):
-    # type: (str) -> None
+def _remove(path: str) -> None:
     try:
         remove_file(path)
     except Exception:
         pass
 
 
-def _migrate_json_file(config_store, source_path, key, also_remove, logger):
-    # type: (object, str, str, tuple, object) -> bool
+def _migrate_json_file(config_store: object, source_path: str, key: str,
+                       also_remove: tuple, logger: object) -> bool:
     """Migrate one legacy JSON file -> config_store[key]; clean up afterwards."""
     if not os.path.isfile(source_path):
         return False
@@ -66,12 +64,11 @@ def _migrate_json_file(config_store, source_path, key, also_remove, logger):
     return True
 
 
-def _migrate_shelve(config_store, legacy_dir, logger):
-    # type: (object, str, object) -> Set[str]
+def _migrate_shelve(config_store: object, legacy_dir: str, logger: object) -> "set[str]":
     """Migrate persistent keys from the legacy FileCache shelve -> config_store."""
     if not os.path.isdir(legacy_dir):
         return set()
-    migrated = set()  # type: Set[str]
+    migrated: "set[str]" = set()
     try:
         cache = FileCache(legacy_dir)
         with cache.session() as data:
@@ -91,8 +88,8 @@ def _migrate_shelve(config_store, legacy_dir, logger):
     return migrated
 
 
-def migrate_legacy_container_settings(config_store, data_path, setting_path, logger):
-    # type: (object, object, object, object) -> Set[str]
+def migrate_legacy_container_settings(config_store: object, data_path: object,
+                                      setting_path: object, logger: object) -> "set[str]":
     """Migrate every legacy source of cntr's persistent settings into config_store.
 
     Args:
@@ -107,7 +104,7 @@ def migrate_legacy_container_settings(config_store, data_path, setting_path, log
     """
     data_path = str(data_path)
     setting_path = str(setting_path)
-    migrated = set()  # type: Set[str]
+    migrated: "set[str]" = set()
 
     if _migrate_json_file(
         config_store,

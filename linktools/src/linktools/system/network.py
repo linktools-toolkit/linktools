@@ -4,11 +4,15 @@
 """Network helpers: LAN/WAN IP (spec §14.1, §14.4 SYS-003)."""
 
 import re
+from typing import TYPE_CHECKING
 
 from .. import utils
 
+if TYPE_CHECKING:
+    from typing import Any
+
 # Basic IPv4 shape check -- the WAN-IP service must return an address, not an
-# HTML error page (spec §14.4: do not silently return a wrong-page body).
+# HTML error page (spec  do not silently return a wrong-page body).
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
@@ -27,14 +31,13 @@ def get_lan_ip():
             utils.ignore_errors(s.close)
 
 
-def _default_transport(url, timeout):
-    # type: (str, float) -> "contextlib.AbstractContextManager"
+def _default_transport(url: str, timeout: float) -> "Any":
     from urllib.request import urlopen
     return urlopen(url, timeout=timeout)
 
 
-def get_wan_ip(url=None, timeout=10.0, transport=None):
-    # type: (str, float, object) -> "str | None"
+def get_wan_ip(url: "str | None" = None, timeout: float = 10.0,
+               transport: "Any" = None) -> "str | None":
     """Return the public WAN IP via the configured service, or None on failure.
 
     Spec §14.4 SYS-003: the URL comes from Environment config (DEFAULT_WAN_IP_URL)

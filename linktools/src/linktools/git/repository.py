@@ -19,6 +19,7 @@ import contextlib
 import os
 import shutil
 import uuid
+from typing import TYPE_CHECKING
 
 from dulwich import porcelain
 from dulwich.repo import Repo as DulwichRepo
@@ -27,10 +28,13 @@ from linktools import utils
 from linktools.core import environ
 from linktools.errors import GitError, GitDivergedError
 from linktools.rich import create_progress
-from linktools.types import PathType
 
 from .progress import GitProgressStream
 from .sync import GitSyncPolicy
+
+if TYPE_CHECKING:
+    from typing import Any
+    from linktools.types import PathType
 
 _logger = environ.get_logger("git")
 
@@ -38,8 +42,7 @@ _logger = environ.get_logger("git")
 class _GitProxy(object):
     """Common git operations on a repo path via dulwich porcelain."""
 
-    def __init__(self, path):
-        # type: (str) -> None
+    def __init__(self, path: str) -> None:
         self._path = path
 
     def stash(self, *args):
@@ -58,8 +61,7 @@ class _GitProxy(object):
 class GitHead(object):
     """A local git branch that can be checked out."""
 
-    def __init__(self, path, name):
-        # type: (str, str) -> None
+    def __init__(self, path: str, name: str) -> None:
         self._path = path
         self.name = name
 
@@ -71,8 +73,7 @@ class GitHead(object):
 class GitRepository(object):
     """Pure-Python git repository wrapper backed by dulwich."""
 
-    def __init__(self, environ, path):
-        # type: (Any, PathType) -> None
+    def __init__(self, environ: "Any", path: "PathType") -> None:
         self._environ = environ
         self._path = str(path)
         self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
@@ -88,11 +89,11 @@ class GitRepository(object):
     def __exit__(self, *args, **kwargs):
         self.close()
 
-    # -- locking (§12.8) ---------------------------------------------------
+    # -- locking ( ---------------------------------------------------
 
     @contextlib.contextmanager
     def _write_lock(self):
-        # Serialise write operations on this repository path (v2 §9.3: uses the
+        # Serialise write operations on this repository path (uses the
         # injected environ's LockManager, not the module-level global).
         key = "git-repo:" + utils.get_hash(self._path, "sha256")
         with self._environ.locks.process_lock(key):
@@ -117,8 +118,8 @@ class GitRepository(object):
     def add(self, *paths):
         porcelain.add(self._path, list(paths) or None)
 
-    def commit(self, message, author=None, committer=None, all=False):
-        # type: (str, str, str, bool) -> str
+    def commit(self, message: str, author: str = None, committer: str = None,
+               all: bool = False) -> str:
         with self._write_lock():
             sha = porcelain.commit(
                 self._path,
@@ -134,8 +135,7 @@ class GitRepository(object):
             refspecs = branch and self._branch_ref(branch).decode()
             porcelain.push(self._path, remote_location, refspecs, force=force)
 
-    def create_head(self, branch):
-        # type: (str) -> GitHead
+    def create_head(self, branch: str) -> "GitHead":
         with self._write_lock():
             branch_ref = self._branch_ref(branch)
             target = self._remote_branch_target(branch)
@@ -147,10 +147,9 @@ class GitRepository(object):
             porcelain.branch_create(self._path, branch, target)
             return GitHead(self._path, branch)
 
-    # -- sync (§12.3) ------------------------------------------------------
+    # -- sync ( ------------------------------------------------------
 
-    def sync(self, policy=GitSyncPolicy.FAST_FORWARD_ONLY):
-        # type: (str) -> None
+    def sync(self, policy: str = GitSyncPolicy.FAST_FORWARD_ONLY) -> None:
         """Reconcile the current branch with its remote per to ``policy``."""
         with self._write_lock():
             if policy == GitSyncPolicy.FAIL_IF_DIRTY and self.is_dirty():
@@ -168,8 +167,7 @@ class GitRepository(object):
                 if stashed:
                     self.git.stash("pop")
 
-    def pull(self, reset=False):
-        # type: (bool) -> None
+    def pull(self, reset: bool = False) -> None:
         """Legacy entry point; maps to :meth:`sync` with the equivalent policy."""
         self.sync(policy=GitSyncPolicy.RESET_TO_REMOTE if reset
                   else GitSyncPolicy.FAST_FORWARD_ONLY)
@@ -206,8 +204,7 @@ class GitRepository(object):
 
     # -- ref helpers -------------------------------------------------------
 
-    def _branch_ref(self, branch):
-        # type: (str) -> bytes
+    def _branch_ref(self, branch: str) -> bytes:
         return b"refs/heads/" + branch.encode()
 
     def _current_branch_ref(self):
@@ -221,11 +218,11 @@ class GitRepository(object):
         remote_ref = b"refs/remotes/origin/" + branch.encode()
         return self._repo.refs.as_dict().get(remote_ref)
 
-    # -- clone (§12.2 atomic) ---------------------------------------------
+    # -- clone ( atomic) ---------------------------------------------
 
     @classmethod
-    def clone(cls, environ, url, repo_path=None, branch=None):
-        # type: (Any, str, str, str) -> "GitRepository"
+    def clone(cls, environ: "Any", url: str, repo_path: str = None,
+              branch: str = None) -> "GitRepository":
         """Shallow-clone, atomically: clone to staging -> rename (spec §12.2).
 
         An interrupted clone leaves only the staging dir behind, never a
