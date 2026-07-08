@@ -50,7 +50,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol, Tuple, runtime_c
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
 from ..agent.runner import AgentRunner
-from ..errors import SwarmError, SwarmLimitExceededError
+from ..errors import SwarmConflictError, SwarmError, SwarmLimitExceededError
 from ..run.context import RunContext
 from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
 from ..session.models import SessionRecord, SessionStatus
@@ -175,6 +175,54 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
     return depth
 
 
+async def _retry_fencing_conflict_once(
+    ctx: SwarmExecutionContext, claimed: SwarmTask, *,
+    still_owned: "Callable[[SwarmTask], bool]",
+    op: "Callable[[int], Awaitable[SwarmTask]]",
+) -> "SwarmTask | None":
+    """Run a fenced SwarmTask write (``op(expected_version)`` -- a partial of
+    set_active_run/complete_task/fail_task with the version filled in) and
+    classify a ``SwarmConflictError`` instead of treating every conflict the
+    same:
+
+    * Re-read the task. If ``still_owned(fresh)`` says this call still holds
+      it, the conflict was just a stale ``expected_version`` (e.g. a lease
+      renewal bumped it while the worker was in flight) -- retry ``op()``
+      ONCE with the fresh version. This is a retry of the cheap persistence
+      write, never of the worker itself.
+    * If ownership has genuinely moved on (reclaimed after lease expiry, or
+      cancelled) -- or the retry with the fresh version ALSO conflicts --
+      return None so the caller discards this attempt without mistaking the
+      conflict for a worker failure.
+
+    Any exception that is not a SwarmConflictError (e.g. SwarmTaskNotFoundError,
+    a raw storage error) is not a fencing conflict this helper knows how to
+    interpret and is left to propagate to the caller."""
+    try:
+        return await op(claimed.version)
+    except asyncio.CancelledError:
+        raise
+    except SwarmConflictError as exc:
+        current = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
+        fresh = next((t for t in current if t.id == claimed.id), None)
+        if fresh is None or not still_owned(fresh):
+            _LOGGER.warning(
+                "swarm task %s lost a fencing race (reclaimed or "
+                "cancelled) -- discarding: %s", claimed.id, exc,
+            )
+            return None
+        try:
+            return await op(fresh.version)
+        except asyncio.CancelledError:
+            raise
+        except SwarmConflictError as retry_exc:
+            _LOGGER.warning(
+                "swarm task %s lost a fencing race on retry with the "
+                "fresh version -- discarding: %s", claimed.id, retry_exc,
+            )
+            return None
+
+
 async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_retries: int = 0) -> "RunResult | None":
     """Run a single SwarmTask against its assigned worker agent.
 
@@ -241,24 +289,21 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # version) so SwarmRunner.cancel can locate the in-flight child Run.
         child_run_id = str(uuid.uuid4())
         # set_active_run carries the same fencing semantics as complete_task
-        # below (see that comment): a conflict here means another caller
-        # already reclaimed or cancelled this task BEFORE this attempt even
-        # started the worker -- not a worker failure, so it must not retry
-        # the worker or call fail_task() either. Nothing has run yet, so
-        # there is no result to discard -- just stop.
-        try:
-            claimed = await ctx.swarm_store.set_active_run(
-                claimed.id, child_run_id, expected_version=claimed.version
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning(
-                "swarm task %s lost a fencing race in set_active_run "
-                "(reclaimed or cancelled) before attempt %d started: %s",
-                claimed.id, base_attempt + _attempt, exc,
-            )
+        # below: a genuine conflict (ownership moved to a reclaim or cancel)
+        # means this attempt hasn't even started the worker yet, so there is
+        # no result to discard -- just stop. A conflict where this call still
+        # holds the task (status still CLAIMED -- e.g. a stale version from a
+        # lease renewal) is retried once with the fresh version instead.
+        claimed_after = await _retry_fencing_conflict_once(
+            ctx, claimed,
+            still_owned=lambda t: t.status is SwarmTaskStatus.CLAIMED,
+            op=lambda v: ctx.swarm_store.set_active_run(
+                claimed.id, child_run_id, expected_version=v,
+            ),
+        )
+        if claimed_after is None:
             return None
+        claimed = claimed_after
 
         scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
         now = _now()
@@ -322,26 +367,27 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             ))
             continue
 
-        # The worker succeeded. A fencing conflict here means someone else
-        # already superseded this task (reclaim after lease expiry, or
-        # cancel) -- this attempt's result is moot, not failed, so it must
-        # not trigger a retry or fail_task(). log-and-continue matches the
-        # best-effort conflict handling SwarmRunner already uses elsewhere
-        # for the same class of race.
-        try:
-            await ctx.swarm_store.complete_task(
-                claimed.id, result, expected_version=claimed.version,
+        # The worker succeeded. A genuine fencing conflict here (ownership
+        # moved to a reclaim or cancel) means this attempt's result is moot,
+        # not failed, so it must not trigger a retry or fail_task(). A
+        # conflict where this call still owns the task (status still CLAIMED
+        # AND active_run_id still this attempt's -- e.g. a stale version from
+        # a lease renewal) is retried once with the fresh version instead of
+        # being discarded, since the worker's result is already in hand.
+        completed = await _retry_fencing_conflict_once(
+            ctx, claimed,
+            still_owned=lambda t: (
+                t.status is SwarmTaskStatus.CLAIMED
+                and t.active_run_id == child_run_id
+            ),
+            op=lambda v: ctx.swarm_store.complete_task(
+                claimed.id, result, expected_version=v,
                 active_run_id=child_run_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning(
-                "worker for swarm task %s succeeded but complete_task lost "
-                "a fencing race (reclaimed or cancelled) -- discarding this "
-                "attempt's result: %s", claimed.id, exc,
-            )
+            ),
+        )
+        if completed is None:
             return None
+        claimed = completed
 
         try:
             await ctx.swarm_store.record_attempt(replace(
@@ -362,10 +408,25 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             )
         return result
 
-    await ctx.swarm_store.fail_task(claimed.id, RunErrorInfo(
-        error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",
-        message=str(last_exc) if last_exc is not None else "",
-    ), expected_version=claimed.version, active_run_id=child_run_id)
+    # Every attempt's worker call genuinely failed -- mark the task FAILED.
+    # A fencing conflict here uses the same reclassify-and-retry-once policy
+    # as complete_task above: a stale version while still owning the task is
+    # retried once; ownership genuinely lost is discarded (the reclaiming or
+    # cancelling caller owns the task's real terminal status now, so this
+    # call must not overwrite it).
+    await _retry_fencing_conflict_once(
+        ctx, claimed,
+        still_owned=lambda t: (
+            t.status is SwarmTaskStatus.CLAIMED
+            and t.active_run_id == child_run_id
+        ),
+        op=lambda v: ctx.swarm_store.fail_task(
+            claimed.id, RunErrorInfo(
+                error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",
+                message=str(last_exc) if last_exc is not None else "",
+            ), expected_version=v, active_run_id=child_run_id,
+        ),
+    )
     return None
 
 
