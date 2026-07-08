@@ -112,32 +112,17 @@ class ConfigMigration(object):
         "CONTAINER.CACHE.INSTALLED_CONTAINERS": "container.installed_containers",
         "CONTAINER.CACHE.INSTALLED_REPOS": "container.installed_repos",
         "CONTAINER.CACHE.RUNNING_CONTAINERS": "container.running_containers",
-        # -- bare-key fallback (only for unambiguous single-section configs) --
+        # -- bare-key fallback: only genuinely global core keys. Section-
+        # sensitive keys (HOST, DOCKER_*, COMPOSE_*, SERVICE_*, FLARE_*,
+        # INSTALLED_*) are deliberately NOT bare-mapped -- they must use their
+        # full SECTION.KEY entry. Otherwise a stray MAIN.CACHE.HOST could be
+        # pulled onto container.host via the (unambiguous) bare fallback.
         "DEBUG": "debug",
         "DATA_PATH": "data.path",
         "TEMP_PATH": "temp.path",
         "STORAGE_PATH": "storage.path",
         "DEFAULT_USER_AGENT": "download.user_agent",
         "DEFAULT_WAN_IP_URL": "network.wan_ip_url",
-        "HOST": "container.host",
-        "DOCKER_HOST": "container.docker_host",
-        "COMPOSE_PROJECT_NAME": "container.compose_project_name",
-        "SERVICE_RESTART_POLICY": "container.service_restart_policy",
-        "SERVICE_LOG_DRIVER": "container.service_log_driver",
-        "SERVICE_LOG_MAX_SIZE": "container.service_log_max_size",
-        "DOCKER_USER": "container.docker_user",
-        "DOCKER_UID": "container.docker_uid",
-        "DOCKER_GID": "container.docker_gid",
-        "DOCKER_TYPE": "container.docker_type",
-        "DOCKER_APP_PATH": "container.docker_app_path",
-        "DOCKER_APP_DATA_PATH": "container.docker_app_data_path",
-        "DOCKER_USER_DATA_PATH": "container.docker_user_data_path",
-        "DOCKER_DOWNLOAD_PATH": "container.docker_download_path",
-        "FLARE_DOMAIN": "container.flare.domain",
-        "FLARE_DOAMIN": "container.flare.domain",
-        "INSTALLED_CONTAINERS": "container.installed_containers",
-        "INSTALLED_REPOS": "container.installed_repos",
-        "RUNNING_CONTAINERS": "container.running_containers",
     }
 
     def _log(self, level: str, msg: str) -> None:

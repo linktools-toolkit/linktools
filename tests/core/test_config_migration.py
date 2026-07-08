@@ -192,6 +192,25 @@ def test_secret_entry_has_no_raw_value_in_report(setup):
     assert "value" not in entry
 
 
+def test_main_cache_host_not_mapped_to_container_host_by_default(setup):
+    # A section-sensitive bare key (HOST) is NOT bare-mapped by default, so a
+    # stray MAIN.CACHE.HOST must NOT be pulled onto container.host -- it is
+    # preserved under legacy.<section>.<key> instead.
+    store, old, _ = setup
+    _write_sections(old, {"MAIN.CACHE": {"HOST": "main-host"}})
+    ConfigMigration(store).migrate(old)
+    assert "container.host" not in store
+    assert store.get("legacy.main.cache.host") == "main-host"
+
+
+def test_container_host_mapped_only_via_full_key(setup):
+    # The container HOST still migrates correctly when addressed by its full key.
+    store, old, _ = setup
+    _write_sections(old, {"CONTAINER.CACHE": {"HOST": "c-host"}})
+    ConfigMigration(store).migrate(old)
+    assert store.get("container.host") == "c-host"
+
+
 # --------------------------------------------------------------------------- #
 # backup (§4.6: never overwrite) + rollback
 # --------------------------------------------------------------------------- #
