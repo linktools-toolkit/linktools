@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
     from typing import Any
     from ._environ import BaseEnviron
+    from ._tools_installer import ToolInstaller
     from linktools.types import PathType, TimeoutType
     from linktools.runtime import Process
 
@@ -454,73 +455,12 @@ class Tool(metaclass=ToolMeta):
             tool = self._tools[dependency]
             tool.prepare()
 
-        # download and extract (manifest in staging BEFORE target)
+        # ToolInstaller is the single install orchestrator (fix-plan §3.3.3):
+        # Tool.prepare keeps dependency resolution, the stub, and chmod, but
+        # delegates the download/extract/manifest/active transaction. The lock,
+        # corrupt-move rollback, and manifest-in-staging live there now.
         if not self.exists:
-            # Tool-level lock (fix-plan §2.3.3): serializes concurrent
-            # installs of the same tool across processes. Dependencies are
-            # prepared above, outside this lock.
-            with self._tools.environ.locks.process_lock("tool:" + self.name):
-                if not self.exists:  # re-check under lock; another process may have installed it
-                    self._tools.logger.info(f"Download {self}: {self.download_url}")
-                    import uuid as _uuid
-                    from .._download import DownloadRequest
-                    temp_dir = self._tools.environ.get_temp_path("tools", "cache")
-                    temp_dir.mkdir(parents=True, exist_ok=True)
-                    temp_path = str(temp_dir / utils.guess_file_name(self.download_url))
-                    # DownloadManager owns atomic landing / resume / hash
-                    # validation; call it directly (fix-plan §2.3.1). sha256/size
-                    # are passed only when the tool definition declares them.
-                    self._tools.environ.downloads.download(DownloadRequest(
-                        url=self.download_url, destination=temp_path,
-                        sha256=self.get("sha256", None) or None,
-                        size=self.get("size", None) or None,
-                    ))
-
-                    # staging dir — everything happens here before atomic move.
-                    staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
-                    os.makedirs(staging, exist_ok=True)
-                    corrupt = None
-                    try:
-                        if not utils.is_empty(self.unpack_path):
-                            self._tools.logger.debug(f"Extract {self} to {staging}")
-                            utils.safe_extract(temp_path, staging)
-                            os.remove(temp_path)
-                        else:
-                            target_in_staging = os.path.join(
-                                staging,
-                                os.path.relpath(self.absolute_path, self.root_path))
-                            os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
-                            shutil.move(temp_path, target_in_staging)
-
-                        # write manifest INSIDE staging before move.
-                        self._write_manifest(staging)
-
-                        # Swap an existing (incomplete) root aside, then atomically
-                        # put staging in its place. If the final move fails, restore
-                        # the old dir so the tool stays usable (fix-plan §2.3.2).
-                        if os.path.exists(self.root_path):
-                            corrupt = self._make_corrupt_path(self.root_path)
-                            os.replace(self.root_path, corrupt)
-                        try:
-                            os.replace(staging, self.root_path)
-                            staging = None  # consumed
-                        except BaseException:
-                            if not os.path.exists(self.root_path) and corrupt \
-                                    and os.path.exists(corrupt):
-                                os.replace(corrupt, self.root_path)
-                                corrupt = None
-                            raise
-                        if corrupt:
-                            shutil.rmtree(corrupt, ignore_errors=True)
-                    except BaseException:
-                        if staging and os.path.exists(staging):
-                            shutil.rmtree(staging, ignore_errors=True)
-                        if corrupt and os.path.exists(corrupt):
-                            shutil.rmtree(corrupt, ignore_errors=True)
-                        raise
-
-                    # Active pointer after successful activation.
-                    self._set_active()
+            self._tools.installer.install_tool(self)
 
         if not os.access(self._stub.path, os.X_OK):
             self._tools.logger.debug(f"Create {self._stub}")
@@ -676,6 +616,16 @@ class Tools(object):
         self.logger = environ.get_logger("tools")
         self.config = environ.wrap_config(env_prefix="")
         self.all = self._parse_items(config)
+
+    @cached_property
+    def installer(self) -> "ToolInstaller":
+        """The single install orchestrator (fix-plan §3.3.3).
+
+        Tool.prepare delegates its install transaction here. base_dir is the
+        tools data dir (the main path's install root).
+        """
+        from ._tools_installer import ToolInstaller
+        return ToolInstaller(self.environ, self.environ.get_data_path("tools"))
 
     @cached_property
     def stub_path(self) -> "pathlib.Path":

@@ -3,17 +3,18 @@
 
 """ToolInstaller: transactional managed-tool installation (spec §10.6/§10.8/§10.9).
 
-STATUS (fix-plan §5): this is a STANDALONE / EXPERIMENTAL module. It is NOT the
-current Tools main path. The real business install path is ``Tool.prepare`` in
-``core/_tools.py`` (which composes DownloadManager + safe_extract + staging +
-atomic move + manifest + active pointer directly). Do NOT add new business code
-that depends on ``ToolInstaller`` -- it is kept here as a candidate future main
-path and is exercised only by its own unit tests.
+STATUS: this module IS the install orchestrator for the Tools main path.
+``Tool.prepare`` (in ``core/_tools.py``) delegates its install transaction to
+``ToolInstaller.install_tool(tool)`` -- the download/extract/manifest/active/
+lock/corrupt-move logic lives here, not duplicated in Tool. The on-disk layout
+remains the Tool's own (config-resolved ``versions/<ver>-<plat>-<arch>/`` tree
++ ``active.json``); only the install *mechanism* is centralised (fix-plan §2.5:
+no layout change). Behaviour is locked by ``tests/core/test_tools_prepare.py``.
 
-It will only become the main path after the Tool.prepare characterization
-harness (fix-plan §5.4: adb/jadx/apktool/dependency/executable_cmdline/active
-fake configs + clear/stub/chmod tests) exists, so the layout switch can be made
-without breaking real tool resolution.
+The ``install(definition)`` method (ToolDefinition/registry-based, with the
+``base/<name>/<version>/`` layout below) is the standalone/experimental path --
+not wired into the business Tools flow. It is kept for a future layout
+unification and is exercised only by its own unit tests.
 
 Composes the persistence foundation: DownloadManager (download+validate),
 utils.safe_extract (§10.7), LockManager (install lock), utils.atomic_write
@@ -258,6 +259,82 @@ class ToolInstaller(object):
 
             self._set_active(name, version)
             return ToolInstallation(target, name, version, manifest)
+
+    # -- main-path install: Tool delegation (fix-plan §3.3.3) -------------
+
+    def install_tool(self, tool):
+        """Install a (legacy) ``Tool`` object into its config-resolved layout.
+
+        ``Tool.prepare`` delegates its install here so ToolInstaller is the
+        single install orchestrator for the main path. The on-disk layout,
+        manifest, and active.json format remain the Tool's own (the config-
+        resolved ``versions/<ver>-<plat>-<arch>/`` tree) -- only the install
+        *mechanism* is centralised here. Behaviour is identical to the previous
+        in-line Tool.prepare block (locked by test_tools_prepare.py).
+        """
+        import uuid as _uuid
+        from .._download import DownloadRequest
+
+        env = tool._tools.environ
+        name = tool.name
+        with env.locks.process_lock("tool:" + name):
+            if tool.exists:
+                return  # another process installed it, or already present
+            tool._tools.logger.info("Download %s: %s" % (tool, tool.download_url))
+            temp_dir = env.get_temp_path("tools", "cache")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = str(temp_dir / utils.guess_file_name(tool.download_url))
+            # DownloadManager owns atomic landing / resume / hash validation;
+            # sha256/size are passed only when the tool definition declares them.
+            env.downloads.download(DownloadRequest(
+                url=tool.download_url, destination=temp_path,
+                sha256=tool.get("sha256", None) or None,
+                size=tool.get("size", None) or None,
+            ))
+
+            # staging dir -- everything happens here before the atomic move.
+            staging = "%s.staging-%s" % (tool.root_path, _uuid.uuid4().hex[:8])
+            os.makedirs(staging, exist_ok=True)
+            corrupt = None
+            try:
+                if not utils.is_empty(tool.unpack_path):
+                    tool._tools.logger.debug("Extract %s to %s" % (tool, staging))
+                    utils.safe_extract(temp_path, staging)
+                    os.remove(temp_path)
+                else:
+                    target_in_staging = os.path.join(
+                        staging,
+                        os.path.relpath(tool.absolute_path, tool.root_path))
+                    os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
+                    shutil.move(temp_path, target_in_staging)
+
+                # manifest inside staging before the move (Tool's format).
+                tool._write_manifest(staging)
+
+                # Swap an existing (incomplete) root aside, atomically put
+                # staging in place, restore on failure (fix-plan §2.3.2).
+                if os.path.exists(tool.root_path):
+                    corrupt = tool._make_corrupt_path(tool.root_path)
+                    os.replace(tool.root_path, corrupt)
+                try:
+                    os.replace(staging, tool.root_path)
+                    staging = None  # consumed
+                except BaseException:
+                    if not os.path.exists(tool.root_path) and corrupt \
+                            and os.path.exists(corrupt):
+                        os.replace(corrupt, tool.root_path)
+                        corrupt = None
+                    raise
+                if corrupt:
+                    shutil.rmtree(corrupt, ignore_errors=True)
+
+                tool._set_active()
+            except BaseException:
+                if staging and os.path.exists(staging):
+                    shutil.rmtree(staging, ignore_errors=True)
+                if corrupt and os.path.exists(corrupt):
+                    shutil.rmtree(corrupt, ignore_errors=True)
+                raise
 
     def active_version(self, name: str) -> "str | None":
         pointer = self._base / name / "active.json"
