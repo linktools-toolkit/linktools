@@ -372,16 +372,23 @@ class SqlAlchemySwarmStore:
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
     ) -> SwarmTask:
-        # No status transition guard: the strategy calls this with the freshly-
-        # minted child RunRecord id right after claim_task (task is CLAIMED).
-        # Optimistic concurrency on expected_version catches a concurrent
-        # reclaim/claim race. UPDATE ... WHERE version=:expected makes the
-        # race-decider atomic (rowcount == 0 -> conflict).
+        # Status guard added alongside expected_version (mirrors
+        # complete_task/fail_task's own fencing): the strategy calls this
+        # with the freshly-minted child RunRecord id right after claim_task
+        # (task is CLAIMED). version alone is sound for pure optimistic
+        # concurrency -- every mutating write (claim_task, complete_task,
+        # fail_task, reclaim_expired_tasks, renew_lease) bumps it, so a
+        # version match already implies no other write interleaved. The
+        # explicit status == CLAIMED check is defense-in-depth (a clearer
+        # SwarmConflictError message, and a second line of defense if some
+        # future write path ever forgot to bump version) rather than a fix
+        # for a currently reachable race.
         async def _do(session):
             result = await session.execute(
                 update(SwarmTaskRow)
                 .where(SwarmTaskRow.id == task_id)
                 .where(SwarmTaskRow.version == expected_version)
+                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
                 .values(
                     active_run_id=run_id,
                     version=SwarmTaskRow.version + 1,
@@ -389,15 +396,19 @@ class SqlAlchemySwarmStore:
                 )
             )
             if result.rowcount == 0:
-                # Either missing or version mismatch -- read to discriminate.
+                # Missing, version mismatch, or not CLAIMED -- read to discriminate.
                 query_result = await session.execute(
                     select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
                     raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                if row.version != expected_version:
+                    raise SwarmConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
                 raise SwarmConflictError(
-                    f"expected version {expected_version}, found {row.version}"
+                    f"task {task_id} is not claimed (status={row.status})"
                 )
             query_result = await session.execute(
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)

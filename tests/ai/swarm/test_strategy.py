@@ -1327,3 +1327,114 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
 
     after = swarm_store._tasks["task-1"]
     assert after.status is SwarmTaskStatus.SUCCEEDED
+
+
+def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
+    """Shared setup for the propagation tests below: one CLAIMED task, one
+    worker agent backed by ``model_fn``, wired into a fresh SwarmExecutionContext."""
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.models import AgentSpec
+    from linktools.ai.agent.spec import PromptSpec
+
+    swarm_store = swarm_store if swarm_store is not None else _MemorySwarmStore()
+    registry = ModelRegistry()
+    registry.register("worker-model", model=FunctionModel(model_fn))
+    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    worker_spec = AgentSpec(
+        id="worker-a", name="worker-a",
+        model=ModelPolicy(primary="worker-model"),
+        instructions=PromptSpec(instructions="you work"),
+        output_schema=str,
+    )
+    compiled = asyncio.run(compiler.compile(worker_spec))
+
+    asyncio.run(swarm_store.create_run(SwarmRun(
+        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
+        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
+        created_at=_NOW, updated_at=_NOW,
+    )))
+    spec = _make_spec(
+        kind="coordinator_delegation", limits=_limits(),
+        agents=(AgentRef("coord"), AgentRef("worker-a")),
+        coordinator=AgentRef("coord"),
+    )
+    ctx = _build_ctx(
+        tmp_path, agents={"coord": compiled, "worker-a": compiled},
+        spec=spec, swarm_store=swarm_store,
+    )
+    _seed_worker_task(swarm_store)
+    return ctx, swarm_store
+
+
+def test_run_task_complete_task_not_found_propagates(tmp_path):
+    """SwarmTaskNotFoundError from complete_task() is not a fencing conflict
+    _retry_fencing_conflict_once knows how to interpret (a task genuinely
+    disappearing is not normal ownership transfer -- more likely data
+    corruption or a wrong storage root) -- it must propagate out of
+    _run_task, not be swallowed as a discarded attempt."""
+    from linktools.ai.errors import SwarmTaskNotFoundError
+    from linktools.ai.swarm.strategy import _run_task
+
+    def _model_fn(messages, info):
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    ctx, swarm_store = _worker_ctx_and_task(tmp_path, _model_fn)
+
+    async def _not_found(task_id, result, *, expected_version, active_run_id=None):
+        raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+
+    swarm_store.complete_task = _not_found
+
+    with pytest.raises(SwarmTaskNotFoundError):
+        asyncio.run(_run_task(
+            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
+        ))
+
+
+def test_run_task_complete_task_storage_error_propagates(tmp_path):
+    """A raw storage/connection error from complete_task() must not be
+    mistaken for a fencing conflict and silently turned into 'this task was
+    reclaimed' -- that would let a real outage masquerade as a benign
+    ownership race and let the swarm's aggregate silently miss a task whose
+    work actually succeeded. It must propagate out of _run_task."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    def _model_fn(messages, info):
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    ctx, swarm_store = _worker_ctx_and_task(tmp_path, _model_fn)
+
+    async def _db_down(task_id, result, *, expected_version, active_run_id=None):
+        raise RuntimeError("db down")
+
+    swarm_store.complete_task = _db_down
+
+    with pytest.raises(RuntimeError, match="db down"):
+        asyncio.run(_run_task(
+            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
+        ))
+
+
+def test_run_task_set_active_run_storage_error_propagates(tmp_path):
+    """Same boundary as complete_task above, at the set_active_run() call
+    site: a raw storage error is not a fencing conflict and must propagate,
+    not be discarded as though the task had merely been reclaimed."""
+    from linktools.ai.swarm.strategy import _run_task
+
+    def _model_fn(messages, info):
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    ctx, swarm_store = _worker_ctx_and_task(tmp_path, _model_fn)
+
+    async def _db_down(task_id, run_id, *, expected_version):
+        raise RuntimeError("db down")
+
+    swarm_store.set_active_run = _db_down
+
+    with pytest.raises(RuntimeError, match="db down"):
+        asyncio.run(_run_task(
+            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
+        ))

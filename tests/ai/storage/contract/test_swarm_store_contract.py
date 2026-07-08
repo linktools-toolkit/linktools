@@ -396,6 +396,31 @@ def test_set_active_run_missing_task_raises_not_found(store_factory):
     asyncio.run(_run())
 
 
+def test_set_active_run_requires_claimed_status(store_factory):
+    """set_active_run must reject a task that is no longer CLAIMED even when
+    the caller's expected_version happens to be correct -- e.g. the task was
+    completed by a racing writer between this caller's last read and this
+    call. Mirrors complete_task/fail_task's own status fencing."""
+    store = store_factory()
+
+    async def _run():
+        await store.create_run(make_run())
+        await store.create_task(make_task(task_id="t-1"))
+        claimed = await store.claim_task("swarm-1", "agent-1")
+        assert claimed is not None
+        completed = await store.complete_task(
+            "t-1", RunResult(output="done"), expected_version=claimed.version,
+        )
+        # completed.version is the CORRECT current version -- but the task
+        # is now SUCCEEDED, not CLAIMED, so set_active_run must still reject.
+        with pytest.raises(SwarmConflictError):
+            await store.set_active_run(
+                "t-1", "child-1", expected_version=completed.version,
+            )
+
+    asyncio.run(_run())
+
+
 def test_set_active_run_roundtrips_through_persistence(store_factory):
     """active_run_id round-trips through the store's serialization layer (JSON
     for FileSwarmStore, SQL column for SqlAlchemySwarmStore). Verified by

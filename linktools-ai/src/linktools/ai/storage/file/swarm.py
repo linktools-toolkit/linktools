@@ -404,10 +404,13 @@ class FileSwarmStore:
     def _set_active_run_sync(
         self, task_id: str, run_id: str, *, expected_version: int
     ) -> SwarmTask:
-        # No transition guard on status: the strategy calls this right after a
-        # successful claim_task (task is CLAIMED) with the freshly-minted child
-        # RunRecord id. Optimistic concurrency on expected_version catches a
-        # concurrent reclaim/claim race (the loser sees a stale version).
+        # Status guard added alongside expected_version (mirrors
+        # complete_task/fail_task's own fencing below): the strategy calls
+        # this right after a successful claim_task (task is CLAIMED) with the
+        # freshly-minted child RunRecord id. version alone already gives
+        # sound optimistic concurrency here -- every mutating write bumps it,
+        # so a version match implies no other write interleaved -- but the
+        # explicit status check is defense-in-depth and a clearer error.
         path = self._task_path(task_id)
         if not path.exists():
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
@@ -415,6 +418,10 @@ class FileSwarmStore:
         if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
+            )
+        if current.status != SwarmTaskStatus.CLAIMED:
+            raise SwarmConflictError(
+                f"task {task_id} is not claimed (status={current.status.value})"
             )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         updated = SwarmTask(
