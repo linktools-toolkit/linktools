@@ -179,6 +179,8 @@ class HttpTransport(DownloadTransport):
                 if exc.code == 416 and have > 0 and part.exists():
                     part_size = part.stat().st_size
                     expected = (meta or {}).get("size")
+                    if expected is None:
+                        expected = request.size  # fall back to the request's declared size
                     if expected is not None and part_size >= expected:
                         return  # Part is complete; nothing more to download.
                     # incomplete + 416 → restart without Range (not throw).
@@ -301,9 +303,8 @@ class DownloadManager(object):
             part = destination.parent / (destination.name + ".part")
             meta: "dict[str, Any]" = dict(resume_ns.get(request.lock_key, {}) or {})
 
-            #  retry: transport/network errors are retried with exponential
-            # backoff (cap 8s); validation failures are not retried here (a
-            # hash-mismatch retry-once refinement is a follow-up).
+            # retry: transport/network errors are retried with exponential
+            # backoff (cap 8s); hash-mismatch is retried once below.
             attempts = max(1, int(request.max_retries or 1))
             last_error: "DownloadError | None" = None
             for attempt in range(attempts):

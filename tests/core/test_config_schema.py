@@ -219,6 +219,19 @@ def _config(allow_unknown=True):
                   sources=[RuntimeOverrideSource(), DefaultSource(schema)])
 
 
+def test_keys_include_persistent_values(tmp_path):
+    # config.persist() writes through PersistentSource; keys() must list it
+    # (it used to miss PersistentSource because it only checked _data/_ns).
+    from linktools.core import ConfigStore, PersistentSource
+    store = ConfigStore(tmp_path / "settings.json")
+    schema = ConfigSchema(allow_unknown=True)
+    config = Config(environ=None, schema=schema,
+                    sources=[PersistentSource(store, "main"), DefaultSource(schema)])
+    config.persist("MY_KEY", "value")
+    assert config.get("MY_KEY") == "value"
+    assert "MY_KEY" in config.keys()
+
+
 def test_get_missing_without_default_raises():
     cfg = _config()
     with pytest.raises(ConfigNotFoundError):

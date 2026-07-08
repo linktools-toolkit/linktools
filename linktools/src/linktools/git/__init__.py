@@ -29,5 +29,10 @@ from .progress import GitProgressStream
 try:
     from .repository import GitRepository, GitHead
 except ImportError as _exc:  # dulwich not installed
+    # Only swallow a missing dulwich; re-raise internal ImportErrors so a real
+    # bug in repository.py is not masked as "optional dependency absent".
+    _missing = (getattr(_exc, "name", "") or "").split(".", 1)[0]
+    if _missing != "dulwich":
+        raise
     GitRepository = missing_optional_class("GitRepository", "git", _exc)
     GitHead = missing_optional_class("GitHead", "git", _exc)

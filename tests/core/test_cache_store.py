@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Tests for the SQLite CacheStore (spec §7.2-7.7, §7.12).
+"""Tests for the SQLite CacheStore now used by Environment.cache.
 
-This is the new transactional local-store infrastructure (PR 05); it is not yet
-wired into ``environ.cache`` and does not replace ``FileCache`` -- that
-migration + deletion is PR 06.
+CacheStore (merged into linktools/cache.py alongside the legacy FileCache) backs
+``environ.cache``; FileCache remains as a legacy API in linktools.cache.
 """
 import threading
 

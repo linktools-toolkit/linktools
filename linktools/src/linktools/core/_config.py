@@ -610,6 +610,14 @@ class PersistentSource(ConfigSource):
     def delete(self, key: str) -> bool:
         return self._store.delete(self._full(key))
 
+    def keys(self) -> "list[str]":
+        """List this namespace's keys (store key minus the namespace prefix)."""
+        result = []
+        for full in self._store.keys():
+            if not self._prefix or full.startswith(self._prefix):
+                result.append(full[len(self._prefix):])
+        return result
+
     def reload(self) -> None:
         self._store.reload()
 
@@ -945,6 +953,14 @@ class Config:
         for name in self._schema._fields:
             known.add(name)
         for source in self._sources:
+            # Prefer a source-level keys() (PersistentSource knows its namespace
+            # prefix); fall back to introspecting _data/_ns for older sources.
+            keys_fn = getattr(source, "keys", None)
+            if callable(keys_fn):
+                try:
+                    known.update(keys_fn())
+                except Exception:
+                    pass
             data = getattr(source, "_data", None)
             if isinstance(data, dict):
                 known.update(data.keys())

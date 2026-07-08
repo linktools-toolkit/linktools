@@ -37,4 +37,9 @@ from .hostkey import SSHHostKeyPolicy, host_key_policy_class
 try:
     from .client import SSHClient
 except ImportError as _exc:  # paramiko/scp not installed
+    # Only swallow a missing paramiko/scp; re-raise internal ImportErrors so a
+    # real bug in client.py is not masked as "optional dependency absent".
+    _missing = (getattr(_exc, "name", "") or "").split(".", 1)[0]
+    if _missing not in ("paramiko", "scp"):
+        raise
     SSHClient = missing_optional_class("SSHClient", "ssh", _exc)
