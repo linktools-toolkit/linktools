@@ -19,7 +19,11 @@ cancel() exploits this -- ``list_tasks(..., status=CLAIMED)`` yields tasks
 whose ``active_run_id`` is the in-flight child Run to cancel.
 
 resume() is explicit and caller-driven (Decision #3): no auto-resume-on-construct.
-cancel() is store-level (Decision #4): no live asyncio task cancellation."""
+cancel() uses RunController when available: it transitions the SwarmRun and
+driving Run to CANCELLING, signals the driving coroutine, and propagates
+cancellation to active child Runs via their active_run_id. When no controller
+or no in-flight registration is available, it falls back to store-only
+CANCELLED transitions for stale/cross-process records."""
 
 import asyncio
 import logging
