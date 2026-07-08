@@ -229,16 +229,34 @@ class Runtime:
           handler then transitions CANCELLING -> CANCELLED via the version
           captured from the preceding step (§6.3).
 
+          If the record is already CANCELLING (a previous cancel() call won
+          the race), skip straight to ``run_controller.cancel(run_id)`` --
+          re-transitioning CANCELLING -> CANCELLING is not a legal edge in
+          ALLOWED_RUN_TRANSITIONS. This makes repeated cancel() calls on the
+          same in-flight run idempotent instead of raising
+          InvalidRunTransitionError on the second call. A concurrent cancel()
+          can also race the CANCELLING transition itself: if it loses to
+          another cancel() between the terminal-status check and the
+          transition call, the ``transition()`` raises RunConflictError; on
+          that specific conflict, re-read the record and, if it is now
+          CANCELLING (the other caller's transition landed first), fall
+          through to the same idempotent ``run_controller.cancel(run_id)``
+          path rather than propagating the conflict. Any other exception
+          (including a fresh terminal or unexpected status) is not ours to
+          interpret and is re-raised as-is.
+
         * **No in-flight task** (stale record from a crashed worker, a test
           seed, or any path where the runner is not driving execute()) --
           there is nothing to actually stop, so the store goes directly to
-          CANCELLED. This is the pre-Phase-3A behavior and preserves every
-          existing seeded-cancel test.
+          CANCELLED. This also covers a stale CANCELLING record with no
+          registered controller entry (e.g. after a process restart). This is
+          the pre-Phase-3A behavior and preserves every existing
+          seeded-cancel test.
 
         Idempotent: a Run already in a terminal status (SUCCEEDED / FAILED /
         CANCELLED) is a no-op. Raises :class:`RunNotFoundError` when the run
         does not exist."""
-        from .errors import RunNotFoundError
+        from .errors import RunConflictError, RunNotFoundError
         from .run.models import RunStatus
 
         record = await self.storage.runs.get(run_id)
@@ -258,10 +276,31 @@ class Runtime:
             and self.run_controller.get_token(run_id) is not None
         )
         if in_flight:
-            await self.storage.runs.transition(
-                run_id, RunStatus.CANCELLING,
-                expected_version=record.version,
-            )
+            if record.status == RunStatus.CANCELLING:
+                # A previous cancel() already moved this in-flight run to
+                # CANCELLING -- re-signal the controller (idempotent) instead
+                # of attempting the illegal CANCELLING -> CANCELLING edge.
+                await self.run_controller.cancel(run_id)
+                return
+
+            try:
+                await self.storage.runs.transition(
+                    run_id, RunStatus.CANCELLING,
+                    expected_version=record.version,
+                )
+            except RunConflictError:
+                fresh = await self.storage.runs.get(run_id)
+                if fresh is None:
+                    raise RunNotFoundError(f"run not found: {run_id}")
+                if fresh.status in (
+                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                ):
+                    return
+                if fresh.status == RunStatus.CANCELLING:
+                    await self.run_controller.cancel(run_id)
+                    return
+                raise
+
             await self.run_controller.cancel(run_id)
         else:
             await self.storage.runs.transition(
