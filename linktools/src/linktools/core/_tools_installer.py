@@ -320,12 +320,15 @@ class ToolInstaller(object):
                 if tool.absolute_path:
                     expected_rel = os.path.relpath(tool.absolute_path, tool.root_path)
                     expected_path = os.path.join(staging, expected_rel)
-                    if not os.path.exists(expected_path):
-                        raise ToolInstallError(
-                            "%s entrypoint missing after install: %s" % (tool, expected_rel))
+                    # Check the boundary BEFORE existence: a malformed target_path
+                    # that resolves outside staging must not be probed (and must
+                    # not be reported as merely "missing").
                     if not utils.is_sub_path(expected_path, staging):
                         raise ToolInstallError(
                             "%s entrypoint escapes staging: %s" % (tool, expected_rel))
+                    if not os.path.exists(expected_path):
+                        raise ToolInstallError(
+                            "%s entrypoint missing after install: %s" % (tool, expected_rel))
 
                 # manifest inside staging before the move (Tool's format).
                 tool._write_manifest(staging)
