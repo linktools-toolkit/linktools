@@ -17,7 +17,7 @@ import pytest
 from linktools._cache_store import CacheStore
 from linktools._download import DownloadManager
 from linktools.core._locks import LockManager
-from linktools.core._tools import Tools, Tool
+from linktools.core._tools import Tools
 from linktools.types import MISSING
 
 
@@ -177,3 +177,66 @@ def test_prepare_recovers_when_root_exists_but_entry_missing(env, tmp_path):
     tool.prepare()
     assert tool.exists                       # good install landed
     assert not (Path(tool.root_path) / "junk").exists()
+
+
+# --------------------------------------------------------------------------- #
+# review follow-up: install_tool delegation + P0/P1 hardening
+# --------------------------------------------------------------------------- #
+
+def test_prepare_delegates_to_installer_and_creates_stub(env, tmp_path):
+    # Tool.prepare delegates install to ToolInstaller.install_tool, then creates
+    # the executable stub on the tools stub path.
+    jar = tmp_path / "mytool.jar"
+    jar.write_bytes(b"body")
+    tools = Tools(env, {"mytool": {"version": "1.0", "download_url": str(jar)}})
+    tool = tools["mytool"]
+    tool.prepare()
+    assert tool.exists
+    assert tool._stub.exists                 # stub generated
+    assert os.access(str(tool._stub.path), os.X_OK)
+
+
+def test_prepare_missing_entrypoint_raises_no_root_no_active(env, tmp_path):
+    # P0: an archive without the expected entrypoint must fail BEFORE the atomic
+    # move -- no root dir, no active pointer left behind.
+    from linktools.errors import ToolInstallError
+    archive = _zip(tmp_path / "pkg.zip", {"other.txt": "x"})  # no bin/run
+    tools = Tools(env, {"mytool": {
+        "version": "1.0", "download_url": str(archive),
+        "unpack_path": ".", "target_path": "bin/run"}})
+    tool = tools["mytool"]
+    with pytest.raises(ToolInstallError):
+        tool.prepare()
+    assert not os.path.exists(tool.root_path)             # not activated
+    active = env.get_data_path("tools", "mytool", "active.json")
+    assert not os.path.exists(str(active))                # no active pointer
+
+
+def test_install_tool_uses_distinct_per_install_download_dirs(env, tmp_path, monkeypatch):
+    # P1: two tools whose URLs share a file name must download into distinct
+    # per-install dirs, never a shared temp path.
+    real_download = DownloadManager.download
+    dests = []
+
+    def spy(self, request, *a, **k):
+        dests.append(request.destination)
+        return real_download(self, request, *a, **k)
+
+    monkeypatch.setattr(DownloadManager, "download", spy)
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    arch_a = _zip(tmp_path / "a" / "pkg.zip", {"bin/run": "AAA"})
+    arch_b = _zip(tmp_path / "b" / "pkg.zip", {"bin/run": "BBB"})
+    tools = Tools(env, {
+        "ta": {"version": "1.0", "download_url": str(arch_a),
+               "unpack_path": ".", "target_path": "bin/run"},
+        "tb": {"version": "1.0", "download_url": str(arch_b),
+               "unpack_path": ".", "target_path": "bin/run"},
+    })
+    tools["ta"].prepare()
+    tools["tb"].prepare()
+    assert dests[0] != dests[1]                                   # distinct dirs
+    assert ".dl-" in str(dests[0]) and ".dl-" in str(dests[1])    # per-uid, not shared
+    assert Path(tools["ta"].absolute_path).read_bytes() == b"AAA"
+    assert Path(tools["tb"].absolute_path).read_bytes() == b"BBB"

@@ -281,32 +281,51 @@ class ToolInstaller(object):
             if tool.exists:
                 return  # another process installed it, or already present
             tool._tools.logger.info("Download %s: %s" % (tool, tool.download_url))
-            temp_dir = env.get_temp_path("tools", "cache")
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = str(temp_dir / utils.guess_file_name(tool.download_url))
-            # DownloadManager owns atomic landing / resume / hash validation;
-            # sha256/size are passed only when the tool definition declares them.
-            env.downloads.download(DownloadRequest(
-                url=tool.download_url, destination=temp_path,
-                sha256=tool.get("sha256", None) or None,
-                size=tool.get("size", None) or None,
-            ))
 
-            # staging dir -- everything happens here before the atomic move.
-            staging = "%s.staging-%s" % (tool.root_path, _uuid.uuid4().hex[:8])
+            uid = _uuid.uuid4().hex[:8]
+            # staging: empty dest for extract/single-file + the atomic swap.
+            staging = "%s.staging-%s" % (tool.root_path, uid)
+            # per-install download dir (review P1): two tools whose URLs share a
+            # file name get distinct download dirs, so they cannot clobber each
+            # other's archive. Kept outside staging so safe_extract's empty-dest
+            # rule still holds.
+            dl_dir = str(env.get_temp_path("tools", "cache", ".dl-" + uid))
             os.makedirs(staging, exist_ok=True)
+            os.makedirs(dl_dir, exist_ok=True)
             corrupt = None
             try:
+                archive_path = os.path.join(dl_dir, utils.guess_file_name(tool.download_url))
+                # DownloadManager owns atomic landing / resume / hash validation;
+                # sha256/size are passed only when declared.
+                env.downloads.download(DownloadRequest(
+                    url=tool.download_url, destination=archive_path,
+                    sha256=tool.get("sha256", None) or None,
+                    size=tool.get("size", None) or None,
+                ))
+
                 if not utils.is_empty(tool.unpack_path):
                     tool._tools.logger.debug("Extract %s to %s" % (tool, staging))
-                    utils.safe_extract(temp_path, staging)
-                    os.remove(temp_path)
+                    utils.safe_extract(archive_path, staging)
                 else:
                     target_in_staging = os.path.join(
                         staging,
                         os.path.relpath(tool.absolute_path, tool.root_path))
                     os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
-                    shutil.move(temp_path, target_in_staging)
+                    shutil.move(archive_path, target_in_staging)
+                shutil.rmtree(dl_dir, ignore_errors=True)  # archive consumed
+
+                # P0: validate the entrypoint exists inside staging BEFORE the
+                # atomic move, so a bad archive (missing/escaping entry) never
+                # becomes an active install. Raises before root is touched.
+                if tool.absolute_path:
+                    expected_rel = os.path.relpath(tool.absolute_path, tool.root_path)
+                    expected_path = os.path.join(staging, expected_rel)
+                    if not os.path.exists(expected_path):
+                        raise ToolInstallError(
+                            "%s entrypoint missing after install: %s" % (tool, expected_rel))
+                    if not utils.is_sub_path(expected_path, staging):
+                        raise ToolInstallError(
+                            "%s entrypoint escapes staging: %s" % (tool, expected_rel))
 
                 # manifest inside staging before the move (Tool's format).
                 tool._write_manifest(staging)
@@ -334,6 +353,8 @@ class ToolInstaller(object):
                     shutil.rmtree(staging, ignore_errors=True)
                 if corrupt and os.path.exists(corrupt):
                     shutil.rmtree(corrupt, ignore_errors=True)
+                if os.path.exists(dl_dir):
+                    shutil.rmtree(dl_dir, ignore_errors=True)
                 raise
 
     def active_version(self, name: str) -> "str | None":
