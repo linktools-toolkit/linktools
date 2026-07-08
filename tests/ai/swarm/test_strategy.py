@@ -1531,3 +1531,95 @@ def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_
     assert after.version == 4
     assert after.active_run_id is None
     assert after.status is SwarmTaskStatus.CLAIMED
+
+
+def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
+    """base_attempt is sourced from the actual attempt audit trail
+    (list_attempts), not task.attempts -- because task.attempts is bumped
+    only by fail_task(), and a superseded attempt (worker succeeded, but
+    complete_task lost the fencing race) is deliberately never routed
+    through fail_task(). Under the old `claimed.attempts + 1` formula, a
+    fresh _run_task call after a supersession would see task.attempts still
+    0 and wrongly restart numbering at attempt 1, colliding with the
+    already-recorded attempt 1 in the trail."""
+    from linktools.ai.swarm.models import AttemptStatus
+    from linktools.ai.swarm.strategy import _run_task
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.agent.compiler import AgentCompiler
+    from linktools.ai.agent.models import AgentSpec
+    from linktools.ai.agent.spec import PromptSpec
+
+    swarm_store = _MemorySwarmStore()
+
+    # First _run_task call: worker succeeds, but another caller supersedes
+    # the task (version + active_run_id swapped) before complete_task lands
+    # -- the same scenario as test_run_task_complete_task_conflict_after_
+    # worker_success_is_not_a_retry above.
+    def _superseded_model_fn(messages, info):
+        current = swarm_store._tasks["task-1"]
+        swarm_store._tasks["task-1"] = replace(
+            current, version=current.version + 1,
+            active_run_id="some-other-run-id",
+        )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    ctx, swarm_store = _worker_ctx_and_task(
+        tmp_path, _superseded_model_fn, swarm_store=swarm_store,
+    )
+
+    first_result = asyncio.run(_run_task(
+        ctx, swarm_store._tasks["task-1"], max_task_retries=0,
+    ))
+    assert first_result is None
+
+    attempts_after_first = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts_after_first) == 1
+    assert attempts_after_first[0].attempt == 1
+    assert attempts_after_first[0].status is AttemptStatus.FAILED
+    assert attempts_after_first[0].error.error_type == "Superseded"
+    # task.attempts is untouched -- fail_task was never called for a
+    # superseded attempt -- so it still reads 0, the exact staleness this
+    # fix works around.
+    assert swarm_store._tasks["task-1"].attempts == 0
+
+    # Make the task claimable again (standing in for the "other owner" --
+    # whoever won the race above -- eventually finishing and the task
+    # becoming available for a new attempt via a later PENDING transition;
+    # the mechanism doesn't matter here, only that a fresh _run_task call
+    # claims it and must number its attempt correctly).
+    stale = swarm_store._tasks["task-1"]
+    swarm_store._tasks["task-1"] = replace(
+        stale, status=SwarmTaskStatus.PENDING,
+        claimed_at=None, active_run_id=None,
+        version=stale.version + 1,
+    )
+
+    # Second _run_task call: worker succeeds cleanly this time (no
+    # supersession).
+    def _clean_model_fn(messages, info):
+        return ModelResponse(parts=[TextPart(content="done-for-real")])
+
+    registry2 = ModelRegistry()
+    registry2.register("worker-model-2", model=FunctionModel(_clean_model_fn))
+    compiler2 = AgentCompiler(model_router=ModelRouter(registry=registry2))
+    worker_spec_2 = AgentSpec(
+        id="worker-a", name="worker-a",
+        model=ModelPolicy(primary="worker-model-2"),
+        instructions=PromptSpec(instructions="you work"),
+        output_schema=str,
+    )
+    compiled_2 = asyncio.run(compiler2.compile(worker_spec_2))
+    ctx.agents["worker-a"] = compiled_2
+
+    second_result = asyncio.run(_run_task(
+        ctx, swarm_store._tasks["task-1"], max_task_retries=0,
+    ))
+    assert second_result is not None
+    assert second_result.output == "done-for-real"
+
+    attempts_after_second = asyncio.run(swarm_store.list_attempts("task-1"))
+    assert len(attempts_after_second) == 2
+    assert [a.attempt for a in attempts_after_second] == [1, 2]
+    assert attempts_after_second[1].status is AttemptStatus.SUCCEEDED

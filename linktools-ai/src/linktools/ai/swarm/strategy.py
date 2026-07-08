@@ -276,12 +276,17 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     child_run_id: "str | None" = None
     # Each retry iteration records one
     # SwarmTaskAttempt. ``base_attempt`` is the 1-based attempt number of the
-    # FIRST iteration of this _run_task call. ``claimed.attempts`` is 0 on first
-    # execution (claim_task doesn't bump it; only fail_task does), so the trail
-    # is: first execution -> attempt 1, first retry -> attempt 2, etc. A prior
-    # _run_task failure already bumped claimed.attempts via fail_task, so a
-    # re-invocation of _run_task continues the numbering monotonically.
-    base_attempt = claimed.attempts + 1
+    # FIRST iteration of this _run_task call, sourced from the actual audit
+    # trail (``list_attempts``) rather than ``claimed.attempts`` -- the task
+    # row's counter is bumped only by fail_task(), so it undercounts attempts
+    # that were superseded by a reclaim/cancel (recorded in the attempt trail
+    # via the "Superseded" close-out above, but never routed through
+    # fail_task since the task's real terminal status belongs to whoever
+    # else owns it). Counting the actual rows keeps numbering monotonic and
+    # gap-free across reclaim/crash-recovery re-invocations of _run_task,
+    # where claimed.attempts would otherwise start renumbering from a stale,
+    # too-low count.
+    base_attempt = len(await ctx.swarm_store.list_attempts(claimed.id)) + 1
     for _attempt in range(max_task_retries + 1):
         # Phase-5A: each attempt mints a FRESH child RunRecord id + scratch
         # session, not just the first one. Reusing one child_run_id across
