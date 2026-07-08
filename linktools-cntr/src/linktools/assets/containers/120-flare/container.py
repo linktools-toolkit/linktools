@@ -51,7 +51,7 @@ class Container(BaseContainer):
         return dict(
             NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
-            FLARE_DOAMIN=self.get_nginx_domain(""),
+            FLARE_DOMAIN=self.get_nginx_domain(""),
             FLARE_PORT=ConfigField(name="FLARE_PORT", cast=int, default=5000),
             FLARE_AUTH_ENABLE=ConfigField(name="FLARE_AUTH_ENABLE", cast=bool, default=True),
             FLARE_LOGIN_ENABLE=ConfigField(name="FLARE_LOGIN_ENABLE", cast=bool, default=False),
@@ -123,7 +123,7 @@ class Container(BaseContainer):
         )
 
         self.write_nginx_conf(
-            domain=self.get_config("FLARE_DOAMIN"),
+            domain=self.get_config("FLARE_DOMAIN"),
             proxy_url="http://flare:5005",
             auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
             auth_extra={

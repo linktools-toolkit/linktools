@@ -96,3 +96,70 @@ def test_multi_version_layout(installer, tmp_path):
     assert installer.active_version("mv") == "2.0"
     # old version still present (not clobbered)
     assert (tmp_path / "tools" / "mv" / "1.0" / "run").exists()
+
+
+# --------------------------------------------------------------------------- #
+# PR-5: manifest fields + state split (spec §7.2/§7.3/§7.5/§7.9)
+# --------------------------------------------------------------------------- #
+
+def test_manifest_records_platform_arch_size_entrypoint(installer, tmp_path):
+    archive = _make_archive(tmp_path, {"bin/run": "#!/bin/sh\necho hi"})
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    definition = ToolDefinition(name="t", version="1.0", entrypoint="bin/run")
+    inst = installer.install(definition, source_url=str(archive), sha256=digest)
+    m = inst.manifest
+    assert m["entrypoint"] == "bin/run"
+    assert m["platform"] and m["architecture"]
+    assert m["size"] == len("#!/bin/sh\necho hi")
+
+
+def test_install_missing_entrypoint_raises_no_target(installer, tmp_path):
+    archive = _make_archive(tmp_path, {"bin/run": "x"})
+    definition = ToolDefinition(name="t", version="1.0", entrypoint="bin/missing")
+    with pytest.raises(ToolInstallError):
+        installer.install(definition, source_url=str(archive))
+    # entrypoint validated in staging -> no half-installed target exposed
+    assert not (tmp_path / "tools" / "t" / "1.0").exists()
+
+
+def test_version_complete_independent_of_active_pointer(installer, tmp_path):
+    archive = _make_archive(tmp_path, {"run": "x"})
+    definition = ToolDefinition(name="t", version="1.0")
+    installer.install(definition, source_url=str(archive))
+    # removing active.json must NOT make the version dir incomplete (§7.3.1)
+    (tmp_path / "tools" / "t" / "active.json").unlink()
+    assert installer.is_installation_complete("t", "1.0") is True
+    assert installer.is_active_valid("t") is False  # no active pointer -> invalid
+
+
+def test_active_invalid_when_points_at_corrupt_version(installer, tmp_path):
+    archive = _make_archive(tmp_path, {"run": "x"})
+    definition = ToolDefinition(name="t", version="1.0")
+    installer.install(definition, source_url=str(archive))
+    # delete a recorded file -> version no longer complete
+    (tmp_path / "tools" / "t" / "1.0" / "run").unlink()
+    assert installer.is_installation_complete("t", "1.0") is False
+    assert installer.is_active_valid("t") is False
+    with pytest.raises(ToolInstallError):
+        installer.resolve_active("t")
+
+
+def test_resolve_active_returns_installation(installer, tmp_path):
+    archive = _make_archive(tmp_path, {"run": "x"})
+    definition = ToolDefinition(name="t", version="1.0")
+    installer.install(definition, source_url=str(archive))
+    inst = installer.resolve_active("t")
+    assert isinstance(inst, ToolInstallation)
+    assert inst.name == "t" and inst.version == "1.0"
+
+
+def test_corrupt_target_quarantined_then_reinstalled(installer, tmp_path):
+    # pre-create an incomplete target (no manifest) that would block the move
+    bad = tmp_path / "tools" / "t" / "1.0"
+    bad.mkdir(parents=True)
+    (bad / "junk").write_text("partial")
+    archive = _make_archive(tmp_path, {"run": "x"})
+    definition = ToolDefinition(name="t", version="1.0")
+    inst = installer.install(definition, source_url=str(archive))
+    assert (inst.root / "run").exists()           # fresh install succeeded
+    assert (tmp_path / "tools" / ".corrupt").exists()  # corrupt moved aside

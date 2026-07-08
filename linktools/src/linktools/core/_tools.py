@@ -457,39 +457,44 @@ class Tool(metaclass=ToolMeta):
         # download and extract (manifest in staging BEFORE target)
         if not self.exists:
             self._tools.logger.info(f"Download {self}: {self.download_url}")
-            with self._tools.environ.get_url_file(self.download_url) as url_file:
-                if not self.exists:
-                    import uuid as _uuid
-                    temp_dir = self._tools.environ.get_temp_path("tools", "cache")
-                    temp_path = url_file.save(temp_dir)
+            import uuid as _uuid
+            from .._download import DownloadRequest
+            temp_dir = self._tools.environ.get_temp_path("tools", "cache")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = str(temp_dir / utils.guess_file_name(self.download_url))
+            # DownloadManager owns atomic landing / resume / hash validation;
+            # call it directly rather than through the legacy UrlFile facade so
+            # the install path no longer depends on it (spec §3.7).
+            self._tools.environ.downloads.download(DownloadRequest(
+                url=self.download_url, destination=temp_path))
 
-                    # staging dir — everything happens here before atomic move.
-                    staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
-                    os.makedirs(staging, exist_ok=True)
-                    try:
-                        if not utils.is_empty(self.unpack_path):
-                            self._tools.logger.debug(f"Extract {self} to {staging}")
-                            utils.safe_extract(temp_path, staging)
-                            os.remove(temp_path)
-                        else:
-                            target_in_staging = os.path.join(
-                                staging,
-                                os.path.relpath(self.absolute_path, self.root_path))
-                            os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
-                            shutil.move(temp_path, target_in_staging)
+            # staging dir — everything happens here before atomic move.
+            staging = "%s.staging-%s" % (self.root_path, _uuid.uuid4().hex[:8])
+            os.makedirs(staging, exist_ok=True)
+            try:
+                if not utils.is_empty(self.unpack_path):
+                    self._tools.logger.debug(f"Extract {self} to {staging}")
+                    utils.safe_extract(temp_path, staging)
+                    os.remove(temp_path)
+                else:
+                    target_in_staging = os.path.join(
+                        staging,
+                        os.path.relpath(self.absolute_path, self.root_path))
+                    os.makedirs(os.path.dirname(target_in_staging) or staging, exist_ok=True)
+                    shutil.move(temp_path, target_in_staging)
 
-                        # write manifest INSIDE staging before move.
-                        self._write_manifest(staging)
-                        # Atomic move: target appears only when fully installed.
-                        if os.path.exists(self.root_path):
-                            shutil.rmtree(self.root_path, ignore_errors=True)
-                        os.replace(staging, self.root_path)
-                    except BaseException:
-                        shutil.rmtree(staging, ignore_errors=True)
-                        raise
+                # write manifest INSIDE staging before move.
+                self._write_manifest(staging)
+                # Atomic move: target appears only when fully installed.
+                if os.path.exists(self.root_path):
+                    shutil.rmtree(self.root_path, ignore_errors=True)
+                os.replace(staging, self.root_path)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
 
-                    # Active pointer after successful activation.
-                    self._set_active()
+            # Active pointer after successful activation.
+            self._set_active()
 
         if not os.access(self._stub.path, os.X_OK):
             self._tools.logger.debug(f"Create {self._stub}")

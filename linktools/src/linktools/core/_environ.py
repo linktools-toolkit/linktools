@@ -490,6 +490,10 @@ class BaseEnviron(abc.ABC):
         """
         return self.config.get(key=key, type=type, default=default)
 
+    def require_config(self, key: str, type: "type[T]" = None) -> "T":
+        """Return a must-exist configuration value; raise if it is missing."""
+        return self.config.require(key=key, type=type)
+
     def set_config(self, key: str, value: "Any") -> None:
         """Set a configuration value.
 
@@ -641,7 +645,7 @@ class Environ(BaseEnviron):
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/140.0.0.0 "
             "Safari/537.36",
-            DEFAULT_WAN_IP_URL="http://ifconfig.me/ip"  # noqa
+            DEFAULT_WAN_IP_URL="https://ifconfig.me/ip"  # noqa
         )
 
         return config

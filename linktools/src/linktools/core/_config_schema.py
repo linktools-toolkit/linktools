@@ -376,28 +376,53 @@ class ConfigResolver:
         raise ConfigNotFoundError("unknown provider type: %r" % type(provider).__name__)
 
     def explain(self, key: str) -> dict:
-        resolved = self.resolve(key)
+        try:
+            resolved = self.resolve(key)
+        except ConfigNotFoundError:
+            # Key is neither in the schema nor present in any source.
+            return {
+                "key": key,
+                "unknown": True,
+                "found": False,
+                "resolved_value": MISSING,
+                "selected_source": None,
+                "raw_value": MISSING,
+                "all_candidates": [],
+                "secret": False,
+                "deprecated": False,
+                "description": "",
+                "warnings": ["key is not set and has no default"],
+            }
         field = resolved.field
+        unknown = field is None
+        candidate_keys = self._candidates(field) if field is not None else (key,)
         candidates: "list[dict]" = []
         for source in self._sources:
-            for candidate in self._candidates(field):
+            for candidate in candidate_keys:
                 raw, present = source.get(candidate)
                 if present:
                     candidates.append({"source": source.name, "key": candidate, "raw": raw})
-        if field.secret:
+        secret = bool(field.secret) if field is not None else False
+        if secret:
             shown_value = "***"
             shown_raw = "***"
         else:
             shown_value = resolved.value
             shown_raw = resolved.raw_value
+        warnings: "list[str]" = []
+        if unknown:
+            warnings.append("key is not defined in schema")
         return {
+            "key": key,
+            "unknown": unknown,
             "resolved_value": shown_value,
             "selected_source": resolved.source_name,
             "raw_value": shown_raw,
             "all_candidates": candidates,
-            "secret": field.secret,
-            "deprecated": field.deprecated,
-            "description": field.description,
+            "secret": secret,
+            "deprecated": field.deprecated if field is not None else False,
+            "description": field.description if field is not None else "",
+            "warnings": warnings,
         }
 
 
@@ -430,6 +455,11 @@ class Config:
             result = self._resolver.resolve(key)
             value = result.value
         except ConfigNotFoundError:
+            # Missing with no default -> surface the error instead of silently
+            # propagating MISSING into business logic. Callers that accept
+            # absence must pass an explicit default.
+            if default is MISSING:
+                raise
             return default
         if type is not None and value is not MISSING:
             try:
@@ -439,6 +469,10 @@ class Config:
                     return default
                 raise ConfigCastError("cannot cast %r for %s: %s" % (value, key, exc))
         return value
+
+    def require(self, key: str, type: "type | None" = None) -> "Any":
+        """Resolve a must-exist key; raise ConfigNotFoundError if it is missing."""
+        return self.get(key, type=type, default=MISSING)
 
     def set(self, key: str, value: "Any") -> None:
         runtime = self._find(RuntimeOverrideSource)

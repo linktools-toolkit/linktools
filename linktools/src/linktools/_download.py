@@ -3,11 +3,10 @@
 
 """Unified download infrastructure (spec §9).
 
-Standalone module (PR 09): not yet wired into ``environ.downloads`` and does not
-replace ``core/_url.py`` -- that migration is a follow-up. It composes the
-persistence foundation built earlier: LockManager for per-content serialization
-(§9.9), CacheStore for resume metadata (§9.9), utils.atomic_replace /
-verify_file for atomic landing (§9.4) and integrity (§9.7).
+Wired into ``environ.downloads``. It composes the persistence foundation:
+LockManager for per-content serialization (§9.9), CacheStore for resume
+metadata (§9.9), utils.atomic_replace / verify_file for atomic landing
+(§9.4) and integrity (§9.7).
 
 Flow (spec §9.4)::
 
@@ -341,8 +340,6 @@ class DownloadManager(object):
                     except DownloadError:
                         _discard(part)
                         raise
-
-            final_size = os.path.getsize(part)
 
             final_size = os.path.getsize(part)
             utils.atomic_replace(part, destination)

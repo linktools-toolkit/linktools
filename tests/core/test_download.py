@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the Download module (spec §9).
-
-Standalone infrastructure (PR 09); not yet wired into environ.downloads and does
-not replace UrlFile -- that migration is a follow-up.
-"""
+"""Tests for the Download module (spec §9)."""
 import hashlib
 import http.server
 import os
@@ -206,3 +202,178 @@ def test_http_gzip_and_content_disposition(manager, tmp_path):
         assert meta.get("filename") == "real-name.bin"
     finally:
         httpd.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# PR-3: resume / 416 state machine (spec §5.7)
+# --------------------------------------------------------------------------- #
+
+class _RangeServer:
+    """Local HTTP server with a controllable resume/416 behaviour.
+
+    ``mode`` selects how a ranged (Range: bytes=N-) request is answered; a
+    request without Range always gets the full body as 200.
+      good_206       -> 206 with a correct Content-Range (append)
+      missing_cr     -> 206 but no Content-Range header (restart)
+      bad_start      -> 206 whose Content-Range start != N (restart)
+      416            -> 416 Range Not Satisfiable
+      ignore_range   -> 200 full body, ignoring the Range header
+    """
+
+    def __init__(self, body, mode):
+        self.body = body
+        self.mode = mode
+        self.range_requests = []
+
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _send(self, code, payload, content_range=None):
+                self.send_response(code)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(payload)))
+                if content_range is not None:
+                    self.send_header("Content-Range", content_range)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                range_hdr = self.headers.get("Range")
+                server.range_requests.append(range_hdr)
+                total = len(server.body)
+                if range_hdr and server.mode != "ignore_range":
+                    n = int(range_hdr.split("=")[1].split("-")[0])
+                    if server.mode == "416":
+                        self.send_response(416); self.end_headers(); return
+                    if server.mode == "missing_cr":
+                        self._send(206, server.body[n:]); return
+                    if server.mode == "bad_start":
+                        cr = "bytes %d-%d/%d" % (n + 10, total - 1, total)
+                        self._send(206, server.body[n:], content_range=cr); return
+                    # good_206
+                    cr = "bytes %d-%d/%d" % (n, total - 1, total)
+                    self._send(206, server.body[n:], content_range=cr); return
+                # no Range (or ignored) -> full body
+                self._send(200, server.body)
+
+            def log_message(self, *a):
+                return None
+
+        self._httpd = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+        self.port = self._httpd.server_address[1]
+        self._thread = threading.Thread(target=self._httpd.serve_forever)
+        self._thread.daemon = True
+        self._thread.start()
+
+    def url(self, path="/file.bin"):
+        return "http://127.0.0.1:%d%s" % (self.port, path)
+
+    def shutdown(self):
+        self._httpd.shutdown()
+
+
+def _download_with_part(dst, part_bytes):
+    """Pre-seed a .part file alongside the destination and return its path."""
+    part = dst.parent / (dst.name + ".part")
+    part.write_bytes(part_bytes)
+    return part
+
+
+def test_resume_206_good_content_range_appends(manager, tmp_path):
+    body = b"X" * 4096
+    srv = _RangeServer(body, "good_206")
+    try:
+        dst = tmp_path / "dst.bin"
+        _download_with_part(dst, body[:1024])  # already have first 1024 bytes
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body
+        assert srv.range_requests[0] == "bytes=1024-"  # resumed from 1024
+    finally:
+        srv.shutdown()
+
+
+def test_resume_206_missing_content_range_restarts_full(manager, tmp_path):
+    body = b"Y" * 2048
+    srv = _RangeServer(body, "missing_cr")
+    try:
+        dst = tmp_path / "dst.bin"
+        _download_with_part(dst, body[:512])  # stale/partial
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body
+        # 1st ranged request returned a bad 206 -> transport restarted without Range.
+        assert srv.range_requests[1] is None
+    finally:
+        srv.shutdown()
+
+
+def test_resume_206_start_mismatch_restarts_full(manager, tmp_path):
+    body = b"Z" * 2048
+    srv = _RangeServer(body, "bad_start")
+    try:
+        dst = tmp_path / "dst.bin"
+        _download_with_part(dst, body[:512])
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body
+        assert srv.range_requests[1] is None  # restarted without Range
+    finally:
+        srv.shutdown()
+
+
+def test_resume_200_overwrites_stale_part(manager, tmp_path):
+    body = b"W" * 2048
+    srv = _RangeServer(body, "ignore_range")  # server ignores Range -> 200
+    try:
+        dst = tmp_path / "dst.bin"
+        _download_with_part(dst, b"stale-bytes")
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body  # overwritten, not appended
+    finally:
+        srv.shutdown()
+
+
+def test_resume_416_complete_succeeds(manager, tmp_path):
+    body = b"C" * 1024
+    srv = _RangeServer(body, "416")
+    try:
+        dst = tmp_path / "dst.bin"
+        # the .part already holds the full body; size hint in resume meta.
+        _download_with_part(dst, body)
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        # Seed resume metadata (keyed by the request lock_key) with the
+        # expected size so the transport can recognise the part as complete.
+        manager._resume_namespace().set(req.lock_key, {"size": len(body)})
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body
+    finally:
+        srv.shutdown()
+
+
+def test_resume_416_incomplete_restarts_full(manager, tmp_path):
+    body = b"I" * 4096
+    srv = _RangeServer(body, "416")
+    try:
+        dst = tmp_path / "dst.bin"
+        _download_with_part(dst, body[:64])  # incomplete part
+        req = DownloadRequest(url=srv.url(), destination=dst,
+                              sha256=hashlib.sha256(body).hexdigest(), resume=True)
+        manager._resume_namespace().set(req.lock_key, {"size": len(body)})
+        result = manager.download(req, transport=_HttpTransport())
+        assert result.path.read_bytes() == body
+        # 1st ranged -> 416 (incomplete) -> discarded -> 2nd full request.
+        assert srv.range_requests[1] is None
+    finally:
+        srv.shutdown()
+
+
+def _HttpTransport():
+    from linktools._download import HttpTransport
+    return HttpTransport()
