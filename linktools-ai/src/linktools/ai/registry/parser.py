@@ -131,19 +131,52 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
 
 
 def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
-    """Build a tuple[ToolRef] from a list of names or {name: ...} dicts."""
+    """Build a tuple[ToolRef] from a list of tool declarations.
+
+    Accepted shapes (spec §10.1):
+      - "file"                 -> ToolRef(name="file")            (kind None -> builtin)
+      - "builtin:file"         -> ToolRef(name="file", kind="builtin")
+      - "skill:sql"            -> ToolRef(name="sql",  kind="skill")
+      - {name: "file"}         -> ToolRef(name="file")
+      - {kind: "skill", name: "sql", config: {...}} -> ToolRef(name, kind, config)
+    """
     from ..agent.spec import ToolRef
 
     if items is None:
-        return ()
+        # Distinguish "no tools key" (None -> runtime default) from "tools: []"
+        # (empty tuple -> explicitly no tools), per spec §10.7 three-state.
+        return None
     if not isinstance(items, (list, tuple)):
         raise InvalidSpecError("tools must be a list")
     refs: list[Any] = []
     for item in items:
         if isinstance(item, str):
-            refs.append(ToolRef(name=item))
+            refs.append(_tool_ref_from_string(item))
         elif isinstance(item, dict) and "name" in item:
-            refs.append(ToolRef(name=str(item["name"])))
+            kind = item.get("kind")
+            config = item.get("config") or {}
+            if not isinstance(config, dict):
+                raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
+            refs.append(ToolRef(name=str(item["name"]), kind=str(kind) if kind else None,
+                                config=config))
         else:
             raise InvalidSpecError(f"invalid tool ref: {item!r}")
     return tuple(refs)
+
+
+def _tool_ref_from_string(text: str) -> Any:
+    """Split a 'kind:name' tool string; a bare name keeps kind None (resolver
+    treats it as builtin) so legacy ``tools: [file, terminal]`` is unchanged."""
+    from ..agent.spec import ToolRef
+
+    if ":" in text:
+        kind, name = text.split(":", 1)
+        kind = kind.strip()
+        name = name.strip()
+        if not kind or not name:
+            raise InvalidSpecError(f"invalid tool ref: {text!r}")
+        return ToolRef(name=name, kind=kind)
+    name = text.strip()
+    if not name:
+        raise InvalidSpecError(f"invalid tool ref: {text!r}")
+    return ToolRef(name=name)

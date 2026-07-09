@@ -1,15 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai public API (spec section 5). The package root exports:
-AgentSpec, SwarmSpec, Runtime, FileStorage, SqlAlchemyStorage, plus Storage (the
-composed type callers receive). Every other name -- Compiler, Runner, Store
-implementations, Middleware base classes, PolicyEngine, ToolExecutor, etc. --
-is accessed via its own submodule and is not re-exported here.
-"""
+"""linktools.ai public API (spec §20.3). The package root re-exports the hot
+types so downstream imports stay short:
 
-from .agent.spec import AgentSpec
+    from linktools.ai import Runtime, AgentSpec, ToolRef, Storage, FileStorage
+
+SqlAlchemyStorage is intentionally NOT re-exported here -- it depends on the
+optional SQLAlchemy extra and is loaded lazily from ``linktools.ai.storage``
+(spec §21.7). Every other name (Compiler, Runner, Store implementations,
+Middleware, PolicyEngine, ToolExecutor, providers, ...) is reached via its own
+submodule.
+
+Importing this package has no heavy side effects: no file scans, no DB/MCP
+connections, no Runtime construction."""
+
+from .agent import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
+from .model import ModelPolicy, ModelRouter, RuntimeModelConfig
 from .runtime import Runtime
-from .storage.facade import FileStorage, SqlAlchemyStorage, Storage
+from .storage import FileStorage, Storage
 from .swarm.spec import SwarmSpec
 
-__all__ = ["AgentSpec", "SwarmSpec", "Runtime", "FileStorage", "SqlAlchemyStorage", "Storage"]
+__all__ = [
+    "Runtime",
+    "AgentSpec",
+    "PromptSpec",
+    "ToolRef",
+    "MiddlewareRef",
+    "ModelPolicy",
+    "ModelRouter",
+    "RuntimeModelConfig",
+    "Storage",
+    "FileStorage",
+    "SwarmSpec",
+]

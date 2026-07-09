@@ -40,3 +40,42 @@ def test_tool_ref_and_middleware_ref():
     ref = MiddlewareRef(name="budget")
     assert ref.name == "budget"
     assert dict(ref.config) == {}
+
+
+def test_tool_ref_kind_and_config_defaults():
+    # Legacy bare names keep kind None (resolver treats None as builtin).
+    assert ToolRef(name="file").kind is None
+    assert dict(ToolRef(name="file").config) == {}
+    structured = ToolRef(name="sql", kind="skill", config={"limit": 5})
+    assert structured.kind == "skill"
+    assert structured.config == {"limit": 5}
+
+
+def test_parse_tool_refs_handles_kind_name_strings_and_struct():
+    from linktools.ai.registry.parser import parse_tool_refs
+
+    # bare name -> kind None (backward compat)
+    (bare,) = parse_tool_refs(["file"])
+    assert bare.name == "file" and bare.kind is None
+    # kind:name string -> split
+    (prefixed,) = parse_tool_refs(["skill:sql"])
+    assert prefixed.name == "sql" and prefixed.kind == "skill"
+    # structured mapping
+    (struct,) = parse_tool_refs([{"kind": "mcp", "name": "risk", "config": {"k": 1}}])
+    assert struct.name == "risk" and struct.kind == "mcp" and struct.config == {"k": 1}
+    # mapping without kind keeps kind None
+    (plain,) = parse_tool_refs([{"name": "file"}])
+    assert plain.kind is None
+
+
+def test_parse_tool_refs_rejects_bad_shapes():
+    import pytest
+    from linktools.ai.errors import InvalidSpecError
+    from linktools.ai.registry.parser import parse_tool_refs
+
+    with pytest.raises(InvalidSpecError):
+        parse_tool_refs([":file"])  # empty kind
+    with pytest.raises(InvalidSpecError):
+        parse_tool_refs([{"kind": "skill"}])  # missing name
+    with pytest.raises(InvalidSpecError):
+        parse_tool_refs(42)

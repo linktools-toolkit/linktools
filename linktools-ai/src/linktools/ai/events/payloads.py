@@ -157,6 +157,134 @@ class ResourceChanged:
     revision: int
 
 
+# --- Capability Runtime lifecycle events (spec §40 Middleware/EventStore) ---
+# These let a downstream EventStore observe the capability/skill/mcp/subagent/
+# package/prompt/tool-exposure lifecycle without coupling to internal classes.
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolveStarted:
+    agent_id: str
+    capability_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolveCompleted:
+    agent_id: str
+    capability_ref: str
+    tool_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SkillListed:
+    agent_id: "str | None" = None
+    query: "str | None" = None
+    count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SkillRead:
+    agent_id: "str | None" = None
+    skill_id: str = ""
+    allowed: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class PackageResourceListed:
+    package_id: str = ""
+    path: str = ""
+    count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PackageResourceRead:
+    package_id: str = ""
+    path: str = ""
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PackageEntrypointListed:
+    package_id: str = ""
+    kind: "str | None" = None
+    count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PackageEntrypointResolved:
+    package_id: str = ""
+    kind: str = ""
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class McpConnectStarted:
+    server_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class McpConnectCompleted:
+    server_id: str = ""
+    tool_count: "int | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolCallStarted:
+    server_id: str = ""
+    tool_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class McpToolCallCompleted:
+    server_id: str = ""
+    tool_name: str = ""
+    success: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentStarted:
+    agent_id: str = ""
+    parent_run_id: "str | None" = None
+    scope: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentCompleted:
+    agent_id: str = ""
+    run_id: str = ""
+    status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentErrored:
+    agent_id: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PromptCatalogInjected:
+    agent_id: "str | None" = None
+    section: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PromptWindowApplied:
+    policy: str = ""
+    before: int = 0
+    after: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExposureApplied:
+    agent_id: "str | None" = None
+    total_tools: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExposureDenied:
+    agent_id: "str | None" = None
+    reason: str = ""
+
+
 # Union of every event payload type. This is the type of the ``payload`` field
 # EventStore.append accepts (review doc §8.3) -- callers pass a concrete
 # payload instance and the store wraps it in an EventEnvelope.
@@ -185,4 +313,23 @@ EventPayload = Union[
     SwarmTaskFailed,
     SwarmCompleted,
     ResourceChanged,
+    CapabilityResolveStarted,
+    CapabilityResolveCompleted,
+    SkillListed,
+    SkillRead,
+    PackageResourceListed,
+    PackageResourceRead,
+    PackageEntrypointListed,
+    PackageEntrypointResolved,
+    McpConnectStarted,
+    McpConnectCompleted,
+    McpToolCallStarted,
+    McpToolCallCompleted,
+    SubagentStarted,
+    SubagentCompleted,
+    SubagentErrored,
+    PromptCatalogInjected,
+    PromptWindowApplied,
+    ToolExposureApplied,
+    ToolExposureDenied,
 ]

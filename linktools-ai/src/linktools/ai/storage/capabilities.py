@@ -16,6 +16,11 @@ class StorageCapabilities:
     full_text_search: bool
     semantic_search: bool
     multi_process_swarm: bool
+    # spec §17.4 capability flags. Defaulted so existing Storage constructions
+    # stay valid; mixed-store deployments must declare them conservatively.
+    leasing: bool = False
+    advisory_locks: bool = False
+    idempotency: bool = True
 
 
 FILE_STORAGE_CAPABILITIES = StorageCapabilities(
@@ -26,6 +31,9 @@ FILE_STORAGE_CAPABILITIES = StorageCapabilities(
     full_text_search=False,
     semantic_search=False,
     multi_process_swarm=False,
+    leasing=False,
+    advisory_locks=False,
+    idempotency=True,
 )
 
 SQLALCHEMY_STORAGE_CAPABILITIES = StorageCapabilities(
@@ -36,4 +44,7 @@ SQLALCHEMY_STORAGE_CAPABILITIES = StorageCapabilities(
     full_text_search=True,
     semantic_search=False,
     multi_process_swarm=True,
+    leasing=False,
+    advisory_locks=False,
+    idempotency=True,
 )

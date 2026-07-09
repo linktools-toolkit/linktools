@@ -267,3 +267,29 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
     assert "runtime-memory-token" in str(result.output)
     assert "## Memory" in str(result.output)
 
+
+
+def test_runtime_applies_session_window_policy(tmp_path):
+    """CapabilityRuntimeOptions.session_window_policy is applied to session
+    history before the prompt is built (spec §19)."""
+    from linktools.ai.capability import CapabilityRuntimeOptions
+    from linktools.ai.model.router import ModelRouter
+
+    seen = {"called": False, "count": None}
+
+    class _Recording:
+        async def select_messages(self, messages, model_policy):
+            seen["called"] = True
+            seen["count"] = len(messages)
+            return list(messages)
+
+    storage = FileStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage, model_router=ModelRouter(registry=_registry()),
+        options=CapabilityRuntimeOptions(session_window_policy=_Recording()),
+    )
+    spec = AgentSpec(id="agent-1", name="rt-agent", model=ModelPolicy(primary="test-model"),
+                     instructions=PromptSpec(instructions="hi"))
+    asyncio.run(runtime.run(spec, "go"))
+    assert seen["called"] is True
+    assert seen["count"] == 0  # fresh session has no prior messages

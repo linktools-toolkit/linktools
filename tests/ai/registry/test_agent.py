@@ -193,7 +193,7 @@ def test_get_applies_defaults_when_minimal(tmp_path):
     spec = asyncio.run(run())
     assert spec.name == "minimal"
     assert spec.model.primary == "gpt-4o-mini"
-    assert spec.tools == ()
+    assert spec.tools is None  # no tools key -> unset (three-state, spec §10.7)
     assert spec.middleware == ()
     assert spec.instructions.instructions == "Just do the thing."
 

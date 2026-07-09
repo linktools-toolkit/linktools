@@ -219,8 +219,10 @@ def test_parse_tool_refs_rejects_invalid_item():
         parse_tool_refs(["ok", 42])
 
 
-def test_parse_tool_refs_none_returns_empty_tuple():
-    assert parse_tool_refs(None) == ()
+def test_parse_tool_refs_none_is_unset():
+    # No tools key -> None (unset), distinct from tools: [] -> () (spec §10.7).
+    assert parse_tool_refs(None) is None
+    assert parse_tool_refs([]) == ()
 
 
 def test_parse_tool_refs_rejects_non_list():

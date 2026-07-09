@@ -21,18 +21,35 @@ class MCPServerSpec:
     name: str
     transport: str  # "stdio" | "sse" | "http"
     command_or_url: str
+    # Structured transport fields (spec §15.1). ``command_or_url`` is kept as a
+    # backward-compatible derivation; new code should read command/url directly.
+    command: "tuple[str, ...] | None" = None
+    url: "str | None" = None
+    cwd: "str | None" = None
     env: "Mapping[str, str]" = field(default_factory=dict)
+    headers: "Mapping[str, str]" = field(default_factory=dict)
+    timeout_seconds: "float | None" = None
+    tool_prefix: "str | bool | None" = None
+    enabled_tools: "tuple[str, ...] | None" = None
+    disabled_tools: "tuple[str, ...]" = ()
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
+def _as_command_tuple(command_raw: Any) -> "tuple[str, ...]":
+    if isinstance(command_raw, (list, tuple)):
+        return tuple(str(p) for p in command_raw)
+    text = str(command_raw).strip()
+    return tuple(text.split()) if text else ()
+
+
 def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
-    """Build an MCPServerSpec from a parsed YAML dict.
+    """Build an MCPServerSpec from a parsed YAML dict (spec §15.1/§15.5).
 
     - name falls back to mcp_id when omitted.
     - transport comes from `transport` (or legacy `type`), defaulting to stdio;
       it must be one of {stdio, sse, http}.
-    - command_or_url is the `command` (stdio, list joined with spaces) or the
-      `url` (sse/http). At least one must be present.
+    - stdio requires `command`; sse/http require `url`. ``command_or_url`` is
+      kept as a backward-compatible string derivation.
     """
     name = payload.get("name") or mcp_id
     transport = str(payload.get("transport") or payload.get("type") or "stdio")
@@ -44,26 +61,49 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
 
     command_raw = payload.get("command")
     url_raw = payload.get("url")
-    if command_raw is not None:
-        if isinstance(command_raw, (list, tuple)):
-            command_or_url = " ".join(str(part) for part in command_raw)
-        else:
-            command_or_url = str(command_raw)
-    elif url_raw is not None:
-        command_or_url = str(url_raw)
+    command = _as_command_tuple(command_raw) if command_raw is not None else None
+    url = str(url_raw) if url_raw is not None else None
+
+    # Transport validation: stdio needs a command; sse/http need a url.
+    if transport == "stdio":
+        if not command:
+            raise InvalidSpecError(
+                f"mcp {mcp_id}: stdio transport requires 'command'"
+            )
+        command_or_url = " ".join(command)
     else:
-        raise InvalidSpecError(
-            f"mcp {mcp_id}: 'command' (stdio) or 'url' (sse/http) is required"
-        )
+        if not url:
+            raise InvalidSpecError(
+                f"mcp {mcp_id}: {transport} transport requires 'url'"
+            )
+        command_or_url = url
 
     env = dict(payload.get("env") or {})
+    headers = dict(payload.get("headers") or {})
     metadata = dict(payload.get("metadata") or {})
+    cwd = payload.get("cwd")
+    timeout_raw = payload.get("timeout_seconds")
+    timeout_seconds = float(timeout_raw) if timeout_raw is not None else None
+    tool_prefix = payload.get("tool_prefix", None)
+    enabled_raw = payload.get("enabled_tools")
+    enabled_tools = tuple(str(t) for t in enabled_raw) if enabled_raw else None
+    disabled_raw = payload.get("disabled_tools") or ()
+    disabled_tools = tuple(str(t) for t in disabled_raw)
+
     return MCPServerSpec(
         id=mcp_id,
         name=str(name),
         transport=transport,
         command_or_url=command_or_url,
+        command=command,
+        url=url,
+        cwd=str(cwd) if cwd is not None else None,
         env=env,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+        tool_prefix=tool_prefix,
+        enabled_tools=enabled_tools,
+        disabled_tools=disabled_tools,
         metadata=metadata,
     )
 

@@ -10,7 +10,8 @@ from linktools.ai.errors import StorageCapabilityError
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES
-from linktools.ai.storage.facade import FileStorage, SqlAlchemyStorage, Storage
+from linktools.ai.storage import SqlAlchemyStorage
+from linktools.ai.storage.facade import FileStorage, Storage
 from linktools.ai.storage.resource.models import WriteOptions
 from linktools.ai.storage.resource.path import ResourcePath
 from linktools.ai.storage.sqlalchemy.models import Base

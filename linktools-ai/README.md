@@ -147,3 +147,69 @@ Known limitations worth calling out explicitly:
 - Swarm cancel only stops what it can see: cross-process children (a different process's `RunController`) still only get the store-level `CANCELLING`/`CANCELLED` fallback.
 - Event streams are 1:1 with runs today regardless of the `stream_id` field's existence.
 - `SqlAlchemyStorage` does not use SAVEPOINT-based (`session.begin_nested()`) conflict isolation anywhere (`SqlAlchemyIdempotencyStore.reserve`, `ApprovalStore.create_or_get_pending`) due to a known aiosqlite limitation: a savepoint that releases cleanly does not reliably participate in a *later*, unrelated failure's rollback of the enclosing transaction (see either method's docstring for the full writeup). A genuine unique-key collision inside an explicit UnitOfWork therefore aborts the whole transaction rather than gracefully continuing within it -- acceptable given the current codebase's call sites never race the same key within the same transaction. Worth re-testing against a real Postgres/asyncpg backend if `begin_nested()` isolation is reconsidered there.
+
+## Capability Runtime, Provider boundary & optional deps
+
+`linktools-ai` is a **Capability Runtime**: an `AgentSpec`'s declared `tools`
+are resolved into prompt sections + toolsets via pluggable capability providers.
+The Runtime depends only on **Provider Protocols**, never on a concrete
+Registry — a Registry is merely the default file/resource-backed Provider
+implementation. Downstream systems can bypass the default formats entirely and
+supply any backend (DB, config center, HTTP API, git, object storage) that
+returns the standard Specs.
+
+```
+AgentSpec.tools -> CapabilityAssembler -> CapabilityProvider(s)
+  builtin / skill / mcp / subagent / package(-resource/-entrypoint)
+  -> CapabilityBundle (prompt_sections + toolsets)
+  -> AgentRunner / ToolExecutor / Middleware / EventStore
+```
+
+- **Providers** (`linktools.ai.providers`): `AgentSpecProvider`,
+  `SkillSpecProvider`, `MCPServerSpecProvider`, `ToolPolicyProvider`,
+  `SwarmSpecProvider`, `SubagentSpecProvider`, `PackageSpecProvider`,
+  `PackageResourceProvider` — all `async list_ids()/get(...)`. Pass them to
+  `Runtime.build(...)` either as a `ProviderBundle` or as the expanded
+  `agents=`/`skills=`/`mcp_servers=`/... params (not both).
+- **Default registries** (`linktools.ai.registry`) implement these Protocols and
+  parse the recommended formats (`agent.md`, `SKILL.md`, `mcp.yaml`,
+  `tool.yaml`, `swarm.yaml`). Format-clarifying aliases (`MarkdownAgentRegistry`,
+  `YamlMCPRegistry`, ...) make clear these are *recommended*, not mandatory.
+- **Tool-call exposure is controlled** (`CapabilityToolExposurePolicy`): default
+  minimal — prompt catalog + read-only discovery on; execution tools off until
+  opted in; per-capability and total tool caps; `mcp:*` wildcard gated by
+  `allow_mcp_wildcard`; package entrypoints list-only unless `expose_call_tool`.
+- **Package-scoped capability** (`linktools.ai.package`): `skill-creator`-style
+  bundles (resources + entrypoints) resolve under a `PackageScope` so the same
+  entrypoint name in two packages never collides (`package:<id>:agent:<name>`).
+  Resources are read through a path-sandboxed, paginated, size-clamped provider.
+- **base_url is literal**: model `base_url` is passed through verbatim — custom
+  gateway paths are never corrupted. Opt into the legacy auto-`/v1` behavior with
+  `RuntimeModelConfig.base_url_mode="append_v1_if_missing"`.
+- **Runtime is an async context manager** (`async with Runtime.build(...) as rt`)
+  that releases MCP connections on exit.
+
+### Optional dependencies (storage backends)
+
+Core install pulls in only pydantic-ai + the linktools core — **no SQLAlchemy**.
+`FileStorage` and the Store/Provider Protocols work out of the box:
+
+```bash
+pip install linktools-ai
+```
+
+`SqlAlchemyStorage` requires an optional extra:
+
+```bash
+pip install "linktools-ai[sqlite]"      # SQLAlchemy + aiosqlite (default DB)
+pip install "linktools-ai[postgres]"    # SQLAlchemy + asyncpg
+pip install "linktools-ai[mysql]"       # SQLAlchemy + asyncmy
+pip install "linktools-ai[all]"         # every backend
+```
+
+`import linktools.ai` and `import linktools.ai.storage` succeed without any
+extra; accessing `SqlAlchemyStorage` then raises an `ImportError` with the
+install hint. Storage can be reused as-is, composed store-by-store, or fully
+reimplemented behind the Store Protocols + contract tests
+(`tests/ai/contracts/`, `tests/ai/storage/contract/`).
+

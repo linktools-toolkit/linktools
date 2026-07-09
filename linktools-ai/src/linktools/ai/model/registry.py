@@ -23,7 +23,7 @@ Session history persistence (context.json / per-call prompt sidecars) now lives 
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -70,6 +70,10 @@ class RuntimeModelConfig:
     auth_token: "str | None"
     timeout_seconds: int
     raw: "dict[str, Any]"
+    # base_url is passed through literally by default. Some OpenAI-compatible
+    # gateways use custom paths that any normalization would corrupt, so the
+    # legacy "ensure trailing /v1" behavior is opt-in via append_v1_if_missing.
+    base_url_mode: "Literal['literal', 'append_v1_if_missing']" = "literal"
 
     @property
     def token(self) -> "str | None":
@@ -136,13 +140,26 @@ model_registry = ModelRegistry()
 # pydantic-ai model factory
 # ---------------------------------------------------------------------------
 
-def _normalize_base_url(config: RuntimeModelConfig) -> str:
-    base = (config.base_url or "").rstrip("/").removesuffix("/v1")
-    if not base:
+def _resolve_base_url(config: RuntimeModelConfig) -> str:
+    """Resolve the OpenAI provider base_url. Literal pass-through by default;
+    the legacy auto-append ``/v1`` is opt-in via ``base_url_mode``. Never strips
+    a user-supplied path or suffix -- some gateways rely on custom paths."""
+    if not config.base_url:
         raise ModelClientUnavailable(
             f"{config.model_type}: openai protocol requires base_url"
         )
-    return f"{base}/v1"
+
+    mode = config.base_url_mode
+    if mode == "literal":
+        return config.base_url
+    if mode == "append_v1_if_missing":
+        base = config.base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return base
+        return f"{base}/v1"
+    raise ModelClientUnavailable(
+        f"{config.model_type}: invalid base_url_mode {mode!r}"
+    )
 
 
 def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
@@ -154,7 +171,7 @@ def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
         raise ModelClientUnavailable(
             f"{config.model_type}: unsupported protocol '{config.protocol}' (use 'openai')"
         )
-    provider = OpenAIProvider(base_url=_normalize_base_url(config), api_key=config.token)
+    provider = OpenAIProvider(base_url=_resolve_base_url(config), api_key=config.token)
     # The gateway routes to various OpenAI-compatible models, including reasoning/
     # "thinking mode" models (e.g. deepseek-v4-flash) that reject `tool_choice:
     # "required"` with HTTP 400. Disabling this lets pydantic-ai fall back to

@@ -138,3 +138,7 @@ class ToolRegistry:
                 approval=spec.approval,
             )
         return result
+
+    # ToolPolicyProvider (Protocol) canonical name; to_metadata_map is kept as a
+    # backward-compatible alias. Both resolve to the same coroutine function.
+    get_metadata_map = to_metadata_map

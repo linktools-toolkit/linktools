@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""DirectoryEntrypointResolver (spec §13.8/§13.9/§13.11): list entrypoints,
+resolve scoped agents, and namespace isolation across packages."""
+
+import pytest
+
+from linktools.ai.errors import PackageEntrypointNotFoundError
+from linktools.ai.package.entrypoint import EntrypointRef
+from linktools.ai.package.resolver import DirectoryEntrypointResolver
+from linktools.ai.package.scope import PackageScope
+
+
+def _make_pkg(base, pkg_id, agents=("grader",)):
+    root = base / pkg_id
+    (root / "agents").mkdir(parents=True)
+    for a in agents:
+        (root / "agents" / f"{a}.md").write_text(
+            "---\nname: {n}\nmodel:\n  primary: gpt-4o\n---\nYou are {n}.\n".format(n=a),
+            encoding="utf-8",
+    )
+    return root
+
+
+@pytest.fixture
+def resolver(tmp_path):
+    _make_pkg(tmp_path, "skill-creator", agents=("grader", "comparator"))
+    _make_pkg(tmp_path, "another-skill", agents=("grader",))
+    return DirectoryEntrypointResolver({
+        "skill-creator": tmp_path / "skill-creator",
+        "another-skill": tmp_path / "another-skill",
+    })
+
+
+@pytest.mark.asyncio
+async def test_list_entrypoints_kind_filter(resolver):
+    scope = PackageScope("skill-creator", "skill")
+    result = await resolver.list_entrypoints(scope, kind="agent")
+    names = sorted(i.name for i in result.items)
+    assert names == ["comparator", "grader"]
+    assert all(i.kind == "agent" for i in result.items)
+    assert all(i.package_id == "skill-creator" for i in result.items)
+
+
+@pytest.mark.asyncio
+async def test_list_entrypoints_pagination(resolver):
+    scope = PackageScope("skill-creator", "skill")
+    page1 = await resolver.list_entrypoints(scope, kind="agent", limit=1)
+    assert len(page1.items) == 1
+    assert page1.next_cursor is not None
+    page2 = await resolver.list_entrypoints(scope, kind="agent", limit=1, cursor=page1.next_cursor)
+    assert len(page2.items) == 1
+    assert {i.name for i in page1.items + page2.items} == {"grader", "comparator"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_scoped_agent_has_namespaced_id(resolver):
+    scope = PackageScope("skill-creator", "skill")
+    agent = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=scope))
+    assert agent.id == "package:skill-creator:agent:grader"
+    assert agent.model.primary == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_namespace_isolation_same_name_different_packages(resolver):
+    s1 = PackageScope("skill-creator", "skill")
+    s2 = PackageScope("another-skill", "skill")
+    a1 = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=s1))
+    a2 = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=s2))
+    # Same entrypoint name, distinct scoped ids -> no global namespace clash.
+    assert a1.id != a2.id
+    assert a1.id == "package:skill-creator:agent:grader"
+    assert a2.id == "package:another-skill:agent:grader"
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_entrypoint_raises(resolver):
+    scope = PackageScope("skill-creator", "skill")
+    with pytest.raises(PackageEntrypointNotFoundError):
+        await resolver.resolve_agent(EntrypointRef(kind="agent", name="ghost", scope=scope))
+
+
+@pytest.mark.asyncio
+async def test_resolve_toolset_and_workflow_reserved(resolver):
+    scope = PackageScope("skill-creator", "skill")
+    with pytest.raises(NotImplementedError):
+        await resolver.resolve_toolset(EntrypointRef(kind="tool", name="x", scope=scope))
+    with pytest.raises(NotImplementedError):
+        await resolver.resolve_workflow(EntrypointRef(kind="workflow", name="x", scope=scope))

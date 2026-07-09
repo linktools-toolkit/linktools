@@ -94,12 +94,14 @@ if TYPE_CHECKING:
     from pydantic_ai.toolsets import AbstractToolset
 
     from ..agent.approval import ApprovalStore
+    from ..capability.assembler import CapabilityAssembler
+    from ..capability.options import CapabilityRuntimeOptions
     from ..execution.protocols import ExecutionBackend
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
-    from ..storage.facade import _UnitOfWork
+    from ..storage.sqlalchemy.facade import _UnitOfWork
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,6 +127,8 @@ class AgentRunner:
                  run_controller: "RunController | None" = None,
                  execution: "ExecutionBackend | None" = None,
                  approval_store: "ApprovalStore | None" = None,
+                 capability_assembler: "CapabilityAssembler | None" = None,
+                 capability_options: "CapabilityRuntimeOptions | None" = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -167,6 +171,13 @@ class AgentRunner:
         # File mode without this wired -- Runtime.build() always wires it
         # from storage.approvals.
         self._approval_store = approval_store
+        # Capability Runtime (spec §9/§10.7): when an AgentSpec declares non-
+        # empty tools and an assembler is wired, execute() resolves those tools
+        # into prompt sections + toolsets via the capability providers. Default
+        # None preserves the legacy behavior (empty tools -> default builtin
+        # toolset when an execution backend is present).
+        self._capability_assembler = capability_assembler
+        self._capability_options = capability_options
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -288,6 +299,26 @@ class AgentRunner:
 
                 prior_messages = await self._session_store.list_messages(
                     context.session_id)
+                # Prompt window policy (spec §19): trim session history before it
+                # is folded into the prompt. Opt-in via CapabilityRuntimeOptions;
+                # None (default) leaves prior_messages untouched.
+                window_policy = (
+                    self._capability_options.session_window_policy
+                    if self._capability_options is not None else None
+                )
+                if window_policy is not None:
+                    from ..events.payloads import PromptWindowApplied
+                    before_count = len(prior_messages)
+                    prior_messages = list(await window_policy.select_messages(
+                        prior_messages, agent.spec.model))
+                    await self._event_store.append(
+                        stream_id=context.run_id, run_id=context.run_id,
+                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                        session_id=context.session_id, runnable_id=context.runnable_id,
+                        payload=PromptWindowApplied(
+                            policy=type(window_policy).__name__,
+                            before=before_count, after=len(prior_messages)),
+                    )
 
                 # -- Prompt build. Resume path skips this entirely -- the
                 # prompt is baked into the checkpointed message_history.
@@ -343,7 +374,50 @@ class AgentRunner:
                     tool_context=tool_context, execution=self._execution,
                 )
                 toolsets: "list[AbstractToolset]" = []
-                if deps.execution is not None:
+                capability_prompt = ""
+                if agent.spec.tools and self._capability_assembler is not None:
+                    # Declared tools: resolve via the capability assembler. Empty
+                    # tools fall through to the legacy default below.
+                    from ..capability.policy import CapabilityToolExposurePolicy
+                    from ..capability.provider import CapabilityContext
+
+                    exposure = (
+                        self._capability_options.tool_exposure
+                        if self._capability_options is not None
+                        else CapabilityToolExposurePolicy()
+                    )
+                    cap_ctx = CapabilityContext(
+                        agent_id=agent.spec.id, exposure_policy=exposure,
+                        execution=deps.execution, run_id=context.run_id,
+                        root_run_id=context.root_run_id, session_id=context.session_id,
+                        event_store=self._event_store,
+                    )
+                    cap_bundle = await self._capability_assembler.assemble(agent.spec, cap_ctx)
+                    toolsets.extend(cap_bundle.toolsets)
+                    from ..events.payloads import PromptCatalogInjected, ToolExposureApplied
+                    await self._event_store.append(
+                        stream_id=context.run_id, run_id=context.run_id,
+                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                        session_id=context.session_id, runnable_id=context.runnable_id,
+                        payload=ToolExposureApplied(
+                            agent_id=agent.spec.id,
+                            total_tools=sum(len(getattr(ts, "tools", {}) or {}) for ts in toolsets),
+                        ),
+                    )
+                    if cap_bundle.prompt_sections:
+                        capability_prompt = "\n\n".join(cap_bundle.prompt_sections.values())
+                        for section in cap_bundle.prompt_sections:
+                            await self._event_store.append(
+                                stream_id=context.run_id, run_id=context.run_id,
+                                root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                                session_id=context.session_id, runnable_id=context.runnable_id,
+                                payload=PromptCatalogInjected(
+                                    agent_id=agent.spec.id, section=section),
+                            )
+                elif agent.spec.tools is None and deps.execution is not None:
+                    # tools unset (None) + execution backend -> default builtin
+                    # toolset. An explicit empty tuple (() = "no tools") or a
+                    # non-empty tuple without an assembler leaves toolsets empty.
                     from ..execution.toolset import (
                         BuiltinToolContext,
                         build_builtin_toolset,
@@ -368,13 +442,16 @@ class AgentRunner:
                 # is observationally invisible on the default path.
                 if token is not None:
                     await token.raise_if_cancelled()
+                effective_prompt = (
+                    capability_prompt + "\n\n" + prompt if capability_prompt else prompt
+                )
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
                         message_history=message_history, deps=deps,
                         toolsets=toolsets)
                 else:
                     run_iter = agent.pydantic_agent.iter(
-                        prompt, deps=deps, toolsets=toolsets)
+                        effective_prompt, deps=deps, toolsets=toolsets)
 
                 # ``timed_out`` is set whenever the wait_for budget is exhausted
                 # (either proactively before the call, or reactively when

@@ -37,7 +37,7 @@ from linktools.ai.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import SqlAlchemyStorage
+from linktools.ai.storage import SqlAlchemyStorage
 from linktools.ai.storage.sqlalchemy.event import SqlAlchemyEventStore
 from linktools.ai.storage.sqlalchemy.models import Base
 from linktools.ai.storage.file.approval import FileApprovalStore

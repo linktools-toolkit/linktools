@@ -45,6 +45,19 @@ class StorageCapabilityError(StorageError):
     Storage does not have (e.g. cross_store_transactions on FileStorage)."""
 
 
+class StorageTransactionNotSupportedError(StorageCapabilityError):
+    """cross_store_transactions is False on this Storage but a caller requested
+    an atomic cross-store write."""
+
+
+class StorageConcurrencyNotSupportedError(StorageCapabilityError):
+    """optimistic_concurrency is False but a caller requested CAS-style updates."""
+
+
+class StorageLeaseNotSupportedError(StorageCapabilityError):
+    """leasing is False but a caller (e.g. swarm claim) requested a lease."""
+
+
 class IdempotencyConflictError(LinktoolsAIError):
     """Same idempotency key reused with a different request hash."""
 
@@ -236,6 +249,91 @@ class RegistryParseError(RegistryError):
 
 class InvalidSpecError(RegistryError):
     """A parsed spec is structurally present but semantically invalid."""
+
+
+# --- Capability resolution tree -----------------------------------------
+# Resolving AgentSpec.tools into concrete capability bundles can fail in two
+# qualitatively different ways: a referenced capability cannot be found, or two
+# capabilities collide. Both carry agent_id / ref so callers can pinpoint the
+# failing declaration instead of grepping strings.
+
+class CapabilityResolutionError(LinktoolsAIError):
+    """Base class for capability-resolution failures (assemble-time)."""
+
+
+class CapabilityNotFoundError(CapabilityResolutionError):
+    pass
+
+
+class CapabilityConflictError(CapabilityResolutionError):
+    """Two capabilities produced the same tool name; resolution never silently
+    overwrites."""
+
+
+class SkillNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class MCPServerNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class MCPConnectionError(LinktoolsAIError):
+    """An MCP server connection could not be established or was lost."""
+
+
+class MCPToolError(LinktoolsAIError):
+    """An MCP tool invocation failed at the protocol/transport layer."""
+
+
+class PackageNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class PackageResourceNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class PackageResourceAccessDeniedError(PolicyError):
+    """A package resource path was outside the allowed scope/extension set."""
+
+
+class PackageEntrypointNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class PackageEntrypointDeniedError(PolicyError):
+    """An entrypoint kind/name was not on the declared allowlist."""
+
+
+class SubagentNotFoundError(CapabilityNotFoundError):
+    pass
+
+
+class SubagentDepthExceededError(PolicyError):
+    """A subagent call would exceed the configured max_depth."""
+
+    def __init__(self, message: str, *, depth: int, max_depth: int) -> None:
+        super().__init__(message)
+        self.depth = depth
+        self.max_depth = max_depth
+
+
+class SubagentExecutionError(LinktoolsAIError):
+    """A delegated subagent run failed; carries the structured child error."""
+
+    def __init__(self, message: str, *, error: "dict | None" = None) -> None:
+        super().__init__(message)
+        self.error = error
+
+
+class ModelOutputValidationError(LinktoolsAIError):
+    """A model response could not be validated against the expected output."""
+
+
+class ModelTurnLimitExceededError(ModelPolicyExceededError):
+    """A run exhausted its turn/request budget. (Stable alias of the
+    model-registry ModelTurnLimitExceeded; identify by type, not string.)"""
 
 
 class ApprovalError(LinktoolsAIError):

@@ -4,11 +4,22 @@
 Runtime.build() assembles Storage + AgentCompiler + AgentRunner + SwarmRunner +
 ModelRouter; Runtime.run(spec, prompt) compiles the spec, resolves (or creates)
 a Session, mints a RunContext, and delegates to AgentRunner (AgentSpec) or
-SwarmRunner (SwarmSpec)."""
+SwarmRunner (SwarmSpec).
 
+Capability Runtime (spec §9/§17.9): build() also accepts spec Providers (a
+ProviderBundle or the expanded agent/skill/mcp/... params) + CapabilityRuntimeOptions,
+from which it builds a CapabilityAssembler wired into AgentRunner. Declared
+AgentSpec.tools are then resolved into prompt sections + toolsets via the
+registered capability providers; an unconfigured spec keeps the legacy default
+builtin toolset behavior. Runtime is an async context manager that releases MCP
+connections on close (spec §15.4)."""
+
+import asyncio
+import contextlib
+import dataclasses
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
 # generator below; the function itself is an ``async def`` that ``yield``s.
@@ -18,15 +29,28 @@ if TYPE_CHECKING:
 from .agent.compiler import AgentCompiler
 from .agent.runner import AgentRunner
 from .agent.spec import AgentSpec
+from .capability.assembler import CapabilityAssembler
+from .capability.builtin import BuiltinProvider
+from .capability.options import CapabilityRuntimeOptions
 from .errors import SessionError, SwarmError
 from .execution.protocols import ExecutionBackend
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
+from .mcp.client import MCPConnectionManager
+from .mcp.provider import MCPProvider
+from .package.capability_provider import PackageProvider
+from .package.resolver import EntrypointResolver
+from .providers.bundle import ProviderBundle
+from .providers.mcp import MCPServerSpecProvider
+from .providers.subagent import SubagentSpecProvider
 from .run.context import RunContext
 from .run.controller import RunController
 from .run.models import RunInput, RunnableType
 from .session.models import SessionRecord, SessionStatus
+from .skill.provider import SkillProvider
 from .storage.facade import Storage
+from .subagent.models import SubagentResult
+from .subagent.provider import SubagentProvider
 from .swarm.runner import SwarmRunner
 from .swarm.spec import SwarmSpec
 from .tool.executor import ToolExecutor
@@ -35,22 +59,69 @@ if TYPE_CHECKING:
     from .knowledge.retriever import Retriever
 
 
+def _build_capability_providers(
+    bundle: ProviderBundle,
+    execution: "ExecutionBackend | None",
+    options: CapabilityRuntimeOptions,
+    mcp_manager: "MCPConnectionManager | None",
+) -> "dict[str, Any]":
+    """Map the declaration bundle onto the kind -> CapabilityProvider dict the
+    assembler consumes. Builtin is registered only when an execution backend
+    exists (it cannot resolve without one)."""
+    providers: "dict[str, Any]" = {}
+    if execution is not None:
+        providers["builtin"] = BuiltinProvider()
+    if bundle.skills is not None:
+        providers["skill"] = SkillProvider(bundle.skills)
+    if bundle.mcp_servers is not None:
+        providers["mcp"] = MCPProvider(
+            bundle.mcp_servers, mcp_manager,
+            allow_mcp_wildcard=bool(options.allow_mcp_wildcard),
+        )
+    if bundle.entrypoints is not None or bundle.subagents is not None:
+        providers["subagent"] = SubagentProvider(
+            subagent_provider=bundle.subagents,
+            entrypoint_resolver=bundle.entrypoints,
+        )
+    if bundle.package_resources is not None or bundle.entrypoints is not None:
+        # PackageProvider handles three tool-ref kinds (spec §10.1/§13.10);
+        # register one instance under each so package-resource / package-entrypoint
+        # refs resolve.
+        pkg = PackageProvider(
+            resource_provider=bundle.package_resources,
+            entrypoint_resolver=bundle.entrypoints,
+        )
+        for k in ("package", "package-resource", "package-entrypoint"):
+            providers[k] = pkg
+    return providers
+
+
 class Runtime:
     def __init__(self, *, storage: Storage, compiler: AgentCompiler,
                  runner: AgentRunner, swarm_runner: SwarmRunner,
                  model_router: ModelRouter,
-                 run_controller: "RunController | None" = None) -> None:
+                 run_controller: "RunController | None" = None,
+                 capability_assembler: "CapabilityAssembler | None" = None,
+                 mcp_connection_manager: "MCPConnectionManager | None" = None,
+                 options: "CapabilityRuntimeOptions | None" = None,
+                 provider_bundle: "ProviderBundle | None" = None) -> None:
         self.storage = storage
         self.compiler = compiler
         self.runner = runner
         self.swarm_runner = swarm_runner
         self.model_router = model_router
         # Phase 3A (§7.1): tracks in-flight asyncio.Tasks so cancel(run_id)
-        # can actually stop a running task, not just flip the DB status. When
-        # None, cancel() falls back to the pre-Phase-3A store-only path
-        # (best-effort direct -> CANCELLED). Always wired by build() so the
-        # default-constructed Runtime gains real cancellation for free.
+        # can actually stop a running task, not just flip the DB status.
         self.run_controller = run_controller
+        # Capability Runtime wiring (spec §9). When non-None, AgentRunner uses
+        # this assembler to resolve declared AgentSpec.tools into toolsets.
+        self._capability_assembler = capability_assembler
+        self._mcp_connection_manager = mcp_connection_manager
+        self._options = options or CapabilityRuntimeOptions()
+        # The declaration bundle (spec §9.4 #4): consumed by resolve_swarm /
+        # resolve_agent for by-id lookups so the swarm/agent providers are not
+        # dead inputs.
+        self._provider_bundle = provider_bundle
 
     @classmethod
     def build(cls, *, storage: Storage,
@@ -59,43 +130,47 @@ class Runtime:
               retriever: "Retriever | None" = None,
               execution: "ExecutionBackend | None" = None,
               tool_executor: "ToolExecutor | None" = None,
-              pause_on_approval: bool = False) -> "Runtime":
-        """Assemble a Runtime from optional sub-components.
+              pause_on_approval: bool = False,
+              agents: "Any | None" = None,
+              skills: "Any | None" = None,
+              mcp_servers: "MCPServerSpecProvider | None" = None,
+              tool_policies: "Any | None" = None,
+              swarms: "Any | None" = None,
+              subagents: "SubagentSpecProvider | None" = None,
+              packages: "Any | None" = None,
+              package_resources: "Any | None" = None,
+              providers: "ProviderBundle | None" = None,
+              options: "CapabilityRuntimeOptions | None" = None,
+              allow_mcp_wildcard: bool = False) -> "Runtime":
+        """Assemble a Runtime from optional sub-components + capability providers.
 
-        ``execution`` (Package 8, actionable-fix-spec §11): pass a pre-built
-        ``ExecutionBackend`` (e.g. ``LocalExecutionBackend(runtime_dir=...)``)
-        to give compiled agents builtin file/terminal tools. ``None``
-        (default) means conversational-only -- no builtin tools exposed.
-        Runtime.build() does not construct filesystem backends from a bare
-        path itself; the caller owns that decision (which backend
-        implementation, where it's rooted). This replaces the previous
-        ``workdir: Path`` parameter, which implicitly assumed
-        ``LocalExecutionBackend`` was the only possible choice.
+        Capability providers may be passed either as a ``ProviderBundle`` or as
+        the expanded ``agents``/``skills``/``mcp_servers``/... params -- never
+        both (mixing raises ValueError to avoid silent override, spec §17.9).
+        All provider params are optional; the direct ``Runtime.run(spec, ...)``
+        path stays the shortest and needs no providers configured."""
+        expanded = (agents, skills, mcp_servers, tool_policies, swarms,
+                    subagents, packages, package_resources)
+        if providers is not None and any(v is not None for v in expanded):
+            raise ValueError(
+                "pass either `providers=...` or the expanded provider params "
+                "(agents/skills/mcp_servers/...), not both"
+            )
+        resolved_options = options or CapabilityRuntimeOptions()
+        # The build-level allow_mcp_wildcard flag is the documented mcp:* opt-in
+        # (spec §11.5). Fold it into the options so MCPProvider honors it.
+        if allow_mcp_wildcard and not resolved_options.allow_mcp_wildcard:
+            resolved_options = dataclasses.replace(resolved_options, allow_mcp_wildcard=True)
 
-        ``tool_executor`` is the override path for the Phase-6 policy rules:
-        when ``None`` (default) the compiler builds its own default
-        ``ToolExecutor`` whose ``PolicyEngine`` carries only ``CommandRule``
-        (the one rule that needs no tool metadata). To make the rich rules
-        (Permission/Risk/Approval) enforce against real tool declarations,
-        the caller awaits ``build_default_policy_engine(tool_registry)`` and
-        passes ``ToolExecutor(policy=that_engine)`` here. ``build`` stays
-        synchronous by design -- the async policy build is the caller's job,
-        so the common ``Runtime.build(...)`` call site stays simple.
+        bundle = providers if providers is not None else ProviderBundle(
+            agents=agents, skills=skills, mcp_servers=mcp_servers,
+            tool_policies=tool_policies, swarms=swarms, subagents=subagents,
+            packages=packages, package_resources=package_resources,
+        )
 
-        ``pause_on_approval=True`` (Task 9) is the ergonomic entry to the
-        pause/resume path: when set AND no explicit ``tool_executor`` was
-        supplied, ``build`` constructs a pause-enabled default executor with
-        the storage's approval store wired (the compiler's own default
-        executor has no store, so it could only fall through to the legacy
-        raise). When ``tool_executor`` is explicit the flag is informational
-        -- the caller's executor already carries its own pause/store config."""
         router = model_router or ModelRouter()
         resolved_executor = tool_executor
         if tool_executor is None and pause_on_approval:
-            # Option (b): Runtime.build has access to ``storage.approvals`` so
-            # it wires the full pause-enabled executor in one place. The
-            # default-False path leaves executor construction to the compiler
-            # (byte-for-byte unchanged behavior).
             from .policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
             from .policy.engine import PolicyEngine
 
@@ -106,38 +181,15 @@ class Runtime:
                 approval_store=storage.approvals,
                 pause_on_approval=True,
             )
-        # §17 (review-doc) / Package 8: the ExecutionBackend is never passed
-        # to AgentCompiler. AgentCompiler is stateless (no filesystem
-        # surface); the builtin file/terminal tools are constructed at
-        # execution time from this backend inside AgentRunner.execute() and
-        # passed via ``agent.iter(prompt, toolsets=[...])``. ``execution is
-        # None`` means no backend -- runs expose no builtin tools
-        # (conversational-only).
         compiler = AgentCompiler(
             model_router=router,
             middleware_pipeline=middleware_pipeline,
             tool_executor=resolved_executor,
         )
-        # Memory is on-by-default (storage.memories is always populated by the
-        # facade); Knowledge is opt-in via the ``retriever`` argument (None ->
-        # no retrieval, no prompt section). Both are forwarded to SwarmRunner
-        # so swarm worker Runs see the same injection as top-level Runs.
-        #
-        # §10.2 atomic pause: when the storage can promise cross-store
-        # transactions (SqlAlchemy), thread its ``transaction()`` factory into
-        # AgentRunner so the RunPaused handler wraps checkpoint + transition +
-        # event in one UnitOfWork. FileStorage cannot (capabilities flag False)
-        # -> None -> the pause path keeps its non-atomic best-effort shape.
         uow_factory = (
             storage.transaction
             if storage.capabilities.cross_store_transactions else None
         )
-        # Phase 3A (§7): one RunController per Runtime. AgentRunner.execute()
-        # registers its driving asyncio.Task + a fresh CancellationToken here
-        # so Runtime.cancel(run_id) can actually stop the run (token check +
-        # task.cancel()). Always wired -- there is no downside since the
-        # runner's token checks are no-ops unless a controller-issued cancel
-        # sets the token.
         run_controller = RunController()
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
@@ -148,10 +200,8 @@ class Runtime:
             uow_factory=uow_factory,
             run_controller=run_controller,
             execution=execution,
-            # P0-6/G1: always wired so the pause path can persist the
-            # ApprovalRequest in File mode too (SqlAlchemy mode reaches it via
-            # tx.approvals inside the UoW instead).
             approval_store=storage.approvals,
+            capability_options=resolved_options,
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
@@ -159,20 +209,89 @@ class Runtime:
             session_store=storage.sessions,
             event_store=storage.events,
             compiler=compiler,
-            # Package 1 (actionable-fix-spec §4): SwarmRunner reuses the SAME
-            # AgentRunner Runtime just assembled for top-level Agent runs --
-            # it does not build its own. Swarm worker Runs therefore inherit
-            # identical Tool/Policy/Middleware/UoW/ExecutionBackend/Approval
-            # semantics, and (Package 2, §5) the same RunController, so
-            # cancel() can actually stop an in-flight child Run.
             agent_runner=runner,
             run_controller=run_controller,
         )
+
+        # Capability providers + assembler. The subagent executor captures the
+        # runner/compiler/storage just built, so it is wired after the runner.
+        mcp_manager = MCPConnectionManager() if bundle.mcp_servers is not None else None
+        capability_providers = _build_capability_providers(
+            bundle, execution, resolved_options, mcp_manager,
+        )
+        if bundle.entrypoints is not None or bundle.subagents is not None:
+            sub_executor = _make_runtime_subagent_executor(
+                storage=storage, compiler=compiler, runner=runner,
+            )
+            capability_providers["subagent"] = SubagentProvider(
+                subagent_provider=bundle.subagents,
+                entrypoint_resolver=bundle.entrypoints,
+                executor=sub_executor,
+            )
+            # Let package-entrypoint calls execute scoped agents through the
+            # same child-run executor (spec §11.8 #5).
+            pkg_provider = capability_providers.get("package")
+            if pkg_provider is not None:
+                pkg_provider.entrypoint_executor = sub_executor
+        assembler = (
+            CapabilityAssembler(capability_providers) if capability_providers else None
+        )
+        # AgentRunner reads the assembler at execute() time; set it now that the
+        # subagent executor (which needed the runner) is wired.
+        runner._capability_assembler = assembler
+
         return cls(
             storage=storage, compiler=compiler, runner=runner,
             swarm_runner=swarm_runner, model_router=router,
             run_controller=run_controller,
+            capability_assembler=assembler,
+            mcp_connection_manager=mcp_manager,
+            options=resolved_options,
+            provider_bundle=bundle,
         )
+
+    async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
+        """Resolve an AgentSpec's declared tools into a CapabilityBundle. Public
+        surface for callers/tests that want the assembled bundle without running.
+        Requires the Runtime to have been built with capability providers."""
+        from .capability.provider import CapabilityContext
+
+        if self._capability_assembler is None:
+            from .capability.bundle import CapabilityBundle
+            return CapabilityBundle.empty()
+        context = CapabilityContext(
+            agent_id=spec.id,
+            exposure_policy=self._options.tool_exposure,
+            execution=execution,
+        )
+        return await self._capability_assembler.assemble(spec, context)
+
+    async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
+        """Fetch a SwarmSpec by id via the wired SwarmSpecProvider (spec §9.4 #4).
+        Raises SwarmError when no swarm provider was configured."""
+        bundle = self._provider_bundle
+        if bundle is None or bundle.swarms is None:
+            raise SwarmError("no SwarmSpecProvider configured")
+        return await bundle.swarms.get(swarm_id)
+
+    async def resolve_agent(self, agent_id: str) -> AgentSpec:
+        """Fetch an AgentSpec by id via the wired AgentSpecProvider (spec §9.4 #4).
+        Raises SwarmError when no agent provider was configured."""
+        bundle = self._provider_bundle
+        if bundle is None or bundle.agents is None:
+            raise SwarmError("no AgentSpecProvider configured")
+        return await bundle.agents.get(agent_id)
+
+    async def __aenter__(self) -> "Runtime":
+        return self
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release runtime-owned resources (MCP connections). Idempotent."""
+        if self._mcp_connection_manager is not None:
+            await self._mcp_connection_manager.close()
+            self._mcp_connection_manager = None
 
     async def run(self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
                   session_id: "str | None" = None,
@@ -225,37 +344,17 @@ class Runtime:
           call ``run_controller.cancel(run_id)`` which (a) sets the
           CancellationToken so the runner's next execution-point check raises
           CancelledError, and (b) calls ``task.cancel()`` so any hanging await
-          inside the model call also unblocks. The runner's CancelledError
-          handler then transitions CANCELLING -> CANCELLED via the version
-          captured from the preceding step (§6.3).
+          inside the model call also unblocks.
 
-          If the record is already CANCELLING (a previous cancel() call won
-          the race), skip straight to ``run_controller.cancel(run_id)`` --
-          re-transitioning CANCELLING -> CANCELLING is not a legal edge in
-          ALLOWED_RUN_TRANSITIONS. This makes repeated cancel() calls on the
-          same in-flight run idempotent instead of raising
-          InvalidRunTransitionError on the second call. A concurrent cancel()
-          can also race the CANCELLING transition itself: if it loses to
-          another cancel() between the terminal-status check and the
-          transition call, the ``transition()`` raises RunConflictError; on
-          that specific conflict, re-read the record and, if it is now
-          CANCELLING (the other caller's transition landed first), fall
-          through to the same idempotent ``run_controller.cancel(run_id)``
-          path rather than propagating the conflict. Any other exception
-          (including a fresh terminal or unexpected status) is not ours to
-          interpret and is re-raised as-is.
+          If the record is already CANCELLING, skip straight to
+          ``run_controller.cancel(run_id)`` -- re-transitioning is not a legal
+          edge, so repeated cancel() calls are idempotent.
 
-        * **No in-flight task** (stale record from a crashed worker, a test
-          seed, or any path where the runner is not driving execute()) --
-          there is nothing to actually stop, so the store goes directly to
-          CANCELLED. This also covers a stale CANCELLING record with no
-          registered controller entry (e.g. after a process restart). This is
-          the pre-Phase-3A behavior and preserves every existing
-          seeded-cancel test.
+        * **No in-flight task** -- there is nothing to actually stop, so the
+          store goes directly to CANCELLED.
 
-        Idempotent: a Run already in a terminal status (SUCCEEDED / FAILED /
-        CANCELLED) is a no-op. Raises :class:`RunNotFoundError` when the run
-        does not exist."""
+        Idempotent: a Run already in a terminal status is a no-op. Raises
+        :class:`RunNotFoundError` when the run does not exist."""
         from .errors import RunConflictError, RunNotFoundError
         from .run.models import RunStatus
 
@@ -265,21 +364,14 @@ class Runtime:
         if record.status in (
             RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
         ):
-            return  # already terminal -- no-op
+            return
 
-        # If a live task is registered, go through CANCELLING + signal the
-        # controller; the runner finishes the transition to CANCELLED via its
-        # CancelledError handler. Otherwise (no task / no controller) go
-        # directly to CANCELLED -- there is nothing to actually stop.
         in_flight = (
             self.run_controller is not None
             and self.run_controller.get_token(run_id) is not None
         )
         if in_flight:
             if record.status == RunStatus.CANCELLING:
-                # A previous cancel() already moved this in-flight run to
-                # CANCELLING -- re-signal the controller (idempotent) instead
-                # of attempting the illegal CANCELLING -> CANCELLING edge.
                 await self.run_controller.cancel(run_id)
                 return
 
@@ -314,15 +406,9 @@ class Runtime:
         user_id: "str | None" = None,
         tenant_id: "str | None" = None,
     ) -> "AsyncIterator[dict]":
-        """Streaming variant of :meth:`run`. Resolves (or creates) the Session,
-        mints a RunContext, and delegates to :meth:`AgentRunner.run_stream`,
-        yielding the same dict-event shape (``text`` / ``tool``) the CLI REPL
-        consumes.
-
-        Session resolution mirrors :meth:`run` exactly (explicit ``session_id``
-        must exist; ``None`` mints a fresh session). Only ``AgentSpec`` is
-        supported -- a ``SwarmSpec`` raises :class:`SwarmError` because swarm
-        streaming is not implemented."""
+        """Streaming variant of :meth:`run`. Only ``AgentSpec`` is supported --
+        a ``SwarmSpec`` raises :class:`SwarmError` because swarm streaming is not
+        implemented. Session resolution mirrors :meth:`run` exactly."""
         resolved_session_id = session_id or str(uuid.uuid4())
         if session_id is not None:
             existing = await self.storage.sessions.get(session_id)
@@ -354,19 +440,12 @@ class Runtime:
     ) -> "AsyncIterator[dict]":
         """Resume a paused Run (Task 8). Loads the paused RunRecord,
         deserializes its checkpoint's message history, transitions
-        WAITING_APPROVAL -> RUNNING, and re-enters
-        :meth:`AgentRunner.run_stream` with ``message_history=<deserialized>``
-        so the pydantic-ai graph picks up from the checkpointed state: pending
-        tool calls execute (the ToolExecutor's resume gate recognizes the
-        now-APPROVED request), the model is called again with the full history,
-        and the run completes normally.
+        WAITING_APPROVAL -> RUNNING, and re-enters :meth:`AgentRunner.run_stream`.
 
         Yields ``{"type": "resumed", "run_id": run_id}`` first, then the same
-        dict-event shape ``run_stream`` yields (``text`` / ``tool``).
-
-        Raises :class:`RunNotFoundError` when the run or its checkpoint does not
-        exist. Raises :class:`InvalidRunTransitionError` when the run is not in
-        WAITING_APPROVAL status."""
+        dict-event shape ``run_stream`` yields. Raises :class:`RunNotFoundError`
+        when the run/checkpoint does not exist; :class:`InvalidRunTransitionError`
+        when the run is not WAITING_APPROVAL."""
         from .agent.checkpoint_io import deserialize_messages
         from .errors import InvalidRunTransitionError, RunNotFoundError
         from .run.models import RunStatus
@@ -397,3 +476,94 @@ class Runtime:
             compiled, RunInput(prompt=""), context, message_history=messages,
         ):
             yield event
+
+
+def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler,
+                                    runner: AgentRunner):
+    """Build a SubagentExecutor that runs a resolved child AgentSpec under a
+    parent run: creates a child session (parent_id = parent session), mints a
+    child run recording parent_run_id / root_run_id, delegates to the runner
+    (bounded by timeout_seconds), and returns a structured SubagentResult.
+
+    Depth is tracked via the ``_CURRENT_DEPTH`` contextvar: the child run sees
+    parent_depth + 1, so SubagentProvider.enforce_depth bounds the full chain
+    (the token is reset on return so parallel/sibling calls are unaffected)."""
+    from .subagent.runner import _CURRENT_DEPTH
+
+    async def execute(*, agent_spec, task, context, parent_run_id, root_run_id,
+                      parent_session_id, scope, timeout_seconds):
+        child_session = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        await storage.sessions.create(SessionRecord(
+            id=child_session, parent_id=parent_session_id,
+            status=SessionStatus.ACTIVE, version=1,
+            created_at=now, updated_at=now,
+        ))
+        child_run = str(uuid.uuid4())
+        effective_root = root_run_id or parent_run_id or child_run
+        run_ctx = RunContext(
+            run_id=child_run, root_run_id=effective_root, parent_run_id=parent_run_id,
+            session_id=child_session, runnable_id=agent_spec.id,
+            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None,
+            workspace=None,
+        )
+        scope_dict = None
+        if scope is not None:
+            scope_dict = {
+                "package_id": scope.package_id,
+                "package_kind": scope.package_kind,
+            }
+
+        async def _drive():
+            compiled = await compiler.compile(agent_spec)
+            return await runner.run(compiled, RunInput(prompt=task), run_ctx)
+
+        # Increment depth for the child run; reset on return so siblings/parents
+        # keep their own depth value.
+        from .events.payloads import SubagentCompleted, SubagentErrored, SubagentStarted
+
+        async def _evt(payload):
+            await storage.events.append(
+                stream_id=child_run, run_id=child_run, root_run_id=effective_root,
+                parent_run_id=parent_run_id, session_id=child_session,
+                runnable_id=agent_spec.id, payload=payload,
+            )
+
+        token = _CURRENT_DEPTH.set(_CURRENT_DEPTH.get() + 1)
+        await _evt(SubagentStarted(
+            agent_id=agent_spec.id, parent_run_id=parent_run_id,
+            scope=scope_dict.get("package_id") if scope_dict else None,
+        ))
+        try:
+            if timeout_seconds is not None:
+                result = await asyncio.wait_for(_drive(), timeout=timeout_seconds)
+            else:
+                result = await _drive()
+            await _evt(SubagentCompleted(agent_id=agent_spec.id, run_id=child_run, status="succeeded"))
+            return SubagentResult(
+                agent_id=agent_spec.id, scope=scope_dict,
+                session_id=child_session, run_id=child_run,
+                status="succeeded", output=getattr(result, "output", None),
+            )
+        except asyncio.TimeoutError:
+            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=f"timeout after {timeout_seconds}s"))
+            return SubagentResult(
+                agent_id=agent_spec.id, scope=scope_dict,
+                session_id=child_session, run_id=child_run,
+                status="failed", error={"reason": f"timeout after {timeout_seconds}s"},
+            )
+        except Exception as exc:  # child failures surface as structured errors
+            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=str(exc)))
+            return SubagentResult(
+                agent_id=agent_spec.id, scope=scope_dict,
+                session_id=child_session, run_id=child_run,
+                status="failed", error={"reason": str(exc)},
+            )
+        finally:
+            _CURRENT_DEPTH.reset(token)
+
+    return execute
+
+
+# re-export for tooling that imports Runtime alongside these types
+__all__ = ["Runtime"]

@@ -18,11 +18,6 @@ def test_public_api_exports_file_storage():
     assert ai.FileStorage is _Real
 
 
-def test_public_api_exports_sqlalchemy_storage():
-    from linktools.ai.storage.facade import SqlAlchemyStorage as _Real
-    assert ai.SqlAlchemyStorage is _Real
-
-
 def test_public_api_exports_storage():
     from linktools.ai.storage.facade import Storage as _Real
     assert ai.Storage is _Real
@@ -33,10 +28,37 @@ def test_public_api_exports_swarm_spec():
     assert ai.SwarmSpec is _Real
 
 
+def test_public_api_exports_model_hot_types():
+    # spec §20.3: ModelPolicy / ModelRouter / RuntimeModelConfig are root exports.
+    from linktools.ai.model import ModelPolicy, ModelRouter, RuntimeModelConfig
+    assert ai.ModelPolicy is ModelPolicy
+    assert ai.ModelRouter is ModelRouter
+    assert ai.RuntimeModelConfig is RuntimeModelConfig
+
+
+def test_public_api_exports_prompt_and_refs():
+    from linktools.ai.agent.spec import PromptSpec, ToolRef, MiddlewareRef
+    assert ai.PromptSpec is PromptSpec
+    assert ai.ToolRef is ToolRef
+    assert ai.MiddlewareRef is MiddlewareRef
+
+
+def test_root_does_not_re_export_sqlalchemy_storage():
+    # spec §21.7: SqlAlchemyStorage is NOT a root export (optional dependency).
+    assert not hasattr(ai, "SqlAlchemyStorage")
+
+
+def test_sqlalchemy_storage_accessible_lazily_from_storage_package():
+    # spec §21.4: lazy __getattr__ keeps the short import working on demand.
+    from linktools.ai.storage import SqlAlchemyStorage
+    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage as _Real
+    assert SqlAlchemyStorage is _Real
+
+
 def test_public_api_does_not_re_export_internals():
     for internal in ("AgentCompiler", "AgentRunner", "CompiledAgent", "Middleware",
                      "MiddlewarePipeline", "PolicyEngine", "ToolExecutor", "RunStore",
-                     "SessionStore", "EventStore", "ResourceStore", "ModelRouter",
+                     "SessionStore", "EventStore", "ResourceStore",
                      "SwarmRunner", "SwarmStore",
                      "CoordinatorDelegationStrategy", "ParallelFanOutStrategy"):
         assert not hasattr(ai, internal), f"linktools.ai should not export {internal}"
