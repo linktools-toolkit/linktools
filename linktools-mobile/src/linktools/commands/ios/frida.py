@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError, CommandMain
 from linktools.cli.argparse import KeyValueAction, range_type, BooleanOptionalAction
-from linktools.platform import get_free_port
+from linktools.system import get_free_port
 from linktools.mobile.cli import IOSCommand
 from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScriptFile, FridaEvalCode, FridaIOSServer
 from linktools.errors import DownloadError

@@ -114,7 +114,6 @@ class ConfigLoader:
     """Load configuration-backed argparse values after parsing."""
     def __call__(self, parser: "CommandParser", action: "ConfigAction", namespace, value=MISSING):
 
-        from ..core._config import CacheConfigProperty
         from .command import CommandParser
 
         if not isinstance(parser, CommandParser) or not parser.command:
@@ -129,20 +128,9 @@ class ConfigLoader:
         config = parser.command.config
         key = f"`{item}` for `{parser.prog}`"
         if value is MISSING or isinstance(value, ConfigLoader):
-            value = action.property.get(
-                config,
-                key=key,
-                type=action.type or action.property.type,
-                default=MISSING,
-                choices=action.choices,
-            )
+            # New ConfigField: resolve through the Config's resolver.
+            value = config.get(action.dest, type=action.type, default=MISSING)
         setattr(namespace, action.dest, value)
-        if isinstance(action.property, CacheConfigProperty):
-            action.property.save(
-                config,
-                key=key,
-                value=value
-            )
 
 
 class ConfigAction(argparse.Action):
@@ -170,14 +158,15 @@ class ConfigAction(argparse.Action):
             help=help,
             metavar=metavar)
 
-        from ..core import ConfigProperty
+        from ..core import ConfigField
 
-        if not isinstance(config, ConfigProperty):
-            raise argparse.ArgumentError(self, "config must be ConfigProperty")
+        if not isinstance(config, ConfigField):
+            raise argparse.ArgumentError(self, "config must be ConfigField")
 
-        self.property: "ConfigProperty" = config
+        self.property = config
         if default is not MISSING:
-            self.property.set_default(default, ignore_errors=True)
+            if config.default is MISSING or config.default is None:
+                config.default = default
 
     def __call__(self, parser: "CommandParser", namespace, values, option_string=None):
         if not ArgParseComplete.is_invocation():

@@ -36,8 +36,7 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable, cached_property
-from linktools.platform import get_free_port, is_port_free, wait_process
-from linktools.runtime import Process
+from linktools.system import get_free_port, is_port_free, wait_process
 from linktools.types import Stoppable, Timeout
 
 if TYPE_CHECKING:
@@ -45,6 +44,7 @@ if TYPE_CHECKING:
     from typing import Any, TypeVar
     from linktools.ssh import SSHClient
     from linktools.types import TimeoutType
+    from linktools.runtime import Process
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="GoIOSDevice")
 
@@ -404,7 +404,7 @@ class GoIOSForward(Stoppable):
                         break
 
                 if self._process.poll() is None:
-                    time.sleep(min(max(timeout.remain, 1), 1))
+                    time.sleep(min(max(timeout.remaining, 1), 1))
                     if self._process.poll() is None and not is_port_free(local_port):
                         _logger.debug(f"{self} process is running, continue")
                         return

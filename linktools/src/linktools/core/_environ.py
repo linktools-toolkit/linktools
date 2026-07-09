@@ -36,13 +36,34 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools import utils, metadata
-from linktools.platform import get_machine, get_system
+from linktools.system import get_machine, get_system
 from linktools.decorator import cached_property, cached_classproperty
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
-    from linktools.types import T, ConfigDict, Config, Tools, Tool, UrlFile, PathType
+    from linktools.types import T, Config, Tools, Tool, UrlFile, PathType
+    from ._paths import EnvironmentPaths
+    from ._logging import LoggingManager
+    from ._locks import LockManager
+    from ..cache import CacheStore
+    from ._config import ConfigStore
+    from ._download import DownloadManager
+
+
+class ConfigDict(dict):
+    """Minimal dict subclass for tool config loading (v2: replaces old _config.ConfigDict)."""
+    def update_from_file(self, filename, load, silent=False):
+        try:
+            with open(filename, "rb") as f:
+                obj = load(f)
+        except OSError:
+            if silent:
+                return False
+            raise
+        if isinstance(obj, dict):
+            self.update(obj)
+        return True
 
 
 class BaseEnviron(abc.ABC):
@@ -142,6 +163,107 @@ class BaseEnviron(abc.ABC):
         """
         return Path(self.global_config["TEMP_PATH"])
 
+    @cached_property(lock=True)
+    def paths(self) -> "EnvironmentPaths":
+        """Resolved, normalised filesystem layout (spec §5.3).
+
+        Returns:
+            EnvironmentPaths: The operation result.
+
+        ``data``/``temp`` come from the same global config as the legacy
+        accessors, so existing behavior is unchanged; ``cache``/``config``/
+        ``logs``/``downloads`` are the new canonical locations consumers migrate
+        to in later phases.
+        """
+        from ._paths import EnvironmentPaths
+
+        cfg = self.global_config
+        return EnvironmentPaths(
+            root=self.root_path,
+            storage=cfg["STORAGE_PATH"],
+            data=cfg["DATA_PATH"],
+            temp=cfg["TEMP_PATH"],
+        )
+
+    @cached_property(lock=True)
+    def locks(self) -> "LockManager":
+        """Unified process/file lock manager (spec §7.11 CAC-009).
+
+        Returns:
+            LockManager: The operation result.
+        """
+        from ._locks import LockManager
+
+        return LockManager(self.paths.cache / "locks")
+
+    @cached_property(lock=True)
+    def cache(self) -> "CacheStore":
+        """Transactional local cache (spec §7, §5.1).
+
+        Returns:
+            CacheStore: The operation result.
+
+        A single SQLite store shared across the process; use
+        ``environ.cache.namespace(name)`` for isolated key spaces. Per-thread
+        connections are managed inside the store.
+        """
+        from ..cache import CacheStore
+
+        self.paths.ensure_cache()
+        return CacheStore(self.paths.cache / "cache.db")
+
+    @cached_property(lock=True)
+    def config_store(self) -> "ConfigStore":
+        """Persistent, user-editable JSON store (spec §8.5 CFG-005).
+
+        Returns:
+            ConfigStore: The operation result.
+
+        The proper home for persistent user state (e.g. cntr's
+        INSTALLED_CONTAINERS) that must NOT live in the cache. Distinct file and
+        lifecycle from ``cache``; written atomically under a process lock.
+        """
+        from ._config import ConfigStore
+
+        self.paths.ensure_config()
+        return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
+
+    @cached_property(lock=True)
+    def downloads(self) -> "DownloadManager":
+        """Unified download manager (spec §9, §5.1).
+
+        Returns:
+            DownloadManager: The operation result.
+
+        Locks via ``self.locks``, stores resume metadata in ``self.cache``;
+        consumers migrate from the legacy UrlFile (core/_url.py) to this.
+        """
+        from ._download import DownloadManager
+
+        return DownloadManager(self)
+
+    def subprocess_env(self, include_tools=True, overrides=None):
+        """Build a subprocess environment dict (spec §5.1, §10.11).
+
+        Returns a fresh mapping (never mutates the process ``os.environ``): the
+        managed-tools stub dir is prepended to PATH so tools resolve without the
+        global PATH mutation the legacy ``_create_tools`` did, then ``overrides``
+        are applied.
+        """
+        env = dict(os.environ)
+        if include_tools:
+            try:
+                stub = str(self.tools.stub_path)
+                if stub:
+                    rest = [p for p in env.get("PATH", "").split(os.pathsep)
+                            if p and p != stub]
+                    env["PATH"] = os.pathsep.join([stub] + rest)
+            except Exception:
+                pass
+        if overrides:
+            env.update(overrides)
+        return env
+
     def get_path(self, *paths: str) -> "Path":
         """Return the path.
 
@@ -229,19 +351,35 @@ class BaseEnviron(abc.ABC):
         Returns:
             logging.Logger: The operation result.
         """
-        return logging.getLogger(self.name)
+        return self.get_logger()
 
-    def get_logger(self, name: str = None) -> "logging.Logger":
-        """Return the logger.
-
-        Args:
-            name (str): Name to resolve.
+    @cached_property(lock=True)
+    def logging(self) -> "LoggingManager":
+        """The :class:`LoggingManager` owning redaction, context and levels.
 
         Returns:
-            logging.Logger: The operation result.
+            LoggingManager: The operation result.
+
+        Constructing it is side-effect free; redaction is installed lazily on
+        the first ``get_logger``/``bootstrap``/``configure`` call (spec §5.4).
         """
-        name = f"{self.name}.{name}" if name else self.name
-        return logging.getLogger(name)
+        from ._logging import LoggingManager
+
+        return LoggingManager(self)
+
+    def get_logger(self, name: str = None) -> "logging.Logger":
+        """Return a named logger with redaction active (spec §3.2/§5.4, v2 §4.3).
+
+        Avoids double-prefixing: if ``name`` already starts with the environment
+        name (e.g. ``linktools.ssh``), it is used as-is.
+        """
+        if name and (name == self.name or name.startswith(self.name + ".")):
+            full = name
+        elif name:
+            full = "%s.%s" % (self.name, name)
+        else:
+            full = self.name
+        return self.logging.get_logger(full)
 
     @cached_classproperty(lock=True)
     def global_config(self) -> "ConfigDict":
@@ -250,61 +388,94 @@ class BaseEnviron(abc.ABC):
         Returns:
             ConfigDict: The operation result.
         """
-        from ._config import ConfigDict
+        # ConfigDict is defined above (inlined)
 
         prefix = f"{metadata.__name__}".upper()
 
         data_path = os.environ.get(f"{prefix}_DATA_PATH", None)
         temp_path = os.environ.get(f"{prefix}_TEMP_PATH", None)
-        if not (data_path and temp_path):
-            storage_path = os.environ.get(f"{prefix}_PATH", None)
-            if not storage_path:
-                storage_path = os.environ.get(f"{prefix}_STORAGE_PATH", None)
-                if not storage_path:
-                    storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
-            if not data_path:
-                data_path = os.path.join(storage_path, "data")
-            if not temp_path:
-                temp_path = os.path.join(storage_path, "temp")
+        # Storage root is always resolved so EnvironmentPaths can derive the
+        # cache/config/logs/downloads directories under it even when both
+        # DATA_PATH and TEMP_PATH are supplied explicitly via env.
+        storage_path = (
+            os.environ.get(f"{prefix}_PATH", None)
+            or os.environ.get(f"{prefix}_STORAGE_PATH", None)
+        )
+        if not storage_path:
+            storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
+        if not data_path:
+            data_path = os.path.join(storage_path, "data")
+        if not temp_path:
+            temp_path = os.path.join(storage_path, "temp")
 
         return ConfigDict(
             DEBUG=False,
+            STORAGE_PATH=storage_path,
             DATA_PATH=data_path,
             TEMP_PATH=temp_path,
         )
 
     def _create_config(self) -> "Config":
-        from ._config import Config, ConfigDict
+        """Build the new Config (ConfigSchema-backed, v2 §3 main path).
 
-        return Config(
-            self,
-            ConfigDict(),
-            namespace="MAIN",
-            env_prefix=f"{self.name.upper()}_"
+        Sources (§8.2 precedence):
+        EnvironmentSource > RuntimeOverrideSource > PersistentSource >
+        DefaultSource (schema defaults).
+        """
+        from ._config import (
+            Config as NewConfig, ConfigSchema,
+            EnvironmentSource, RuntimeOverrideSource,
+            PersistentSource, DefaultSource,
         )
+
+        schema = ConfigSchema(allow_unknown=True)  # dynamic keys (DEBUG etc.)
+        prefix = self.name.upper() + "_"
+        config = NewConfig(
+            self,
+            schema,
+            sources=[
+                EnvironmentSource(prefix),
+                RuntimeOverrideSource(),
+                PersistentSource(self.config_store, "main"),
+                DefaultSource(schema),
+            ],
+        )
+        # Register known core fields with defaults.
+        config.update_defaults(
+            DEBUG=False,
+        )
+        return config
 
     @cached_property(lock=True)
     def config(self) -> "Config":
-        """Config.
-
-        Returns:
-            Config: The operation result.
-        """
+        """Config (v2 §3: new ConfigSchema-backed main path)."""
         return self._create_config()
 
-    def wrap_config(self, namespace: str = MISSING, env_prefix: str = MISSING) -> "Config":
-        """Return a scoped configuration wrapper.
+    def wrap_config(self, namespace=MISSING, env_prefix=MISSING):
+        """Return a scoped Config (v2 §3: new Config, not ConfigWrapper).
 
-        Args:
-            namespace (str): Argparse namespace to update.
-            env_prefix (str): The env_prefix value.
-
-        Returns:
-            Config: The operation result.
+        Each call returns a fresh Config with its own schema + sources, so
+        sub-managers (cntr) can define their own fields independently.
         """
-        from ._config import ConfigWrapper
+        from ._config import (
+            Config as NewConfig, ConfigSchema,
+            EnvironmentSource, RuntimeOverrideSource,
+            PersistentSource, DefaultSource,
+        )
 
-        return ConfigWrapper(self.config, namespace=namespace, env_prefix=env_prefix)
+        schema = ConfigSchema(allow_unknown=True)  # Tools/cntr dynamic keys
+        prefix = (env_prefix if env_prefix is not MISSING else "")
+        ns = namespace if namespace is not MISSING else "main"
+        return NewConfig(
+            self,
+            schema,
+            sources=[
+                EnvironmentSource(prefix),
+                RuntimeOverrideSource(),
+                PersistentSource(self.config_store, ns),
+                DefaultSource(schema),
+            ],
+        )
 
     def get_config(self, key: str, type: "type[T]" = None, default: "Any" = MISSING) -> "T":
         """Return a configuration value.
@@ -319,6 +490,10 @@ class BaseEnviron(abc.ABC):
         """
         return self.config.get(key=key, type=type, default=default)
 
+    def require_config(self, key: str, type: "type[T]" = None) -> "T":
+        """Return a must-exist configuration value; raise if it is missing."""
+        return self.config.require(key=key, type=type)
+
     def set_config(self, key: str, value: "Any") -> None:
         """Set a configuration value.
 
@@ -328,15 +503,39 @@ class BaseEnviron(abc.ABC):
         """
         self.config.set(key, value)
 
+    def close(self):
+        """Close all owned resources (v4 §10.3).
+
+        Idempotent. Closes cache connections, logging handlers, and download
+        tasks owned by this Environment. Does NOT close other Environment's
+        resources or the root logger.
+        """
+        # Cache (SQLite connections are per-thread; close this thread's).
+        cache = getattr(self, "_cache", None)
+        if cache is not None:
+            cache.close()
+        # Config store (no persistent connection to close, but flush is atomic).
+        # Logging (unregister redactor from global factory).
+        logging_mgr = getattr(self, "_logging", None)
+        if logging_mgr is not None:
+            logging_mgr.close()
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def _create_tools(self) -> "Tools":
         from ._tools import Tools
-        from ._config import ConfigDict
+        # ConfigDict is defined above (inlined)
 
         config = ConfigDict()
 
-        develop_path = environ.get_path("assets", "develop", "tools.yml")
-        data_path = environ.get_data_path("tools", "tools.json")
-        asset_path = environ.get_path("assets", "tools.json")
+        develop_path = self.get_path("assets", "develop", "tools.yml")
+        data_path = self.get_data_path("tools", "tools.json")
+        asset_path = self.get_path("assets", "tools.json")
 
         if os.path.exists(data_path):
             config.update_from_file(data_path, json.load)
@@ -347,11 +546,8 @@ class BaseEnviron(abc.ABC):
             config.update_from_file(develop_path, yaml.safe_load)
 
         tools = Tools(self, config)
-        paths = os.environ["PATH"].split(os.pathsep)
-        stub_path = str(tools.stub_path)
-        if stub_path not in paths:
-            paths.append(stub_path)
-            os.environ["PATH"] = os.pathsep.join(paths)
+        # do NOT mutate os.environ["PATH"]. Subprocesses that need the
+        # tools stub resolve it via env.subprocess_env() (Tool.popen, ToolRunner).
         return tools
 
     @cached_property(lock=True)
@@ -387,7 +583,7 @@ class BaseEnviron(abc.ABC):
         Returns:
             UrlFile: The operation result.
         """
-        from ._url import HttpFile, LocalFile
+        from ._download import HttpFile, LocalFile
 
         if not isinstance(url, str):
             url = str(url)
@@ -442,14 +638,14 @@ class Environ(BaseEnviron):
     def _create_config(self):
         config = super()._create_config()
 
-        # Initialize download-related defaults.
-        config.update(
+        # Initialize download-related defaults on the new Config.
+        config.update_defaults(
             DEFAULT_USER_AGENT=
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/140.0.0.0 "
             "Safari/537.36",
-            DEFAULT_WAN_IP_URL="http://ifconfig.me/ip"  # noqa
+            DEFAULT_WAN_IP_URL="https://ifconfig.me/ip"  # noqa
         )
 
         return config

@@ -7,12 +7,13 @@ import os
 import queue
 import subprocess
 import threading
+import time as _time
 from collections import ChainMap
 from typing import TYPE_CHECKING
 
 from ..decorator import cached_property, timeoutable
 from ..errors import ExecError
-from ..platform import is_unix_like, wait_process
+from ..system import is_unix_like, wait_process
 from ..utils import list2cmdline
 
 if TYPE_CHECKING:
@@ -67,7 +68,7 @@ if is_unix_like():
                 fds.append(stderr.fd)
 
             while len(fds) > 0:
-                remain = _coalesce(timeout.remain, 1)
+                remain = _coalesce(timeout.remaining, 1)
                 if remain <= 0:
                     break
                 rlist, wlist, xlist = select.select(fds, [], [], min(remain, 1))
@@ -176,7 +177,7 @@ else:
 
         def get(self, timeout: "Timeout"):
             while self.is_alive:
-                remain = _coalesce(timeout.remain, 1)
+                remain = _coalesce(timeout.remaining, 1)
                 if remain <= 0:
                     break
                 try:
@@ -195,14 +196,89 @@ else:
                     break
 
 
-class Process(subprocess.Popen):
+class ProcessResult(object):
+    """Result of a completed process (v2 §12.1 RUN-PROC-002)."""
+
+    def __init__(self, args: "Any", returncode: int, stdout: "Any" = None,
+                 stderr: "Any" = None, duration: float = None,
+                 timed_out: bool = False) -> None:
+        self.args = args
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.duration = duration
+        self.timed_out = timed_out
+
+    @property
+    def succeeded(self):
+        return self.returncode == 0
+
+    def __repr__(self):
+        return "ProcessResult(args=%r, returncode=%d, duration=%.2fs)" % (
+            self.args, self.returncode, self.duration or 0)
+
+
+class Process(object):
+    """Composition wrapper around subprocess.Popen (v2 §12.1 RUN-PROC-001).
+
+    No longer inherits Popen; instead wraps it and delegates all attribute
+    access via __getattr__. This means callers that used Popen methods/attrs
+    (wait, poll, kill, stdout, pid, returncode, ...) work unchanged through
+    delegation, while Process owns its own lifecycle methods (call, check_call,
+    fetch, exec, recursive_kill, wait_for_result).
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._popen = subprocess.Popen(*args, **kwargs)
+        self._started_at = _time.monotonic()
+
+    def __getattr__(self, name):
+        # Delegate any attribute not defined on Process to the wrapped Popen.
+        # This covers wait, poll, kill, terminate, communicate, stdout, stderr,
+        # stdin, pid, returncode, args, etc.
+        return getattr(self._popen, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._popen.wait()
+
+    @classmethod
+    def start(cls, *args: "Any", **kwargs: "Any") -> "Process":
+        """Create and start a Process (v2 §12.1)."""
+        return cls(*args, **kwargs)
+
+    def wait_for_result(self, timeout: "TimeoutType" = None) -> "ProcessResult":
+        """Wait for the process and return a ProcessResult (v2 §12.1)."""
+        from ..types import Timeout
+        timed_out = False
+        wall = None
+        if timeout is not None:
+            t = Timeout(timeout)
+            wall = t.remaining
+        try:
+            retcode = self._popen.wait(timeout=wall)
+        except subprocess.TimeoutExpired:
+            self.recursive_kill()
+            retcode = self._popen.returncode
+            timed_out = True
+        duration = _time.monotonic() - self._started_at
+        return ProcessResult(
+            args=self._popen.args,
+            returncode=retcode,
+            stdout=self._popen.stdout,
+            stderr=self._popen.stderr,
+            duration=duration,
+            timed_out=timed_out,
+        )
 
     @timeoutable
     def call(self, timeout: "TimeoutType" = None) -> int:
         with self:
             try:
-                return self.wait(timeout.remain)
-            except:
+                return self._popen.wait(timeout.remaining)
+            except Exception:
                 self.recursive_kill()
                 raise
 
@@ -210,11 +286,11 @@ class Process(subprocess.Popen):
     def check_call(self, timeout: "TimeoutType" = None) -> int:
         with self:
             try:
-                retcode = self.wait(timeout.remain)
+                retcode = self._popen.wait(timeout.remaining)
                 if retcode:
-                    raise subprocess.CalledProcessError(retcode, self.args)
+                    raise subprocess.CalledProcessError(retcode, self._popen.args)
                 return retcode
-            except:
+            except Exception:
                 self.recursive_kill()
                 raise
 
@@ -306,7 +382,7 @@ def popen(
         shell: bool = False, cwd: "PathType" = None,
         env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
         **kwargs
-) -> Process:
+) -> "Process":
     args = [str(arg) for arg in args]
 
     if capture_output is True:

@@ -8,7 +8,7 @@ import paramiko
 from paramiko.ssh_exception import SSHException
 
 from linktools import utils
-from linktools.platform import get_free_port
+from linktools.system import get_free_port
 from linktools.mobile.cli import IOSCommand
 from linktools.ssh import SSHClient
 

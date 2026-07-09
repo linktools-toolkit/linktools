@@ -8,12 +8,12 @@ from linktools import utils
 from linktools.core import environ
 from linktools.decorator import timeoutable
 from linktools.errors import Error
-from linktools.runtime import Process
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
     from typing import Any, IO
     from linktools.types import TimeoutType
+    from linktools.runtime import Process
     from linktools.core import Tool
 
 BridgeType = TypeVar("BridgeType", bound="Bridge")

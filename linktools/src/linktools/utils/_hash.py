@@ -43,6 +43,18 @@ def get_file_md5(path: "PathType"):
     return get_file_hash(path, algorithm="md5")
 
 
+def verify_file(path: "PathType", digest: str, algorithm: "Literal['md5', 'sha1', 'sha256']" = "sha256") -> bool:
+    """Return True if the file's digest matches (spec §17.3 UTL-003).
+
+    Constant-time comparison so a timing oracle cannot leak the expected digest.
+    """
+    import hmac
+
+    actual = get_file_hash(path, algorithm=algorithm)
+    expected = digest.lower()
+    return len(actual) == len(expected) and hmac.compare_digest(actual, expected)
+
+
 def get_hash_ident(data: "str | bytes"):
     """Return a short stable identifier from a hashed value."""
     if isinstance(data, str):

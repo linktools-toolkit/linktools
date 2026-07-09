@@ -35,7 +35,8 @@ from dulwich.errors import GitProtocolError
 
 from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
-from linktools.core import environ, ConfigProperty
+from linktools.core import environ
+from linktools.core import ConfigField
 from linktools.rich import confirm, choose
 from linktools.errors import ConfigError, GitError
 from .container import ContainerError
@@ -137,7 +138,8 @@ class ConfigCommand(BaseCommand):
     @subcommand("set", help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
     def on_command_set(self, configs: "dict[str, str]"):
-        manager.env_config.cache.save(**configs)
+        for key, value in configs.items():
+            manager.env_config.persist(key, value)
         for key in sorted(configs.keys()):
             value = manager.env_config.get(key)
             self.logger.info(f"{key}: {value}")
@@ -145,7 +147,8 @@ class ConfigCommand(BaseCommand):
     @subcommand("unset", help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
     def on_command_remove(self, configs: "dict[str, str]"):
-        manager.env_config.cache.remove(*configs)
+        for key in configs.keys():
+            manager.env_config.remove(key)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
     @subcommand("list", help="list container configs")
@@ -165,8 +168,8 @@ class ConfigCommand(BaseCommand):
         for container in target_containers:
             keys.update(container.extend_configs.keys())
         if not names:
-            keys.update([key for key, value in manager.configs.items() if not isinstance(value, ConfigProperty)])
-            keys.update(manager.env_config.cache.keys())
+            keys.update([key for key, value in manager.configs.items() if not isinstance(value, ConfigField)])
+            keys.update(manager.env_config.keys())
         for key in sorted(keys):
             value = manager.env_config.get(key)
             self.logger.info(f"{key}={value}")
@@ -174,12 +177,46 @@ class ConfigCommand(BaseCommand):
     @subcommand("edit", help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
     def on_command_edit(self, editor: str):
-        return manager.create_process(editor, manager.env_config.cache.path).call()
+        return manager.create_process(editor, str(manager.environ.paths.config / "settings.json")).call()
 
     @subcommand("reload", help="reload container configs")
     def on_command_reload(self):
         manager.env_config.reload()
         manager.prepare_installed_containers()
+
+    @subcommand("migrate", help="migrate old config data to new format (v2 §3.3/§13.2)")
+    @subcommand_argument("--dry-run", action="store_true", default=False,
+                         help="inspect only, do not modify anything")
+    @subcommand_argument("--backup", action="store_true", default=False,
+                         help="backup old config before migrating")
+    def on_command_migrate(self, dry_run: bool, backup: bool):
+        from linktools.core import ConfigMigration
+        old_path = str(manager.environ.paths.config / "settings.json")
+        mig = ConfigMigration(manager.environ.config_store, self.logger)
+        info = mig.inspect(old_path)
+        if info["count"] == 0:
+            self.logger.info("No old config data found to migrate.")
+            return
+        self.logger.info(f"Found {info['count']} keys in old config: {old_path}")
+        if dry_run:
+            for key in info["keys"]:
+                self.logger.info(f"  {key}")
+            return
+        backup_path = None
+        if backup:
+            backup_path = mig.backup(old_path)
+            self.logger.info(f"Backed up to {backup_path}")
+        report = mig.migrate(old_path)
+        self.logger.info(
+            f"Migrated {len(report['migrated'])}, skipped {len(report['skipped'])}, "
+            f"legacy {len(report['legacy'])}")
+        if mig.verify():
+            self.logger.info("Verification passed.")
+        else:
+            self.logger.error("Verification FAILED!")
+            if backup_path:
+                self.logger.warning("Rolling back...")
+                mig.rollback(backup_path, old_path)
 
 
 class ExecCommand(BaseCommand):

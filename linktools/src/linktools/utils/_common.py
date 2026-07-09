@@ -97,7 +97,7 @@ def ignore_errors(
             return fn(**kwargs) \
                 if kwargs is not None \
                 else fn()
-    except:
+    except Exception:
         return default
 
 
@@ -116,7 +116,7 @@ def cast(type: "type[T]", obj: "Any", default: "Any" = MISSING) -> "T | None":  
         return type(obj)
     try:
         return type(obj)
-    except:
+    except Exception:
         return default
 
 
@@ -213,13 +213,13 @@ def get_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
         try:
             obj = obj[key]
             continue
-        except:
+        except Exception:
             pass
 
         try:
             obj = getattr(obj, key)
             continue
-        except:
+        except Exception:
             pass
 
         return default
@@ -227,7 +227,7 @@ def get_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
     if obj is not None and type is not None:
         try:
             obj = type(obj)
-        except:
+        except Exception:
             return default
 
     return obj
@@ -259,13 +259,13 @@ def pop_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
         try:
             obj = obj[key]
             continue
-        except:
+        except Exception:
             pass
 
         try:
             obj = getattr(obj, key)
             continue
-        except:
+        except Exception:
             pass
 
         return default
@@ -273,13 +273,13 @@ def pop_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
     if last_obj is not None and last_key is not None:
         try:
             del last_obj[last_key]
-        except:
+        except Exception:
             pass
 
     if obj is not None and type is not None:
         try:
             obj = type(obj)
-        except:
+        except Exception:
             return default
 
     return obj
@@ -305,7 +305,7 @@ def get_list_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "li
         if obj is not None and type is not None:
             try:
                 result.append(type(obj))
-            except:
+            except Exception:
                 pass
         else:
             result.append(obj)

@@ -11,14 +11,14 @@ from .._base import BridgeError, Bridge, BaseDevice
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_property, timeoutable
-from linktools.platform import get_free_port
-from linktools.runtime import Process
+from linktools.system import get_free_port
 from linktools.types import Stoppable
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
-    from typing import Any
+    from typing import Any, TypeVar
     from linktools.ssh import SSHClient
+    from linktools.runtime import Process
 
     DEVICE_TYPE = TypeVar("DEVICE_TYPE", bound="SibDevice")
 
@@ -57,7 +57,7 @@ class Sib(Bridge):
 
 class SibDevice(BaseDevice):
 
-    def __init__(self, id: str = None, info: "Dict" = None, sib: "Sib" = None):
+    def __init__(self, id: str = None, info: "dict" = None, sib: "Sib" = None):
         """
         :param id: 设备号
         :param info: 设备信息
@@ -129,7 +129,7 @@ class SibDevice(BaseDevice):
         """
         return self.info.get("deviceDetail")
 
-    def copy(self, type: "Callable[[str, Dict, Sib], DEVICE_TYPE]" = None) -> "DEVICE_TYPE":
+    def copy(self, type: "Callable[[str, dict, Sib], DEVICE_TYPE]" = None) -> "DEVICE_TYPE":
         """
         生成一个新的设备对象
         :param type: 设备类型

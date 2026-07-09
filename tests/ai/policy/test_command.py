@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""tests/ai/policy/test_command.py"""
+import pytest
+
+from linktools.ai.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
+from linktools.ai.policy.engine import PolicyDecisionKind, ToolContext, ToolRequest
+
+
+@pytest.mark.asyncio
+async def test_denies_rm_rf_root():
+    rule = CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS)
+    request = ToolRequest(tool_name="terminal", arguments={"command": "rm -rf /"})
+    decision = await rule.evaluate(request, ToolContext(run_id="run-1", session_id="session-1"))
+    assert decision.kind == PolicyDecisionKind.DENY
+
+
+@pytest.mark.asyncio
+async def test_allows_safe_command():
+    rule = CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS)
+    request = ToolRequest(tool_name="terminal", arguments={"command": "ls -la"})
+    decision = await rule.evaluate(request, ToolContext(run_id="run-1", session_id="session-1"))
+    assert decision.kind == PolicyDecisionKind.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_ignores_non_terminal_tools():
+    rule = CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS)
+    request = ToolRequest(tool_name="file", arguments={"command": "rm -rf /"})
+    decision = await rule.evaluate(request, ToolContext(run_id="run-1", session_id="session-1"))
+    assert decision.kind == PolicyDecisionKind.ALLOW

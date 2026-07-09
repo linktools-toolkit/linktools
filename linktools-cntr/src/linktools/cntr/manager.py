@@ -37,14 +37,17 @@ from typing import TYPE_CHECKING
 from dulwich.errors import NotGitRepository
 
 from linktools import utils
-from linktools.platform import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
-from linktools.core import Config
-from linktools.cache import FileCache
+from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
+from linktools.core import (
+    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider,
+)
 from linktools.decorator import cached_property
 from linktools.errors import GitDivergedError
-from linktools.git import GitRepository
+from linktools.git import GitRepository, GitSyncPolicy
 from linktools.types import MISSING
-from linktools.runtime import Process, import_module_file, popen
+from linktools.runtime import import_module_file, popen
+
+from . import _migrate
 from .container import BaseContainer, SimpleContainer, ContainerError
 from ..capabilities.cntr import __cap_cntr__
 
@@ -53,6 +56,7 @@ if TYPE_CHECKING:
     from typing import Any
     from linktools.core import Environ
     from linktools.types import PathType
+    from linktools.runtime import Process
     from .context import EventContext
 
 
@@ -88,7 +92,10 @@ class ContainerManager:
     @property
     def configs(self) -> "dict[str, Any]":
         return dict(
-            HOST=Config.Prompt() | Config.Lazy(lambda cfg: get_lan_ip()),
+            HOST=ConfigField(name="HOST", provider=ChainProvider(
+                PromptProvider("HOST"),
+                LazyProvider(lambda r: get_lan_ip()),
+            )),
             DOCKER_HOST="/var/run/docker.sock",
 
             COMPOSE_PROJECT_NAME=self.name,
@@ -96,19 +103,33 @@ class ContainerManager:
             SERVICE_LOG_DRIVER="json-file",
             SERVICE_LOG_MAX_SIZE="10m",
 
-            DOCKER_USER=Config.Prompt(cached=True) | os.environ.get("SUDO_USER", self.user).replace(" ", ""),
-            DOCKER_UID=Config.Lazy(lambda cfg: get_uid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_GID=Config.Lazy(lambda cfg: get_gid(cfg.get("DOCKER_USER", type=str))),
-            DOCKER_TYPE=Config.Lazy(lambda cfg: \
-                Config.Alias("CONTAINER_TYPE") | Config.Prompt(choices=["docker", "docker-rootless"], cached=True) \
-                if self.system == "linux" and os.getuid() != 0 \
-                else "docker"
-            ),
+            DOCKER_USER=ConfigField(name="DOCKER_USER", provider=ChainProvider(
+                PromptProvider("DOCKER_USER"),
+            ), default=os.environ.get("SUDO_USER", self.user).replace(" ", "")),
+            DOCKER_UID=ConfigField(name="DOCKER_UID", provider=LazyProvider(
+                lambda r: get_uid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_GID=ConfigField(name="DOCKER_GID", provider=LazyProvider(
+                lambda r: get_gid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_TYPE=ConfigField(name="DOCKER_TYPE", default="docker", provider=(
+                ChainProvider(
+                    AliasProvider("CONTAINER_TYPE"),
+                    PromptProvider("DOCKER_TYPE", choices=["docker", "docker-rootless"]),
+                ) if self.system == "linux" and os.getuid() != 0 else None
+            )),
 
-            DOCKER_APP_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("app"),
-            DOCKER_APP_DATA_PATH=Config.Alias("DOCKER_APP_PATH", type="path"),
-            DOCKER_USER_DATA_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("user_data"),
-            DOCKER_DOWNLOAD_PATH=Config.Prompt(type="path", cached=True) | self.data_path.joinpath("download"),
+            DOCKER_APP_PATH=ConfigField(name="DOCKER_APP_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_APP_PATH"),
+            ), default=str(self.data_path.joinpath("app"))),
+            DOCKER_APP_DATA_PATH=ConfigField(name="DOCKER_APP_DATA_PATH", cast="path",
+                                             provider=AliasProvider("DOCKER_APP_PATH")),
+            DOCKER_USER_DATA_PATH=ConfigField(name="DOCKER_USER_DATA_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_USER_DATA_PATH"),
+            ), default=str(self.data_path.joinpath("user_data"))),
+            DOCKER_DOWNLOAD_PATH=ConfigField(name="DOCKER_DOWNLOAD_PATH", cast="path", provider=ChainProvider(
+                PromptProvider("DOCKER_DOWNLOAD_PATH"),
+            ), default=str(self.data_path.joinpath("download"))),
         )
 
     @property
@@ -162,35 +183,23 @@ class ContainerManager:
         return path
 
     @cached_property
-    def _settings(self):
-        settings = FileCache(self.setting_path / "manager")
+    def _persistent_store(self):
+        """Persistent user state (spec §8.5): INSTALLED_CONTAINERS / REPOS."""
+        return self.environ.config_store
 
-        config_path = self.data_path.joinpath("config", "containers.yml")
-        repo_path = self.data_path.joinpath("repo", "repo.json")
-        repo_lock = self.data_path.joinpath("repo", "repo.lock")
+    @cached_property
+    def _transient_ns(self):
+        """Transient settings (RUNNING_CONTAINERS, ...) in the cache store."""
+        return self.environ.cache.namespace("cntr")
 
-        if os.path.isfile(config_path) or os.path.isfile(repo_path):
-            with settings.session() as data:
-                if os.path.isfile(config_path):
-                    self.logger.warning("Found old config file, try to migrate.")
-                    try:
-                        with open(config_path) as fd:
-                            data.set("INSTALLED_CONTAINERS", json.load(fd))
-                        utils.remove_file(config_path.parent)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load old config file: {e}")
-
-                if os.path.isfile(repo_path):
-                    self.logger.warning("Found old repo file, try to migrate.")
-                    try:
-                        with open(repo_path) as fd:
-                            data.set("INSTALLED_REPOS", json.load(fd))
-                        utils.remove_file(repo_path)
-                        utils.remove_file(repo_lock)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load old repo file: {e}")
-
-        return settings
+    @cached_property
+    def _migrated(self):
+        # One-time legacy -> ConfigStore migration. Runs on first
+        # access of any setting; idempotent.
+        _migrate.migrate_legacy_container_settings(
+            self._persistent_store, self.data_path, self.setting_path, self.logger
+        )
+        return True
 
     @cached_property
     def _repo_path(self):
@@ -277,7 +286,7 @@ class ContainerManager:
                 return
 
     def get_installed_containers(self, resolve: bool = True) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             containers = self._load_installed_containers()
         if resolve:
             containers = self.resolve_depend_containers(containers)
@@ -327,7 +336,7 @@ class ContainerManager:
         return containers
 
     def add_installed_containers(self, *names: str) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             result = set()
             for name in names:
                 container = self.containers.get(name, None)
@@ -339,7 +348,7 @@ class ContainerManager:
             return list(result)
 
     def remove_installed_containers(self, *names: str, force: bool = False) -> "list[BaseContainer]":
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             containers = self._load_installed_containers(reload=True)
 
             result = set()
@@ -381,7 +390,7 @@ class ContainerManager:
         self._dump_setting("INSTALLED_CONTAINERS", list(set([container.name for container in containers])))
 
     def get_running_containers(self):
-        with self._settings.lock():
+        with self.environ.locks.process_lock("cntr:settings"):
             return self._load_running_containers()
 
     def _load_running_containers(self):
@@ -438,7 +447,7 @@ class ContainerManager:
         yield
 
         if context.is_full_containers:
-            with self._settings.lock():
+            with self.environ.locks.process_lock("cntr:settings"):
                 running_containers = self._load_running_containers()
                 all_containers = {*context.containers, *running_containers}
                 for container in running_containers:
@@ -564,7 +573,7 @@ class ContainerManager:
         return self._load_setting("INSTALLED_REPOS", default={})
 
     def add_repo(self, url: str, branch: str = None, force: bool = False):
-        with self._settings.lock("repo"):
+        with self.environ.locks.process_lock("cntr:repo"):
             repos = self._load_setting("INSTALLED_REPOS", reload=True, default={})
 
             def ensure_repo_not_exist(key):
@@ -581,7 +590,7 @@ class ContainerManager:
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
-                GitRepository.clone(url, repo_path, branch)
+                GitRepository.clone(self.environ, url, repo_path, branch)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
 
             else:
@@ -607,14 +616,14 @@ class ContainerManager:
 
             if repo_type == "git" and not os.path.exists(repo_path):
                 self.logger.info(f"Update git repository: {url}")
-                GitRepository.clone(url, repo_path, branch)
+                GitRepository.clone(self.environ, url, repo_path, branch)
                 continue
 
             if not os.path.exists(repo_path):
                 continue
 
             try:
-                repo = GitRepository(repo_path)
+                repo = GitRepository(self.environ, repo_path)
             except NotGitRepository:
                 self.logger.debug(f"Invalid git repository, skip: {url}")
                 continue
@@ -643,14 +652,15 @@ class ContainerManager:
                         new_branch.checkout()
 
                 try:
-                    repo.pull(reset=reset)
+                    repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE if reset
+                              else GitSyncPolicy.FAST_FORWARD_ONLY)
                 except GitDivergedError:
                     if reset:
                         raise
                     self.logger.warning(
                         f"Repository `{url}` has diverged from the remote, force resetting ..."
                     )
-                    repo.pull(reset=True)
+                    repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE)
 
             finally:
                 if is_stash:
@@ -658,7 +668,7 @@ class ContainerManager:
                     repo.git.stash("pop")
 
     def remove_repo(self, url: str):
-        with self._settings.lock("repo"):
+        with self.environ.locks.process_lock("cntr:repo"):
             repos = self._load_setting("INSTALLED_REPOS", reload=True, default={})
             if url not in repos:
                 raise ContainerError(f"Repository `{url}` not found.")
@@ -684,18 +694,23 @@ class ContainerManager:
                 shutil.rmtree(repo_path, ignore_errors=True)
 
     def _load_setting(self, key: str, reload: bool = False, default: "Any" = None) -> "dict | list | tuple":
+        self._migrated  # ensure legacy data has been moved into ConfigStore
         if reload:
             self._setting_cache.pop(key, None)
         elif key in self._setting_cache:
             return self._setting_cache[key]
-        with self._settings.session() as data:
-            result = data.get(key, default)
-            if result is None:  # key may be stored explicitly as null
-                result = default
-            self._setting_cache[key] = result
-            return result
+        if key in _migrate.PERSISTENT_KEYS:
+            result = self._persistent_store.get(key, default)
+        else:
+            result = self._transient_ns.get(key, default)
+        # Existence is decided by row presence in the new stores (no falsy drop),
+        # so the old `if result is None: result = default` workaround is gone.
+        self._setting_cache[key] = result
+        return result
 
     def _dump_setting(self, key: str, setting: "dict | list | tuple"):
         self._setting_cache.pop(key, None)
-        with self._settings.session() as data:
-            data.set(key, setting)
+        if key in _migrate.PERSISTENT_KEYS:
+            self._persistent_store.set(key, setting)
+        else:
+            self._transient_ns.set(key, setting)

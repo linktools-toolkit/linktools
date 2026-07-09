@@ -42,11 +42,11 @@ from types import ModuleType, GeneratorType
 from typing import TYPE_CHECKING
 
 from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, ConfigLoader
-from ..core import environ, BaseCapability, ConfigProperty
+from ..core import environ, BaseCapability, ConfigField
 from ..decorator import cached_property
 from ..types import MISSING
 from ..rich import get_log_handler, init_logging, _is_rich_available
-from ..errors import Error
+from ..errors import Error, CliError
 from ..runtime import import_module
 
 if TYPE_CHECKING:
@@ -60,8 +60,12 @@ if TYPE_CHECKING:
     ERROR_HANDLER = Literal["error", "ignore", "warn"] | Callable[[str, Exception], None]
 
 
-class CommandError(Error):
-    """Base exception for command-line failures."""
+class CommandError(CliError):
+    """Base exception for command-line failures (spec §18.1 CliError domain).
+
+    Reparented from ``Error`` so the CLI exit-code mapper (spec §16.4) treats
+    command/user-input errors as exit 2 rather than internal (10).
+    """
     pass
 
 
@@ -165,16 +169,11 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
         try:
             module = import_module(name, spec=finder.find_spec(name))
             info = _CommandInfo()
-            if is_package:
-                info.id = name[len(prefix):]
-                info.parent_id = getattr(module, "__parent__", None) or name[len(prefix):name.rfind(".")]
-                info.module = module.__name__
-                info.command = None
-                info.command_name = getattr(module, "__command__", None) or info.id[info.id.rfind(".") + 1:]
-                info.command_description = getattr(module, "__description__", None) or ""
-                info.order = getattr(module, "__order__", None) or info.command_name
-                yield info
-            elif hasattr(module, "command") and isinstance(module.command, BaseCommand):
+            # A package or module that exposes a `command` attribute (a BaseCommand
+            # instance) is discovered as a command node directly. This lets a
+            # sub-package act as a single command (e.g. `lt ai <subcommand>`) when
+            # its `__init__.py` re-exports `command`, matching the cntr pattern.
+            if hasattr(module, "command") and isinstance(module.command, BaseCommand):
                 info.id = name[len(prefix):]
                 info.parent_id = module.command.parent or name[len(prefix):name.rfind(".")]
                 info.module = module.command.module
@@ -182,6 +181,15 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
                 info.command_name = module.command.name
                 info.command_description = module.command.description
                 info.order = module.command.order
+                yield info
+            elif is_package:
+                info.id = name[len(prefix):]
+                info.parent_id = getattr(module, "__parent__", None) or name[len(prefix):name.rfind(".")]
+                info.module = module.__name__
+                info.command = None
+                info.command_name = getattr(module, "__command__", None) or info.id[info.id.rfind(".") + 1:]
+                info.command_description = getattr(module, "__description__", None) or ""
+                info.order = getattr(module, "__order__", None) or info.command_name
                 yield info
         except Exception as e:
             if callable(onerror):
@@ -560,7 +568,8 @@ class SubCommandGroup(SubCommand):
             Any: The operation result.
         """
         attr_name = f"__subcommand_help_{id(self):x}__"
-        assert hasattr(args, attr_name)
+        if not hasattr(args, attr_name):
+            raise CommandError("subcommand help not available")
         func = getattr(args, attr_name)
         return func()
 
@@ -644,7 +653,7 @@ class _SubCommandMethod(SubCommand):
             parameter = signature.parameters[dest] if not no_param else None
             if "config" in argument_kwargs:
                 config = argument_kwargs.get("config")
-                if isinstance(config, ConfigProperty):
+                if isinstance(config, ConfigField):
                     if "action" not in argument_kwargs:
                         argument_kwargs.setdefault("action", ConfigAction)
                         annotation = _resolve_annotation(parameter)
@@ -679,7 +688,8 @@ class _SubCommandMethod(SubCommand):
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
-        assert hasattr(args, attr_name)
+        if not hasattr(args, attr_name):
+            raise CommandError("subcommand actions not available")
         actions = getattr(args, attr_name)
 
         method_args = []
@@ -1229,7 +1239,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         class VerboseAction(Action):
 
             def __call__(self, parser, namespace, values, option_string=None):
-                logging.root.setLevel(logging.DEBUG)
+                environ.logging.set_level("root", logging.DEBUG)
 
         class SilentAction(Action):
 
@@ -1240,7 +1250,13 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
             def __call__(self, parser, namespace, values, option_string=None):
                 environ.global_config["DEBUG"] = True
-                environ.logger.setLevel(logging.DEBUG)
+                environ.logging.set_level(environ.name, logging.DEBUG)
+
+        class NoInputAction(Action):
+
+            def __call__(self, parser, namespace, values, option_string=None):
+                from ..rich import set_no_input
+                set_no_input(True)
 
         class LogTimeAction(BooleanOptionalAction):
 
@@ -1267,6 +1283,12 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                            help="disable all log output")
         group.add_argument(f"{prefix}{prefix}debug", action=DebugAction, nargs=0, const=True, dest=SUPPRESS,
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
+
+        group = parser.add_argument_group(title="interaction options")
+        group.add_argument(f"{prefix}{prefix}no-input", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
+                           help="never prompt; return defaults or error (spec §16.6)")
+        group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
+                           help="answer yes/accept defaults to all prompts (alias for --no-input)")
 
         if get_log_handler():
             group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
@@ -1305,12 +1327,19 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             exit_code = self.run(args) or 0
 
         except (CommandError, *self.known_errors) as e:
-            exit_code = 1
+            # Spec  map the error's domain to a stable exit code.
+            from .exitcodes import exit_code_for
+            exit_code = exit_code_for(e)
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
                 exc_info=True if self.environ.debug else None,
             )
+
+        except KeyboardInterrupt:
+            from .exitcodes import EXIT_INTERRUPT
+            exit_code = EXIT_INTERRUPT
+            self.logger.warning("Interrupted")
 
         return exit_code
 
@@ -1411,7 +1440,7 @@ class CommandMain:
                 exc_info=True if self.command.environ.debug else None,
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
-        except:
+        except Exception:
             if self.command.environ.debug and _is_rich_available():
                 from rich import get_console
                 get_console().print_exception(show_locals=True)

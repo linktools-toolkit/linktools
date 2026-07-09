@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import environ
 from linktools.decorator import cached_classproperty
-from linktools.runtime import Process
 from linktools.types import Stoppable
 from .adb import AdbDevice, AdbError
 from ...capabilities.mobile import __cap_mobile__
@@ -47,6 +46,7 @@ from ...capabilities.mobile import __cap_mobile__
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
+    from linktools.runtime import Process
 
 logger = environ.get_logger("android.scrcpy")
 

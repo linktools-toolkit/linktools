@@ -1,0 +1,41 @@
+[build-system]
+requires = ["linktools-setup>=0.0.2"]
+build-backend = "linktools_setup.build_meta"
+
+[project]
+name = "linktools-ai"
+description = "linktools toolkit"
+requires-python = ">=3.11"
+authors = [{name = "Hu Ji", email = "669898595@qq.com"}]
+dynamic = ["version", "dependencies", "optional-dependencies", "scripts", "entry-points"]
+
+[project.readme]
+file = "README.md"
+content-type = "text/markdown"
+[project.license]
+text = "Apache-2.0"
+[project.urls]
+Homepage = "https://github.com/ice-black-tea/linktools"
+Repository = "https://github.com/ice-black-tea/linktools.git"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["linktools*"]
+
+[tool.setuptools.package-data]
+linktools = ["**/assets/**"]
+
+[tool.linktools]
+name = "ai"
+convert = [{type = "jinja2", source = "capability.jinja2", dest = "src/linktools/capabilities/ai.py"}]
+
+[tool.linktools.version]
+file = ".version"
+[tool.linktools.dependencies]
+file = "requirements.yml"
+[tool.linktools.scripts]
+capability = "linktools.capabilities.ai:__cap_ai__"
+console = {path = "src/linktools/commands", module = "linktools.commands"}

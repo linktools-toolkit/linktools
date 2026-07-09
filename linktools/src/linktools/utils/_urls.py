@@ -69,7 +69,7 @@ def guess_file_name(url: str) -> str:
         return ""
     try:
         return os.path.split(parse.urlparse(url).path)[1]
-    except:
+    except Exception:
         return ""
 
 

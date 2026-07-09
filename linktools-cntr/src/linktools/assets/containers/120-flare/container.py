@@ -31,10 +31,13 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools import utils
-from linktools.core import Config
+from linktools.core import (
+    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
+)
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
+from linktools.rich import prompt
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -48,22 +51,16 @@ class Container(BaseContainer):
         return dict(
             NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
-            FLARE_DOAMIN=self.get_nginx_domain(""),
-            FLARE_PORT=Config.Property(type=int) | 5000,
-            FLARE_AUTH_ENABLE=Config.Property(type=bool) | True,
-            FLARE_LOGIN_ENABLE=Config.Alias(type=bool) | False,
-            FLARE_USER=Config.Lazy(
-                lambda cfg:
-                Config.Prompt(cached=True) | "admin"
-                if cfg.get("FLARE_LOGIN_ENABLE")
-                else ""
-            ),
-            FLARE_PASSWORD=Config.Lazy(
-                lambda cfg:
-                Config.Prompt(cached=True)
-                if cfg.get("FLARE_LOGIN_ENABLE")
-                else ""
-            )
+            FLARE_DOMAIN=self.get_nginx_domain(""),
+            FLARE_PORT=ConfigField(name="FLARE_PORT", cast=int, default=5000),
+            FLARE_AUTH_ENABLE=ConfigField(name="FLARE_AUTH_ENABLE", cast=bool, default=True),
+            FLARE_LOGIN_ENABLE=ConfigField(name="FLARE_LOGIN_ENABLE", cast=bool, default=False),
+            FLARE_USER=ConfigField(name="FLARE_USER", default="", provider=LazyProvider(
+                lambda r: "admin" if r.get("FLARE_LOGIN_ENABLE") else ""
+            )),
+            FLARE_PASSWORD=ConfigField(name="FLARE_PASSWORD", default="", provider=LazyProvider(
+                lambda r: prompt("FLARE_PASSWORD") if r.get("FLARE_LOGIN_ENABLE") else ""
+            )),
         )
 
     @cached_property
@@ -126,7 +123,7 @@ class Container(BaseContainer):
         )
 
         self.write_nginx_conf(
-            domain=self.get_config("FLARE_DOAMIN"),
+            domain=self.get_config("FLARE_DOMAIN"),
             proxy_url="http://flare:5005",
             auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
             auth_extra={
