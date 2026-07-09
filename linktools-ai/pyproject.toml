@@ -5,7 +5,7 @@ build-backend = "linktools_setup.build_meta"
 [project]
 name = "linktools-ai"
 description = "linktools toolkit"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [{name = "Hu Ji", email = "669898595@qq.com"}]
 dynamic = ["version", "dependencies", "optional-dependencies", "scripts", "entry-points"]
 

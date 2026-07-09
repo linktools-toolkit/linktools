@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 import yaml
 from dulwich.errors import GitProtocolError
 
-from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser
+from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand_argument, SubCommandGroup, BaseCommandGroup, CommandParser, CommandGroupRef
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ
 from linktools.core import ConfigField
@@ -278,8 +278,12 @@ class Command(BaseCommandGroup):
         return "cntr"
 
     @property
-    def parent(self) -> "str | None":
-        return "common"
+    def parent(self) -> "CommandGroupRef | str | None":
+        return CommandGroupRef(
+            id="common",
+            name="ct",
+            description="Common scripts",
+        )
 
     @property
     def known_errors(self) -> "list[type[BaseException]]":

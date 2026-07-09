@@ -28,7 +28,6 @@
 """
 import contextlib
 import inspect
-import json
 import os
 import pathlib
 import shutil
@@ -77,8 +76,8 @@ class ContainerManager:
         self.system = get_system()
         self.machine = get_machine()
 
-        self.name = name or self.environ.name
         self.environ = environ
+        self.name = name or self.environ.name
         self.logger = environ.get_logger("container")
 
         self.env_config = self.environ.wrap_config(namespace="container", env_prefix="")
@@ -552,7 +551,7 @@ class ContainerManager:
         if not _is_chown_supported(self.system):
             self.logger.debug(f"Skip chmod of {path} on {self.system}")
             return
-        if not shutil.which("chown"):
+        if not shutil.which("chmod"):
             self.logger.debug("Command `chmod` not found")
             return
         args = ["chmod"]

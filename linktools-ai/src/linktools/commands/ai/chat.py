@@ -269,12 +269,10 @@ async def _list_pending_approvals(storage) -> list:
     return requests
 
 
-# NOTE: this module deliberately does NOT define a module-level ``command``
-# instance. The package's ``__init__.py`` instantiates ``Command()`` so that the
-# sub-package is discovered as a single command node (see the package-walk
-# handling in `linktools.cli.command.iter_module_commands`). Run standalone via:
-#   python -m linktools.commands.ai.chat
+# NOTE: this module deliberately does NOT expose a module-level ``command``.
+# The package ``linktools.commands.ai`` exposes ``command = Command()`` so the
+# package is discovered as the single top-level ``lt ai`` command (see the
+# package-walk handling in `linktools.cli.command.iter_module_commands`).
+# Run standalone via: python -m linktools.commands.ai.chat
 if __name__ == "__main__":
     Command().main()
-
-command = Command()

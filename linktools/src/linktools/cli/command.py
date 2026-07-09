@@ -122,6 +122,7 @@ class _CommandInfo:
     command_name: str
     command_description: str
     order: str
+    declared_parent_group: "CommandGroupRef | None" = None
 
 
 def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
@@ -174,13 +175,19 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
             # sub-package act as a single command (e.g. `lt ai <subcommand>`) when
             # its `__init__.py` re-exports `command`, matching the cntr pattern.
             if hasattr(module, "command") and isinstance(module.command, BaseCommand):
+                command = module.command
+                parent = command.parent
+                if not parent:
+                    # Preserve the existing module-path-derived fallback so a
+                    # command with no explicit parent still nests correctly.
+                    parent = name[len(prefix):name.rfind(".")]
                 info.id = name[len(prefix):]
-                info.parent_id = module.command.parent or name[len(prefix):name.rfind(".")]
-                info.module = module.command.module
-                info.command = module.command
-                info.command_name = module.command.name
-                info.command_description = module.command.description
-                info.order = module.command.order
+                info.parent_id, info.declared_parent_group = _normalize_parent(parent)
+                info.module = command.module
+                info.command = command
+                info.command_name = command.name
+                info.command_description = command.description
+                info.order = command.order
                 yield info
             elif is_package:
                 info.id = name[len(prefix):]
@@ -217,14 +224,17 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
     """
     for obj in _iter_entry_points(group, onerror=onerror):
         if isinstance(obj, CommandMain):
+            command = obj.command
+            parent_id, declared_parent_group = _normalize_parent(command.parent)
             info = _CommandInfo()
-            info.id = _join_id(obj.command.parent, obj.command.name)
-            info.parent_id = obj.command.parent
-            info.module = obj.command.module  # ep.module
-            info.command = obj.command
-            info.command_name = obj.command.name
-            info.command_description = obj.command.description
-            info.order = obj.command.order
+            info.id = _join_id(parent_id, command.name)
+            info.parent_id = parent_id
+            info.declared_parent_group = declared_parent_group
+            info.module = command.module  # ep.module
+            info.command = command
+            info.command_name = command.name
+            info.command_description = command.description
+            info.order = command.order
             yield info
         elif isinstance(obj, ModuleType):
             yield from iter_module_commands(obj, onerror=onerror)
@@ -574,6 +584,147 @@ class SubCommandGroup(SubCommand):
         return func()
 
 
+class CommandGroupRef(object):
+    """Reference to a parent command group, used as a fallback declaration.
+
+    Returned from a command's ``parent`` property to say "attach me under the
+    group with this id; if no real group with that id is registered, materialise
+    one from this declaration". If a real group with the same id is already
+    registered (provided by another package), the real group wins and this
+    declaration is ignored.
+
+    A plain string ``parent`` (e.g. ``"common"``) is *not* a fallback: if that
+    group is missing, registration raises :class:`SubCommandError`.
+    """
+
+    def __init__(
+        self,
+        id,
+        name=None,
+        description="",
+        parent=None,
+        order=None,
+    ):
+        self.id = id
+        self.name = name or id
+        self.description = description or ""
+        self.parent = parent
+        self.order = order or self.name
+
+    def __repr__(self):
+        return (
+            "CommandGroupRef(id=%r, name=%r, parent=%r)"
+            % (self.id, self.name, self.parent)
+        )
+
+
+def _normalize_parent(parent):
+    """Resolve a command's ``parent`` value to ``(parent_id, declared_group_ref)``.
+
+    - ``None`` -> ``(ROOT_ID, None)``: a top-level command.
+    - :class:`CommandGroupRef` -> ``(ref.id, ref)``: fallback declaration; if the
+      group is missing it is materialised from the ref.
+    - ``str`` -> ``(str, None)``: attach to an existing group; missing raises.
+    """
+    if parent is None:
+        return SubCommand.ROOT_ID, None
+    if isinstance(parent, CommandGroupRef):
+        return parent.id, parent
+    return parent, None
+
+
+def _ensure_declared_parent_groups(subcommands):
+    """Materialise missing parent groups declared via :class:`CommandGroupRef`.
+
+    A real group already present in ``subcommands`` always wins; its
+    CommandGroupRef declarations are ignored. When several CommandGroupRefs
+    describe the same absent group they must agree (name/order/parent) or
+    :class:`SubCommandError` is raised. Plain-string parents are never
+    auto-created, so a missing non-declared parent still raises during validation.
+    """
+    result = list(subcommands)
+    exists = set([item.id for item in result])
+    declarations = {}
+
+    # Collect fallback declarations; if a real group already exists, ignore.
+    for item in result:
+        group = getattr(item, "declared_parent_group", None)
+        if group is None:
+            continue
+        if group.id in exists:
+            continue
+        existing = declarations.get(group.id)
+        if existing is None:
+            declarations[group.id] = group
+        else:
+            _merge_or_validate_group_ref(existing, group)
+
+    changed = True
+    while changed:
+        changed = False
+        for item in list(result):
+            parent_id = item.parent_id
+            if parent_id == SubCommand.ROOT_ID:
+                continue
+            if parent_id in exists:
+                continue
+            group = declarations.get(parent_id)
+            if group is None:
+                continue
+            group_parent_id, group_parent_ref = _normalize_parent(group.parent)
+            result.append(SubCommandGroup(
+                id=group.id,
+                name=group.name,
+                description=group.description,
+                parent_id=group_parent_id,
+                order=group.order,
+            ))
+            exists.add(group.id)
+            changed = True
+
+            # Support a group that itself hangs under another CommandGroupRef.
+            # If that real parent already exists, the real group still wins.
+            if group_parent_ref is not None:
+                if group_parent_ref.id in exists:
+                    continue
+                existing = declarations.get(group_parent_ref.id)
+                if existing is None:
+                    declarations[group_parent_ref.id] = group_parent_ref
+                else:
+                    _merge_or_validate_group_ref(existing, group_parent_ref)
+
+    return tuple(result)
+
+
+def _merge_or_validate_group_ref(existing, incoming):
+    """Two CommandGroupRefs for the same absent group must agree.
+
+    name/order/parent must match exactly; description is filled in loosely (a
+    non-empty incoming description is adopted when existing is empty). Any
+    mismatch raises :class:`SubCommandError`.
+    """
+    if existing.name != incoming.name:
+        raise SubCommandError(
+            "Conflicting command group declaration for %s: name %s != %s"
+            % (existing.id, existing.name, incoming.name)
+        )
+    if existing.order != incoming.order:
+        raise SubCommandError(
+            "Conflicting command group declaration for %s: order %s != %s"
+            % (existing.id, existing.order, incoming.order)
+        )
+    existing_parent_id, _ = _normalize_parent(existing.parent)
+    incoming_parent_id, _ = _normalize_parent(incoming.parent)
+    if existing_parent_id != incoming_parent_id:
+        raise SubCommandError(
+            "Conflicting command group declaration for %s: parent %s != %s"
+            % (existing.id, existing_parent_id, incoming_parent_id)
+        )
+    if not existing.description and incoming.description:
+        existing.description = incoming.description
+    return existing
+
+
 class _SubCommandMethod(SubCommand):
 
     def __init__(self, info: "_SubCommandMethodInfo", target: "Any",
@@ -711,14 +862,19 @@ class SubCommandWrapper(SubCommand):
                  id: str = None, parent_id: str = None,
                  name: str = None, description: str = None,
                  order: str = None):
+        parent_id_value, declared_parent_group = _normalize_parent(command.parent)
         super().__init__(
-            id=id or _join_id(command.parent, command.name),
-            parent_id=parent_id or _join_id(command.parent),
+            id=id or _join_id(parent_id_value, command.name),
+            parent_id=parent_id or parent_id_value,
             name=name or command.name,
             description=description or command.description,
             order=order or command.order,
         )
         self.command = command
+        # Internal only: a fallback group declaration (CommandGroupRef) carried
+        # from the command's `parent`, used to materialise a missing parent
+        # group. Not part of the command-author API.
+        self.declared_parent_group = declared_parent_group
 
     def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
         """Create a parser for the wrapped command.
@@ -845,6 +1001,7 @@ class SubCommandMixin:
         target_parser = parser or self._argument_parser
 
         subcommand_list = tuple(self.walk_subcommands(target))
+        subcommand_list = _ensure_declared_parent_groups(subcommand_list)
         subcommand_maps = {subcommand_list[i].id: (i, subcommand_list[i]) for i in range(len(subcommand_list))}
         subcommand_index = {}
         for i in range(len(subcommand_list)):

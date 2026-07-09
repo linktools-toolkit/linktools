@@ -7,6 +7,6 @@ dependencies:
 dev-dependencies: []
 
 release-dependencies:
-  - linktools[cli,common,git]>=0.9.1
+  - linktools[cli,git]>=0.9.1
 
 optional-dependencies: {}

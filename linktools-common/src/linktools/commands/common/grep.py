@@ -33,15 +33,13 @@ import shutil
 import zipfile
 from typing import TYPE_CHECKING
 
-import lief
-import magic
 from rich import get_console
 from rich.highlighter import NullHighlighter
 from rich.text import Text
 
 from linktools import utils
 from linktools.core import environ
-from linktools.cli import BaseCommand
+from linktools.cli import BaseCommand, CommandError
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -49,6 +47,25 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
 
 pprint = functools.partial(get_console().print, sep="", markup=False, highlight=NullHighlighter)
+
+
+def _load_grep_optional_deps():
+    """Load the optional ``lief``/``python-magic`` deps at use time.
+
+    They are optional (``linktools-common[lief]``); importing them at module
+    top level would make ``ct grep`` (and thus ``common`` command discovery)
+    fail when they are absent. Raise CommandError with an install hint only
+    when grep is actually run.
+    """
+    try:
+        import lief
+        import magic
+    except ImportError as e:
+        raise CommandError(
+            "grep requires optional dependencies. "
+            "Install with `linktools-common[lief]`: %s" % e
+        )
+    return lief, magic
 
 
 class GrepHandler:
@@ -102,8 +119,12 @@ class GrepHandler:
 
 class GrepMatcher:
 
-    def __init__(self, pattern: "re.Pattern"):
+    def __init__(self, pattern: "re.Pattern", lief=None, magic=None):
         self.pattern = pattern
+        if lief is None or magic is None:
+            lief, magic = _load_grep_optional_deps()
+        self._lief = lief
+        self._magic = magic
 
     def match(self, path: str):
         if not os.path.exists(path):
@@ -120,7 +141,7 @@ class GrepMatcher:
             try:
                 with open(filename, "rb") as fd:
                     buffer = fd.read(1024)
-                mimetype = magic.from_buffer(buffer, mime=True)
+                mimetype = self._magic.from_buffer(buffer, mime=True)
                 if not GrepHandler.handle(self, filename, mimetype):
                     self.on_binary(filename, mimetype)
             except Exception as e:
@@ -160,7 +181,7 @@ class GrepMatcher:
         "application/x-sharedlib"
     )
     def on_elf(self, filename: str, mimetype: str):
-        file: "lief.ELF.Binary" = lief.parse(filename)
+        file: "lief.ELF.Binary" = self._lief.parse(filename)
         for symbol in file.imported_symbols:
             out = self.match_content(symbol.name)
             if not utils.is_empty(out):
@@ -179,7 +200,7 @@ class GrepMatcher:
         "application/x-mach-binary"
     )
     def on_mach(self, filename: str, mimetype: str):
-        file: "lief.MachO.Binary" = lief.parse(filename)
+        file: "lief.MachO.Binary" = self._lief.parse(filename)
         for symbol in file.imported_symbols:
             out = self.match_content(symbol.name)
             if not utils.is_empty(out):
@@ -240,9 +261,10 @@ class Command(BaseCommand):
         if utils.is_empty(args.files):
             args.files = [os.getcwd()]
 
+        lief, magic = _load_grep_optional_deps()
         lief.logging.disable()
         for file in args.files:
-            GrepMatcher(pattern).match(file)
+            GrepMatcher(pattern, lief=lief, magic=magic).match(file)
 
         return
 

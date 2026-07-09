@@ -34,4 +34,4 @@ from .command import \
     SubCommand, SubCommandGroup, SubCommandWrapper, \
     subcommand, subcommand_argument, SubCommandError, NotFoundSubCommand, \
     iter_module_commands, iter_entry_point_commands, \
-    CommandMain, CommandParser
+    CommandMain, CommandParser, CommandGroupRef
