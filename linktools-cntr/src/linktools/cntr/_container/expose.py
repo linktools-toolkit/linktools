@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Access-link declarations (exposes) for a container: categories, lazily
 resolved URLs, and the idempotent nginx-conf registration hook."""
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -103,6 +104,12 @@ class ExposeMixin:
 
         if not proxy_conf and not proxy_url:
             return ""
+
+        # Snapshot now: auth_extra is caller-owned and may be mutated after
+        # this call returns, but the hook key must describe exactly what the
+        # hook will write when it fires later, so key and closure share the
+        # same frozen copy taken at registration time.
+        auth_extra = deepcopy(auth_extra) if auth_extra is not None else None
 
         def make_url():
             domain = self.get_config(key, type=str, default=None)

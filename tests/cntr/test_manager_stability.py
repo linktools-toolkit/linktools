@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ContainerManager stability and the manager/CLI restructuring contract.
-
-- __init__ must assign self.environ before using it for the default name,
-  so ContainerManager(environ, name=None) does not AttributeError.
-- change_file_mode() must probe `chmod`, not `chown`.
-- The rest of this file freezes ContainerManager's public surface, its
-  configs override dispatch, migration retry semantics, and persistent vs
-  transient store routing, so internal reorganization cannot silently change
-  any of them.
+"""Verifies the stable public contract of ContainerManager: its public
+surface, configs override dispatch, migration retry semantics, and
+persistent vs transient store routing, so internal reorganization cannot
+silently change any of them.
 """
 import inspect
 import os

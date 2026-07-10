@@ -55,3 +55,21 @@ def test_remove_unknown_name_is_noop(fresh_manager):
     removed = fresh_manager.remove_installed_containers("does-not-exist")
     assert removed == []
     assert _installed_names(fresh_manager) == before
+
+
+def test_remove_survives_a_dependency_on_a_container_that_no_longer_exists(fresh_manager, monkeypatch):
+    """Regression: is_depend_on() indexed manager.containers[next_name] directly.
+    If an installed container's dependency chain names a container whose
+    defining repo has since been removed (so it's no longer in
+    manager.containers at all), that raised a bare KeyError -- crashing
+    `remove` for an entirely unrelated container, blocking the very command a
+    user would reach for to clean up that broken state.
+    """
+    # flare declares no real dependencies; portainer is unrelated to it too --
+    # picking two containers with no real dependency edge isolates the
+    # assertion to the dangling-dependency handling itself.
+    flare = fresh_manager.containers["flare"]
+    monkeypatch.setattr(type(flare), "dependencies", property(lambda self: ["ghost-container"]))
+
+    removed = fresh_manager.remove_installed_containers("portainer")
+    assert {c.name for c in removed} == {"portainer"}

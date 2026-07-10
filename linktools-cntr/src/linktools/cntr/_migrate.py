@@ -66,12 +66,20 @@ def migrate_legacy_container_settings(config_store: object, data_path: object,
     mig = ConfigMigration(config_store, logger=logger)
     migrated: "set[str]" = set()
 
+    config_dir = os.path.join(data_path, "config")
     if mig.migrate_json_file(
-        os.path.join(data_path, "config", "containers.yml"),
+        os.path.join(config_dir, "containers.yml"),
         "INSTALLED_CONTAINERS",
-        also_remove=(os.path.join(data_path, "config"),),
+        also_remove=(os.path.join(config_dir, "containers.yml"),),
     ):
         migrated.add("INSTALLED_CONTAINERS")
+    # Only the migrated file is removed above; a user may keep unrelated
+    # files alongside it in data/config, so the directory itself is removed
+    # only if migration happened to empty it out -- never recursively.
+    try:
+        os.rmdir(config_dir)
+    except OSError:
+        pass
 
     if mig.migrate_json_file(
         os.path.join(data_path, "repo", "repo.json"),

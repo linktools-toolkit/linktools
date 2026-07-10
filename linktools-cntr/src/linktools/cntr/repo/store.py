@@ -54,6 +54,10 @@ class RepoStore:
 
     def add(self, url: str, branch: str = None, force: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
+            # See InstalledStateStore.add for why this reload is necessary:
+            # the lock alone doesn't stop this read-modify-write from
+            # clobbering a concurrent writer's change with stale data.
+            self.manager._persistent_store.reload()
             repos = self._load()
 
             def ensure_repo_not_exist(key):
@@ -91,6 +95,7 @@ class RepoStore:
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
+            self.manager._persistent_store.reload()
             repos = self._load()
             if url not in repos:
                 raise ContainerError(f"Repository `{url}` not found.")

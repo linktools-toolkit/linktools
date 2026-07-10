@@ -27,6 +27,24 @@ def _is_chown_supported(system: str = None) -> bool:
     return (system or get_system()) == "linux"
 
 
+_DEFAULT_DOCKER_HOST = "/var/run/docker.sock"
+
+
+def _docker_host_args(container_type: str, host: "str | None") -> "list[str]":
+    """Explicit connection args for a configured DOCKER_HOST.
+
+    Only emitted when DOCKER_HOST was actually changed away from the built-in
+    default -- otherwise docker/podman's own default connection resolution
+    (e.g. docker-rootless's active `docker context`) is left alone, since the
+    built-in default string doesn't itself describe where that resolves to.
+    """
+    if not host or host == _DEFAULT_DOCKER_HOST:
+        return []
+    if "://" not in host:
+        host = f"unix://{host}"
+    return ["--url", host] if container_type == "podman" else ["-H", host]
+
+
 class RuntimeProcessFactory:
     """Create docker/podman/compose subprocesses behind the facade."""
 
@@ -58,12 +76,15 @@ class RuntimeProcessFactory:
             **kwargs,
     ) -> "Process":
         commands = []
+        host = self.manager.env_config.get("DOCKER_HOST", type=str, default=None)
         if self.manager.container_type in ("docker", "docker-rootless"):
             commands.extend(["docker"])
+            commands.extend(_docker_host_args(self.manager.container_type, host))
             if privilege is None:
                 privilege = self.manager.container_type == "docker"
         elif self.manager.container_type == "podman":
             commands.extend(["podman"])
+            commands.extend(_docker_host_args(self.manager.container_type, host))
         else:
             raise ContainerError(f"Invalid container type: {self.manager.container_type}")
         return self.create_process(*commands, *args, privilege=privilege, **kwargs)
@@ -80,6 +101,12 @@ class RuntimeProcessFactory:
             path = container.get_docker_compose_file()
             if path and os.path.exists(path):
                 options.extend(["--file", path])
+        if not options:
+            # Without any --file, docker/podman compose falls back to
+            # searching the current working directory for a compose file --
+            # if the targeted containers produced none, that search could hit
+            # a completely unrelated project instead of failing loudly.
+            raise ContainerError("No Docker Compose file was generated for the targeted containers")
         options.extend(["--project-name", self.manager.project_name])
         return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
 

@@ -324,7 +324,15 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             current_items = next_items
             next_items = set()
             for next_name in current_items:
-                for next_dependency in self.manager.containers[next_name].dependencies:
+                # A dependency's defining container can go missing (its repo
+                # was removed while something else installed still names it
+                # as a dependency); skip it rather than crash, so `remove`
+                # stays usable as the way to recover from that state instead
+                # of being blocked by it.
+                next_container = self.manager.containers.get(next_name)
+                if next_container is None:
+                    continue
+                for next_dependency in next_container.dependencies:
                     if next_dependency not in exclude_items:
                         next_items.add(next_dependency)
         return False

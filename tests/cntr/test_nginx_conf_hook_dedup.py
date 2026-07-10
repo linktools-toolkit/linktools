@@ -60,6 +60,29 @@ def test_freeze_does_not_conflate_list_and_set_of_same_elements():
     assert _freeze(["a", "b"]) != _freeze({"a", "b"})
 
 
+def test_nginx_hook_uses_registration_time_auth_extra(fresh_manager, monkeypatch):
+    # auth_extra is caller-owned; mutating it after registration must not
+    # change what the hook writes, since the hook key was already derived
+    # from its contents at registration time.
+    container = fresh_manager.containers["portainer"]
+    baseline = len(container.start_hooks)
+
+    written = []
+    monkeypatch.setattr(container, "write_nginx_conf", lambda **kwargs: written.append(kwargs))
+
+    auth_extra = {"uris": ["/a"]}
+    field = ConfigField(name="TEST_SNAPSHOT_DOMAIN", default="snapshot.example.com")
+    container.load_nginx_url(field, proxy_url="http://backend:9092", auth_extra=auth_extra)
+
+    auth_extra["uris"].append("/b")
+
+    added = container.start_hooks[baseline:]
+    assert len(added) == 1
+    added[0]()
+
+    assert written[0]["auth_extra"] == {"uris": ["/a"]}
+
+
 def test_same_backend_with_equivalent_but_differently_built_auth_extra_sets_is_deduplicated(
         fresh_manager, monkeypatch):
     container = fresh_manager.containers["portainer"]

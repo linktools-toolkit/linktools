@@ -65,7 +65,13 @@ class ContainerLoader:
                 module = import_module_file(name, container_path)
                 for value in module.__dict__.values():
                     if isinstance(value, type) and issubclass(value, BaseContainer):
-                        if not value.__abstract__:
+                        # A container.py that imports a shared concrete base
+                        # class (e.g. `from repo.common import CommonContainer`)
+                        # must not have that imported class picked up instead
+                        # of the subclass this file actually defines -- dict
+                        # iteration order follows import order, so the import
+                        # would otherwise be found first.
+                        if not value.__abstract__ and value.__module__ == module.__name__:
                             container = value(manager, path)
                             manager.logger.debug(f"Load container {container.name} in {path}")
                             manager._callback(container.on_init)

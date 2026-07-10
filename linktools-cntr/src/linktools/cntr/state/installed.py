@@ -32,6 +32,12 @@ class InstalledStateStore:
 
     def add(self, *names: str) -> "list[BaseContainer]":
         with self.manager.environ.locks.process_lock("cntr:settings"):
+            # The lock only serializes writers; each process's persistent
+            # store still holds whatever it last read, possibly before
+            # another process's write. Reload now, under the lock, so this
+            # read-modify-write is based on the latest data instead of
+            # clobbering a concurrent writer's change on flush.
+            self.manager._persistent_store.reload()
             result = set()
             for name in names:
                 container = self.manager.containers.get(name, None)
@@ -44,6 +50,7 @@ class InstalledStateStore:
 
     def remove(self, *names: str, force: bool = False) -> "list[BaseContainer]":
         with self.manager.environ.locks.process_lock("cntr:settings"):
+            self.manager._persistent_store.reload()
             containers = self._load()
 
             result = set()

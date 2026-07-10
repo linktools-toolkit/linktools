@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""chown/chmod must resolve their `path` argument identically: expanduser +
-abspath via env_config.cast(type="path"), regardless of whether the caller
-passed a Path object, a plain string, a relative path, or a `~/...` path.
-
-Regression: chmod() checked os.path.exists(path) on the raw argument while
-chown() cast it first, so `manager.change_file_mode("~/mytarget", ...)` raised
-FileNotFoundError on the literal "~/mytarget" instead of resolving it like
-change_file_owner() does.
+"""Verifies consistent path normalization for chown and chmod: both resolve
+their `path` argument identically via env_config.cast(type="path"), for a
+Path object, a plain string, a relative path, or a `~/...` path.
 """
 import os
+import shutil
 
 import pytest
+
+from linktools.cntr.runtime import process as process_module
 
 
 class _FakeProcess:
@@ -29,8 +27,14 @@ def _record(monkeypatch, manager):
 def _linux(monkeypatch, fresh_manager):
     # chown/chmod are no-ops on non-Linux (bind-mount ownership isn't
     # reflected in the container there); force the Linux path so every
-    # assertion here actually reaches create_process.
+    # assertion here actually reaches create_process. shutil.which/get_uid/
+    # get_gid are mocked too so this test only exercises path resolution,
+    # not whatever chown/chmod binaries or user database happen to be on
+    # the host running the suite.
     monkeypatch.setattr(fresh_manager, "system", "linux")
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(process_module, "get_uid", lambda user: 1000)
+    monkeypatch.setattr(process_module, "get_gid", lambda user: 1000)
 
 
 @pytest.mark.parametrize("make_path", [

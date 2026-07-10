@@ -83,12 +83,14 @@ class RepoSync:
                 repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE if reset
                           else GitSyncPolicy.FAST_FORWARD_ONLY)
             except GitDivergedError:
-                if reset:
-                    raise
-                self.logger.warning(
-                    f"Repository `{url}` has diverged from the remote, force resetting ..."
-                )
-                repo.sync(policy=GitSyncPolicy.RESET_TO_REMOTE)
+                # Without --force, a diverged branch must fail loudly and
+                # leave local commits alone -- silently resetting to remote
+                # here would discard unpushed work the user never agreed to
+                # lose.
+                raise GitDivergedError(
+                    f"Repository `{url}` has diverged from the remote. "
+                    f"Re-run with --force to reset to remote."
+                ) from None
 
         finally:
             if is_stash:
