@@ -32,12 +32,14 @@ import pathlib
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.system import get_gid, get_machine, get_system, get_uid, get_user
+from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
+from linktools.core import (
+    ConfigField, PromptProvider, LazyProvider, AliasProvider,
+)
 from linktools.decorator import cached_property
 from linktools.types import MISSING
 
 from . import _migrate
-from .config.manager import build_manager_configs
 from .container import BaseContainer, ContainerError
 
 if TYPE_CHECKING:
@@ -88,9 +90,45 @@ class ContainerManager:
 
     @property
     def configs(self) -> "dict[str, Any]":
-        # Resolved through the property (not called directly) so a subclass
-        # overriding `configs` still has its extra fields registered.
-        return build_manager_configs(self)
+        return dict(
+            HOST=ConfigField.chain(
+                PromptProvider(),
+                LazyProvider(lambda r: get_lan_ip()),
+            ),
+            DOCKER_HOST="/var/run/docker.sock",
+
+            COMPOSE_PROJECT_NAME=self.name,
+            SERVICE_RESTART_POLICY="unless-stopped",
+            SERVICE_LOG_DRIVER="json-file",
+            SERVICE_LOG_MAX_SIZE="10m",
+
+            DOCKER_USER=ConfigField.chain(
+                PromptProvider(cached=True),
+                default=os.environ.get("SUDO_USER", self.user).replace(" ", ""),
+            ),
+            DOCKER_UID=ConfigField(provider=LazyProvider(
+                lambda r: get_uid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_GID=ConfigField(provider=LazyProvider(
+                lambda r: get_gid(r.get("DOCKER_USER", type=str)),
+            )),
+            DOCKER_TYPE=ConfigField.chain(
+                AliasProvider("CONTAINER_TYPE"),
+                PromptProvider(choices=["docker", "docker-rootless"], cached=True),
+                default="docker",
+            ) if self.system == "linux" and os.getuid() != 0 else ConfigField(default="docker"),
+
+            DOCKER_APP_PATH=ConfigField.chain(
+                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("app")),
+            ),
+            DOCKER_APP_DATA_PATH=ConfigField(cast="path", provider=AliasProvider("DOCKER_APP_PATH")),
+            DOCKER_USER_DATA_PATH=ConfigField.chain(
+                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("user_data")),
+            ),
+            DOCKER_DOWNLOAD_PATH=ConfigField.chain(
+                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("download")),
+            ),
+        )
 
     @property
     def debug(self) -> bool:
