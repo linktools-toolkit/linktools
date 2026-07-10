@@ -81,22 +81,40 @@ class SpecLoader:
 
     @classmethod
     def from_resources(cls, resource_store: Any, *, prefix: str) -> "SpecLoader":
+        # ResourceStore exposes get(ResourcePath) + propfind(ResourcePath); it has
+        # no .list() and no global .revision(). Build paths via ResourcePath so the
+        # store's own normalization + sandbox apply; pin revision at 0 (the store
+        # owns per-resource etag/version, not a global revision clock).
+        from ..storage.resource.models import Depth
+        from ..storage.resource.path import ResourcePath
+
+        base = prefix.strip("/")
+
+        def _full(path: str) -> "ResourcePath":
+            joined = f"{base}/{path.strip('/')}" if base else path.strip("/")
+            if not joined or ".." in joined.split("/"):
+                raise RegistryNotFoundError(f"invalid spec resource path: {path!r}")
+            return ResourcePath(f"/{joined}")
+
         async def read(path: str) -> str:
-            file = await resource_store.get(f"{prefix}/{path}")
-            if file is None:
-                raise RegistryNotFoundError(f"spec resource not found: {prefix}/{path}")
-            return file.content
+            full = _full(path)
+            resource = await resource_store.get(full)
+            if resource is None:
+                raise RegistryNotFoundError(f"spec resource not found: {full.value}")
+            return resource.text()
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
-            files = await resource_store.list(pattern=f"{prefix}/*{suffix}")
-            ids: list[str] = []
-            for f in files:
-                name = f.path.rsplit("/", 1)[-1]
-                ids.append(name[: -len(suffix)] if name.endswith(suffix) else name)
-            return tuple(ids)
+            root = ResourcePath(f"/{base}") if base else ResourcePath("/")
+            page = await resource_store.propfind(root, depth=Depth.ONE, limit=1000)
+            ids: "list[str]" = []
+            for item in page.items:
+                name = item.path.value.rstrip("/").rsplit("/", 1)[-1]
+                if name.endswith(suffix):
+                    ids.append(name[: -len(suffix)])
+            return tuple(sorted(ids))
 
         async def revision() -> int:
-            return await resource_store.revision()
+            return 0
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 

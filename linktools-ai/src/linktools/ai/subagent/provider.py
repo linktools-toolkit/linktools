@@ -66,13 +66,12 @@ class SubagentProvider:
             depth_provider=self.depth_provider,
             max_depth=max_depth,
             timeout_seconds=float(timeout) if timeout is not None else None,
+            max_concurrency=max_concurrency,
             allowed_packages=allowed_packages,
             parent_run_id=context.run_id,
             root_run_id=context.run_id,  # top-level resolution seeds root as this run
             parent_session_id=context.session_id,
         )
-        # max_concurrency is enforced by the executor (semaphore); surfaced here
-        # so the limit is visible on the bundle/limit contract.
         return CapabilityBundle(toolsets=(toolset,), middleware=())
 
     async def _allowed_names(self, ref: CapabilityRef) -> "set[str]":

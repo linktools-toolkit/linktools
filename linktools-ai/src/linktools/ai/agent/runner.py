@@ -402,7 +402,7 @@ class AgentRunner:
                     # Declared tools: resolve via the capability assembler. Empty
                     # tools fall through to the legacy default below.
                     from ..capability.policy import CapabilityToolExposurePolicy
-                    from ..capability.provider import CapabilityContext
+                    from ..capability.provider import CapabilityContext, toolset_names as _count_tool_names
 
                     exposure = (
                         self._capability_options.tool_exposure
@@ -424,7 +424,7 @@ class AgentRunner:
                         session_id=context.session_id, runnable_id=context.runnable_id,
                         payload=ToolExposureApplied(
                             agent_id=agent.spec.id,
-                            total_tools=sum(len(getattr(ts, "tools", {}) or {}) for ts in toolsets),
+                            total_tools=len(_count_tool_names(toolsets)),
                         ),
                     )
                     if cap_bundle.prompt_sections:

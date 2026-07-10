@@ -53,6 +53,7 @@ def build_subagent_toolset(
     depth_provider: "Callable[[], int]",
     max_depth: int,
     timeout_seconds: "float | None",
+    max_concurrency: int = 1,
     allowed_packages: "set[str] | None" = None,
     parent_run_id: "str | None" = None,
     root_run_id: "str | None" = None,
@@ -61,9 +62,14 @@ def build_subagent_toolset(
     """Level-2 execution tool: call_subagent. Only declared agent ids are
     admitted; a package-scoped call must target a package in ``allowed_packages``
     (declared-packages-only confinement); depth + authorization are enforced
-    before delegation."""
+    before delegation; concurrency is bounded by ``max_concurrency`` (per-ref
+    semaphore, so two distinct subagent refs do not starve each other)."""
+    import asyncio
+
     toolset: FunctionToolset = FunctionToolset()
     package_allowlist = allowed_packages or set()
+    # Per-ref concurrency cap; released even on failure/timeout via async-with.
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
     async def call_subagent(
         agent_id: str, task: str,
@@ -85,12 +91,13 @@ def build_subagent_toolset(
         spec = await _resolve_spec(agent_id, pkg_scope, subagent_provider, entrypoint_resolver)
         if executor is None:
             raise SubagentExecutionError("no subagent executor configured")
-        result = await executor.execute(
-            agent_spec=spec, task=task, context=context,
-            parent_run_id=parent_run_id, root_run_id=root_run_id,
-            parent_session_id=parent_session_id, scope=pkg_scope,
-            timeout_seconds=timeout_seconds,
-        )
+        async with semaphore:
+            result = await executor.execute(
+                agent_spec=spec, task=task, context=context,
+                parent_run_id=parent_run_id, root_run_id=root_run_id,
+                parent_session_id=parent_session_id, scope=pkg_scope,
+                timeout_seconds=timeout_seconds,
+            )
         return result.model_dump()
 
     toolset.add_function(call_subagent)

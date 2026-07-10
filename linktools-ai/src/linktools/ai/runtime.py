@@ -64,10 +64,12 @@ def _build_capability_providers(
     execution: "ExecutionBackend | None",
     options: CapabilityRuntimeOptions,
     mcp_manager: "MCPConnectionManager | None",
+    subagent_executor: Any = None,
 ) -> "dict[str, Any]":
     """Map the declaration bundle onto the kind -> CapabilityProvider dict the
     assembler consumes. Builtin is registered only when an execution backend
-    exists (it cannot resolve without one)."""
+    exists (it cannot resolve without one). The subagent executor is passed in
+    so both SubagentProvider and PackageProvider receive it at construction."""
     providers: "dict[str, Any]" = {}
     if execution is not None:
         providers["builtin"] = BuiltinProvider()
@@ -82,14 +84,15 @@ def _build_capability_providers(
         providers["subagent"] = SubagentProvider(
             subagent_provider=bundle.subagents,
             entrypoint_resolver=bundle.entrypoints,
+            executor=subagent_executor,
         )
     if bundle.package_resources is not None or bundle.entrypoints is not None:
-        # PackageProvider handles three tool-ref kinds;
-        # register one instance under each so package-resource / package-entrypoint
-        # refs resolve.
+        # PackageProvider handles three tool-ref kinds; one instance registered
+        # under each so package-resource / package-entrypoint refs resolve.
         pkg = PackageProvider(
             resource_provider=bundle.package_resources,
             entrypoint_resolver=bundle.entrypoints,
+            entrypoint_executor=subagent_executor,
         )
         for k in ("package", "package-resource", "package-entrypoint"):
             providers[k] = pkg
@@ -215,30 +218,23 @@ class Runtime:
         )
 
         # Capability providers + assembler. The subagent executor captures the
-        # runner/compiler/storage just built, so it is wired after the runner.
+        # runner/compiler/storage just built, so build it first and pass it into
+        # _build_capability_providers so SubagentProvider + PackageProvider
+        # receive it at construction (no post-mutation).
         mcp_manager = MCPConnectionManager() if bundle.mcp_servers is not None else None
-        capability_providers = _build_capability_providers(
-            bundle, execution, resolved_options, mcp_manager,
-        )
+        sub_executor = None
         if bundle.entrypoints is not None or bundle.subagents is not None:
             sub_executor = _make_runtime_subagent_executor(
                 storage=storage, compiler=compiler, runner=runner,
             )
-            capability_providers["subagent"] = SubagentProvider(
-                subagent_provider=bundle.subagents,
-                entrypoint_resolver=bundle.entrypoints,
-                executor=sub_executor,
-            )
-            # Let package-entrypoint calls execute scoped agents through the
-            # same child-run executor.
-            pkg_provider = capability_providers.get("package")
-            if pkg_provider is not None:
-                pkg_provider.entrypoint_executor = sub_executor
+        capability_providers = _build_capability_providers(
+            bundle, execution, resolved_options, mcp_manager, sub_executor,
+        )
         assembler = (
             CapabilityAssembler(capability_providers) if capability_providers else None
         )
-        # AgentRunner reads the assembler at execute() time; set it now that the
-        # subagent executor (which needed the runner) is wired.
+        # AgentRunner reads the assembler at execute() time; set it now that
+        # capability providers (which needed the runner) are wired.
         runner._capability_assembler = assembler
 
         return cls(
@@ -266,7 +262,8 @@ class Runtime:
 
     async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
         """Deprecated: use ``runtime.capability_assembler.assemble(spec, context)``.
-        Kept for compatibility; emits DeprecationWarning."""
+        Removal target: next major version. Kept for compatibility; emits
+        DeprecationWarning."""
         import warnings
         warnings.warn(
             "Runtime.assemble is deprecated; use runtime.capability_assembler.assemble",
@@ -285,8 +282,9 @@ class Runtime:
         return await self._capability_assembler.assemble(spec, context)
 
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
-        """Deprecated: use ``runtime.providers.swarms.get(swarm_id)``. Kept for
-        compatibility; emits DeprecationWarning."""
+        """Deprecated: use ``runtime.providers.swarms.get(swarm_id)``.
+        Removal target: next major version. Kept for compatibility; emits
+        DeprecationWarning."""
         import warnings
         warnings.warn(
             "Runtime.resolve_swarm is deprecated; use runtime.providers.swarms.get",
@@ -298,8 +296,9 @@ class Runtime:
         return await bundle.swarms.get(swarm_id)
 
     async def resolve_agent(self, agent_id: str) -> AgentSpec:
-        """Deprecated: use ``runtime.providers.agents.get(agent_id)``. Kept for
-        compatibility; emits DeprecationWarning."""
+        """Deprecated: use ``runtime.providers.agents.get(agent_id)``.
+        Removal target: next major version. Kept for compatibility; emits
+        DeprecationWarning."""
         import warnings
         warnings.warn(
             "Runtime.resolve_agent is deprecated; use runtime.providers.agents.get",

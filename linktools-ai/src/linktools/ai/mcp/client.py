@@ -76,6 +76,33 @@ class MCPConnectionManager:
         self._toolsets[server.id] = toolset
         return toolset
 
+    async def list_tools(self, server: MCPServerSpec) -> "tuple[str, ...]":
+        """Enumerate a server's live tool names for governance (enabled/disabled
+        filtering, conflict detection, max_tools). Best-effort: pydantic-ai's
+        MCPToolset resolves names lazily, so a live connection is needed; if the
+        underlying API cannot enumerate here, returns () (governance then operates
+        on an unknown set -- the documented live-MCP boundary)."""
+        try:
+            toolset = await self.get_toolset(server)
+            getter = getattr(toolset, "get_tools", None)
+            if getter is None:
+                return ()
+            # pydantic-ai toolsets yield ToolDefinition objects; read .name off each.
+            import inspect
+            result = getter()
+            if inspect.isawaitable(result):
+                tools = await result
+            else:
+                tools = result
+            names: "list[str]" = []
+            for t in tools or ():
+                name = getattr(t, "name", None) or getattr(getattr(t, "function", None), "name", None)
+                if name:
+                    names.append(str(name))
+            return tuple(names)
+        except Exception:
+            return ()
+
     async def close_server(self, server_id: str) -> None:
         toolset = self._toolsets.pop(server_id, None)
         if toolset is None:

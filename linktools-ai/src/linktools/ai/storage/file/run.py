@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileRunStore: one JSON file per run under root/{run_id}.json. Atomic writes via
-temp-file-then-os.replace, matching FileResourceBackend's pattern from Phase 1.
+temp-file-then-os.replace, matching FileResourceBackend's write pattern.
 
 Each public async method delegates to a ``_*_sync`` private method via
 ``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""

@@ -19,23 +19,26 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.ref import CapabilityRef
+from ..providers.package import PackageResourceProvider
+from ..subagent.runner import SubagentExecutor
 from .entrypoint import EntrypointInfo
-from .provider import DirectoryPackageResourceProvider
-from .resolver import DirectoryEntrypointResolver
+from .resolver import EntrypointResolver
 from .scope import PackageScope
 from .toolset import build_package_entrypoint_toolset, build_package_resource_toolset
 
 
 @dataclass
 class PackageProvider:
-    """CapabilityProvider for package-scoped capabilities. Holds the resource
-    provider + entrypoint resolver; per-ref config selects read vs call tools."""
+    """CapabilityProvider for package-scoped capabilities. Depends only on the
+    PackageResourceProvider / EntrypointResolver Protocols (the Directory
+    implementations are one possible Provider, not a type boundary). The
+    entrypoint executor is injected at construction so call_package_entrypoint
+    can run scoped agents without runtime mutation."""
 
     kind: str = "package"
-    resource_provider: "DirectoryPackageResourceProvider | None" = None
-    entrypoint_resolver: "DirectoryEntrypointResolver | None" = None
-    # Wired by Runtime so call_package_entrypoint can execute scoped agents.
-    entrypoint_executor: Any = None
+    resource_provider: "PackageResourceProvider | None" = None
+    entrypoint_resolver: "EntrypointResolver | None" = None
+    entrypoint_executor: "SubagentExecutor | None" = None
 
     async def resolve(
         self,

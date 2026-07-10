@@ -525,7 +525,7 @@ class SqlAlchemySwarmStore:
         return await self._execute_in_session(_do)
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
-        # G9: a select-then-loop-mutate here raced against a concurrent
+        # A select-then-loop-mutate here raced against a concurrent
         # renew_lease/complete_task/fail_task -- two overlapping
         # reclaim_expired_tasks calls could both select the same expired rows
         # before either commits, or a reclaim could stomp a lease a worker

@@ -11,10 +11,15 @@ from typing import Any, Mapping
 
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..errors import PackageResourceAccessDeniedError, PackageEntrypointDeniedError
+from ..errors import (
+    PackageEntrypointDeniedError,
+    PackageEntrypointNotFoundError,
+    PackageResourceAccessDeniedError,
+)
+from ..providers.package import PackageResourceProvider
 from .entrypoint import EntrypointRef
-from .provider import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES, DirectoryPackageResourceProvider
-from .resolver import DirectoryEntrypointResolver
+from .provider import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
+from .resolver import EntrypointResolver
 from .scope import PackageScope
 
 
@@ -28,7 +33,7 @@ def _check_allowed(package_id: str, allowed: "Mapping[str, PackageScope]") -> Pa
 
 
 def build_package_resource_toolset(
-    provider: DirectoryPackageResourceProvider,
+    provider: PackageResourceProvider,
     *,
     allowed: "Mapping[str, PackageScope]",
     max_resources_per_list: int = DEFAULT_LIST_LIMIT,
@@ -78,7 +83,7 @@ def build_package_resource_toolset(
 
 
 def build_package_entrypoint_toolset(
-    resolver: DirectoryEntrypointResolver,
+    resolver: EntrypointResolver,
     *,
     allowed: "Mapping[str, PackageScope]",
     allowed_kinds: "tuple[str, ...]" = ("agent",),
@@ -128,15 +133,21 @@ def build_package_entrypoint_toolset(
                 raise PackageEntrypointDeniedError(
                     f"entrypoint {kind}/{name!r} not in allowlist for package {package_id!r}"
                 )
-            # Resolve the scoped agent and delegate to the subagent executor when
-            # wired; otherwise return a reserved marker (the gate is still testable).
-            ref = EntrypointRef(kind=kind, name=name, scope=scope)
-            if executor is None or resolver is None:
-                return {"status": "reserved", "ref": ref.internal_key(), "task": task}
+            # Execution tools must not fake success: without a resolver/executor
+            # the entrypoint cannot run, so raise a structured denial.
+            if resolver is None:
+                raise PackageEntrypointNotFoundError(
+                    f"package entrypoint resolution unavailable for {package_id!r}"
+                )
+            if executor is None:
+                raise PackageEntrypointDeniedError(
+                    "package entrypoint execution requires an entrypoint executor"
+                )
             if kind != "agent":
                 raise PackageEntrypointDeniedError(
                     f"only agent entrypoints are executable, got kind {kind!r}"
                 )
+            ref = EntrypointRef(kind=kind, name=name, scope=scope)
             agent_spec = await resolver.resolve_agent(ref)
             if emit is not None:
                 from ..events.payloads import PackageEntrypointResolved

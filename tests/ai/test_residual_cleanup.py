@@ -19,8 +19,9 @@ _AI_SRC = Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linkto
 # not legitimate prose like "Package skills".
 _MARKER_RE = re.compile(
     r"review3|review-doc|review doc|Package [A-Z0-9](?![a-z])|Task [0-9]+|"
-    r"P[01]-[0-9]+|\bG[1-6]\b|GAP-[0-9]+|Decision D|Decision #[0-9]+|actionable-fix|"
-    r"spec §|§[0-9]|spec section|spec docs|docs/linktools-ai\.md",
+    r"P[01]-[0-9]+|\bG[0-9]\b|GAP-[0-9]+|Decision D|Decision #[0-9]+|"
+    r"actionable-fix|spec §|§[0-9]|spec section|spec docs|docs/linktools-ai\.md|"
+    r"Phase [0-9]",
     re.IGNORECASE,
 )
 
@@ -82,3 +83,28 @@ async def test_import_linktools_ai_without_sqlalchemy():
     }
     r = subprocess.run([sys.executable, "-c", blocker], capture_output=True, text=True, env=env)
     assert r.returncode == 0, f"STDERR:\n{r.stderr}"
+
+
+def test_deprecated_runtime_api_has_removal_plan():
+    rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
+    # Each deprecated method documents its replacement + removal target.
+    assert rt.count("Removal target: next major version") >= 3
+    assert "runtime.providers.agents.get" in rt
+    assert "runtime.providers.swarms.get" in rt
+    assert "runtime.capability_assembler.assemble" in rt
+
+
+def test_tool_exposure_counting_uses_shared_helper():
+    # Runner must count tools via capability.toolset_names (same helper the
+    # assembler uses for conflict detection), not a private getattr.
+    runner = (_AI_SRC / "agent" / "runner.py").read_text(encoding="utf-8")
+    assert "toolset_names" in runner
+    assert 'getattr(ts, "tools"' not in runner
+
+
+def test_spec_loader_from_resources_uses_resourcestore_api():
+    parser = (_AI_SRC / "registry" / "parser.py").read_text(encoding="utf-8")
+    body = parser.split("def from_resources")[1].split("return cls")[0]
+    # Must not call the non-existent ResourceStore.list / global .revision.
+    assert "resource_store.list" not in body
+    assert "resource_store.revision" not in body
