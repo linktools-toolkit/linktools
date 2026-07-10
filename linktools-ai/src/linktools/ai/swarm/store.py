@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """SwarmStore Protocol: persistence contract for SwarmRun/SwarmTask.
 Method signatures are this phase's concrete resolution of the spec's `(...)`
-ellipses (section 22). Two backends implement it: FileSwarmStore (single-process)
+ellipses . Two backends implement it: FileSwarmStore (single-process)
 and SqlAlchemySwarmStore (multi-process via atomic optimistic claim)."""
 
 from typing import Any, Protocol, runtime_checkable
@@ -51,8 +51,8 @@ class SwarmStore(Protocol):
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
-        """Mark the task SUCCEEDED. Package 4 (actionable-fix-spec §7):
-        ``expected_version`` is now a MANDATORY fencing token -- the CLAIMED
+        """Mark the task SUCCEEDED. ``expected_version`` is now a MANDATORY
+        fencing token -- the CLAIMED
         task's version right after set_active_run -- so a worker whose lease
         already expired (and was reclaimed to a new owner) cannot clobber the
         new owner's progress with its own stale completion. The update is
@@ -79,7 +79,7 @@ class SwarmStore(Protocol):
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]": ...
 
-    # -- attempts (review doc §19.2) --------------------------------------
+    # -- attempts ---------------------------------------------------------
     #
     # Each (re)execution of a SwarmTask records one SwarmTaskAttempt for audit.
     # ``record_attempt`` is an upsert keyed on ``attempt.id``: the strategy
@@ -91,7 +91,7 @@ class SwarmStore(Protocol):
 
     async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]": ...
 
-    # -- lease renewal (review doc §19.4) ---------------------------------
+    # -- lease renewal ----------------------------------------------------
     #
     # A worker that's still actively executing a long-running task must extend
     # its lease periodically; otherwise a concurrent reclaim/owner-change would

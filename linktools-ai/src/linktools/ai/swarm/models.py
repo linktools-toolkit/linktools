@@ -18,7 +18,7 @@ class SwarmStatus(str, Enum):
     RUNNING = "running"
     PAUSED = "paused"
     # CANCELLING distinguishes "cancel requested" from "actually cancelled"
-    # (mirrors RunStatus.CANCELLING -- actionable-fix-spec §5.4.5):
+    # (mirrors RunStatus.CANCELLING):
     # SwarmRunner.cancel() flips to CANCELLING while an in-flight swarm
     # coroutine is still unwinding; the CancelledError handler in
     # SwarmRunner.run() transitions CANCELLING -> CANCELLED once actually
@@ -40,7 +40,7 @@ class SwarmTaskStatus(str, Enum):
 class AttemptStatus(str, Enum):
     """Lifecycle of a single task execution attempt (SwarmTaskAttempt.status).
 
-    Review doc §19.2: each (re)try of a SwarmTask records one SwarmTaskAttempt so
+    Each (re)try of a SwarmTask records one SwarmTaskAttempt so
     retries, agent migrations, and failure recovery are fully auditable. A task
     that succeeds on the second try leaves attempt #1 = FAILED and #2 = SUCCEEDED.
     """
@@ -140,7 +140,7 @@ class SwarmTask:
 
 @dataclass(frozen=True, slots=True)
 class SwarmTaskAttempt:
-    """One execution attempt of a SwarmTask (review doc §19.2).
+    """One execution attempt of a SwarmTask.
 
     A single SwarmTask may produce several SwarmTaskAttempts over its life:
     retries inside one ``_run_task`` call each record their own attempt, as does

@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FileEventStore: root/{stream_id}/{sequence:010d}.json, one file per event,
-never overwritten -- append-only per spec docs/linktools-ai.md section 23.3.
-The payload's concrete type name is stored alongside the payload's __dict__
-so list() can reconstruct the exact dataclass.
+never overwritten -- append-only. The payload's concrete type name is stored
+alongside the payload's __dict__ so list() can reconstruct the exact dataclass.
 
-Per review doc §8.1/§8.5, the store is the SOLE owner of sequence assignment.
-append() takes the payload plus run/stream context and assigns the next
-sequence atomically under a per-stream lock (single-process file mode per
-§19.5 -- an asyncio.Lock per stream serializes appends within one event loop).
+The store is the SOLE owner of sequence assignment. append() takes the
+payload plus run/stream context and assigns the next sequence atomically
+under a per-stream lock (single-process file mode; an asyncio.Lock per
+stream serializes appends within one event loop).
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The per-stream ``asyncio.Lock`` is held in the
-async wrapper and spans the ``to_thread`` call, so concurrent appends to the
-same stream still serialize."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The per-stream ``asyncio.Lock`` is held in the async wrapper and spans the
+``to_thread`` call, so concurrent appends to the same stream still serialize."""
 
 import asyncio
 import json
@@ -121,7 +119,7 @@ class FileEventStore:
         payload = payload_cls(**raw["payload"])
         return EventEnvelope(
             event_id=raw["event_id"],
-            # G3: fall back to run_id for files written before stream_id
+            # fall back to run_id for files written before stream_id
             # became a first-class field -- every caller has always passed
             # stream_id == run_id, so this default is exact, not a guess.
             stream_id=raw.get("stream_id", raw["run_id"]),

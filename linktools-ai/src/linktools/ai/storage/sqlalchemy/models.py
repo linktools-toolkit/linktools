@@ -42,7 +42,7 @@ class IdempotencyRow(Base):
 
 
 class ToolIdempotencyRow(Base):
-    """Persistent tool-call idempotency records (review doc §11). The unique
+    """Persistent tool-call idempotency records. The unique
     constraint on (scope, key) is the natural primary key for the
     IdempotencyStore Protocol -- it backs ``reserve``'s "find-or-create"
     semantics (IntegrityError on the race -> SELECT the winner -> hash-check).
@@ -135,7 +135,7 @@ class SessionMessageRow(Base):
 
 class EventRow(Base):
     __tablename__ = "ai_events"
-    # G3/review3 §8.4: the uniqueness (and sequence-reservation) boundary is
+    # the uniqueness (and sequence-reservation) boundary is
     # the STREAM, not the run -- stream_id is a distinct column so a future
     # session/audit/root-run/swarm stream can coexist with a run's own stream
     # without colliding on (run_id, sequence). Every current caller still
@@ -197,7 +197,7 @@ class SwarmTaskRow(Base):
 
 
 class SwarmTaskAttemptRow(Base):
-    """One execution attempt of a SwarmTask (review doc §19.2). Mirrors the
+    """One execution attempt of a SwarmTask. Mirrors the
     SwarmTaskAttempt domain model. Indexed on task_id for fast list_attempts."""
 
     __tablename__ = "ai_swarm_task_attempts"
@@ -229,7 +229,7 @@ class MemoryRow(Base):
 
 class ApprovalRow(Base):
     __tablename__ = "ai_approvals"
-    # Package 3 (actionable-fix-spec §6): the database-level dedupe backstop.
+    # the database-level dedupe backstop.
     # (run_id, tool_call_id) IS the natural dedup key -- a pydantic-ai
     # tool_call_id is minted fresh per invocation, so it never needs to be
     # "released" after a terminal (approved/rejected) resolution for reuse by

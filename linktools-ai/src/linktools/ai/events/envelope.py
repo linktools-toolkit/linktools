@@ -13,7 +13,7 @@ TEvent = TypeVar("TEvent")
 @dataclass(frozen=True, slots=True)
 class EventEnvelope(Generic[TEvent]):
     event_id: str
-    # G3/review3 §8.2: stream_id is the sequence-uniqueness boundary (a
+    # stream_id is the sequence-uniqueness boundary (a
     # session/audit/root-run/swarm stream, not necessarily the run itself);
     # every current caller passes stream_id == run_id, but the field is now
     # first-class rather than conflated with run_id.

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""IdempotencyStore: persistent tool-call idempotency (spec §11).
+"""IdempotencyStore: persistent tool-call idempotency.
 
 ToolExecutor consults an IdempotencyStore when an ``idempotency_key`` is
 supplied to ``execute()``. The store persists reservations so tool
 idempotency survives process restart -- the legacy in-process dict is gone
-(review doc §11.1: "禁止仅使用进程内字典").
+("禁止仅使用进程内字典").
 
-Lifecycle (per §11.2):
+Lifecycle:
 
 - ``reserve(scope, key, request_hash)`` is the entry point. It either:
   * creates a fresh RESERVED record and returns ``None`` -- the caller must
@@ -23,14 +23,14 @@ Lifecycle (per §11.2):
 API note: ``complete``/``fail`` key off ``(scope, key)`` rather than a
 synthetic record id. The caller always knows ``(scope, key)`` (it just
 passed them to ``reserve``), and ``(scope, key)`` is the natural primary
-key on both backends (file path; SQL unique constraint). The review doc
-sketches ``complete(record_id, ...)`` but leaves ``record_id`` undefined in
-the wiring pseudocode; ``(scope, key)`` is the consistent, race-free
+key on both backends (file path; SQL unique constraint). An alternative
+``complete(record_id, ...)`` signature leaves ``record_id`` without a
+source; ``(scope, key)`` is the consistent, race-free
 interpretation. ``record.id`` remains on the dataclass for diagnostics,
 audit logs, and any future indexer that needs a stable handle.
 
 The Protocol is ``@runtime_checkable`` so wiring/tests can ``isinstance``
-against it. ``compute_request_hash`` centralizes the §11.3 hash formula so
+against it. ``compute_request_hash`` centralizes the hash formula so
 both backends and the executor agree byte-for-byte."""
 
 import hashlib
@@ -42,7 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 
 
 class IdempotencyStatus(str, Enum):
-    """Three-state lifecycle of an idempotent tool call (§11.2). String enum
+    """Three-state lifecycle of an idempotent tool call. String enum
     so the value round-trips through JSON / SQL columns as a plain string."""
 
     RESERVED = "reserved"
@@ -112,8 +112,8 @@ def compute_request_hash(
     tool_name: str, arguments: "dict[str, Any]", scope: str,
     *, schema_version: str = "1",
 ) -> str:
-    """SHA-256 of ``tool_name | schema_version | normalized_args | scope``
-    (§11.3/P1-5). ``arguments`` are json-serialized with ``sort_keys=True`` so
+    """SHA-256 of ``tool_name | schema_version | normalized_args | scope``.
+    ``arguments`` are json-serialized with ``sort_keys=True`` so
     two dicts that compare equal hash identically regardless of insertion
     order; ``default=str`` keeps non-JSON-native values (Path, datetime, ...)
     stable instead of raising.

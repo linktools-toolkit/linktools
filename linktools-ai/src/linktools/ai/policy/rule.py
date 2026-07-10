@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Policy enums, ToolPolicyMetadata, and the PolicyRule/PolicyDecision/ToolRequest/
-ToolContext types they revolve around. Section 25 defines the rule protocol; the
+ToolContext types they revolve around. defines the rule protocol; the
 rule modules live in permission.py / risk.py / path.py / network.py / approval.py /
 command.py, and PolicyEngine (engine.py) composes them. The policy-relevant slice
-of a tool's declaration (section 26.1) is ToolPolicyMetadata below -- the full
-ToolSpec lands in registry/tool.py (Task 11)."""
+of a tool's declaration is ToolPolicyMetadata below -- the full
+ToolSpec lands in registry/tool.py."""
 
 from dataclasses import dataclass, field
 from enum import Enum

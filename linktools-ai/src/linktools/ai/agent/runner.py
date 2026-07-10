@@ -7,8 +7,8 @@ fire via MiddlewareCapability, enabled by passing deps=AgentDependencies(...) to
 agent.pydantic_agent.iter() -- the per-Run ToolContext travels through
 pydantic-ai's dependency injection (ctx.deps), not a mutable capability field.
 
-Phase 2A of the review-doc refactoring (spec §5): one execute() async generator
-is the SINGLE lifecycle. run() and run_stream() both delegate to it.
+One execute() async generator is the SINGLE lifecycle. run() and run_stream()
+both delegate to it.
 
 * ``execute()`` drives ``agent.pydantic_agent.iter()`` and yields the dict-event
   shape the CLI REPL consumes:
@@ -33,14 +33,14 @@ Message-history adaptation is a text-join MVP (SessionMessage.content values
 prepended to the prompt). Checkpoint payload uses pydantic-ai's
 ModelMessagesTypeAdapter via serialize_messages().
 
-Optional Memory + Knowledge injection (Phase 5): when ``memory_store`` and/or
+Optional Memory + Knowledge injection: when ``memory_store`` and/or
 ``retriever`` are wired, ``execute()`` queries them with the user prompt and
 prepends ``## Memory`` / ``## Knowledge`` sections to the prompt sent to the
 model. Both default to None, so existing callers see no change. Final prompt
 order (when both are set and non-empty): ``## Knowledge`` on top, then
 ``## Memory``, then session history, then the user prompt.
 
-Optional Observability (Phase 6): when ``observability`` is wired, ``execute()``
+Optional Observability: when ``observability`` is wired, ``execute()``
 wraps the lifecycle in an outer ``agent.run`` span and the iter() drive in a
 nested ``agent.model`` span (parented via the tracing contextvar). When
 ``metrics`` is wired, records ``counter("agent.run.completed"/"agent.run.failed")``
@@ -142,11 +142,11 @@ class AgentRunner:
         # Cross-store UnitOfWork factory (SqlAlchemy only). When wired, the
         # pause path wraps checkpoint-save + Run-transition + event-append in
         # one shared AsyncSession + one transaction, so they commit/rollback
-        # atomically (review doc §10.2). None for FileStorage -- File cannot
+        # atomically. None for FileStorage -- File cannot
         # promise cross-store transactions, so the pause path keeps its
-        # best-effort non-atomic shape (§10.3).
+        # best-effort non-atomic shape.
         self._uow_factory = uow_factory
-        # Phase 3A real cancellation (review doc §7). When wired, execute()
+        # Real cancellation. When wired, execute()
         # registers its driving asyncio.Task + a fresh CancellationToken with
         # the controller so Runtime.cancel(run_id) can actually stop the run
         # (sets the token -> next raise_if_cancelled() check aborts; also
@@ -155,7 +155,7 @@ class AgentRunner:
         # CancelledError path -- the existing behavior, no token checks at
         # execution points. Default-None preserves every existing test.
         self._run_controller = run_controller
-        # §17 (review-doc): the per-Runtime ExecutionBackend. execute()
+        # The per-Runtime ExecutionBackend. execute()
         # publishes this to AgentDependencies.execution and constructs the
         # builtin file/terminal FunctionToolset from it at execution time,
         # passing it via ``agent.iter(prompt, toolsets=[...])``. ``None``
@@ -164,14 +164,14 @@ class AgentRunner:
         # ``workdir=None`` path. Holding the backend on the runner (not the
         # compiler) is what decouples AgentCompiler from the filesystem.
         self._execution = execution
-        # P0-6/G1 (review3 §5, Package A): File-mode approval persistence for
+        # File-mode approval persistence for
         # the pause path (SqlAlchemy mode reaches the approval store via
         # ``tx.approvals`` inside the UoW instead). None (default) means a
         # RunPaused with a tool_call_id simply cannot persist its approval in
         # File mode without this wired -- Runtime.build() always wires it
         # from storage.approvals.
         self._approval_store = approval_store
-        # Capability Runtime (spec §9/§10.7): when an AgentSpec declares non-
+        # Capability Runtime: when an AgentSpec declares non-
         # empty tools and an assembler is wired, execute() resolves those tools
         # into prompt sections + toolsets via the capability providers. Default
         # None preserves the legacy behavior (empty tools -> default builtin
@@ -186,6 +186,33 @@ class AgentRunner:
         if self._observability is None:
             return _noop_span()
         return use_span(self._observability, name, attributes=attrs or {})
+
+    def _effective_memory_policy(self):
+        """Explicit policy from options, else the default built from the wired
+        memory store, else None (no memory injection)."""
+        opts = self._capability_options
+        if opts is not None and opts.memory_policy is not None:
+            return opts.memory_policy
+        if self._memory_store is not None:
+            from .context_policies import DefaultMemoryPolicy
+            return DefaultMemoryPolicy(self._memory_store)
+        return None
+
+    def _effective_retrieval_policy(self):
+        opts = self._capability_options
+        if opts is not None and opts.retrieval_policy is not None:
+            return opts.retrieval_policy
+        if self._retriever is not None:
+            from .context_policies import DefaultRetrievalPolicy
+            return DefaultRetrievalPolicy(self._retriever)
+        return None
+
+    def _prompt_formatter(self):
+        opts = self._capability_options
+        if opts is not None and opts.prompt_context_formatter is not None:
+            return opts.prompt_context_formatter
+        from .context_policies import DefaultPromptContextFormatter
+        return DefaultPromptContextFormatter()
 
     async def execute(
         self,
@@ -224,7 +251,7 @@ class AgentRunner:
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
 
         # -- Setup: create record + transition RUNNING (or read version for resume).
-        # Per review doc §6.3, the terminal transitions reuse the version returned
+        # The terminal transitions reuse the version returned
         # here -- no hardcoded expected_version anywhere in this file.
         if message_history is None:
             now = datetime.now(timezone.utc)
@@ -246,14 +273,14 @@ class AgentRunner:
             current = await self._run_store.get(context.run_id)
             running_version = current.version
 
-        # Phase 3A real cancellation (§7). When a RunController is wired,
+        # Real cancellation. When a RunController is wired,
         # register the driving asyncio.Task + a fresh CancellationToken so
         # Runtime.cancel(run_id) can actually stop this run: the token is
         # checked at the model-call execution points below, and the task is
         # cancelled to interrupt any hanging await inside the model call.
         # When ``run_controller`` is None (default), ``token`` stays None and
         # every check below is skipped -- cancellation then works purely via
-        # asyncio's CancelledError path (the pre-Phase-3A behavior, so the
+        # asyncio's CancelledError path (the prior behavior, so the
         # default-None path is observationally identical to before).
         token: "CancellationToken | None" = None
         if self._run_controller is not None:
@@ -299,7 +326,7 @@ class AgentRunner:
 
                 prior_messages = await self._session_store.list_messages(
                     context.session_id)
-                # Prompt window policy (spec §19): trim session history before it
+                # Prompt window policy: trim session history before it
                 # is folded into the prompt. Opt-in via CapabilityRuntimeOptions;
                 # None (default) leaves prior_messages untouched.
                 window_policy = (
@@ -328,39 +355,35 @@ class AgentRunner:
                     prompt = (f"{history_text}\n{request.prompt}"
                               if history_text else request.prompt)
 
-                    # Memory + Knowledge injection (Phase 5). Each block is
-                    # optional and only fires when its dependency is wired AND
-                    # yields a non-empty section, so the default-None path is a
-                    # no-op. Memory injected first, then knowledge -- both
-                    # prepend, so the final order top-to-bottom is: Knowledge,
-                    # Memory, history, user prompt. Owner resolution prefers
-                    # user_id, then tenant_id, then session_id.
-                    if self._memory_store is not None:
-                        from ..knowledge.context import format_memory
-                        owner = (context.user_id or context.tenant_id
-                                 or context.session_id)
-                        memories = await self._memory_store.search(
-                            request.prompt, owner_id=owner, limit=5,
-                        )
-                        section = format_memory(memories)
+                    # Memory + Knowledge injection via substitutable policies.
+                    # Each fires only when its policy is wired (explicit on
+                    # options, or the runner's default built from a wired store/
+                    # retriever) AND yields a non-empty section. Memory is
+                    # injected first, then knowledge -- both prepend, so the
+                    # final top-to-bottom order is: Knowledge, Memory, history,
+                    # user prompt.
+                    memory_policy = self._effective_memory_policy()
+                    if memory_policy is not None:
+                        memories = await memory_policy.select_memories(context, request.prompt)
+                        section = self._prompt_formatter().format_memory(memories)
                         if section:
                             prompt = f"{section}\n{prompt}"
-                    if self._retriever is not None:
-                        from ..knowledge.context import KnowledgeContext
-                        docs = await self._retriever.search(request.prompt, limit=5)
-                        section = KnowledgeContext(documents=docs).format()
+                    retrieval_policy = self._effective_retrieval_policy()
+                    if retrieval_policy is not None:
+                        items = await retrieval_policy.retrieve(context, request.prompt)
+                        section = self._prompt_formatter().format_knowledge(items)
                         if section:
                             prompt = f"{section}\n{prompt}"
 
                 # -- Model call: agent.pydantic_agent.iter() drives the graph.
                 # The per-Run ToolContext travels to capabilities via pydantic-ai
                 # DI: ``deps=`` becomes ``ctx.deps.tool_context`` inside every
-                # capability hook (Phase 1 refactoring -- safe concurrent reuse
+                # capability hook (safe concurrent reuse
                 # of one CompiledAgent across many Runs).
                 tool_context = ToolContext(
                     run_id=context.run_id, session_id=context.session_id,
                     tool_call_id=None)
-                # §17 (review-doc): the builtin file/terminal toolset is
+                # The builtin file/terminal toolset is
                 # constructed HERE, at execution time, from the per-Runtime
                 # ExecutionBackend -- not baked into the compiled Agent. This
                 # is what makes AgentCompiler stateless (no filesystem surface):
@@ -426,17 +449,17 @@ class AgentRunner:
                         backend=deps.execution,
                         enabled_tools={"file", "terminal"},
                     )))
-                # GAP-08: ModelPolicy.timeout_seconds is enforced by wrapping
+                # ModelPolicy.timeout_seconds is enforced by wrapping
                 # each graph step (``run.__anext__()``) in asyncio.wait_for with
                 # the REMAINING budget. The model call happens at this await
                 # point (for stream-less models / the non-streaming path), so
                 # wait_for can interrupt a hanging model call. timeout_seconds
-                # left at None reproduces the pre-GAP-08 path (no wait_for).
+                # left at None reproduces the prior path (no wait_for).
                 timeout = agent.spec.model.timeout_seconds
 
                 accumulated_text = ""
                 result = None
-                # §7.2: check the cancellation token BEFORE the model call.
+                # check the cancellation token BEFORE the model call.
                 # raise_if_cancelled() is a no-op when the token is not set
                 # (or when no controller is wired -- token is None), so this
                 # is observationally invisible on the default path.
@@ -574,16 +597,16 @@ class AgentRunner:
                                 # generator without triggering a cross-task
                                 # cancel-scope exit.
                                 #
-                                # P0-6/G1 (review3 §5, Package A): ToolExecutor
+                                # ToolExecutor
                                 # no longer persists the ApprovalRequest itself
                                 # -- ``paused`` carries every field needed to
                                 # build it, and THIS handler is the one that
                                 # calls ``ApprovalStore.create_or_get_pending``
-                                # (deduping on (run_id, tool_call_id) -- G2),
+                                # (deduping on (run_id, tool_call_id)),
                                 # so the approval write joins the same atomicity
                                 # story as checkpoint/transition/event below.
                                 #
-                                # §10.2 atomicity: when a UnitOfWork factory is
+                                # atomicity: when a UnitOfWork factory is
                                 # wired (SqlAlchemy), approval + checkpoint +
                                 # transition + events share ONE transaction --
                                 # they commit together on clean exit or rollback
@@ -592,12 +615,12 @@ class AgentRunner:
                                 # FAILED). When no factory is wired (File),
                                 # cross-store transactions are impossible, so
                                 # the path keeps its non-atomic best-effort
-                                # shape (§10.3): checkpoint + transition still
-                                # propagate (§3.3 forbids leaving them partial),
+                                # shape: checkpoint + transition still
+                                # propagate; leaving them partial is forbidden,
                                 # but the approval write and RunPaused/
                                 # ApprovalRequested event appends are
                                 # best-effort.
-                                # G2: create_or_get_pending may return an
+                                # create_or_get_pending may return an
                                 # EXISTING approval (dedup on tool_call_id)
                                 # whose id differs from the fresh
                                 # ``paused.approval_id`` ToolExecutor minted.
@@ -646,13 +669,13 @@ class AgentRunner:
                                             reason=f"approval required: {paused.approval_id}",
                                         )
                                         await tx.checkpoints.save(checkpoint)
-                                        # §3.3 + §6.3: WAITING_APPROVAL
+                                        # WAITING_APPROVAL
                                         # transition MUST propagate. If it
                                         # fails the run cannot be paused --
                                         # rolling back + propagating avoids
                                         # leaving the checkpoint saved but the
                                         # run still RUNNING (the inconsistent
-                                        # state §10.2 forbids).
+                                        # state forbidden by atomicity).
                                         await tx.runs.transition(
                                             context.run_id,
                                             RunStatus.WAITING_APPROVAL,
@@ -677,10 +700,10 @@ class AgentRunner:
                                             payload=paused_payload,
                                         )
                                 else:
-                                    # File mode: non-atomic best-effort (§10.3).
+                                    # File mode: non-atomic best-effort.
                                     # Cross-store transactions are unavailable,
-                                    # so checkpoint + transition propagate (§3.3
-                                    # forbids masking them) but the approval
+                                    # so checkpoint + transition propagate
+                                    # (masking them is forbidden) but the approval
                                     # write and event appends stay best-effort
                                     # -- the run is already WAITING_APPROVAL, so
                                     # a missing approval/event is a recovery
@@ -784,7 +807,7 @@ class AgentRunner:
                     else:
                         raise
 
-                # §7.2: check the cancellation token AFTER the model call
+                # check the cancellation token AFTER the model call
                 # completes. If Runtime.cancel flipped the token while the
                 # iter() drive was in flight (but the underlying asyncio.Task
                 # cancel hasn't surfaced yet), this raises CancelledError here
@@ -795,7 +818,7 @@ class AgentRunner:
 
                 # If the timeout budget was exhausted, raise ModelRoutingError
                 # so the outer generic-except handler records FAILED with a
-                # descriptive "model timeout" message (GAP-08). This sits
+                # descriptive "model timeout" message (). This sits
                 # OUTSIDE the iter() context so __aexit__ has already run.
                 if timed_out:
                     raise ModelRoutingError("model timeout")
@@ -814,7 +837,7 @@ class AgentRunner:
                     else:
                         output = accumulated_text
 
-                    # GAP-08: max_tokens enforcement. usage is read once so the
+                    # max_tokens enforcement. usage is read once so the
                     # check and the RunResult.token_usage share the same
                     # snapshot. budget (cost-per-token) is declared on
                     # ModelPolicy but deferred -- only the token-count limit is
@@ -829,7 +852,7 @@ class AgentRunner:
                                 kind="max_tokens",
                             )
 
-                    # G6: sequence is assigned by the SessionStore itself
+                    # sequence is assigned by the SessionStore itself
                     # (NewSessionMessage carries no id/sequence/created_at) --
                     # the caller no longer computes `len(prior_messages) + 1`,
                     # which could race with a concurrent Run appending to the
@@ -871,10 +894,10 @@ class AgentRunner:
                     # Best-effort RunCompleted: on the resume path, the event
                     # stream may already hold a RunPaused event from the
                     # initial pause -- the store-assigned sequence simply
-                    # appends after it (no caller sequence to collide with --
-                    # review doc §8.1). best-effort audit - non-critical path:
+                    # appends after it (no caller sequence to collide with).
+                    # best-effort audit - non-critical path:
                     # the run is already SUCCEEDED, so a missing event is an
-                    # observability gap, not state corruption (§3.3).
+                    # observability gap, not state corruption.
                     try:
                         await self._event_store.append(
                             stream_id=context.run_id,
@@ -899,20 +922,20 @@ class AgentRunner:
                             attributes=run_attrs,
                         )
         except asyncio.CancelledError:
-            # GAP-16 + Phase 3A (§6.1, §7): in-flight cancel path. CancelledError
+            # in-flight cancel path. CancelledError
             # surfaces at the current await point (model call / node.stream() /
             # event append / middleware / token check). Caught BEFORE the generic
             # ``except Exception`` (CancelledError is a BaseException since
             # Python 3.8). The run is transitioned to CANCELLING then CANCELLED
             # -- CANCELLING distinguishes "cancel requested" from "actually
-            # stopped" (§6.1), and the run only reaches CANCELLED once this
+            # stopped", and the run only reaches CANCELLED once this
             # handler has actually drained.
             #
             # Defensive against the controller-driven path: when Runtime.cancel
             # beat us to it, the store is ALREADY in CANCELLING and the
             # RUNNING -> CANCELLING transition is rejected. We re-read the
             # record to capture its live version for the CANCELLING -> CANCELLED
-            # step (§6.3 -- expected_version always comes from the store, never
+            # step (expected_version always comes from the store, never
             # hardcoded).
             #
             # Both transitions are best-effort ONLY because asyncio requires
@@ -955,7 +978,7 @@ class AgentRunner:
             # RunFailed, record metrics. Re-raise so the caller sees the error.
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc))
-            # §3.3: Run status update. The FAILED transition is kept
+            # Run status update. The FAILED transition is kept
             # best-effort ONLY because we are already in the failing path:
             # letting the transition error escape would replace the ORIGINAL
             # exc (the actual cause) with a version-mismatch/store error,
@@ -976,7 +999,7 @@ class AgentRunner:
                 await self._middleware_pipeline.run_on_error(context, exc)
             # best-effort audit - non-critical path: the run is already failing
             # (FAILED transition attempted above), so a missing RunFailed event
-            # is an observability gap, not state corruption (§3.3).
+            # is an observability gap, not state corruption.
             try:
                 await self._event_store.append(
                     stream_id=context.run_id,
@@ -1001,7 +1024,7 @@ class AgentRunner:
                 })
             raise
         finally:
-            # Phase 3A: drop the in-flight registration so the controller does
+            # drop the in-flight registration so the controller does
             # not retain a reference to the (now-finished) asyncio.Task. The
             # unregister is in ``finally`` so it runs on every exit path --
             # success, pause-yield, cancel, and error. Idempotent (no-op when
@@ -1055,7 +1078,7 @@ class AgentRunner:
         # execute() completed without pausing -- the SUCCEEDED transition
         # stored the RunResult. Read it back rather than threading state out
         # of the generator, so the result is the store's authoritative copy
-        # (single source of truth per review doc §3.2).
+        # (single source of truth).
         record = await self._run_store.get(context.run_id)
         if record is not None and record.result is not None:
             return record.result

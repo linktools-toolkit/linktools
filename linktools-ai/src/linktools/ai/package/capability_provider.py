@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """PackageProvider: the CapabilityProvider for ``package`` / ``package-resource``
-/ ``package-entrypoint`` tool refs (spec §13).
+/ ``package-entrypoint`` tool refs.
 
 - ``package:<id>``            -> prompt catalog only (Level 0), no tools.
 - ``package-resource:<id>``   -> Level-1 list/read resource tools for that pkg.

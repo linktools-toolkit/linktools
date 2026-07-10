@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SwarmSpec: declarative multi-Agent orchestration (spec 22.2). Names its member
+"""SwarmSpec: declarative multi-Agent orchestration . Names its member
 agents (AgentRef), a coordinator agent, a strategy declaration, governance limits,
 a context-sharing policy, and an aggregation policy."""
 

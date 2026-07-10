@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """EventStore: append-only. Events are never overwritten or deleted.
 
-Per review doc §8.1, the EventStore is the SOLE owner of event sequence
+The EventStore is the SOLE owner of event sequence
 assignment -- callers pass the payload plus the run/stream context, and the
 store constructs the EventEnvelope (assigning the next sequence atomically,
 minting event_id, and stamping occurred_at)."""

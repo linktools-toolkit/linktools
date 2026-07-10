@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Package resource types (spec §13.4/§13.5): ResourceRef (a scoped path) plus
+"""Package resource types: ResourceRef (a scoped path) plus
 the pydantic content/listing models. ``sanitize_package_path`` enforces the
 path sandbox -- parent traversal would let one package read another's files."""
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ModelPolicy: primary model + fallback chain + limits, per spec section 31."""
+"""ModelPolicy: primary model + fallback chain + limits."""
 
 from dataclasses import dataclass
 from decimal import Decimal

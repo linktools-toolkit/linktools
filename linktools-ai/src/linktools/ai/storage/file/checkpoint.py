@@ -3,9 +3,8 @@
 """FileCheckpointStore: root/{run_id}/{sequence}.bin (raw payload) + a JSON
 sidecar for id/format/schema_version/created_at/metadata.
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
 
 import asyncio
 import json

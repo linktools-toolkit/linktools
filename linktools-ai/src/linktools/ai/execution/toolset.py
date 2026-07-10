@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 """Builtin toolset wiring: FunctionToolset signatures forwarding to an ExecutionBackend."""
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic_ai.toolsets import FunctionToolset, WrapperToolset
+from pydantic_ai.toolsets import FunctionToolset
 
 from .protocols import ExecutionBackend
 
@@ -15,60 +14,6 @@ from .protocols import ExecutionBackend
 class BuiltinToolContext:
     backend: ExecutionBackend
     enabled_tools: "set[str]"
-
-
-class HookedBuiltinToolset(WrapperToolset):
-    """Wraps the builtin `FunctionToolset` (file/terminal) to fire
-    mcp_call_start/post_mcp_call events with `server="builtin"`, mirroring the
-    attribution used by SkillCapability/SubagentCapability/HookedMCPCapability
-    for their own tool categories.
-    """
-
-    def __init__(self, wrapped, kernel, context: "dict[str, Any]", parent_call_id: "str | None"):
-        super().__init__(wrapped)
-        self._kernel = kernel
-        self._context = context
-        self._parent_call_id = parent_call_id
-
-    async def call_tool(self, name, tool_args, ctx, tool):
-        t = time.monotonic()
-        success = True
-        error: "str | None" = None
-        result: Any = None
-        if self._kernel:
-            self._kernel.trigger(
-                "mcp_call_start",
-                **self._context,
-                server="builtin",
-                tool_name=name,
-                arguments=tool_args,
-                call_id=ctx.tool_call_id,
-                parent_call_id=self._parent_call_id,
-            )
-        try:
-            result = await self.wrapped.call_tool(name, tool_args, ctx, tool)
-            return result
-        except Exception as exc:
-            success = False
-            error = str(exc)
-            raise
-        finally:
-            if self._kernel:
-                self._kernel.trigger(
-                    "post_mcp_call",
-                    **self._context,
-                    server="builtin",
-                    tool_name=name,
-                    duration_ms=round((time.monotonic() - t) * 1000, 2),
-                    success=success,
-                    data_gaps=[] if success else [f"builtin_tool_failed: {name}"],
-                    result=result,
-                    error=error,
-                    call_id=ctx.tool_call_id,
-                    parent_call_id=self._parent_call_id,
-                    tool_use_id=ctx.tool_call_id or name,
-                    source="builtin",
-                )
 
 
 def build_builtin_toolset(context: BuiltinToolContext) -> FunctionToolset:

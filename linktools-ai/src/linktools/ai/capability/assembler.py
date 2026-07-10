@@ -3,7 +3,7 @@
 """CapabilityAssembler: turns an AgentSpec.tools declaration into one merged
 CapabilityBundle by dispatching each tool ref to its CapabilityProvider.
 
-Resolution rules (spec §10.6):
+Resolution rules:
   - unknown kind (no provider registered)        -> CapabilityResolutionError
   - a provider rejects its ref (not found, ...)  -> propagates that error
   - two capabilities produce the same tool name  -> CapabilityConflictError
@@ -46,7 +46,7 @@ async def _emit(context: CapabilityContext, payload) -> None:
         payload=payload,
     )
 
-# Recognized capability kinds (spec §10.1). A kind outside this set is a
+# Recognized capability kinds. A kind outside this set is a
 # structurally invalid tool ref (InvalidSpecError); a known kind with no
 # registered provider is a wiring gap (CapabilityResolutionError).
 KNOWN_CAPABILITY_KINDS = frozenset({
@@ -154,5 +154,5 @@ def _to_capability_ref(agent_id: str, tool_ref: ToolRef) -> CapabilityRef:
     return CapabilityRef(kind=kind, name=tool_ref.name, config=dict(tool_ref.config))
 
 
-# Spec §5.2/§20.7 use both names for the same orchestrator.
+# Both names refer to the same orchestrator.
 CapabilityResolver = CapabilityAssembler

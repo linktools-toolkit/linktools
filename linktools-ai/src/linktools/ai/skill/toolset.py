@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill toolset: list_skills / read_skill with an authorization boundary
-(spec §14.4/§14.7). An agent may only read skills it declared; unauthorized
+"""Skill toolset: list_skills / read_skill with an authorization boundary.
+An agent may only read skills it declared; unauthorized
 reads raise SkillNotFoundError so existence is not leaked."""
 
 from typing import Any, Awaitable, Callable, Iterable

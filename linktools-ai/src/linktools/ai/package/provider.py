@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """DirectoryPackageResourceProvider: the default file-backed
 PackageResourceProvider. Reads resources from a per-package root directory with
-the spec §13.6 safety guarantees: path sandbox (no ``..`` escape), pagination,
+the safety guarantees: path sandbox (no ``..`` escape), pagination,
 and a max_bytes read clamp."""
 
 from pathlib import Path
@@ -38,7 +38,7 @@ class DirectoryPackageResourceProvider:
         deny_extensions: "tuple[str, ...]" = (),
     ) -> None:
         self._roots: "dict[str, Path]" = {pid: Path(p) for pid, p in roots.items()}
-        # Extension allow/deny lists (spec §13.6 #4), normalized lowercase with
+        # Extension allow/deny lists, normalized lowercase with
         # a leading dot. When set, read_resource refuses disallowed extensions.
         self._allow_ext = tuple(e.lower() for e in allow_extensions) if allow_extensions else None
         self._deny_ext = tuple(e.lower() for e in deny_extensions)

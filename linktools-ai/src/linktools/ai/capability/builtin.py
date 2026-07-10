@@ -3,7 +3,7 @@
 """BuiltinProvider: resolves ``builtin:file`` / ``builtin:terminal`` into the
 file/terminal FunctionToolset built from the per-Run ExecutionBackend. This
 moves the hardcoded ``{file, terminal}`` toolset construction out of
-AgentRunner into a discoverable capability (spec §12)."""
+AgentRunner into a discoverable capability."""
 
 from ..errors import CapabilityNotFoundError, CapabilityResolutionError
 from ..execution.toolset import BuiltinToolContext, build_builtin_toolset
@@ -17,7 +17,7 @@ _WILDCARD = {"*", ""}
 class BuiltinProvider:
     """Provides ``builtin:file`` and ``builtin:terminal`` toolsets. Requires an
     ExecutionBackend in the resolution context; a builtin ref with no backend is
-    a configuration error, not a silent no-op (spec §12.4)."""
+    a configuration error, not a silent no-op."""
 
     kind = "builtin"
 

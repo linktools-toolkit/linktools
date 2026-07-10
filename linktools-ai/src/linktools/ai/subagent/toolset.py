@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""call_subagent toolset (spec §16.4/§16.5). The tool delegates to a resolved
+"""call_subagent toolset. The tool delegates to a resolved
 child AgentSpec -- global (SubagentSpecProvider) or package-scoped
 (EntrypointResolver) -- subject to an allowlist and depth/timeout limits."""
 

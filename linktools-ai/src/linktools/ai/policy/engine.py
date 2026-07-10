@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """PolicyEngine: composes PolicyRules into one ALLOW/DENY/REQUIRE_APPROVAL
 decision. Middleware never makes authorization decisions itself -- only
-PolicyEngine does, per spec section 25.
+PolicyEngine does.
 
 The decision types and the PolicyRule Protocol live in rule.py and are
 re-exported here so existing imports from policy.engine keep working."""

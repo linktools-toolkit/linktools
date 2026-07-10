@@ -96,8 +96,8 @@ class IdempotencyRecord:
     result: "ResourceInfo | None"
 
 
-# ResourceLookupInfo is the metadata-only shape returned by raw_stat (spec
-# §15.1). It is intentionally an alias of ResourceInfo: ResourceInfo already
+# ResourceLookupInfo is the metadata-only shape returned by raw_stat.
+# It is intentionally an alias of ResourceInfo: ResourceInfo already
 # carries exactly the metadata fields (path/kind/etag/version/content_type/
 # size/modified_at/metadata) and -- crucially -- no content field. Aliasing
 # rather than duplicating keeps a single source of truth for the metadata
@@ -105,7 +105,7 @@ class IdempotencyRecord:
 # type level.
 ResourceLookupInfo: TypeAlias = ResourceInfo
 
-# MoveResult is the result shape of an atomic MOVE (spec §13.1). The target
+# MoveResult is the result shape of an atomic MOVE. The target
 # resource (info + content) is what callers receive from ResourceStore.move();
 # aliasing Resource avoids parallel result types.
 MoveResult: TypeAlias = Resource

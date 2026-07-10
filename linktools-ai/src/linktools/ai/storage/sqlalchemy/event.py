@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """SqlAlchemyEventStore: DB-backed EventStore. The unique (run_id, sequence)
 constraint on ai_events is the backstop for sequence uniqueness; the store
-additionally reserves the next sequence itself (review doc §8.1/§8.4) by
+additionally reserves the next sequence itself by
 reading MAX(sequence)+1 for the stream inside the same transaction that
 inserts the row. On the rare race where two concurrent transactions both
 computed the same next_seq, the unique constraint's IntegrityError is caught

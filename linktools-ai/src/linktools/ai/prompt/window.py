@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session window policies (spec §19): context-window trimming as a pluggable
+"""Session window policies: context-window trimming as a pluggable
 policy, separate from SessionStore (which only stores/retrieves).
 
 - NoopWindowPolicy: pass every message through (default).
@@ -48,7 +48,7 @@ class RecentWindowPolicy:
 
 
 class TokenBudgetWindowPolicy:
-    """Reserved (spec §19): trim to a token budget. The interface is stable; the
+    """Reserved: trim to a token budget. The interface is stable; the
     implementation is deferred until a token estimator is wired in."""
 
     def __init__(self, *args, **kwargs) -> None:

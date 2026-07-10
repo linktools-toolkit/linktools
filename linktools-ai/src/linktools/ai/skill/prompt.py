@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill prompt catalog (spec §14.6). Only id/name/description/tags/package_id
+"""Skill prompt catalog. Only id/name/description/tags/package_id
 are injected -- never the full SKILL.md body, which the model must fetch via
 read_skill only when needed."""
 

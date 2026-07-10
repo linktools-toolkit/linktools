@@ -5,12 +5,11 @@
 via temp-file-then-os.replace; whiteouts/idempotency/revision are separate small
 JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resources.
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The in-process ``threading.Lock`` is held
-inside the sync core (running in a worker thread), so it still serializes
-the checked operations within one process while the event loop continues
-running other coroutines."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The in-process ``threading.Lock`` is held inside the sync core (running in a
+worker thread), so it still serializes the checked operations within one
+process while the event loop continues running other coroutines."""
 
 import asyncio
 import json
@@ -156,14 +155,14 @@ class FileResourceBackend:
         return await asyncio.to_thread(self._raw_get_sync, path, include_content=include_content)
 
     async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
-        """Metadata-only stat (spec §15.1): read only the metadata sidecar,
+        """Metadata-only stat: read only the metadata sidecar,
         never the data file. The sidecar carries path/kind/etag/version/
         content_type/size/modified_at/metadata -- everything stat() needs
         without touching the (potentially large) content blob."""
         return await asyncio.to_thread(self._load_info, path)
 
     def _raw_propfind_sync(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        """Keyset pagination (spec §15.2): metadata files are iterated in sorted
+        """Keyset pagination: metadata files are iterated in sorted
         order (so the global path order is stable), filtered by prefix, by
         ``path > cursor`` (resume point), and by depth, collecting limit+1 items
         so the (limit+1)th path becomes next_cursor. The cursor is the literal
@@ -316,7 +315,7 @@ class FileResourceBackend:
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
             if info is not None:
                 existing_content = self._data_path(path).read_bytes()
-                # P1-4: content_type must be part of the no-op comparison --
+                # content_type must be part of the no-op comparison --
                 # a PUT that only changes content_type (same bytes, same
                 # metadata) is still a real change and must bump version/etag,
                 # not be silently dropped as a no-op.
@@ -387,7 +386,7 @@ class FileResourceBackend:
         options: WriteOptions,
     ) -> MoveResult:
         """Atomic MOVE on the same filesystem via ``os.replace`` for the data
-        file (spec §13.3). The whole operation runs under self._lock so two
+        file. The whole operation runs under self._lock so two
         in-process callers cannot interleave the steps; cross-process races
         remain (a documented limitation -- true cross-process atomicity
         requires the SqlAlchemy backend).
@@ -400,8 +399,8 @@ class FileResourceBackend:
         clear, revision bump) are themselves each atomic via _atomic_write, but
         the SEQUENCE is not crash-atomic -- a crash between the data replace
         and the source whiteout leaves source masked-but-data-gone. That is
-        the documented file-mode limitation; spec §13.3 requires idempotent
-        recoverability rather than strict crash-atomicity for file mode.
+        the documented file-mode limitation; file mode requires idempotent
+        recoverability rather than strict crash-atomicity.
 
         Revision bumps exactly once (observable proof the move was not
         decomposed into a put+delete pair, which would bump twice)."""

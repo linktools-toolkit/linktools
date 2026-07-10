@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CapabilityPackageSpec: a package declaration (spec §13.2). A package bundles
+"""CapabilityPackageSpec: a package declaration. A package bundles
 resources + entrypoints under one id/kind; ``skill`` is one built-in kind, but
 the model is general (agentpack / toolpack / mcp-pack / workflow / custom)."""
 

@@ -3,23 +3,20 @@
 """ToolExecutor: consults PolicyEngine before a tool executes, translating
 its decision into the corresponding domain error.
 
-Two distinct REQUIRE_APPROVAL paths:
+Canonical approval flow (``pause_on_approval=True``): the executor mints an
+``approval_id`` and raises ``RunPaused`` carrying every field needed to build
+the ApprovalRequest. AgentRunner's pause handler then persists the
+ApprovalRequest (deduping on ``(run_id, tool_call_id)``) alongside the
+checkpoint save + WAITING_APPROVAL transition + pause events -- on a
+cross-store-transactional Storage that happens in one UnitOfWork, so a crash
+between "approval persisted" and "run paused" is impossible. ``Runtime.resume``
+completes the flow.
 
-* ``pause_on_approval=False`` (legacy, direct-raise): when ``approval_store``
-  is wired, the executor persists a PENDING ApprovalRequest and (if
-  ``event_store`` is also wired) emits an ApprovalRequested event -- both
-  BEFORE ``ToolApprovalRequiredError`` is raised. Default-None (no stores
-  wired) preserves the original no-persistence behavior identically.
-
-* ``pause_on_approval=True`` (the Run-pause path): the executor does NOT
-  persist anything (review3 §5/Package A, P0-6/G1). It only mints a fresh
-  ``approval_id`` and raises ``RunPaused`` carrying every field needed to
-  build the ApprovalRequest -- AgentRunner's pause handler is the one that
-  actually calls ``ApprovalStore.create_or_get_pending`` (deduping on
-  (run_id, tool_call_id), G2), and on SqlAlchemy storage does so in the SAME
-  UnitOfWork as the checkpoint save + WAITING_APPROVAL transition + pause
-  events, so a crash between "approval persisted" and "run paused" is no
-  longer possible."""
+Fallback (``pause_on_approval=False``): for runtimes without the pause/resume
+path, the executor persists a PENDING ApprovalRequest (when an approval store
+is wired) and emits an ApprovalRequested event (when an event store is wired)
+before raising ``ToolApprovalRequiredError``. This is the simpler, non-pausing
+mode; the pause/resume flow above is the recommended canonical path."""
 import asyncio
 import logging
 import uuid
@@ -59,7 +56,7 @@ class ToolExecutor:
         # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
         # ToolError) so PolicyCapability's catch list does not translate it
         # into SkipToolExecution -- it propagates out of pydantic-ai's
-        # tool-execution stack to AgentRunner (Tasks 6-7 catch it). Default
+        # tool-execution stack to AgentRunner ( catch it). Default
         # False preserves today's behavior byte-for-byte.
         self._pause_on_approval = pause_on_approval
 
@@ -81,7 +78,7 @@ class ToolExecutor:
                 else context.run_id
             )
             if self._pause_on_approval:
-                # P0-6/G1: do NOT persist here. Mint the id and hand every
+                # do NOT persist here. Mint the id and hand every
                 # field the suspension handler needs to AgentRunner via
                 # RunPaused -- the actual ApprovalStore write happens there,
                 # atomically with the checkpoint/transition/event writes.
@@ -141,11 +138,11 @@ class ToolExecutor:
         identical to today).
 
         Only used by the legacy ``pause_on_approval=False`` direct-raise path
-        -- the pause path (P0-6/G1) does NOT call this; it defers persistence
+        -- the pause path does NOT call this; it defers persistence
         to AgentRunner's suspension handler instead (see ``check``).
 
         Event emission is best-effort: the EventStore assigns the sequence
-        itself (review doc §8.1), so a failure here is logged and swallowed --
+        itself, so a failure here is logged and swallowed --
         the approval record remains the source of truth. The store's
         per-stream sequence counter naturally interleaves this event with any
         others emitted for the same run (e.g. AgentRunner's RunStarted)."""
@@ -216,12 +213,12 @@ class ToolExecutor:
         is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
         the legacy single-call-no-timeout behavior exactly.
 
-        ``idempotency_key`` enables persistent tool-call idempotency (spec
-        section 27, §11 form). When the executor was constructed with an
+        ``idempotency_key`` enables persistent tool-call idempotency. When the
+        executor was constructed with an
         ``idempotency_store`` AND ``idempotency_key`` is provided, the
         ``(scope, key)`` is ``(context.run_id, idempotency_key)``. The store
-        survives process restart (review doc §11.1 forbids dict-only
-        idempotency). Behavior per ``IdempotencyStatus``:
+        survives process restart (dict-only idempotency is forbidden).
+        Behavior per ``IdempotencyStatus``:
 
         - COMPLETED + same request hash -> cached ``result`` returned, the
           handler is NOT invoked.
@@ -235,11 +232,11 @@ class ToolExecutor:
           ``fail`` on exception.
 
         ``schema_version`` (default ``"1"``) is folded into the request hash
-        (P1-5) so a ToolSpec whose input contract changed shape bumps its
+        so a ToolSpec whose input contract changed shape bumps its
         schema_version and gets a fresh hash -- a stale idempotency record
         from before the change is never mistaken for a match. Callers that
         have a ``ToolSpec`` in hand should pass ``spec.schema_version`` here;
-        omitting it preserves the pre-P1-5 hash formula's default.
+        omitting it preserves the prior hash formula's default.
 
         Default ``idempotency_store=None`` (or ``idempotency_key=None``)
         preserves today's no-idempotency behavior: the handler runs every
@@ -266,7 +263,7 @@ class ToolExecutor:
                     )
                 # FAILED: fall through to re-execute. The handler runs again
                 # and complete()/fail() overwrites the prior terminal record
-                # (§11.2 -- FAILED allows retry per policy).
+                # FAILED allows retry per policy.
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
         for attempt in range(max_retries + 1):

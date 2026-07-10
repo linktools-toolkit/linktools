@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryIndex: decoupled ranked-search abstraction over memories. Extension
-point for a future vector index; KeywordMemoryIndex (Task 2) adapts a MemoryStore."""
+point for a future vector index; KeywordMemoryIndex adapts a MemoryStore."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable

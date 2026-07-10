@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryStore Protocol: persistence + search contract for MemoryRecord.
-Method signatures resolve the spec's `(...)` ellipses (section 20), mirroring
+Method signatures resolve the spec's `(...)` ellipses, mirroring
 the optimistic-concurrency shape of RunStore/SwarmStore. update/forget take
 expected_version because both backends advertise optimistic_concurrency=True."""
 

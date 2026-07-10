@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.skill: SkillProvider (prompt catalog + list_skills/read_skill)
-per spec §14. Skills are a read-only discovery capability; execution is left to
+"""linktools.ai.skill: SkillProvider (prompt catalog + list_skills/read_skill).
+Skills are a read-only discovery capability; execution is left to
 the caller."""
 
 from .models import SkillContent, SkillSummary

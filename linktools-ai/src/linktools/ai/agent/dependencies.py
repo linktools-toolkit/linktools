@@ -3,7 +3,7 @@
 """AgentDependencies: the per-Run context passed to pydantic-ai capabilities
 via dependency injection. Replaces the prior mutable per-Run field pattern.
 
-Phase 1 of the review-doc refactoring: ``CompiledAgent`` is compiled once and
+``CompiledAgent`` is compiled once and
 reused across many real Runs. Previously, ``PolicyCapability`` and
 ``MiddlewareCapability`` each carried a mutable per-Run ToolContext field that
 ``AgentRunner`` set/clear around each ``agent.pydantic_agent.run()`` call --
@@ -14,7 +14,7 @@ capability hook as ``ctx.deps``. The runner constructs one per Run and passes
 it via ``deps=`` at call time; capabilities read ``ctx.deps.tool_context``.
 No mutable shared state, no set/clear lifecycle, safe for concurrent reuse.
 
-§17 (review-doc): ``execution`` carries the per-Run ``ExecutionBackend`` the
+``execution`` carries the per-Run ``ExecutionBackend`` the
 runner uses to construct the builtin file/terminal toolset at execution time
 (via ``agent.iter(prompt, toolsets=[...])``). ``None`` (default) means the run
 exposes no builtin tools -- a conversational-only agent. Decoupling the backend

@@ -81,9 +81,10 @@ async def test_resolve_missing_entrypoint_raises(resolver):
 
 
 @pytest.mark.asyncio
-async def test_resolve_toolset_and_workflow_reserved(resolver):
-    scope = PackageScope("skill-creator", "skill")
-    with pytest.raises(NotImplementedError):
-        await resolver.resolve_toolset(EntrypointRef(kind="tool", name="x", scope=scope))
-    with pytest.raises(NotImplementedError):
-        await resolver.resolve_workflow(EntrypointRef(kind="workflow", name="x", scope=scope))
+async def test_resolver_only_exposes_implemented_methods(resolver):
+    # First version exposes only list_entrypoints + resolve_agent; workflow /
+    # toolset resolution are not part of the public Protocol surface.
+    assert hasattr(resolver, "list_entrypoints")
+    assert hasattr(resolver, "resolve_agent")
+    assert not hasattr(resolver, "resolve_toolset")
+    assert not hasattr(resolver, "resolve_workflow")

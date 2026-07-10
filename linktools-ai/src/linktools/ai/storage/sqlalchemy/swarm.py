@@ -202,7 +202,7 @@ class SqlAlchemySwarmStore:
         cost: "Decimal | None" = None,
         metadata: "dict | None" = None,
     ) -> SwarmRun:
-        # §14.4/P0-5: DB-level CAS via UPDATE ... WHERE version=:expected,
+        # DB-level CAS via UPDATE ... WHERE version=:expected,
         # mirroring SqlAlchemyRunStore.transition -- a Python read-check-mutate
         # pattern is not safe under concurrent updates on a real (non-SQLite)
         # backend. When a status change is requested, the WHERE clause also
@@ -422,7 +422,7 @@ class SqlAlchemySwarmStore:
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
-        # Package 4 (actionable-fix-spec §7): expected_version is now
+        # expected_version is now
         # MANDATORY -- there is no more unconditional legacy path. DB-level
         # CAS via UPDATE ... WHERE version=:expected AND status='claimed'
         # AND (active_run_id IS NULL OR active_run_id=:active_run_id): a
@@ -480,7 +480,7 @@ class SqlAlchemySwarmStore:
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
-        # Package 4: same mandatory fencing as complete_task.
+        # same mandatory fencing as complete_task.
         async def _do(session):
             now = datetime.now(timezone.utc)
             stmt = (
@@ -560,7 +560,7 @@ class SqlAlchemySwarmStore:
             return tuple(_row_to_task(row) for row in query_result.scalars())
         return await self._execute_in_session(_do)
 
-    # -- lease renewal (review doc §19.4) --------------------------------
+    # -- lease renewal --------------------------------
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
@@ -604,7 +604,7 @@ class SqlAlchemySwarmStore:
             return _row_to_task(row)
         return await self._execute_in_session(_do)
 
-    # -- attempts (review doc §19.2) -------------------------------------
+    # -- attempts -------------------------------------
 
     async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
         # Upsert keyed on attempt.id. SQLite/SQLAlchemy has no native upsert

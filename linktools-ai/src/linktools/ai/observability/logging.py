@@ -7,7 +7,7 @@ stdlib `logging` module.
 Spans emit DEBUG start/end lines carrying span_id/parent_id (and duration_ms on
 end); counters/histograms/gauges emit INFO. There is deliberately NO OTel
 dependency: this is the stdlib default an OTel adapter can later plug into in
-front of (Decision D-2). The class structurally satisfies both
+front of. The class structurally satisfies both
 ObservabilitySink and ObservabilityMetrics without importing them."""
 
 import logging

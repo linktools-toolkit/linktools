@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SubagentResult (spec §16.4): the structured return value of a delegated
+"""SubagentResult: the structured return value of a delegated
 subagent run. Carries the child session/run ids, terminal status, output or
 structured error, and accounting fields."""
 

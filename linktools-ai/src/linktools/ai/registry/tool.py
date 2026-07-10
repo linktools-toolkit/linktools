@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolSpec (section 26.1 minimal) + ToolRegistry: loads tool declarations from
+"""ToolSpec + ToolRegistry: loads tool declarations from
 YAML via SpecLoader, caches per-revision, and exposes to_metadata_map() (the
 bridge the policy rule modules -- PermissionRule/RiskRule/ApprovalRule -- consume)."""
 
@@ -30,7 +30,7 @@ class ToolSpec:
     approval: ApprovalMode = ApprovalMode.NEVER
     idempotent: bool = False
     timeout_seconds: "float | None" = None
-    # P1-5: bump when a tool's input contract changes shape so an idempotency
+    # bump when a tool's input contract changes shape so an idempotency
     # hash computed under the old schema is never mistaken for a match
     # against the new one (see tool/idempotency.py compute_request_hash).
     schema_version: str = "1"

@@ -50,7 +50,7 @@ class ResourceBackend(Protocol):
     async def put_idempotency(self, record: IdempotencyRecord) -> None:
         ...
 
-    # -- OPTIONAL atomic checked operations (spec section 16, TOCTOU fix) --
+    # -- OPTIONAL atomic checked operations (TOCTOU fix) --
     # These fold precondition-check + idempotency-reservation + mutate into ONE
     # backend call so the three steps cannot be interleaved by a concurrent
     # writer (the TOCTOU race the split ResourceStore orchestration has). A
@@ -82,7 +82,7 @@ class ResourceBackend(Protocol):
     ) -> None:
         ...
 
-    # -- OPTIONAL atomic MOVE (spec section 13) --
+    # -- OPTIONAL atomic MOVE --
     # MOVE is a single domain operation: the backend must NOT decompose it into
     # a public put() + delete() pair, which would expose intermediate state
     # (target written while source still live, or source gone while target not
@@ -102,7 +102,7 @@ class ResourceBackend(Protocol):
     ) -> MoveResult:
         ...
 
-    # -- OPTIONAL metadata-only stat (spec section 15.1) --
+    # -- OPTIONAL metadata-only stat --
     # Returns the resource metadata (path/version/etag/content_type/metadata/
     # state) WITHOUT loading the content blob. A backend that can select only
     # metadata columns (SqlAlchemy) or read only the sidecar (File) implements

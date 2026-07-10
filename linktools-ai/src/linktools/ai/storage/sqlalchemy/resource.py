@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 """SqlAlchemyResourceBackend: DB-backed ResourceBackend.
 
-Concurrency model (spec docs/linktools-ai-review.md §12.1-12.3):
+Concurrency model:
 
 - Revision counter bumps atomically via ``UPDATE ai_resource_revision
-  SET value = value + 1 WHERE id = 1 RETURNING value`` (spec §12.1). Server-side
+  SET value = value + 1 WHERE id = 1 RETURNING value``. Server-side
   arithmetic so two concurrent writers always produce distinct revisions.
-- Resource updates use a conditional WHERE clause on ``version`` (spec §12.2):
+- Resource updates use a conditional WHERE clause on ``version``:
   ``UPDATE ... WHERE path = :path AND version = :expected``. ``rowcount == 0``
   means a concurrent writer committed first (lost update prevented). Callers
   without a precondition retry the SELECT-UPDATE loop.
-- ``If-Match`` enters the same UPDATE WHERE clause as ``AND etag = :if_match``
-  (spec §12.3), so the precondition is enforced by the DB rather than a Python
+- ``If-Match`` enters the same UPDATE WHERE clause as ``AND etag = :if_match``,
+  so the precondition is enforced by the DB rather than a Python
   pre-read that can race.
 
 Each checked write (raw_put_checked / raw_delete_checked) runs precondition +
@@ -109,7 +109,7 @@ class SqlAlchemyResourceBackend:
             return Found(resource=Resource(info=_row_to_info(row), content=content))
 
     async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
-        """Metadata-only stat (spec §15.1): SELECT every column EXCEPT content.
+        """Metadata-only stat: SELECT every column EXCEPT content.
         Loading a potentially-large blob just to read its etag/version is
         wasteful; projecting the metadata columns only keeps stat() cheap. A
         masked (deleted_at) row is treated as absent -- stat is for live
@@ -130,7 +130,7 @@ class SqlAlchemyResourceBackend:
         return _dict_to_info(row._asdict())
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        """Keyset pagination (spec §15.2): ``WHERE path > :cursor ORDER BY path
+        """Keyset pagination: ``WHERE path > :cursor ORDER BY path
         LIMIT :limit+1``. Pushing the depth=ONE filter into SQL (``NOT LIKE
         prefix + '%/%'``) keeps the LIMIT honest -- a Python-side depth filter
         applied after LIMIT could silently under-return. Fetching limit+1 rows
@@ -162,11 +162,11 @@ class SqlAlchemyResourceBackend:
         return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
     # ------------------------------------------------------------------
-    # Revision counter: atomic increment (spec §12.1)
+    # Revision counter: atomic increment
     # ------------------------------------------------------------------
 
     async def _bump_revision(self, session: AsyncSession) -> int:
-        """Atomic ``UPDATE ... SET value = value + 1 RETURNING value`` (spec §12.1).
+        """Atomic ``UPDATE ... SET value = value + 1 RETURNING value``.
 
         Server-side arithmetic guarantees two concurrent writers always produce
         distinct revisions: one UPDATE blocks on the row lock, then re-evaluates
@@ -203,7 +203,7 @@ class SqlAlchemyResourceBackend:
             return result.scalar_one()
 
     # ------------------------------------------------------------------
-    # PUT: conditional UPDATE on version + If-Match in WHERE (spec §12.2, §12.3)
+    # PUT: conditional UPDATE on version + If-Match in WHERE
     # ------------------------------------------------------------------
 
     async def _conditional_update_row(
@@ -218,8 +218,8 @@ class SqlAlchemyResourceBackend:
         new_version: int,
         if_match: "str | None",
     ) -> "dict | None":
-        """Conditional UPDATE on ``version`` (spec §12.2) with optional If-Match
-        in the WHERE clause (spec §12.3). Returns a dict of the post-update
+        """Conditional UPDATE on ``version`` with optional If-Match
+        in the WHERE clause. Returns a dict of the post-update
         column values, or None when 0 rows matched (a concurrent writer
         committed first, or the etag precondition failed).
 
@@ -231,7 +231,7 @@ class SqlAlchemyResourceBackend:
         """
         conditions = [ResourceRow.path == path.value, ResourceRow.version == expected_version]
         if if_match is not None:
-            # §12.3: push the etag precondition into the UPDATE WHERE so the DB
+            # push the etag precondition into the UPDATE WHERE so the DB
             # -- not a Python pre-read -- enforces it. Two concurrent writers
             # both holding the same stale if_match cannot both pass: only one
             # UPDATE matches the etag before the row's etag changes.
@@ -322,12 +322,12 @@ class SqlAlchemyResourceBackend:
         ``bump_revision``: when False, the caller (raw_move) owns the single
         revision bump for the whole composite operation and directs this helper
         to skip its per-step bumps. The no-op short-circuit path never bumps
-        regardless of the flag (§12.4: an idempotent no-op PUT must not bump).
+        regardless of the flag (an idempotent no-op PUT must not bump).
         """
         row = await self._get_row(session, path)
         if row is None:
             if if_match is not None:
-                # §12.3: If-Match on a missing resource is a precondition failure.
+                # If-Match on a missing resource is a precondition failure.
                 raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
             # INSERT path: unique-path constraint is the atomicity backstop.
             try:
@@ -347,7 +347,7 @@ class SqlAlchemyResourceBackend:
             # Row exists. If-None-Match demands it not exist.
             if if_none_match and row.deleted_at is None:
                 raise ResourcePreconditionFailedError(f"resource already exists: {path}")
-            # §12.4 no-op short-circuit: identical content + content_type +
+            # no-op short-circuit: identical content + content_type +
             # metadata + live state is an idempotent no-op PUT, which must NOT
             # bump version/revision. Python comparison is a tiny race window
             # (another writer between our SELECT and return); the consequence is
@@ -360,13 +360,13 @@ class SqlAlchemyResourceBackend:
                 and json.loads(row.metadata_json) == dict(metadata)
             ):
                 # If-Match is still enforced even on a no-op: a stale etag means
-                # the caller's view of the resource is outdated, which §12.3
-                # requires us to surface as a precondition failure regardless of
+                # the caller's view of the resource is outdated, which must be
+                # surfaced as a precondition failure regardless of
                 # whether the PUT would have changed anything.
                 if if_match is not None and row.etag != if_match:
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
                 return _row_to_info(row)
-            # §12.2 conditional UPDATE on version. new_version is computed in
+            # conditional UPDATE on version. new_version is computed in
             # Python from the SELECTed row, but the conditional WHERE makes the
             # assignment safe: if another writer bumped version first, our
             # UPDATE matches 0 rows.
@@ -378,7 +378,7 @@ class SqlAlchemyResourceBackend:
             )
             if updated is None:
                 if if_match is not None:
-                    # §12.3: the etag precondition failed inside the DB WHERE.
+                    # the etag precondition failed inside the DB WHERE.
                     raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
                 return None  # retry-able conflict
             if bump_revision:
@@ -438,7 +438,7 @@ class SqlAlchemyResourceBackend:
     ) -> Resource:
         """Atomic precondition + idempotency + put in ONE transaction.
 
-        The If-Match precondition enters the UPDATE WHERE clause (spec §12.3),
+        The If-Match precondition enters the UPDATE WHERE clause,
         so the etag check is enforced by the DB rather than a Python pre-read.
         Concurrent writers both holding the same stale If-Match cannot both
         succeed: the conditional UPDATE serializes them at the row lock.
@@ -570,8 +570,8 @@ class SqlAlchemyResourceBackend:
         request_hash: str,
     ) -> None:
         """Atomic precondition + idempotency + delete in ONE transaction. If-Match
-        is pushed into the UPDATE WHERE (consistent with raw_put_checked per spec
-        §12.3): two concurrent deletes holding the same stale If-Match cannot
+        is pushed into the UPDATE WHERE (consistent with raw_put_checked):
+        two concurrent deletes holding the same stale If-Match cannot
         both succeed."""
         idem_key = f"delete:{options.idempotency_key}" if options.idempotency_key else None
         async with self._session_factory() as session:
@@ -628,7 +628,7 @@ class SqlAlchemyResourceBackend:
                     await self._save_idempotency_row(session, idem_key, request_hash, removed_info)
 
     # ------------------------------------------------------------------
-    # MOVE: ONE transaction (spec §13.2)
+    # MOVE: ONE transaction
     # ------------------------------------------------------------------
 
     async def raw_move(
@@ -638,7 +638,7 @@ class SqlAlchemyResourceBackend:
         *,
         options: WriteOptions,
     ) -> MoveResult:
-        """Atomic MOVE in ONE transaction (spec §13.2): load+lock source,
+        """Atomic MOVE in ONE transaction: load+lock source,
         validate, write target, whiteout source, bump revision once. All four
         mutations commit or roll back together, so a concurrent reader can
         never observe the intermediate states a decomposed put+delete would
@@ -650,7 +650,7 @@ class SqlAlchemyResourceBackend:
         Source precondition: must exist and be live. Target preconditions:
         options.if_match / options.if_none_match are enforced against the
         target row via _put_with_retry (same code path as raw_put_checked, so
-        If-Match enters the conditional UPDATE WHERE per spec §12.3)."""
+        If-Match enters the conditional UPDATE WHERE)."""
         async with self._session_factory() as session:
             async with session.begin():
                 source_row = await self._get_row(session, source)
@@ -662,7 +662,7 @@ class SqlAlchemyResourceBackend:
                 # Write target (INSERT or conditional UPDATE). Runs in this
                 # transaction's snapshot: no concurrent writer can interleave.
                 # bump_revision=False: raw_move owns the single revision bump
-                # for the whole composite operation (spec §13.2 step 6) -- the
+                # for the whole composite operation -- the
                 # target write and source mask together count as ONE state
                 # change, so the counter advances exactly once.
                 target_info = await self._put_with_retry(
@@ -679,7 +679,7 @@ class SqlAlchemyResourceBackend:
                 if not masked:
                     raise ResourcePreconditionFailedError(f"source changed during move: {source}")
 
-                # One revision bump for the whole move (spec §13.2 step 6).
+                # One revision bump for the whole move.
                 await self._bump_revision(session)
                 return Resource(info=target_info, content=source_content)
 

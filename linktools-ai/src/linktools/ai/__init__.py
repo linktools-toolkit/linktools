@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai public API (spec §20.3). The package root re-exports the hot
+"""linktools.ai public API. The package root re-exports the hot
 types so downstream imports stay short:
 
     from linktools.ai import Runtime, AgentSpec, ToolRef, Storage, FileStorage
 
 SqlAlchemyStorage is intentionally NOT re-exported here -- it depends on the
-optional SQLAlchemy extra and is loaded lazily from ``linktools.ai.storage``
-(spec §21.7). Every other name (Compiler, Runner, Store implementations,
+optional SQLAlchemy extra and is loaded lazily from ``linktools.ai.storage``.
+Every other name (Compiler, Runner, Store implementations,
 Middleware, PolicyEngine, ToolExecutor, providers, ...) is reached via its own
 submodule.
 

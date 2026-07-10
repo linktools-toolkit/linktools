@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Subagent execution contract (spec §16). A subagent run creates a child
+"""Subagent execution contract. A subagent run creates a child
 session (parent_id = parent session) and a child run recording parent_run_id /
 root_run_id, then executes the resolved AgentSpec and returns a SubagentResult.
 

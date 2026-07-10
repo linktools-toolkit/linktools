@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Middleware: a base class with no-op defaults for every lifecycle hook, per
-spec section 24 -- a concrete Middleware overrides only what it needs.
+"""Middleware: a base class with no-op defaults for every lifecycle hook --
+a concrete Middleware overrides only what it needs.
 
 before_run/after_run/on_error are called directly by AgentRunner around its
 agent.run(...) call (pydantic-ai has no equivalent native hook). before_model/
 after_model/before_tool/after_tool get adapted into a real pydantic-ai
-AbstractCapability by build_middleware_capability() (Task 9's tool/executor.py
-and Task 10's AgentCompiler wire this up) -- this file only defines the
+AbstractCapability by build_middleware_capability() (tool/executor.py
+and AgentCompiler wire this up) -- this file only defines the
 Protocol-like base class, it does not touch pydantic-ai at all."""
 
 from typing import Any

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CheckpointStore: keyed by (run_id, sequence), per spec docs/linktools-ai.md
-section 9 -- NOT by session_id, fixing the durability bug in the pre-vNext
-checkpoint/ module (a fresh agent instance for the same session restarted the
-sequence counter at 1, silently overwriting that session's prior checkpoint)."""
+"""CheckpointStore: keyed by (run_id, sequence) -- NOT by session_id, fixing
+the durability bug in the pre-vNext checkpoint/ module (a fresh agent instance
+for the same session restarted the sequence counter at 1, silently
+overwriting that session's prior checkpoint)."""
 
 from typing import Protocol, runtime_checkable
 

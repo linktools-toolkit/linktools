@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentSpec: an immutable, serializable Agent declaration, per spec section 7.1.
+"""AgentSpec: an immutable, serializable Agent declaration.
 Holds no runtime state -- no Session, no Run, no Store, no working directory."""
 
 from dataclasses import dataclass, field
@@ -41,7 +41,7 @@ class AgentSpec:
     name: str
     model: ModelPolicy
     instructions: PromptSpec
-    # tools three-state (spec §10.7): None = unset (runtime applies its default
+    # tools three-state: None = unset (runtime applies its default
     # builtin toolset when an execution backend is present); () = explicitly no
     # tools; a non-empty tuple = only the declared capabilities are assembled.
     tools: "tuple[ToolRef, ...] | None" = None

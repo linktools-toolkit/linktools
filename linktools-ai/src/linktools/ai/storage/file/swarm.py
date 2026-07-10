@@ -5,11 +5,11 @@ swarm/store.py). One JSON file per SwarmRun under root/runs/{id}.json
 and one per SwarmTask under root/tasks/{id}.json. Mirrors FileRunStore's
 atomic-write + path-traversal-guard patterns (see storage/file/run.py).
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The ``asyncio.Lock`` is held in the async
-wrapper and spans the ``to_thread`` call (not the other way around), so the
-optimistic-concurrency + transition invariants still hold within one process."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The ``asyncio.Lock`` is held in the async wrapper and spans the
+``to_thread`` call (not the other way around), so the optimistic-concurrency
++ transition invariants still hold within one process."""
 
 import asyncio
 import json
@@ -193,7 +193,7 @@ class FileSwarmStore:
     traversal. An ``asyncio.Lock`` serializes ``claim_task``/``update_run`` so
     that optimistic-concurrency invariants hold within one process.
 
-    Review doc §19.5 -- explicit single-process scope:
+    Explicit single-process scope:
 
       * Only ONE process may instantiate this store against a given ``root``.
         There is no cross-process file lock, so concurrent processes would
@@ -459,7 +459,7 @@ class FileSwarmStore:
         expected_version: int,
         active_run_id: "str | None",
     ) -> SwarmTask:
-        # Package 4: expected_version is mandatory -- no more unconditional
+        # expected_version is mandatory -- no more unconditional
         # legacy path. Held under self._lock (see complete_task) so the
         # read-check-write is atomic within this process.
         path = self._task_path(task_id)
@@ -575,7 +575,7 @@ class FileSwarmStore:
         # mid-claim, so there is nothing to reclaim at rest. Returns empty.
         return ()
 
-    # -- lease renewal (review doc §19.4) --------------------------------
+    # -- lease renewal ----------------------------------------
 
     def _renew_lease_sync(
         self, task_id: str, *, expected_version: int, lease_seconds: float
@@ -625,7 +625,7 @@ class FileSwarmStore:
                 expected_version=expected_version, lease_seconds=lease_seconds,
             )
 
-    # -- attempts (review doc §19.2) -------------------------------------
+    # -- attempts ---------------------------------------------
 
     def _record_attempt_sync(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
         # Upsert keyed on attempt.id: the strategy writes the RUNNING row before

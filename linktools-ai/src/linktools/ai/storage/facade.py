@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Storage facade (spec docs/linktools-ai.md section 11): composes the storage
+"""Storage facade: composes the storage
 backends into one frozen dataclass so a caller gets a single object that can do
 everything.
 
-This module is deliberately SQLAlchemy-free (spec §21.6): ``Storage`` and
+This module is deliberately SQLAlchemy-free: ``Storage`` and
 ``FileStorage`` depend only on the standard library and core stores, so
 ``import linktools.ai`` and ``import linktools.ai.storage`` succeed without the
 optional SQLAlchemy/aiosqlite dependencies. The SQLAlchemy-backed composition

@@ -12,10 +12,10 @@ so reserve/get/complete/fail are all O(1). ``record.id`` is a uuid4 minted
 on reserve and stored inside the JSON for diagnostics/audit; it is not used
 to address the file.
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The ``asyncio.Lock`` is held in the async
-wrapper and spans the ``to_thread`` call (not the other way around)."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The ``asyncio.Lock`` is held in the async wrapper and spans the
+``to_thread`` call (not the other way around)."""
 
 import asyncio
 import json

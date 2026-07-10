@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """AgentCompiler: resolves an AgentSpec's model via ModelRouter and builds the
 underlying pydantic-ai Agent. Entirely stateless -- never touches Session, Run,
-or the filesystem. Per review-doc §17, the compiler accepts no working-directory
+or the filesystem. The compiler accepts no working-directory
 or ExecutionBackend parameter and never constructs ``LocalExecutionBackend``:
 builtin file/terminal tools are constructed at EXECUTION TIME from
 ``AgentDependencies.execution`` and passed to ``agent.iter(prompt, toolsets=)``.
@@ -36,9 +36,8 @@ class AgentCompiler:
         # the default CommandRule-only executor. ``pause_on_approval`` threads
         # through so a directly-constructed compiler can opt into the pause
         # path -- note, however, that pausing without an ``approval_store``
-        # wired falls through to the legacy ToolApprovalRequiredError raise
-        # (Task 9 wires the store at the Runtime.build level where Storage is
-        # available). When ``tool_executor`` is explicit the flag is purely
+        # wired falls through to the legacy ToolApprovalRequiredError raise.
+        # When ``tool_executor`` is explicit the flag is purely
         # informational: the supplied executor already carries its own setting.
         self._pause_on_approval = pause_on_approval
         self._tool_executor = tool_executor or ToolExecutor(

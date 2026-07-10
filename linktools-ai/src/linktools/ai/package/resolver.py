@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EntrypointResolver: lists and resolves addressable objects inside packages
-(spec §13.8). The first version implements ``list_entrypoints`` and
-``resolve_agent``; ``resolve_toolset`` / ``resolve_workflow`` are reserved
-(NotImplementedError) per spec §13.8.
+"""EntrypointResolver: lists and resolves addressable objects inside packages.
+The first version implements ``list_entrypoints`` and ``resolve_agent`` only;
+workflow/toolset resolution will land as separate Protocols when implemented.
 
 Scoped agents are parsed from ``<root>/agents/<name>.md`` using the canonical
 agent parser and re-id'd as ``package:<id>:agent:<name>`` so the same entrypoint
@@ -110,16 +109,10 @@ class DirectoryEntrypointResolver:
         agent = parse_agent_spec(scoped_id, payload, body)
         return agent
 
-    async def resolve_toolset(self, ref: EntrypointRef) -> "tuple[Any, ...]":
-        raise NotImplementedError("resolve_toolset is reserved for a later phase")
-
-    async def resolve_workflow(self, ref: EntrypointRef) -> Any:
-        raise NotImplementedError("resolve_workflow is reserved for a later phase")
-
 
 class PackageRegistry:
     """Default PackageSpecProvider AND PackageResourceProvider over a directory
-    tree (spec §8.1): each subdirectory of ``base_dir`` is a package. The kind
+    tree: each subdirectory of ``base_dir`` is a package. The kind
     is read from an optional ``package.yaml``; otherwise it defaults to 'custom'.
     Resource list/read delegate to a DirectoryPackageResourceProvider so a single
     registry satisfies both Protocols."""
@@ -166,5 +159,4 @@ class PackageRegistry:
         return await self._resources().read_resource(ref, max_bytes=max_bytes)
 
 
-# Spec §8.4 alias.
 DirectoryPackageRegistry = PackageRegistry

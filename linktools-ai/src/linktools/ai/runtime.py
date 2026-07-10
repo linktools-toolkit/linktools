@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime: the top-level integration surface (spec section 5; deviation #3).
+"""Runtime: the top-level integration surface.
 Runtime.build() assembles Storage + AgentCompiler + AgentRunner + SwarmRunner +
 ModelRouter; Runtime.run(spec, prompt) compiles the spec, resolves (or creates)
 a Session, mints a RunContext, and delegates to AgentRunner (AgentSpec) or
 SwarmRunner (SwarmSpec).
 
-Capability Runtime (spec §9/§17.9): build() also accepts spec Providers (a
+Capability Runtime: build() also accepts spec Providers (a
 ProviderBundle or the expanded agent/skill/mcp/... params) + CapabilityRuntimeOptions,
 from which it builds a CapabilityAssembler wired into AgentRunner. Declared
 AgentSpec.tools are then resolved into prompt sections + toolsets via the
 registered capability providers; an unconfigured spec keeps the legacy default
 builtin toolset behavior. Runtime is an async context manager that releases MCP
-connections on close (spec §15.4)."""
+connections on close."""
 
 import asyncio
 import contextlib
@@ -84,7 +84,7 @@ def _build_capability_providers(
             entrypoint_resolver=bundle.entrypoints,
         )
     if bundle.package_resources is not None or bundle.entrypoints is not None:
-        # PackageProvider handles three tool-ref kinds (spec §10.1/§13.10);
+        # PackageProvider handles three tool-ref kinds;
         # register one instance under each so package-resource / package-entrypoint
         # refs resolve.
         pkg = PackageProvider(
@@ -110,15 +110,15 @@ class Runtime:
         self.runner = runner
         self.swarm_runner = swarm_runner
         self.model_router = model_router
-        # Phase 3A (§7.1): tracks in-flight asyncio.Tasks so cancel(run_id)
+        # Tracks in-flight asyncio.Tasks so cancel(run_id)
         # can actually stop a running task, not just flip the DB status.
         self.run_controller = run_controller
-        # Capability Runtime wiring (spec §9). When non-None, AgentRunner uses
+        # Capability Runtime wiring. When non-None, AgentRunner uses
         # this assembler to resolve declared AgentSpec.tools into toolsets.
         self._capability_assembler = capability_assembler
         self._mcp_connection_manager = mcp_connection_manager
         self._options = options or CapabilityRuntimeOptions()
-        # The declaration bundle (spec §9.4 #4): consumed by resolve_swarm /
+        # The declaration bundle: consumed by resolve_swarm /
         # resolve_agent for by-id lookups so the swarm/agent providers are not
         # dead inputs.
         self._provider_bundle = provider_bundle
@@ -146,7 +146,7 @@ class Runtime:
 
         Capability providers may be passed either as a ``ProviderBundle`` or as
         the expanded ``agents``/``skills``/``mcp_servers``/... params -- never
-        both (mixing raises ValueError to avoid silent override, spec §17.9).
+        both (mixing raises ValueError to avoid silent override).
         All provider params are optional; the direct ``Runtime.run(spec, ...)``
         path stays the shortest and needs no providers configured."""
         expanded = (agents, skills, mcp_servers, tool_policies, swarms,
@@ -158,7 +158,7 @@ class Runtime:
             )
         resolved_options = options or CapabilityRuntimeOptions()
         # The build-level allow_mcp_wildcard flag is the documented mcp:* opt-in
-        # (spec §11.5). Fold it into the options so MCPProvider honors it.
+        # Fold it into the options so MCPProvider honors it.
         if allow_mcp_wildcard and not resolved_options.allow_mcp_wildcard:
             resolved_options = dataclasses.replace(resolved_options, allow_mcp_wildcard=True)
 
@@ -171,13 +171,14 @@ class Runtime:
         router = model_router or ModelRouter()
         resolved_executor = tool_executor
         if tool_executor is None and pause_on_approval:
-            from .policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
+            # pause_on_approval only switches the executor to the pause/resume
+            # flow; it does NOT inject a default security policy. Callers that
+            # want a command denylist pass an explicit tool_executor built from
+            # linktools.ai.policy.presets.build_default_command_policy().
             from .policy.engine import PolicyEngine
 
             resolved_executor = ToolExecutor(
-                policy=PolicyEngine(rules=(
-                    CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),
-                )),
+                policy=PolicyEngine(rules=()),
                 approval_store=storage.approvals,
                 pause_on_approval=True,
             )
@@ -229,7 +230,7 @@ class Runtime:
                 executor=sub_executor,
             )
             # Let package-entrypoint calls execute scoped agents through the
-            # same child-run executor (spec §11.8 #5).
+            # same child-run executor.
             pkg_provider = capability_providers.get("package")
             if pkg_provider is not None:
                 pkg_provider.entrypoint_executor = sub_executor
@@ -250,10 +251,27 @@ class Runtime:
             provider_bundle=bundle,
         )
 
+    @property
+    def providers(self) -> "ProviderBundle | None":
+        """The declaration bundle wired at build time. Canonical entry point for
+        spec-by-id lookups (``runtime.providers.agents.get(id)``)."""
+        return self._provider_bundle
+
+    @property
+    def capability_assembler(self) -> "CapabilityAssembler | None":
+        """The CapabilityAssembler used internally. Prefer
+        ``capability_assembler.assemble(spec, context)`` over the deprecated
+        :meth:`assemble`."""
+        return self._capability_assembler
+
     async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
-        """Resolve an AgentSpec's declared tools into a CapabilityBundle. Public
-        surface for callers/tests that want the assembled bundle without running.
-        Requires the Runtime to have been built with capability providers."""
+        """Deprecated: use ``runtime.capability_assembler.assemble(spec, context)``.
+        Kept for compatibility; emits DeprecationWarning."""
+        import warnings
+        warnings.warn(
+            "Runtime.assemble is deprecated; use runtime.capability_assembler.assemble",
+            DeprecationWarning, stacklevel=2,
+        )
         from .capability.provider import CapabilityContext
 
         if self._capability_assembler is None:
@@ -267,16 +285,26 @@ class Runtime:
         return await self._capability_assembler.assemble(spec, context)
 
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
-        """Fetch a SwarmSpec by id via the wired SwarmSpecProvider (spec §9.4 #4).
-        Raises SwarmError when no swarm provider was configured."""
+        """Deprecated: use ``runtime.providers.swarms.get(swarm_id)``. Kept for
+        compatibility; emits DeprecationWarning."""
+        import warnings
+        warnings.warn(
+            "Runtime.resolve_swarm is deprecated; use runtime.providers.swarms.get",
+            DeprecationWarning, stacklevel=2,
+        )
         bundle = self._provider_bundle
         if bundle is None or bundle.swarms is None:
             raise SwarmError("no SwarmSpecProvider configured")
         return await bundle.swarms.get(swarm_id)
 
     async def resolve_agent(self, agent_id: str) -> AgentSpec:
-        """Fetch an AgentSpec by id via the wired AgentSpecProvider (spec §9.4 #4).
-        Raises SwarmError when no agent provider was configured."""
+        """Deprecated: use ``runtime.providers.agents.get(agent_id)``. Kept for
+        compatibility; emits DeprecationWarning."""
+        import warnings
+        warnings.warn(
+            "Runtime.resolve_agent is deprecated; use runtime.providers.agents.get",
+            DeprecationWarning, stacklevel=2,
+        )
         bundle = self._provider_bundle
         if bundle is None or bundle.agents is None:
             raise SwarmError("no AgentSpecProvider configured")
@@ -333,14 +361,14 @@ class Runtime:
         return await self.runner.run(compiled, RunInput(prompt=prompt), context)
 
     async def cancel(self, run_id: str) -> None:
-        """Cancel an in-flight Run (review doc §7).
+        """Cancel an in-flight Run.
 
         Two paths, depending on whether a live asyncio.Task is registered with
         the RunController:
 
         * **In-flight task registered** -- the run is actually being driven by
-          AgentRunner.execute(). Transition the store to CANCELLING (§6.1:
-          distinguishes "cancel requested" from "actually cancelled"), then
+          AgentRunner.execute(). Transition the store to CANCELLING
+          (distinguishes "cancel requested" from "actually cancelled"), then
           call ``run_controller.cancel(run_id)`` which (a) sets the
           CancellationToken so the runner's next execution-point check raises
           CancelledError, and (b) calls ``task.cancel()`` so any hanging await
@@ -438,7 +466,7 @@ class Runtime:
         user_id: "str | None" = None,
         tenant_id: "str | None" = None,
     ) -> "AsyncIterator[dict]":
-        """Resume a paused Run (Task 8). Loads the paused RunRecord,
+        """Resume a paused Run. Loads the paused RunRecord,
         deserializes its checkpoint's message history, transitions
         WAITING_APPROVAL -> RUNNING, and re-enters :meth:`AgentRunner.run_stream`.
 

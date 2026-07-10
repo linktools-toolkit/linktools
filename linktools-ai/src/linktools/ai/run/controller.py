@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """RunController: tracks in-flight asyncio Tasks + their CancellationTokens.
 
-Review doc §7.1: ``Runtime.cancel(run_id)`` must actually stop the running
+``Runtime.cancel(run_id)`` must actually stop the running
 task, not just update the database status. The controller is the bridge --
 when AgentRunner.execute() starts driving a run, it registers the driving
 ``asyncio.Task`` and a fresh ``CancellationToken`` here. Runtime.cancel() then

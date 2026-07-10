@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SubagentProvider: the CapabilityProvider for ``subagent:<id>`` / ``subagent:*``
-(spec §16). Builds a call_subagent toolset scoped to the declared agent ids,
+"""SubagentProvider: the CapabilityProvider for ``subagent:<id>`` / ``subagent:*``.
+Builds a call_subagent toolset scoped to the declared agent ids,
 with depth/concurrency/timeout limits read from the ref config (defaults
 max_depth=3, max_concurrency=1, timeout=120).
 

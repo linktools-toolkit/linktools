@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RedisResourceCoordinator: revision-change hints and optional distributed locking
-via a Redis SET NX lock. Never stores Resource content (spec section 17)."""
+via a Redis SET NX lock. Never stores Resource content."""
 
 import asyncio
 import uuid

@@ -3,7 +3,7 @@
 """MiddlewarePipeline: orchestrates before_run/after_run/on_error and
 before_model/after_model/before_tool/after_tool across a registered set of
 Middlewares. Entering: M1 -> M2 -> M3 (registration order). Returning/erroring:
-M3 -> M2 -> M1 (reverse order), per spec section 24."""
+M3 -> M2 -> M1 (reverse order)."""
 
 from .base import Middleware
 

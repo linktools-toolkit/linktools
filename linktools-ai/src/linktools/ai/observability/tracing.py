@@ -3,7 +3,7 @@
 """observability.tracing: span abstraction for linktools.ai.
 
 ObservabilitySink is the Protocol boundary an OpenTelemetry adapter can later
-plug into (Decision D-2); it intentionally has no OTel dependency. Span nesting
+plug into; it intentionally has no OTel dependency. Span nesting
 is tracked with a contextvar so callers do not have to thread parent spans
 through every call site -- use the `use_span` async context manager to set the
 current span for the duration of a body, and `current_span()` to read it."""

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Package toolsets (spec §13.10): read-only discovery tools exposed only when
+"""Package toolsets: read-only discovery tools exposed only when
 an agent declares ``package-resource`` / ``package-entrypoint``. They enforce
 pagination + size limits at the provider layer and an allowlist at the toolset
 layer (an agent may only touch packages it declared). Execution tools

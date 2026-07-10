@@ -3,9 +3,8 @@
 """FileSessionStore: root/{session_id}/record.json + root/{session_id}/messages/
 {sequence:010d}.json (one file per message, append-only).
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
 
 import asyncio
 import json
@@ -60,7 +59,7 @@ class FileSessionStore:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        # G6/review3 §6.4: this store is the SOLE sequence authority --
+        # this store is the SOLE sequence authority --
         # append_messages() reads the current max sequence and assigns fresh
         # ones itself (mirroring FileEventStore), so the caller no longer
         # computes `len(prior_messages) + 1`. The per-session lock still

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SkillProvider: the CapabilityProvider for ``skill:*`` / ``skill:<id>``
-(spec §14).
+"""SkillProvider: the CapabilityProvider for ``skill:*`` / ``skill:<id>``.
 
 - skill:*   -> inject the catalog prompt (lightweight summaries only) + expose
                list_skills/read_skill authorized for every skill.

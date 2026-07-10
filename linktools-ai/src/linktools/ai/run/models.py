@@ -14,8 +14,8 @@ class RunStatus(str, Enum):
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
     PAUSED = "paused"
-    # CANCELLING distinguishes "cancel requested" from "actually cancelled"
-    # (review doc §6.1). Runtime.cancel flips a run to CANCELLING while the
+    # CANCELLING distinguishes "cancel requested" from "actually cancelled".
+    # Runtime.cancel flips a run to CANCELLING while the
     # in-flight task is still draining; the runner's CancelledError handler
     # then transitions CANCELLING -> CANCELLED once the task has actually
     # stopped. Going through CANCELLING first avoids falsely advertising a run
@@ -32,7 +32,7 @@ class RunnableType(str, Enum):
     SWARM = "swarm"
 
 
-# Review doc §6.2 transition table. CANCELLING is the canonical route to
+# CANCELLING is the canonical route to
 # CANCELLED for any in-flight run: RUNNING/WAITING_APPROVAL/PAUSED -> CANCELLING
 # -> CANCELLED (or -> FAILED if cancellation itself times out / errors).
 #

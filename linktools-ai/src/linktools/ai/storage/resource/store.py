@@ -28,7 +28,7 @@ class ResourceStore:
 
     async def _lookup_chain(self, path: ResourcePath):
         """Reader-facing three-state resolution across Primary then Overlays. A
-        Masked result at Primary stops the search (spec section 14.6 rule 3)."""
+        Masked result at Primary stops the search."""
         primary_lookup = await self._primary.raw_get(path)
         if isinstance(primary_lookup, Found):
             return primary_lookup
@@ -45,12 +45,12 @@ class ResourceStore:
         return lookup.resource if isinstance(lookup, Found) else None
 
     async def stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
-        """Metadata-only stat (spec §15.1): delegate to backend.raw_stat when
+        """Metadata-only stat: delegate to backend.raw_stat when
         available so the content blob is never loaded. Falls back to get()+info
         only for backends that don't implement raw_stat (Memory).
 
         Three-state resolution mirrors _lookup_chain: a Masked primary result
-        stops the overlay search (spec section 14.6 rule 3). The masked check
+        stops the overlay search. The masked check
         uses raw_get(include_content=False) -- only invoked in the rare case
         where raw_stat returned None and overlays exist that might otherwise
         resurrect a masked path."""
@@ -79,7 +79,7 @@ class ResourceStore:
     async def propfind(self, path: ResourcePath, *, depth: Depth = Depth.ONE, limit: int = 100, cursor: "str | None" = None) -> ResourcePage:
         """List resources under `path`, merging Primary and Overlay results.
 
-        Cursor pagination (spec §15.2): each backend is asked for limit+1 items
+        Cursor pagination: each backend is asked for limit+1 items
         past the cursor; the (limit+1)th item from any backend signals "more
         available". After merge + whiteout filter, if the result exceeds limit,
         the limit-th path becomes next_cursor and the caller passes it back to
@@ -92,7 +92,7 @@ class ResourceStore:
         strictly advances, so progress is guaranteed and termination is
         reached when no backend has more items past the cursor.
 
-        G4 fix: whiteout/shadow filtering can shrink the merged page BELOW
+        whiteout/shadow filtering can shrink the merged page BELOW
         `limit` even though a backend still has unfetched items beyond its own
         fetch window (e.g. a whiteout removes an item from the middle of this
         page's candidate set, and the page that's left is short even though
@@ -109,7 +109,7 @@ class ResourceStore:
         skips a still-live item."""
         merged: "dict[str, ResourceInfo]" = {}
         # Fetch limit+1 from each backend so we can detect "more available"
-        # without a second count query (spec §15.2 LIMIT :limit+1).
+        # without a second count query.
         fetch_limit = limit + 1
         max_scanned: "str | None" = cursor
         backend_has_more = False
@@ -173,7 +173,7 @@ class ResourceStore:
 
     async def put(self, path: ResourcePath, content: bytes, *, options: WriteOptions = WriteOptions()) -> Resource:
         self._require_writable_primary()
-        # P1-2: the hash must cover every input that changes the operation's
+        # the hash must cover every input that changes the operation's
         # meaning, not just its payload -- otherwise two PUTs with the same
         # path/content/metadata but DIFFERENT preconditions (if_match,
         # if_none_match) or actor hash identically, and a replayed idempotency
@@ -187,7 +187,7 @@ class ResourceStore:
             str(options.if_none_match).encode(),
             (options.actor or "").encode(),
         )
-        # TOCTOU fix (spec section 16): when the primary backend implements the
+        # TOCTOU fix: when the primary backend implements the
         # atomic checked operation, delegate precondition + idempotency + mutate
         # to it as a single atomic call so a concurrent writer cannot interleave
         # the three steps. The Memory backend does not implement it, so the
@@ -223,7 +223,7 @@ class ResourceStore:
 
     async def delete(self, path: ResourcePath, *, options: WriteOptions = WriteOptions()) -> None:
         self._require_writable_primary()
-        # P1-2: same rationale as put() -- if_match/actor must be part of the
+        # same rationale as put() -- if_match/actor must be part of the
         # hash so a replayed key with a different precondition/actor cannot be
         # mistaken for the same request.
         req_hash = _request_hash(
@@ -255,7 +255,7 @@ class ResourceStore:
         await self._save_idempotency("delete", options.idempotency_key, req_hash, result_info)
 
     async def move(self, src: ResourcePath, dst: ResourcePath, *, options: WriteOptions = WriteOptions()) -> Resource:
-        """MOVE: a single domain operation (spec §13.1). When the primary
+        """MOVE: a single domain operation. When the primary
         backend implements raw_move AND the source lives in primary, delegate
         to it -- the backend folds load-source + write-target + whiteout-source
         + bump-revision into ONE transaction, so a concurrent reader never sees
@@ -266,20 +266,20 @@ class ResourceStore:
 
         Two cases keep the legacy put+delete orchestration: (1) the Memory
         backend has no transaction primitive, so it never implements raw_move;
-        (2) an OVERLAY-only source must be copied across backends, which spec
-        §13.3 explicitly says cannot be made fully atomic -- the legacy path
-        copies the overlay resource into primary and writes a primary whiteout
-        to mask the overlay source.
+        (2) an OVERLAY-only source must be copied across backends, which
+        cannot be made fully atomic -- the legacy path copies the overlay
+        resource into primary and writes a primary whiteout to mask the
+        overlay source.
 
         Idempotency: the atomic path keys the idempotency record under
-        ``move:{key}`` (spec §14 lists MOVE as a distinct operation). The
+        ``move:{key}``. The
         legacy path inherits put's ``put:{key}`` keying via the delegated put
         call -- preserved unchanged for backward compatibility."""
         self._require_writable_primary()
         if hasattr(self._primary, "raw_move"):
             # Atomic raw_move handles only primary-resident sources. An
             # overlay-only source falls through to the legacy cross-backend
-            # copy path (spec §13.3: not fully atomic).
+            # copy path.
             source_in_primary = (
                 await self._primary.raw_stat(src) is not None
                 if hasattr(self._primary, "raw_stat")

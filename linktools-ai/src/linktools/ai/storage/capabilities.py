@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""StorageCapabilities: what a given Storage instance can and cannot promise
-(spec docs/linktools-ai.md section 10.5). Callers branch on these flags instead
-of on concrete Storage/backend types."""
+"""StorageCapabilities: what a given Storage instance can and cannot promise.
+Callers branch on these flags instead of on concrete Storage/backend types."""
 
 from dataclasses import dataclass
 
@@ -16,7 +15,7 @@ class StorageCapabilities:
     full_text_search: bool
     semantic_search: bool
     multi_process_swarm: bool
-    # spec §17.4 capability flags. Defaulted so existing Storage constructions
+    # Capability flags. Defaulted so existing Storage constructions
     # stay valid; mixed-store deployments must declare them conservatively.
     leasing: bool = False
     advisory_locks: bool = False

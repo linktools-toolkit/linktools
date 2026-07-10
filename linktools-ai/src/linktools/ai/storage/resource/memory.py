@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """MemoryResourceBackend: a dependency-free ResourceBackend used to exercise the
 Protocol contract and as one of the parametrized backends in the ResourceStore
-contract-test suite (Task 6)."""
+contract-test suite."""
 
 import hashlib
 from datetime import datetime, timezone
@@ -32,7 +32,7 @@ class MemoryResourceBackend:
         return Missing()
 
     async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
-        # Keyset pagination (spec §15.2): entries iterate in sorted key order;
+        # Keyset pagination: entries iterate in sorted key order;
         # ``key > cursor`` is the resume point. Collect limit+1 so the
         # (limit+1)th path becomes next_cursor. Memory does NOT implement
         # raw_move / raw_stat -- ResourceStore falls back to the legacy path

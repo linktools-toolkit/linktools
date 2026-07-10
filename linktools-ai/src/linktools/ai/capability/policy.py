@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CapabilityToolExposurePolicy: the single knob set that bounds how many tools
-a Capability Runtime exposes and which risk tiers are auto-enabled (spec §11.4).
+a Capability Runtime exposes and which risk tiers are auto-enabled.
 
 Defaults are conservative: prompt catalog + read-only discovery tools are on;
 execution tools are OFF until a caller opts in. Per-capability and total tool

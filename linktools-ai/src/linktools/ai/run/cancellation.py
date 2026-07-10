@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """CancellationToken: cooperative cancellation signal for agent runs.
 
-Review doc §7.2: cancellation must reach the actual execution points (model
+Cancellation must reach the actual execution points (model
 call, tool call, swarm iteration), not just flip the database status. The
 token is the propagation channel -- Runtime.cancel sets it via RunController,
 and AgentRunner.execute() checks it at the documented await points via

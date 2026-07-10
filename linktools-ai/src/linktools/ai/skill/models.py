@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill summary/content models (spec §14.5). Summaries are the lightweight form
+"""Skill summary/content models. Summaries are the lightweight form
 injected into the prompt catalog; content is the full body returned by
 read_skill on demand."""
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SkillSpec (section 19 minimal) + SkillRegistry: loads skill declarations from
+"""SkillSpec  + SkillRegistry: loads skill declarations from
 {name}.md (markdown + YAML frontmatter) via SpecLoader, revision-cached. The
 frontmatter holds name/description/metadata; the markdown body becomes the
 SkillSpec.instructions (mirrors the AgentRegistry markdown pattern)."""

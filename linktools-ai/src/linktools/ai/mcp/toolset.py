@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deterministic MCP tool-name shaping (spec §15.6/§15.7): per-server prefixing,
+"""Deterministic MCP tool-name shaping: per-server prefixing,
 enabled/disabled filtering, and cross-server conflict detection. Pure functions
 so the policy is testable without a live MCP connection."""
 
@@ -32,7 +32,7 @@ def filter_tool_names(
     enabled_tools: "tuple[str, ...] | None",
     disabled_tools: "tuple[str, ...]",
 ) -> "tuple[str, ...]":
-    """Apply enabled_tools then disabled_tools (spec §15.7). Order is preserved
+    """Apply enabled_tools then disabled_tools. Order is preserved
     from the input; disabled always wins when both are set."""
     out: "list[str]" = []
     enabled_set = set(enabled_tools) if enabled_tools else None
@@ -48,7 +48,7 @@ def filter_tool_names(
 
 def detect_mcp_conflicts(final_names_by_server: "Mapping[str, Iterable[str]]") -> None:
     """Raise CapabilityConflictError if two servers expose the same final tool
-    name. MCP tool collisions are never silently overwritten (spec §15.8)."""
+    name. MCP tool collisions are never silently overwritten."""
     seen: "dict[str, str]" = {}
     for server_id, names in final_names_by_server.items():
         for final_name in names:

@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """SqlAlchemySessionStore: DB-backed SessionStore.
 
-Concurrency boundary (Package 6, actionable-fix-spec §9): ``append_messages``
-is the sequence authority (G6) -- it reads MAX(sequence) for the session and
+Concurrency boundary: ``append_messages``
+is the sequence authority -- it reads MAX(sequence) for the session and
 assigns fresh ones inside the inserting transaction.
 
 * **Normal mode** (``session=None``, the common case -- each call opens its
@@ -30,7 +30,7 @@ assigns fresh ones inside the inserting transaction.
   caller needs multiple concurrent UoW-mode writers to the same session, the
   fix is a dedicated ``ai_session_counters(session_id, next_sequence)`` table
   with an atomic ``UPDATE ... RETURNING`` (mirroring how ``claim_task``
-  allocates), NOT a broader retry loop -- see actionable-fix-spec §9.4."""
+  allocates), NOT a broader retry loop."""
 
 import json
 import uuid
@@ -114,7 +114,7 @@ class SqlAlchemySessionStore:
     async def _append_one_batch(
         self, session: AsyncSession, session_id: str, messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
-        # G6/review3 §6.5: reserve the next sequence(s) inside the inserting
+        # reserve the next sequence(s) inside the inserting
         # transaction -- read MAX(sequence) for the session, assign
         # contiguously, insert. Mirrors SqlAlchemyEventStore._append_one.
         result = await session.execute(

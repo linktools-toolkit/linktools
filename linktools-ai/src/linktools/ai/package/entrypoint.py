@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Package entrypoint types (spec §13.7). An entrypoint is an addressable
+"""Package entrypoint types. An entrypoint is an addressable
 object inside a package -- an agent, skill, tool, mcp, workflow, or script.
 Scoped entrypoints are namespaced by their PackageScope so two packages can
 both expose ``agent:grader`` without colliding (internal key

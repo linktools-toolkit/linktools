@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CompiledAgent: the stateless output of AgentCompiler.compile(). Reusable
-across many Runs -- no Session, no Run, no Checkpoint, no Workspace, and (Phase
-1 review-doc refactoring) no mutable per-Run fields anywhere on its
+across many Runs -- no Session, no Run, no Checkpoint, no Workspace, and no
+mutable per-Run fields anywhere on its
 capabilities. policy_capability/middleware_capability are the SAME instances
 already inside pydantic_agent's capabilities=[...] list; the per-Run
 ToolContext reaches them via pydantic-ai dependency injection

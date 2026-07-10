@@ -3,7 +3,7 @@
 """observability.metrics: counter/histogram/gauge abstraction for linktools.ai.
 
 ObservabilityMetrics is the Protocol boundary an OpenTelemetry adapter can
-later plug into (Decision D-2); it has no OTel dependency. A single class can
+later plug into; it has no OTel dependency. A single class can
 implement both this and ObservabilitySink -- LoggingObservabilitySink does."""
 
 from typing import Any, Mapping, Protocol, runtime_checkable

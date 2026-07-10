@@ -3,7 +3,7 @@
 """SqlAlchemyStorage: the SQLAlchemy-backed Storage composition. Lives in its
 own module so the core ``storage`` package (and ``linktools.ai`` itself) imports
 cleanly without SQLAlchemy installed -- this module is only reached when a
-caller actually requests ``SqlAlchemyStorage`` (spec §21). SQLAlchemy and
+caller actually requests ``SqlAlchemyStorage``. SQLAlchemy and
 aiosqlite are optional dependencies; install via ``linktools-ai[sqlite]``.
 
 All seven stores share one ``session_factory``; ``transaction()`` yields a

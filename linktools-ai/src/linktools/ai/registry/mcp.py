@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCPServerSpec (section 27 minimal) + MCPRegistry: loads MCP server
+"""MCPServerSpec  + MCPRegistry: loads MCP server
 declarations from {name}.yaml via SpecLoader, revision-cached. Mirrors
 ToolRegistry's YAML pattern (the loader exposes a revision() monotonic clock;
 whenever it changes the per-(id, revision) cache and id listing are dropped)."""
@@ -21,7 +21,7 @@ class MCPServerSpec:
     name: str
     transport: str  # "stdio" | "sse" | "http"
     command_or_url: str
-    # Structured transport fields (spec §15.1). ``command_or_url`` is kept as a
+    # Structured transport fields. ``command_or_url`` is kept as a
     # backward-compatible derivation; new code should read command/url directly.
     command: "tuple[str, ...] | None" = None
     url: "str | None" = None
@@ -43,7 +43,7 @@ def _as_command_tuple(command_raw: Any) -> "tuple[str, ...]":
 
 
 def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
-    """Build an MCPServerSpec from a parsed YAML dict (spec §15.1/§15.5).
+    """Build an MCPServerSpec from a parsed YAML dict.
 
     - name falls back to mcp_id when omitted.
     - transport comes from `transport` (or legacy `type`), defaulting to stdio;

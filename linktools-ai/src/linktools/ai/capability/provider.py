@@ -25,8 +25,7 @@ class CapabilityContext:
     """Per-resolution dynamic state handed to every CapabilityProvider. Fields
     are added as providers need them; the exposure policy and execution backend
     cover the builtin path. Identity fields make resolution failures precise.
-    ``event_store`` (optional) lets providers emit capability-lifecycle events
-    (spec §40 Middleware/EventStore)."""
+    ``event_store`` (optional) lets providers emit capability-lifecycle events."""
 
     agent_id: str
     exposure_policy: CapabilityToolExposurePolicy

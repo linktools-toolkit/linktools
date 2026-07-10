@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.prompt: context-window policies (spec §19)."""
+"""linktools.ai.prompt: context-window policies."""
 
 from .window import (
     NoopWindowPolicy,

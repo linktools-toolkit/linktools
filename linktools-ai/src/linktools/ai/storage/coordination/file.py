@@ -3,8 +3,7 @@
 """FileResourceCoordinator: provides real cross-process mutual exclusion via
 POSIX advisory file locks (fcntl.flock) when every instance shares the same
 filesystem. Only meaningful under that condition; never stores Resource
-content; never replaces the database transaction as the source of correctness
-(spec section 17)."""
+content; never replaces the database transaction as the source of correctness."""
 
 import asyncio
 import fcntl

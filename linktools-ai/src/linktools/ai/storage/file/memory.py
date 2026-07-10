@@ -6,10 +6,10 @@ Mirrors FileSwarmStore/FileRunStore's atomic-write + path-traversal-guard
 patterns (see storage/file/run.py). The `_UNSET` sentinel distinguishes
 "omit this field" from `category=None` meaning "explicitly clear".
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The ``asyncio.Lock`` is held in the async
-wrapper and spans the ``to_thread`` call (not the other way around)."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The ``asyncio.Lock`` is held in the async wrapper and spans the
+``to_thread`` call (not the other way around)."""
 
 import asyncio
 import json

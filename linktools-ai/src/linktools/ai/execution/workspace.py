@@ -3,7 +3,7 @@
 """WorkspaceManager: creates/resolves/cleans up the physical execution directory
 for a Run, keyed by run_id. AgentSpec/CompiledAgent/RunContext hold only a
 WorkspaceRef, never a raw Path -- only WorkspaceManager.resolve() exposes one,
-and only at the point of tool execution (spec section 29).
+and only at the point of tool execution.
 
 ``WorkspaceManager`` is the Protocol every backend satisfies; ``LocalWorkspaceManager``
 is the local-filesystem implementation. A container-backed implementation can

@@ -192,8 +192,7 @@ class SqlAlchemyApprovalStore:
         self, *, run_id: str, tool_call_id: str, tool_name: str,
         reason: "str | None", arguments: "dict[str, Any]", approval_id: str,
     ) -> ApprovalRequest:
-        """Dedup on (run_id, tool_call_id) (Package 3, actionable-fix-spec
-        §6): a retry, a duplicate model drive, or a re-entrant pause for the
+        """Dedup on (run_id, tool_call_id): a retry, a duplicate model drive, or a re-entrant pause for the
         same tool_call reuses the existing request rather than creating a
         second PENDING one. The SELECT-then-INSERT below is only the fast
         path -- ``ai_approvals``'s ``uq_approval_run_tool_call`` UNIQUE

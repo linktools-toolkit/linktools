@@ -15,10 +15,10 @@ mapped to None, so callers can distinguish "rejected, no reason given" from
 touches the metadata so it cannot shadow a prior rejection reason on a
 different request.
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop. The ``asyncio.Lock`` is held in the async
-wrapper and spans the ``to_thread`` call (not the other way around)."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
+The ``asyncio.Lock`` is held in the async wrapper and spans the
+``to_thread`` call (not the other way around)."""
 
 import asyncio
 import json
@@ -168,7 +168,7 @@ class FileApprovalStore:
         self, *, run_id: str, tool_call_id: str, tool_name: str,
         reason: "str | None", arguments: dict, approval_id: str,
     ) -> ApprovalRequest:
-        # G1/G2 (review3 §5.4): dedup on (run_id, tool_call_id) BEFORE
+        # dedup on (run_id, tool_call_id) BEFORE
         # creating -- a retry, a duplicate model drive, or a re-entrant pause
         # for the same tool_call must reuse the existing request rather than
         # creating a second PENDING one. Held under self._lock (see
@@ -178,7 +178,7 @@ class FileApprovalStore:
             r for r in self._list_for_run_sync(run_id) if r.tool_call_id == tool_call_id
         ]
         if existing:
-            # Package 3 (§6.4.3): same dedupe key reused with a different
+            # same dedupe key reused with a different
             # tool_name/arguments is a conflict, not a replay.
             check_dedupe_conflict(existing[-1], tool_name=tool_name, arguments=arguments)
             return existing[-1]

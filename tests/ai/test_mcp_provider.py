@@ -12,8 +12,10 @@ from linktools.ai.errors import (
     MCPServerNotFoundError,
 )
 from linktools.ai.mcp import (
-    MCPConnectionManager, MCPProvider, build_mcp_server,
-    detect_mcp_conflicts, filter_tool_names, final_tool_name, parse_mcp_spec,
+    MCPConnectionManager, MCPProvider, build_mcp_server, parse_mcp_spec,
+)
+from linktools.ai.mcp.toolset import (
+    detect_mcp_conflicts, filter_tool_names, final_tool_name,
 )
 
 

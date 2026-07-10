@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SwarmRunner: the top-level orchestrator that ties the SwarmSpec -> strategy ->
-child Runs flow together (spec 22.4). It compiles the member agents, creates the
+child Runs flow together . It compiles the member agents, creates the
 driving RunRecord (runnable_type=SWARM) + SwarmRun, builds the
 SwarmExecutionContext, delegates the round loop to the resolved strategy, writes
 ONLY the final aggregate to the shared/parent Session, and transitions the
@@ -18,7 +18,7 @@ Critical invariant (established by strategy._run_task): a SwarmTask's
 cancel() exploits this -- ``list_tasks(..., status=CLAIMED)`` yields tasks
 whose ``active_run_id`` is the in-flight child Run to cancel.
 
-resume() is explicit and caller-driven (Decision #3): no auto-resume-on-construct.
+resume() is explicit and caller-driven : no auto-resume-on-construct.
 cancel() uses RunController when available: it transitions the SwarmRun and
 driving Run to CANCELLING, signals the driving coroutine, and propagates
 cancellation to active child Runs via their active_run_id. When no controller
@@ -72,10 +72,10 @@ class SwarmRunner:
     """Orchestrates one Swarm invocation end-to-end. Construct once, call
     ``run()`` per invocation. ``resume()`` re-enters the strategy after a
     partial run; ``cancel()`` propagates real cancellation through
-    ``RunController`` when wired (Package 1/2, actionable-fix-spec).
+    ``RunController`` when wired.
 
     SwarmRunner does NOT assemble an AgentRunner itself -- Runtime is the
-    single assembly point (actionable-fix-spec §4). The caller (normally
+    single assembly point. The caller (normally
     ``Runtime.build()``) must hand in the SAME ``AgentRunner`` instance used
     for top-level Agent runs, so Swarm worker Runs get identical Tool/Policy/
     Middleware/UoW/Cancellation semantics instead of a second, divergent
@@ -104,7 +104,7 @@ class SwarmRunner:
         # calls it directly -- it is handed to the SwarmExecutionContext so
         # strategy._run_task can drive worker Runs.
         self._agent_runner = agent_runner
-        # Package 2: the SAME RunController agent_runner was built with, so
+        # the SAME RunController agent_runner was built with, so
         # cancel() can (a) stop the swarm's own driving coroutine and (b)
         # signal an active child Run's in-flight asyncio.Task -- the child's
         # own AgentRunner.execute() already registers with this controller
@@ -166,7 +166,7 @@ class SwarmRunner:
         # version is now 2 after the PENDING -> RUNNING update.
         swarm_version = swarm_run.version
 
-        # Package 2 (actionable-fix-spec §5): register the driving coroutine
+        # register the driving coroutine
         # + a fresh CancellationToken with run_controller, mirroring
         # AgentRunner.execute()'s own registration. Runtime.cancel(run_id) /
         # SwarmRunner.cancel() can then call run_controller.cancel(run_id)
@@ -209,11 +209,11 @@ class SwarmRunner:
                 event_store=self._event_store,
             )
             strategy = build_strategy(spec.strategy)
-            # GAP-09 (spec 22.3): SwarmLimits.timeout_seconds wraps the strategy
+            # : SwarmLimits.timeout_seconds wraps the strategy
             # round loop in asyncio.wait_for. On timeout the TimeoutError is
             # translated to SwarmError("swarm timeout: ...") so the generic
             # FAILED handler below records a descriptive message; timeout_seconds
-            # left at None reproduces the pre-GAP-09 path (no wait_for wrapper).
+            # left at None reproduces the prior path (no wait_for wrapper).
             timeout = spec.limits.timeout_seconds
             try:
                 if timeout is not None:
@@ -223,7 +223,7 @@ class SwarmRunner:
             except asyncio.TimeoutError:
                 raise SwarmError(f"swarm timeout: exceeded timeout_seconds={timeout}")
 
-            # GAP-09: enforce SwarmLimits.max_total_tokens. aggregate() sums each
+            # enforce SwarmLimits.max_total_tokens. aggregate() sums each
             # worker RunResult.token_usage (populated by AgentRunner from the
             # model's usage) into the aggregate result, so one comparison here
             # covers every task. max_total_cost is declared on SwarmLimits but
@@ -245,7 +245,7 @@ class SwarmRunner:
             )
             swarm_version = swarm_run.version
 
-            # Package 2: re-check right before committing success -- a cancel
+            # re-check right before committing success -- a cancel
             # that raced in while strategy.run() was wrapping up (and didn't
             # happen to land on an in-flight await) must not still write a
             # successful result.
@@ -277,7 +277,7 @@ class SwarmRunner:
             )
             return result
         except asyncio.CancelledError:
-            # Package 2/P1-1 (actionable-fix-spec, current-review round): real
+            # real
             # cancel path -- CancelledError surfaces here either from
             # task.cancel() interrupting an in-flight await inside
             # strategy.run() (child agent call, store I/O, ...) or from one of
@@ -317,7 +317,7 @@ class SwarmRunner:
             # bumps it inside the try block above); the SwarmRun's is tracked in
             # swarm_version.
             #
-            # The FAILED transitions (§3.3 "Run status update") are kept
+            # The FAILED transitions are kept
             # best-effort ONLY because we are already in the failing path:
             # letting either transition error escape would replace the ORIGINAL
             # exc (the actual cause) with a store/version error, losing the
@@ -360,7 +360,7 @@ class SwarmRunner:
         *,
         agents: "Mapping[str, AgentSpec]",
     ) -> RunResult:
-        """Explicit, caller-driven re-entry (Decision #3). Re-reads the
+        """Explicit, caller-driven re-entry . Re-reads the
         SwarmRun + driving RunRecord, reconstructs the SwarmExecutionContext, and
         re-enters ``strategy.run(ctx)`` -- the strategy's round loop observes
         already-SUCCEEDED tasks (via ``list_tasks(status=SUCCEEDED)``) and the
@@ -437,7 +437,7 @@ class SwarmRunner:
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=str(exc)
             )
-            # §3.3 "Run status update": kept best-effort ONLY because we are
+            # kept best-effort ONLY because we are
             # already in the failing path -- letting the transition error
             # escape would replace the ORIGINAL exc with a store/version error.
             # The warning keeps the failure visible rather than silent.
@@ -467,8 +467,8 @@ class SwarmRunner:
     # -- cancel() -------------------------------------------------------------
 
     async def cancel(self, swarm_run_id: str) -> None:
-        """Real cancel when a RunController is wired (Package 2,
-        actionable-fix-spec §5): transitions the SwarmRun and driving Run to
+        """Real cancel when a RunController is wired: transitions the SwarmRun
+        and driving Run to
         CANCELLING and signals ``run_controller.cancel()`` for the driving
         run and every active child run, so an in-flight asyncio.Task (the
         swarm's own coroutine, or a child AgentRunner.execute()) actually
@@ -493,7 +493,7 @@ class SwarmRunner:
             and self._run_controller.get_token(driving_run_id) is not None
         )
         if driving_in_flight:
-            # CANCELLING first (§5.4.5): the driving run()'s own
+            # CANCELLING first: the driving run()'s own
             # CancelledError handler finishes CANCELLING -> CANCELLED once it
             # actually stops. Both the SwarmRun and the driving RunRecord go
             # through this two-step transition.
@@ -530,7 +530,7 @@ class SwarmRunner:
             # to cancel in RunStore, skip. Read the child's current version
             # rather than assuming it tracks task.version.
             #
-            # best-effort per child (§3.3 "Cancel status confirm"): a child that
+            # best-effort per child: a child that
             # already completed or was cancelled concurrently is not a cancel
             # failure, and one stubborn child must not abort the rest of the
             # loop -- but the failure is logged (not silent) so a genuinely
@@ -573,7 +573,7 @@ class SwarmRunner:
     # -- recover() -------------------------------------------------------------
 
     async def recover(self, swarm_run_id: str) -> None:
-        """Best-effort restart-time scan (review doc §19.5). Walks every CLAIMED
+        """Best-effort restart-time scan. Walks every CLAIMED
         task whose lease has lapsed and reconciles it with the child RunRecord's
         current state:
 
@@ -581,7 +581,7 @@ class SwarmRunner:
             child Run's SUCCEEDED transition and its ``complete_task`` call).
           * Run FAILED    -> ``fail_task`` (same gap, failed side).
           * Run RUNNING   -> leave alone. The worker may yet finish; this is the
-            §19.4 "禁止仅根据时间过期就盲目重复执行副作用任务" guard.
+            "禁止仅根据时间过期就盲目重复执行副作用任务" guard.
           * active_run_id is None / Run missing / Run CANCELLED or PENDING ->
             skip here, then ``reclaim_expired_tasks`` resets them to PENDING so
             the next ``resume()`` can pick them up.
@@ -603,7 +603,7 @@ class SwarmRunner:
         now = datetime.now(timezone.utc)
         for task in claimed:
             # A task whose lease hasn't lapsed is presumed still being worked --
-            # leave it alone (§19.4: don't blindly re-run side-effecting tasks).
+            # leave it alone (don't blindly re-run side-effecting tasks).
             if task.lease_expires_at is not None and task.lease_expires_at > now:
                 continue
             # No active_run_id: the strategy crashed between claim_task and
@@ -657,8 +657,8 @@ class SwarmRunner:
 
     async def _finalize_cancelled_run(self, run_id: str) -> None:
         """Drive the driving RunRecord to CANCELLED after a real
-        ``CancelledError`` was observed (P1-1, current-review-actionable-fix
-        round). Mirrors ``AgentRunner.execute()``'s own CancelledError
+        ``CancelledError`` was observed. Mirrors ``AgentRunner.execute()``'s own
+        CancelledError
         handler: re-reads current status rather than assuming RUNNING, since
         ``Runtime.cancel(run_id)`` may have ALREADY transitioned it to
         CANCELLING (that transition is precisely what preceded the
@@ -738,7 +738,7 @@ class SwarmRunner:
         self, context: RunContext, result: RunResult
     ) -> None:
         """Append the single aggregate assistant message to the shared/parent
-        Session. G6: sequence is assigned by the SessionStore itself, not
+        Session. Sequence is assigned by the SessionStore itself, not
         computed here from `len(prior_messages) + 1`."""
         await self._session_store.append_messages(
             context.session_id,

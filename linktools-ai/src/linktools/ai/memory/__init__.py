@@ -2,5 +2,4 @@
 # -*- coding: utf-8 -*-
 """memory: the Memory subsystem's pure domain model (MemoryRecord) and
 persistence/search Protocols (MemoryStore, MemoryIndex). Backends
-(FileMemoryStore, KeywordMemoryIndex) land in later phases of the section 20
-spec."""
+(FileMemoryStore, KeywordMemoryIndex) land in later phases."""

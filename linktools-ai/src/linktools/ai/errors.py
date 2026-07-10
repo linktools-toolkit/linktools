@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """errors.py: stable domain error hierarchy. Never identify an error by string
-matching -- always by type (spec docs/linktools-ai.md section 32)."""
+matching -- always by type."""
 
 
 class LinktoolsAIError(Exception):
@@ -87,7 +87,7 @@ class RunPaused(RunError):
     through pydantic-ai's tool-execution stack out to AgentRunner, which
     persists the ApprovalRequest, checkpoints state, transitions the Run to
     WAITING_APPROVAL, and appends the pause events -- all atomically in one
-    UnitOfWork on SqlAlchemy storage (review3 §5, Package A / P0-6).
+    UnitOfWork on SqlAlchemy storage.
 
     This is a control-flow signal, NOT an error condition -- it's a RunError
     (not a ToolError) precisely so PolicyCapability.before_tool_execute (which
@@ -129,7 +129,7 @@ class SessionError(LinktoolsAIError):
 
 class SessionSequenceConflictError(SessionError):
     """Raised when the SessionStore cannot reserve a unique message sequence
-    after repeated conflicts (G6/review3 §6: the store is the sole sequence
+    after repeated conflicts (the store is the sole sequence
     authority, mirroring EventSequenceConflictError)."""
 
 
@@ -163,8 +163,8 @@ class ToolIdempotencyConflictError(ToolError):
 
 class IdempotencyInProgressError(ToolError):
     """Raised by ToolExecutor when an idempotent call hits a RESERVED record
-    (another in-flight call owns the reservation). §11.2 lists "wait / return
-    in-progress / reject duplicate" as policy choices; for now the executor
+    (another in-flight call owns the reservation). "wait / return
+    in-progress / reject duplicate" are policy choices; for now the executor
     rejects -- the caller can retry once the in-flight call completes and the
     record moves to COMPLETED or FAILED."""
 

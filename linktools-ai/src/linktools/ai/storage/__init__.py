@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Storage package. ``Storage`` and ``FileStorage`` are core (no optional deps);
 ``SqlAlchemyStorage`` is loaded lazily on first access so ``import
-linktools.ai.storage`` succeeds without SQLAlchemy installed (spec §21.4)."""
+linktools.ai.storage`` succeeds without SQLAlchemy installed."""
 
 from .facade import FileStorage, Storage
 

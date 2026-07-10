@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ArtifactService: a domain service over ResourceStore for run-scoped artifacts.
 Owns naming/run-association/content-type/metadata; ResourceStore continues to own
-content, ETag, version, and idempotency underneath it (spec section 18)."""
+content, ETag, version, and idempotency underneath it."""
 
 from typing import Mapping
 

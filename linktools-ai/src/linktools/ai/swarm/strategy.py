@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SwarmStrategy: the PROGRAMMATIC orchestration layer (spec 22.4). A strategy
+"""SwarmStrategy: the PROGRAMMATIC orchestration layer . A strategy
 consumes a SwarmExecutionContext and produces one aggregated RunResult.
 
-Decision #1 (PROGRAMMATIC): strategies never call a real model to DECIDE what to
+: strategies never call a real model to DECIDE what to
 do. They accept an injectable async ``coordinator_fn`` (CoordinatorDelegation)
 or ``task_factory`` (ParallelFanOut). Tests inject deterministic functions and
 use FunctionModel workers -- no real model calls.
@@ -21,7 +21,7 @@ mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
 task via ``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the
 handle SwarmRunner.cancel uses to find the in-flight child Run. On retry the
 same task gets a NEW run_id (active_run_id is overwritten), which is the
-decoupling the review doc §19.1 mandates.
+decoupling mandated for correctness.
 
 claim_task is a WORK-QUEUE api: ``claim_task(swarm_run_id, agent_id)`` returns
 the oldest PENDING task for that (run, agent) pair -- it does NOT take a task_id.
@@ -150,7 +150,7 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
     ancestor adds one. Guards against malformed cycles by capping the walk at a
     parent that is missing or already seen.
 
-    Used by GAP-09 (spec 22.3) max_depth enforcement. The current built-in
+    Used by  max_depth enforcement. The current built-in
     strategies (``_make_task``) always set ``parent_task_id=None``, so every
     programmatically-created task is depth 1; this guard only fires for nested
     delegations (coordinator chains, future hierarchical strategies).
@@ -235,7 +235,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     """Run a single SwarmTask against its assigned worker agent.
 
     Sequence:
-      0. GAP-09 depth guard: walk ``parent_task_id`` chain; raise
+      0. depth guard: walk ``parent_task_id`` chain; raise
          SwarmLimitExceededError(kind="max_depth") before claiming/dispatching.
       1. resolve the compiled worker.
       2. claim a pending task for (swarm_run, agent) via the store's work-queue
@@ -256,7 +256,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     Returns the worker's RunResult on success, or None if there was nothing to
     claim or every attempt failed.
     """
-    # GAP-09 (spec 22.3): max_depth guard. Fires before claim_task so a too-deep
+    # : max_depth guard. Fires before claim_task so a too-deep
     # task is rejected without consuming a worker slot.
     max_depth = ctx.spec.limits.max_depth
     if max_depth is not None:
@@ -274,7 +274,7 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
 
     last_exc: "BaseException | None" = None
     child_run_id: "str | None" = None
-    # Phase-5B (review doc §19.2): each retry iteration records one
+    # Each retry iteration records one
     # SwarmTaskAttempt. ``base_attempt`` is the 1-based attempt number of the
     # FIRST iteration of this _run_task call. ``claimed.attempts`` is 0 on first
     # execution (claim_task doesn't bump it; only fail_task does), so the trail

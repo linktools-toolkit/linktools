@@ -91,7 +91,7 @@ class SqlAlchemyRunStore:
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
     ) -> RunRecord:
-        # §14.4 forbids a Python read-then-compare-then-flush for core state
+        # a Python read-then-compare-then-flush is forbidden for core state
         # updates -- two concurrent transactions can both SELECT the same
         # version under READ COMMITTED and both then unconditionally write,
         # silently losing one update. The WHERE id=... AND version=:expected

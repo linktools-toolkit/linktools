@@ -133,7 +133,7 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
 def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     """Build a tuple[ToolRef] from a list of tool declarations.
 
-    Accepted shapes (spec §10.1):
+    Accepted shapes:
       - "file"                 -> ToolRef(name="file")            (kind None -> builtin)
       - "builtin:file"         -> ToolRef(name="file", kind="builtin")
       - "skill:sql"            -> ToolRef(name="sql",  kind="skill")
@@ -144,7 +144,7 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
 
     if items is None:
         # Distinguish "no tools key" (None -> runtime default) from "tools: []"
-        # (empty tuple -> explicitly no tools), per spec §10.7 three-state.
+        # (empty tuple -> explicitly no tools) -- the three-state distinction.
         return None
     if not isinstance(items, (list, tuple)):
         raise InvalidSpecError("tools must be a list")

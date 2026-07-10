@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Strongly-typed event payloads, per docs/linktools-ai.md section 23.2. Each
+"""Strongly-typed event payloads. Each
 payload carries the minimum data meaningful for that event type -- the spec
 mandates which payload TYPES must exist, not their exact fields."""
 
@@ -157,7 +157,7 @@ class ResourceChanged:
     revision: int
 
 
-# --- Capability Runtime lifecycle events (spec §40 Middleware/EventStore) ---
+# --- Capability Runtime lifecycle events ---
 # These let a downstream EventStore observe the capability/skill/mcp/subagent/
 # package/prompt/tool-exposure lifecycle without coupling to internal classes.
 
@@ -286,7 +286,7 @@ class ToolExposureDenied:
 
 
 # Union of every event payload type. This is the type of the ``payload`` field
-# EventStore.append accepts (review doc §8.3) -- callers pass a concrete
+# EventStore.append accepts -- callers pass a concrete
 # payload instance and the store wraps it in an EventEnvelope.
 EventPayload = Union[
     RunStarted,

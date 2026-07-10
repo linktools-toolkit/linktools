@@ -3,9 +3,8 @@
 """FileRunStore: one JSON file per run under root/{run_id}.json. Atomic writes via
 temp-file-then-os.replace, matching FileResourceBackend's pattern from Phase 1.
 
-Per review doc §16 (Phase 4B): each public async method delegates to a
-``_*_sync`` private method via ``asyncio.to_thread`` so blocking file I/O
-never runs on the event loop."""
+Each public async method delegates to a ``_*_sync`` private method via
+``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
 
 import asyncio
 import json
@@ -78,7 +77,7 @@ class FileRunStore:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        # P1-6: serializes transition()'s read-check-write sequence so two
+        # serializes transition()'s read-check-write sequence so two
         # coroutines racing to transition the SAME run within one process
         # cannot both read the same version and both write -- a lost update.
         # Mirrors FileSwarmStore's single-lock pattern (see storage/file/swarm.py).

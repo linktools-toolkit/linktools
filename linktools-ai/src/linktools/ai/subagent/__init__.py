@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.subagent: tree-style delegation (spec §16). Distinct from Swarm --
+"""linktools.ai.subagent: tree-style delegation. Distinct from Swarm --
 a subagent call is one parent -> one named child -> synchronous result."""
 
 from .models import SubagentResult, SubagentStatus

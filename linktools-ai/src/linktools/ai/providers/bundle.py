@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ProviderBundle (spec §17.9): the declaration/configuration bundle handed to
+"""ProviderBundle: the declaration/configuration bundle handed to
 Runtime.build. Holds the optional spec providers for each capability domain.
 Distinct from Storage (state) and CapabilityRuntimeOptions (policy)."""
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ProviderPrefixes:
     """Resource-path prefixes for building default registries from a shared
-    ResourceStore (spec §17.5). An empty/None prefix means that domain is not
+    ResourceStore. An empty/None prefix means that domain is not
     constructed."""
     agents: str = "specs/agents"
     skills: str = "specs/skills"
@@ -60,7 +60,7 @@ class ProviderBundle:
         packages_base: "Any | None" = None,
     ) -> "ProviderBundle":
         """Build a ProviderBundle of default registries from a shared
-        ResourceStore (spec §17.5). Each Spec-backed registry (agents/skills/
+        ResourceStore. Each Spec-backed registry (agents/skills/
         mcp/tools) is constructed via SpecLoader.from_resources under its prefix.
         ``packages_base`` (a filesystem root Path) optionally builds a
         PackageRegistry + DirectoryEntrypointResolver; packages are filesystem

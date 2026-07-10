@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.package: package-scoped capability resolution (spec §13). A
+"""linktools.ai.package: package-scoped capability resolution. A
 package bundles resources + entrypoints under a PackageScope; Skill is one
 built-in package kind, not a special case."""
 

@@ -51,8 +51,8 @@ class SessionMessage:
 
 @dataclass(frozen=True, slots=True)
 class NewSessionMessage:
-    """Input shape for :meth:`SessionStore.append_messages` (review3 §6.2 /
-    G6). Deliberately carries no ``id``/``sequence``/``created_at`` -- the
+    """Input shape for :meth:`SessionStore.append_messages`.
+    Deliberately carries no ``id``/``sequence``/``created_at`` -- the
     SessionStore is the SOLE authority for assigning those (mirroring how
     EventStore owns sequence assignment for events), so two concurrent
     callers appending to the same session can never compute the same

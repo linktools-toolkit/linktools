@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MCP client wiring: construct pydantic-ai MCP servers from MCPServerSpec, and
-MCPConnectionManager to cache/share live toolsets and close them on shutdown
-(spec §15.3). Construction is synchronous and side-effect-free; connections are
+MCPConnectionManager to cache/share live toolsets and close them on shutdown.
+Construction is synchronous and side-effect-free; connections are
 opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 
 from typing import Any
@@ -28,7 +28,7 @@ def build_mcp_server(spec: MCPServerSpec) -> Any:
     """Build the pydantic-ai MCPServer for a spec (stdio/sse/http). Raises
     MCPConnectionError for a misconfigured transport. ``command``/``url`` are
     read from the structured fields (command_or_url is a compat-only string).
-    The per-server ``tool_prefix`` is applied here (spec §15.6)."""
+    The per-server ``tool_prefix`` is applied here."""
     from pydantic_ai.mcp import MCPServerHTTP, MCPServerSSE, MCPServerStdio
 
     timeout = spec.timeout_seconds
@@ -61,8 +61,7 @@ def build_mcp_server(spec: MCPServerSpec) -> Any:
 class MCPConnectionManager:
     """Owns the lifecycle of live MCP toolsets. ``get_toolset`` builds (and
     caches) a pydantic-ai MCPToolset for a server; ``close`` / ``close_server``
-    release them. Runtime closes this on shutdown so connections do not leak
-    (spec §15.4/§15.8 #6)."""
+    release them. Runtime closes this on shutdown so connections do not leak."""
 
     def __init__(self) -> None:
         self._toolsets: "dict[str, Any]" = {}

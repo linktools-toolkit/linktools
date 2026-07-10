@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Approval domain models: ApprovalStatus enum, ApprovalRequest record,
 ALLOWED_APPROVAL_TRANSITIONS map, the ApprovalStore Protocol, and the
-build_approval_request factory. Per spec section 28 (approval flow).
+build_approval_request factory.
 
 This phase ships persistence + audit + events + external resolve; full run
 pause/resume is deferred. Mirrors the frozen-dataclass + str-Enum +
@@ -58,7 +58,7 @@ def build_approval_request(
 
     ``arguments`` is copied into a plain dict so callers cannot mutate the
     record's state by holding onto the source mapping. ``approval_id``
-    (review3 §5.2/Package A) lets a caller that already minted an id --
+    lets a caller that already minted an id --
     ToolExecutor mints one for ``RunPaused.approval_id`` before this request
     is ever persisted -- pass it through so the id reported to the caller
     matches the id actually stored. Defaults to a fresh uuid4 when omitted.
@@ -82,7 +82,7 @@ def build_approval_request(
 def check_dedupe_conflict(
     existing: ApprovalRequest, *, tool_name: str, arguments: "Mapping[str, Any]",
 ) -> None:
-    """Package 3 (actionable-fix-spec §6.4.3): when
+    """when
     ``create_or_get_pending()`` finds an existing request for
     ``(run_id, tool_call_id)``, it must not silently hand back a request
     that was actually for a DIFFERENT call -- same dedupe key reused with
@@ -104,7 +104,7 @@ class ApprovalStore(Protocol):
     """Persistence contract for ApprovalRequest.
 
     Method signatures are this phase's concrete resolution of the spec's
-    ``(...)`` ellipses (section 28). ``approve``/``reject`` carry
+    ``(...)`` ellipses . ``approve``/``reject`` carry
     ``expected_version`` for optimistic-concurrency control; conflict /
     not-found / invalid-transition cases raise the corresponding errors from
     ``linktools.ai.errors`` (ApprovalConflictError / ApprovalNotFoundError /
@@ -116,7 +116,7 @@ class ApprovalStore(Protocol):
     (``ToolExecutor._already_approved``) consults it to recognize a call that
     was approved externally without re-persisting a PENDING duplicate.
 
-    ``create_or_get_pending`` (review3 §5.4/Package A, G1/G2) is the
+    ``create_or_get_pending`` is the
     dedup-aware entry point the RunPaused-handling suspension path uses
     instead of a bare ``create``: a repeated tool_call_id for the same run_id
     (retry, duplicate model drive, re-entrant pause) returns the EXISTING
