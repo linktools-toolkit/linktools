@@ -11,13 +11,13 @@ from linktools.ai.security.pipeline import (
     PipelineAction, PipelineDecision, SecurityPipeline,
     ToolInvocationEvent, ToolResultEvent,
 )
+from linktools.ai.errors import RunPaused, ToolDeniedError, ToolTimeoutError
 from linktools.ai.tool.contribution import ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.tool.policy import (
     ResolvedToolPolicy, ToolInvocationContext, ToolPolicyProvider,
     merge_policies,
 )
-from linktools.ai.errors import ToolDeniedError, ToolTimeoutError
 
 
 # --- ToolDescriptor ---
@@ -165,7 +165,7 @@ async def test_adapter_pipeline_require_approval():
         descriptor=_descriptor(), handler=handler,
         security_pipeline=_ApprovalPipeline(),
     )
-    with pytest.raises(ToolDeniedError, match="approval"):
+    with pytest.raises(RunPaused, match="approval"):
         await adapter.invoke()
 
 

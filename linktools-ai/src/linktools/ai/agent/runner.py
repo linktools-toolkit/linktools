@@ -184,6 +184,7 @@ class AgentRunner:
         self._security_pipeline = security_pipeline
         self._baseline_policy = baseline_policy
         self._tool_policy_provider = tool_policy_provider
+        self._tool_executor_for_managed = None  # set by Runtime.build if pause_on_approval
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -404,9 +405,13 @@ class AgentRunner:
                 )
                 toolsets: "list[AbstractToolset]" = []
                 capability_prompt = ""
-                if agent.spec.tools and self._capability_assembler is not None:
-                    # Declared tools: resolve via the capability assembler. Empty
-                    # tools fall through to the legacy default below.
+                cap_bundle = None
+                # All tools go through the capability assembler + ManagedToolAdapter.
+                # tools=None + execution -> default builtin via assembler (no raw bypass).
+                # tools=() -> no tools. tools explicit -> only declared.
+                has_assembler = self._capability_assembler is not None
+                needs_default = agent.spec.tools is None and deps.execution is not None
+                if (agent.spec.tools or needs_default) and has_assembler:
                     from ..capability.policy import CapabilityToolExposurePolicy
                     from ..capability.provider import CapabilityContext, toolset_names as _count_tool_names
 
@@ -423,58 +428,56 @@ class AgentRunner:
                         user_id=context.user_id, tenant_id=context.tenant_id,
                         workspace=context.workspace,
                     )
-                    cap_bundle = await self._capability_assembler.assemble(agent.spec, cap_ctx)
-                    # Managed path: when a SecurityPipeline or baseline is
-                    # configured, wrap each tool through ManagedToolAdapter so
-                    # every call passes through the unified governance chain
-                    # (policy, pipeline, baseline, timeout, events). Otherwise
-                    # use the legacy direct-toolset path (backward compat).
+                    # When tools is None, synthesize a default builtin:* ref.
+                    if needs_default:
+                        from ..agent.spec import ToolRef as _TR
+                        effective_spec = AgentSpec(
+                            id=agent.spec.id, name=agent.spec.name,
+                            model=agent.spec.model,
+                            instructions=agent.spec.instructions,
+                            tools=(_TR(name="*"),),
+                            middleware=agent.spec.middleware,
+                            output_schema=agent.spec.output_schema,
+                            metadata=agent.spec.metadata,
+                        )
+                    else:
+                        effective_spec = agent.spec
+                    cap_bundle = await self._capability_assembler.assemble(effective_spec, cap_ctx)
+                    # Managed governance applies to ALL tools (including default
+                    # builtin) when any security object is configured. When no
+                    # security is configured, pass through raw toolsets.
                     use_managed = (self._security_pipeline is not None
-                                   or self._baseline_policy is not None)
+                                   or self._baseline_policy is not None
+                                   or self._tool_policy_provider is not None)
                     if use_managed and cap_bundle.tool_contributions:
-                        import inspect as _inspect
-                        from pydantic_ai.toolsets import FunctionToolset as _FTS
-                        from ..tool.auto_descriptor import extract_handler
-                        from ..tool.managed import ManagedToolAdapter
                         from ..tool.managed_toolset import ManagedToolsetWrapper
-                        managed_ts = _FTS()
                         for contrib in cap_bundle.tool_contributions:
-                            # Try per-handler extraction (FunctionToolset path).
-                            any_extracted = False
-                            for desc in contrib.descriptors:
-                                handler = extract_handler(contrib.toolset, desc.name)
-                                if handler is None:
-                                    continue
-                                any_extracted = True
-                                _adapter = ManagedToolAdapter(
-                                    descriptor=desc, handler=handler,
-                                    policy_provider=self._tool_policy_provider,
-                                    security_pipeline=self._security_pipeline,
-                                    baseline_policy=self._baseline_policy,
-                                    run_context=context,
-                                )
-                                async def _managed_invoke(_a=_adapter, **kw):
-                                    return await _a.invoke(**kw)
-                                _managed_invoke.__name__ = desc.name
-                                try:
-                                    _managed_invoke.__signature__ = _inspect.signature(handler)
-                                except (ValueError, TypeError):
-                                    pass
-                                managed_ts.add_function(_managed_invoke)
-                            # If no handlers extracted (opaque toolset like MCP),
-                            # wrap the entire toolset at the call_tool level.
-                            if not any_extracted and contrib.descriptors:
+                            if contrib.descriptors:
                                 wrapper = ManagedToolsetWrapper(
                                     contrib.toolset,
                                     descriptor=contrib.descriptors[0],
                                     security_pipeline=self._security_pipeline,
+                                    tool_executor=self._tool_executor_for_managed,
                                     run_context=context,
                                 )
                                 toolsets.append(wrapper)
-                        if managed_ts.tools:
-                            toolsets.append(managed_ts)
+                            else:
+                                toolsets.append(contrib.toolset)
                     else:
                         toolsets.extend(cap_bundle.toolsets)
+                elif needs_default:
+                    # No assembler wired (e.g. a bare AgentRunner) — fall back
+                    # to the raw builtin toolset so existing callers keep working.
+                    from ..execution.toolset import (
+                        BuiltinToolContext, build_builtin_toolset,
+                    )
+                    toolsets.append(build_builtin_toolset(BuiltinToolContext(
+                        backend=deps.execution,
+                        enabled_tools={"file", "terminal"},
+                    )))
+                # ToolExposureApplied + PromptCatalog events only fire when the
+                # capability assembler ran (cap_bundle exists).
+                if cap_bundle is not None:
                     from ..events.payloads import PromptCatalogInjected, ToolExposureApplied
                     await self._event_store.append(
                         stream_id=context.run_id, run_id=context.run_id,
@@ -495,18 +498,6 @@ class AgentRunner:
                                 payload=PromptCatalogInjected(
                                     agent_id=agent.spec.id, section=section),
                             )
-                elif agent.spec.tools is None and deps.execution is not None:
-                    # tools unset (None) + execution backend -> default builtin
-                    # toolset. An explicit empty tuple (() = "no tools") or a
-                    # non-empty tuple without an assembler leaves toolsets empty.
-                    from ..execution.toolset import (
-                        BuiltinToolContext,
-                        build_builtin_toolset,
-                    )
-                    toolsets.append(build_builtin_toolset(BuiltinToolContext(
-                        backend=deps.execution,
-                        enabled_tools={"file", "terminal"},
-                    )))
                 # ModelPolicy.timeout_seconds is enforced by wrapping
                 # each graph step (``run.__anext__()``) in asyncio.wait_for with
                 # the REMAINING budget. The model call happens at this await

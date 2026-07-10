@@ -82,15 +82,20 @@ class CompositeSecurityPipeline:
         self._pipelines = tuple(pipelines)
 
     async def _evaluate(self, hook_name: str, event: Any) -> PipelineDecision:
+        # Collect ALL decisions; only DENY short-circuits. This ensures a later
+        # pipeline's DENY is not masked by an earlier REQUIRE_APPROVAL.
         modifications: "list[Any]" = []
+        require_approval: "PipelineDecision | None" = None
         for p in self._pipelines:
             decision = await getattr(p, hook_name)(event)
             if decision.action == PipelineAction.DENY:
                 return decision
             if decision.action == PipelineAction.REQUIRE_APPROVAL:
-                return decision
-            if decision.action == PipelineAction.MODIFY and decision.modified_payload is not None:
+                require_approval = decision
+            elif decision.action == PipelineAction.MODIFY and decision.modified_payload is not None:
                 modifications.append(decision.modified_payload)
+        if require_approval is not None:
+            return require_approval
         final_payload = modifications[-1] if modifications else None
         return PipelineDecision(action=PipelineAction.ALLOW, modified_payload=final_payload)
 

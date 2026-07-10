@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Adapter bridging the existing ToolPolicyMetadata-based provider to the new
-ToolPolicyProvider Protocol (resolve descriptor -> ResolvedToolPolicy)."""
+"""Adapter bridging the existing ToolSpec/ToolPolicyMetadata-based provider to
+the new ToolPolicyProvider Protocol (resolve descriptor -> ResolvedToolPolicy).
+Maps ALL fields from the existing ToolSpec that have runtime consumers."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .policy import ResolvedToolPolicy
 
@@ -15,7 +16,8 @@ if TYPE_CHECKING:
 class MetadataBackedPolicyProvider:
     """Wraps an old-style ``get_metadata_map()`` provider and resolves a
     ToolDescriptor into a ResolvedToolPolicy by looking up the tool's metadata.
-    Tools not in the metadata map get default policy (enabled, no approval)."""
+    Tools not in the metadata map get default policy (enabled, no approval).
+    Provider errors fail closed."""
 
     def __init__(self, metadata_provider: Any) -> None:
         self._provider = metadata_provider
@@ -24,17 +26,26 @@ class MetadataBackedPolicyProvider:
         try:
             metadata_map = await self._provider.get_metadata_map()
         except Exception:
-            # Fail closed: if the provider errors, return a restrictive default.
             return ResolvedToolPolicy(enabled=True, require_approval=True, risk="high")
         meta = metadata_map.get(descriptor.name)
         if meta is None:
             return ResolvedToolPolicy()
+        # Map all ToolSpec/ToolPolicyMetadata fields that have consumers.
+        risk = str(getattr(meta, "risk", "medium")).lower()
+        approval = getattr(meta, "approval", None)
+        require_approval = approval is not None and str(approval).upper() != "NEVER"
+        side_effect = getattr(meta, "side_effect", None)
+        idempotent = bool(getattr(meta, "idempotent", False))
+        timeout = getattr(meta, "timeout_seconds", None)
         return ResolvedToolPolicy(
             enabled=True,
-            require_approval=getattr(meta, "approval", None) is not None
-                             and str(getattr(meta, "approval", "")).upper() != "NEVER",
-            risk=str(getattr(meta, "risk", "medium")).lower(),
+            timeout_seconds=float(timeout) if timeout is not None else None,
+            max_retries=0,
+            idempotent=idempotent,
+            require_approval=require_approval,
+            risk=risk,
+            metadata={
+                "permissions": [str(p) for p in getattr(meta, "permissions", frozenset())],
+                "side_effect": str(side_effect) if side_effect is not None else "read_only",
+            },
         )
-
-
-from typing import Any  # noqa: E402

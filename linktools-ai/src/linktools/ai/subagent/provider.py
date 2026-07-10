@@ -77,10 +77,10 @@ class SubagentProvider:
             max_concurrency=max_concurrency,
             allowed_packages=allowed_packages,
             parent_run_id=context.run_id,
-            root_run_id=context.run_id,
+            root_run_id=context.root_run_id or context.run_id,
             parent_user_id=context.user_id,
             parent_tenant_id=context.tenant_id,
-            parent_workspace=context.workspace,  # top-level resolution seeds root as this run
+            parent_workspace=context.workspace,
             parent_session_id=context.session_id,
         )
         from ..security.descriptor import ToolDescriptor

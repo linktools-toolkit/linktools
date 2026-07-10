@@ -228,6 +228,9 @@ class Runtime:
             baseline_policy=runner_baseline_policy,
             tool_policy_provider=runner_policy_provider,
         )
+        # Wire the ToolExecutor so ManagedToolsetWrapper can delegate policy/
+        # approval checks for managed tool calls.
+        runner._tool_executor_for_managed = resolved_executor
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
             run_store=storage.runs,

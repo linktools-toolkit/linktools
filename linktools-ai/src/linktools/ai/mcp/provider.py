@@ -53,6 +53,7 @@ class MCPProvider:
     ) -> CapabilityBundle:
         ids = await self._target_ids(ref, context)
         toolsets: "list[Any]" = []
+        contributions: "list[Any]" = []
         final_names_by_server: "dict[str, tuple[str, ...]]" = {}
         max_per_cap = context.exposure_policy.max_tools_per_capability
         for server_id in ids:
@@ -79,8 +80,23 @@ class MCPProvider:
             toolset = await self._toolset(spec)
             if toolset is not None:
                 toolsets.append(toolset)
+                # Build ToolContribution with conservative MCP descriptors.
+                from ..security.descriptor import ToolDescriptor
+                from ..tool.contribution import ToolContribution
+                kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
+                # Conservative: unknown MCP tools are treated as write/high/mutating
+                # (default conservative when mutation unknown).
+                descs = tuple(
+                    ToolDescriptor(
+                        name=n, category="mcp-write", risk="high", mutating=True, **kw,
+                    ) for n in final
+                )
+                contributions.append(ToolContribution(toolset=toolset, descriptors=descs))
         detect_mcp_conflicts(final_names_by_server)
-        return CapabilityBundle(toolsets=tuple(toolsets))
+        return CapabilityBundle(
+            toolsets=tuple(toolsets),
+            tool_contributions=tuple(contributions),
+        )
 
     async def _target_ids(self, ref: CapabilityRef, context: CapabilityContext) -> "tuple[str, ...]":
         if ref.name == "*":
