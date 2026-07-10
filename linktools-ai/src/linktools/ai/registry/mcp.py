@@ -21,6 +21,7 @@ class MCPServerSpec:
     name: str
     transport: str  # "stdio" | "sse" | "http"
     command_or_url: str
+    discovery_mode: str = "strict"  # "strict" | "best_effort"
     # Structured transport fields. ``command_or_url`` is kept as a
     # backward-compatible derivation; new code should read command/url directly.
     command: "tuple[str, ...] | None" = None

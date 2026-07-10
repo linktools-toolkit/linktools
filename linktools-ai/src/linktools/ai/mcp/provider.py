@@ -59,6 +59,15 @@ class MCPProvider:
             spec = await self._spec(server_id)
             # Governance: enumerate -> filter -> prefix -> cap.
             raw = await self._list_tools(spec)
+            # Strict discovery: when governance config is present but tools
+            # cannot be enumerated, fail closed rather than silently passthrough.
+            has_governance = (spec.enabled_tools is not None or spec.disabled_tools
+                              or spec.tool_prefix is not None)
+            if not raw and has_governance and getattr(spec, "discovery_mode", "strict") == "strict":
+                raise CapabilityResolutionError(
+                    f"mcp server {server_id!r}: strict discovery mode cannot verify "
+                    f"tool governance (enabled/disabled/prefix) without live enumeration"
+                )
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
             if max_per_cap and len(final) > max_per_cap:

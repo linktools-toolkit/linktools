@@ -41,7 +41,8 @@ class _Executor:
         self._fail = set(fail)
 
     async def execute(self, *, agent_spec, task, context, parent_run_id, root_run_id,
-                      parent_session_id, scope, timeout_seconds):
+                      parent_session_id, scope, timeout_seconds,
+                      user_id=None, tenant_id=None, workspace=None):
         self.calls.append((agent_spec.id, task, parent_run_id, parent_session_id, scope))
         if agent_spec.id in self._fail:
             return SubagentResult(

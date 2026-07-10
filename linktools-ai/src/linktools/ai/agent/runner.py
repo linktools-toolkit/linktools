@@ -53,7 +53,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..errors import InvalidRunTransitionError, ModelPolicyExceededError, ModelRoutingError, RunConflictError, RunPaused
 from ..events.payloads import (
@@ -129,6 +129,9 @@ class AgentRunner:
                  approval_store: "ApprovalStore | None" = None,
                  capability_assembler: "CapabilityAssembler | None" = None,
                  capability_options: "CapabilityRuntimeOptions | None" = None,
+                 security_pipeline: Any = None,
+                 baseline_policy: Any = None,
+                 tool_policy_provider: Any = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -178,6 +181,9 @@ class AgentRunner:
         # toolset when an execution backend is present).
         self._capability_assembler = capability_assembler
         self._capability_options = capability_options
+        self._security_pipeline = security_pipeline
+        self._baseline_policy = baseline_policy
+        self._tool_policy_provider = tool_policy_provider
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -414,9 +420,61 @@ class AgentRunner:
                         execution=deps.execution, run_id=context.run_id,
                         root_run_id=context.root_run_id, session_id=context.session_id,
                         event_store=self._event_store,
+                        user_id=context.user_id, tenant_id=context.tenant_id,
+                        workspace=context.workspace,
                     )
                     cap_bundle = await self._capability_assembler.assemble(agent.spec, cap_ctx)
-                    toolsets.extend(cap_bundle.toolsets)
+                    # Managed path: when a SecurityPipeline or baseline is
+                    # configured, wrap each tool through ManagedToolAdapter so
+                    # every call passes through the unified governance chain
+                    # (policy, pipeline, baseline, timeout, events). Otherwise
+                    # use the legacy direct-toolset path (backward compat).
+                    use_managed = (self._security_pipeline is not None
+                                   or self._baseline_policy is not None)
+                    if use_managed and cap_bundle.tool_contributions:
+                        import inspect as _inspect
+                        from pydantic_ai.toolsets import FunctionToolset as _FTS
+                        from ..tool.auto_descriptor import extract_handler
+                        from ..tool.managed import ManagedToolAdapter
+                        from ..tool.managed_toolset import ManagedToolsetWrapper
+                        managed_ts = _FTS()
+                        for contrib in cap_bundle.tool_contributions:
+                            # Try per-handler extraction (FunctionToolset path).
+                            any_extracted = False
+                            for desc in contrib.descriptors:
+                                handler = extract_handler(contrib.toolset, desc.name)
+                                if handler is None:
+                                    continue
+                                any_extracted = True
+                                _adapter = ManagedToolAdapter(
+                                    descriptor=desc, handler=handler,
+                                    policy_provider=self._tool_policy_provider,
+                                    security_pipeline=self._security_pipeline,
+                                    baseline_policy=self._baseline_policy,
+                                    run_context=context,
+                                )
+                                async def _managed_invoke(_a=_adapter, **kw):
+                                    return await _a.invoke(**kw)
+                                _managed_invoke.__name__ = desc.name
+                                try:
+                                    _managed_invoke.__signature__ = _inspect.signature(handler)
+                                except (ValueError, TypeError):
+                                    pass
+                                managed_ts.add_function(_managed_invoke)
+                            # If no handlers extracted (opaque toolset like MCP),
+                            # wrap the entire toolset at the call_tool level.
+                            if not any_extracted and contrib.descriptors:
+                                wrapper = ManagedToolsetWrapper(
+                                    contrib.toolset,
+                                    descriptor=contrib.descriptors[0],
+                                    security_pipeline=self._security_pipeline,
+                                    run_context=context,
+                                )
+                                toolsets.append(wrapper)
+                        if managed_ts.tools:
+                            toolsets.append(managed_ts)
+                    else:
+                        toolsets.extend(cap_bundle.toolsets)
                     from ..events.payloads import PromptCatalogInjected, ToolExposureApplied
                     await self._event_store.append(
                         stream_id=context.run_id, run_id=context.run_id,

@@ -51,6 +51,14 @@ class SubagentProvider:
         max_concurrency = int(cfg.get("max_concurrency", DEFAULT_MAX_CONCURRENCY))
         timeout = cfg.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
 
+        # Reject invalid limits at resolution time.
+        if max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+        if max_depth < 1:
+            raise ValueError(f"max_depth must be >= 1, got {max_depth}")
+        if timeout is not None and float(timeout) <= 0:
+            raise ValueError(f"timeout_seconds must be > 0, got {timeout}")
+
         allowed = await self._allowed_names(ref)
         explicit = set(cfg.get("allowed_names") or [])
         if explicit:
@@ -69,10 +77,22 @@ class SubagentProvider:
             max_concurrency=max_concurrency,
             allowed_packages=allowed_packages,
             parent_run_id=context.run_id,
-            root_run_id=context.run_id,  # top-level resolution seeds root as this run
+            root_run_id=context.run_id,
+            parent_user_id=context.user_id,
+            parent_tenant_id=context.tenant_id,
+            parent_workspace=context.workspace,  # top-level resolution seeds root as this run
             parent_session_id=context.session_id,
         )
-        return CapabilityBundle(toolsets=(toolset,), middleware=())
+        from ..security.descriptor import ToolDescriptor
+        from ..tool.contribution import ToolContribution
+        contrib = ToolContribution(toolset=toolset, descriptors=(
+            ToolDescriptor(
+                name="call_subagent", source="subagent", category="subagent",
+                risk="medium", mutating=True,
+                capability_kind="subagent", capability_name=ref.name,
+            ),
+        ))
+        return CapabilityBundle(toolsets=(toolset,), tool_contributions=(contrib,))
 
     async def _allowed_names(self, ref: CapabilityRef) -> "set[str]":
         if ref.name == "*":

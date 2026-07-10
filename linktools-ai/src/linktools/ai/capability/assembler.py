@@ -88,6 +88,7 @@ class CapabilityAssembler:
 
         merged_prompt: "dict[str, str]" = {}
         merged_toolsets: "list[Any]" = []
+        merged_contributions: "list[Any]" = []
         owner_by_tool: "dict[str, str]" = {}
         total_tools = 0
         cap = context.exposure_policy
@@ -130,6 +131,23 @@ class CapabilityAssembler:
                     merged_prompt[section] = text
 
             merged_toolsets.extend(bundle.toolsets)
+            # Auto-wrap raw toolsets into ToolContributions with conservative
+            # descriptors so downstream (ManagedToolAdapter) never needs
+            # toolset introspection (compat adaptation).
+            if bundle.tool_contributions:
+                merged_contributions.extend(bundle.tool_contributions)
+            elif bundle.toolsets:
+                from ..tool.auto_descriptor import auto_contribute
+                for ts in bundle.toolsets:
+                    merged_contributions.append(auto_contribute(
+                        ts, source=ref.kind, capability_kind=ref.kind,
+                        capability_name=ref.name))
+            # Reject non-empty resources (lifecycle not implemented).
+            if bundle.resources:
+                raise CapabilityResolutionError(
+                    f"agent {spec.id}: capability {ref} returned non-empty resources; "
+                    f"resource lifecycle is not implemented in this phase"
+                )
             total_tools += len(names)
 
         if total_tools > cap.max_tools_total:
@@ -144,6 +162,7 @@ class CapabilityAssembler:
         return CapabilityBundle(
             prompt_sections=merged_prompt,
             toolsets=tuple(merged_toolsets),
+            tool_contributions=tuple(merged_contributions),
             middleware=tuple(),
             resources=tuple(),
         )

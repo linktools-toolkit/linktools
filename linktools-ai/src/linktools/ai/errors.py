@@ -157,6 +157,11 @@ class ToolTimeoutError(ToolError):
     pass
 
 
+class TransientToolError(ToolError):
+    """A tool execution error that MAY succeed on retry (network blip, transient
+    lock conflict, etc.). ManagedToolAdapter retries these up to max_retries."""
+
+
 class ToolIdempotencyConflictError(ToolError):
     pass
 

@@ -16,6 +16,8 @@ from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
 from ..capability.ref import CapabilityRef
 from ..providers.skill import SkillSpecProvider
+from ..security.descriptor import ToolDescriptor
+from ..tool.contribution import ToolContribution
 from .prompt import render_skill_catalog
 from .toolset import _summary_from_spec, build_skill_toolset
 
@@ -51,8 +53,20 @@ class SkillProvider:
         sections: "dict[str, str]" = {}
         if context.exposure_policy.expose_prompt_catalog and summaries:
             sections["skills"] = render_skill_catalog(summaries)
-        return CapabilityBundle(prompt_sections=sections, toolsets=(toolset,))
+        contribution = _skill_contribution(toolset)
+        return CapabilityBundle(prompt_sections=sections, toolsets=(toolset,),
+                                tool_contributions=(contribution,))
 
     def _resolve_single(self, skill_id, emit=None) -> CapabilityBundle:
         toolset = build_skill_toolset(self.skill_provider, authorized={skill_id}, emit=emit)
-        return CapabilityBundle(toolsets=(toolset,))
+        contribution = _skill_contribution(toolset)
+        return CapabilityBundle(toolsets=(toolset,), tool_contributions=(contribution,))
+
+
+def _skill_contribution(toolset) -> ToolContribution:
+    """Both skill tools are read-only discovery."""
+    kw = dict(source="skill", capability_kind="skill", category="discovery", risk="low", mutating=False)
+    return ToolContribution(toolset=toolset, descriptors=(
+        ToolDescriptor(name="list_skills", **kw),
+        ToolDescriptor(name="read_skill", **kw),
+    ))

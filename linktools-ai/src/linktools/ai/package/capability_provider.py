@@ -20,6 +20,8 @@ from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.ref import CapabilityRef
 from ..providers.package import PackageResourceProvider
+from ..security.descriptor import ToolDescriptor
+from ..tool.contribution import ToolContribution
 from ..subagent.runner import SubagentExecutor
 from .entrypoint import EntrypointInfo
 from .resolver import EntrypointResolver
@@ -68,7 +70,13 @@ class PackageProvider:
                 max_read_bytes=cfg.get("max_read_bytes", cap.max_read_bytes),
                 emit=emit,
             )
-            return CapabilityBundle(toolsets=(ts,))
+            pkw = dict(source="package", capability_kind="package-resource",
+                       capability_name=ref.name, category="package-read", risk="low", mutating=False)
+            contrib = ToolContribution(toolset=ts, descriptors=(
+                ToolDescriptor(name="list_package_resources", **pkw),
+                ToolDescriptor(name="read_package_resource", **pkw),
+            ))
+            return CapabilityBundle(toolsets=(ts,), tool_contributions=(contrib,))
 
         if ref.kind == "package-entrypoint":
             if self.entrypoint_resolver is None:
@@ -88,7 +96,14 @@ class PackageProvider:
                 parent_run_id=context.run_id,
                 parent_session_id=context.session_id,
             )
-            return CapabilityBundle(toolsets=(ts,))
+            ekw = dict(source="package", capability_kind="package-entrypoint", capability_name=ref.name)
+            descs = [ToolDescriptor(name="list_package_entrypoints", category="discovery",
+                                    risk="low", mutating=False, **ekw)]
+            if expose_call:
+                descs.append(ToolDescriptor(name="call_package_entrypoint", category="package-execute",
+                                            risk="high", mutating=True, **ekw))
+            contrib = ToolContribution(toolset=ts, descriptors=tuple(descs))
+            return CapabilityBundle(toolsets=(ts,), tool_contributions=(contrib,))
 
         # An unknown package-* kind slipped through; nothing to expose.
         return CapabilityBundle()
