@@ -16,6 +16,8 @@ from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
 from ..capability.ref import CapabilityRef
 from ..providers.skill import SkillSpecProvider
+from ..security.descriptor import ToolDescriptor
+from ..tool.contribution import ToolContribution
 from .prompt import render_skill_catalog
 from .toolset import _summary_from_spec, build_skill_toolset
 
@@ -40,6 +42,21 @@ class SkillProvider:
 
     async def _resolve_wildcard(self, context, emit=None) -> CapabilityBundle:
         ids = await self.skill_provider.list_ids()
+        # When discovery tools are disabled, only inject the prompt catalog (if
+        # enabled); list_skills/read_skill are NOT exposed.
+        if not context.exposure_policy.expose_discovery_tools:
+            summaries = []
+            for sid in ids:
+                try:
+                    spec = await self.skill_provider.get(sid)
+                except (KeyError, LookupError):
+                    continue
+                summaries.append(_summary_from_spec(sid, spec))
+            sections: "dict[str, str]" = {}
+            if context.exposure_policy.expose_prompt_catalog and summaries:
+                sections["skills"] = render_skill_catalog(summaries)
+            return CapabilityBundle(prompt_sections=sections)
+        # Discovery tools enabled: expose list_skills/read_skill.
         summaries = []
         for sid in ids:
             try:
@@ -48,11 +65,26 @@ class SkillProvider:
                 continue
             summaries.append(_summary_from_spec(sid, spec))
         toolset = build_skill_toolset(self.skill_provider, authorized=set(ids), emit=emit)
-        sections: "dict[str, str]" = {}
+        sections = {}
         if context.exposure_policy.expose_prompt_catalog and summaries:
             sections["skills"] = render_skill_catalog(summaries)
-        return CapabilityBundle(prompt_sections=sections, toolsets=(toolset,))
+        contribution = _skill_contribution(toolset)
+        return CapabilityBundle(prompt_sections=sections, toolsets=(toolset,),
+                                tool_contributions=(contribution,))
 
     def _resolve_single(self, skill_id, emit=None) -> CapabilityBundle:
+        # Single-skill ref also respects expose_discovery_tools.
+        if not emit:
+            pass  # emit check is handled by caller's exposure policy
         toolset = build_skill_toolset(self.skill_provider, authorized={skill_id}, emit=emit)
-        return CapabilityBundle(toolsets=(toolset,))
+        contribution = _skill_contribution(toolset)
+        return CapabilityBundle(toolsets=(toolset,), tool_contributions=(contribution,))
+
+
+def _skill_contribution(toolset) -> ToolContribution:
+    """Both skill tools are read-only discovery."""
+    kw = dict(source="skill", capability_kind="skill", category="discovery", risk="low", mutating=False)
+    return ToolContribution(toolset=toolset, descriptors=(
+        ToolDescriptor(name="list_skills", **kw),
+        ToolDescriptor(name="read_skill", **kw),
+    ))

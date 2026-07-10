@@ -34,6 +34,10 @@ class CapabilityContext:
     root_run_id: "str | None" = None
     session_id: "str | None" = None
     event_store: "EventStore | None" = None
+    # Identity fields propagated to subagent child runs.
+    user_id: "str | None" = None
+    tenant_id: "str | None" = None
+    workspace: Any = None
 
 
 @runtime_checkable

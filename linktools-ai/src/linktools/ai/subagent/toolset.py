@@ -58,6 +58,9 @@ def build_subagent_toolset(
     parent_run_id: "str | None" = None,
     root_run_id: "str | None" = None,
     parent_session_id: "str | None" = None,
+    parent_user_id: "str | None" = None,
+    parent_tenant_id: "str | None" = None,
+    parent_workspace: Any = None,
 ) -> FunctionToolset:
     """Level-2 execution tool: call_subagent. Only declared agent ids are
     admitted; a package-scoped call must target a package in ``allowed_packages``
@@ -97,6 +100,8 @@ def build_subagent_toolset(
                 parent_run_id=parent_run_id, root_run_id=root_run_id,
                 parent_session_id=parent_session_id, scope=pkg_scope,
                 timeout_seconds=timeout_seconds,
+                user_id=parent_user_id, tenant_id=parent_tenant_id,
+                workspace=parent_workspace,
             )
         return result.model_dump()
 

@@ -53,12 +53,22 @@ class MCPProvider:
     ) -> CapabilityBundle:
         ids = await self._target_ids(ref, context)
         toolsets: "list[Any]" = []
+        contributions: "list[Any]" = []
         final_names_by_server: "dict[str, tuple[str, ...]]" = {}
         max_per_cap = context.exposure_policy.max_tools_per_capability
         for server_id in ids:
             spec = await self._spec(server_id)
             # Governance: enumerate -> filter -> prefix -> cap.
             raw = await self._list_tools(spec)
+            # Strict discovery: when governance config is present but tools
+            # cannot be enumerated, fail closed rather than silently passthrough.
+            has_governance = (spec.enabled_tools is not None or spec.disabled_tools
+                              or spec.tool_prefix is not None)
+            if not raw and has_governance and getattr(spec, "discovery_mode", "strict") == "strict":
+                raise CapabilityResolutionError(
+                    f"mcp server {server_id!r}: strict discovery mode cannot verify "
+                    f"tool governance (enabled/disabled/prefix) without live enumeration"
+                )
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
             if max_per_cap and len(final) > max_per_cap:
@@ -70,8 +80,23 @@ class MCPProvider:
             toolset = await self._toolset(spec)
             if toolset is not None:
                 toolsets.append(toolset)
+                # Build ToolContribution with conservative MCP descriptors.
+                from ..security.descriptor import ToolDescriptor
+                from ..tool.contribution import ToolContribution
+                kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
+                # Conservative: unknown MCP tools are treated as write/high/mutating
+                # (default conservative when mutation unknown).
+                descs = tuple(
+                    ToolDescriptor(
+                        name=n, category="mcp-write", risk="high", mutating=True, **kw,
+                    ) for n in final
+                )
+                contributions.append(ToolContribution(toolset=toolset, descriptors=descs))
         detect_mcp_conflicts(final_names_by_server)
-        return CapabilityBundle(toolsets=tuple(toolsets))
+        return CapabilityBundle(
+            toolsets=tuple(toolsets),
+            tool_contributions=tuple(contributions),
+        )
 
     async def _target_ids(self, ref: CapabilityRef, context: CapabilityContext) -> "tuple[str, ...]":
         if ref.name == "*":

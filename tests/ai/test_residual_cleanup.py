@@ -85,13 +85,14 @@ async def test_import_linktools_ai_without_sqlalchemy():
     assert r.returncode == 0, f"STDERR:\n{r.stderr}"
 
 
-def test_deprecated_runtime_api_has_removal_plan():
+def test_resolve_methods_retained_as_public_api():
     rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
-    # Each deprecated method documents its replacement + removal target.
-    assert rt.count("Removal target: next major version") >= 3
-    assert "runtime.providers.agents.get" in rt
-    assert "runtime.providers.swarms.get" in rt
-    assert "runtime.capability_assembler.assemble" in rt
+    # resolve_agent / resolve_swarm / assemble are retained as convenience
+    # wrappers (confirmed spec §11.2), NOT deprecated.
+    assert "def resolve_agent" in rt
+    assert "def resolve_swarm" in rt
+    assert "def assemble" in rt
+    assert "DeprecationWarning" not in rt
 
 
 def test_tool_exposure_counting_uses_shared_helper():

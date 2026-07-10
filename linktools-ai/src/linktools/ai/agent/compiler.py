@@ -57,7 +57,7 @@ class AgentCompiler:
             middleware_capability = None
         pydantic_agent = PydanticAgent(
             bundle.model,
-            output_type=spec.output_schema or dict,
+            output_type=spec.output_schema or str,
             capabilities=capabilities,
             deps_type=AgentDependencies,
         )

@@ -17,7 +17,8 @@ class _Executor:
         self.resolved_ids = []
 
     async def execute(self, *, agent_spec, task, context, parent_run_id, root_run_id,
-                      parent_session_id, scope, timeout_seconds):
+                      parent_session_id, scope, timeout_seconds,
+                      user_id=None, tenant_id=None, workspace=None):
         self.resolved_ids.append((agent_spec.id, scope.package_id if scope else None))
         return SubagentResult(
             agent_id=agent_spec.id, session_id="cs", run_id="cr", status="succeeded",

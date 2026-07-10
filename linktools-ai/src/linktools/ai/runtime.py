@@ -144,7 +144,8 @@ class Runtime:
               package_resources: "Any | None" = None,
               providers: "ProviderBundle | None" = None,
               options: "CapabilityRuntimeOptions | None" = None,
-              allow_mcp_wildcard: bool = False) -> "Runtime":
+              allow_mcp_wildcard: bool = False,
+              security: Any = None) -> "Runtime":
         """Assemble a Runtime from optional sub-components + capability providers.
 
         Capability providers may be passed either as a ``ProviderBundle`` or as
@@ -174,14 +175,17 @@ class Runtime:
         router = model_router or ModelRouter()
         resolved_executor = tool_executor
         if tool_executor is None and pause_on_approval:
-            # pause_on_approval only switches the executor to the pause/resume
-            # flow; it does NOT inject a default security policy. Callers that
-            # want a command denylist pass an explicit tool_executor built from
-            # linktools.ai.policy.presets.build_default_command_policy().
             from .policy.engine import PolicyEngine
+            from .security.baseline import SecurityBaseline
 
+            baseline = security if security is not None else SecurityBaseline()
+            rules: "list[Any]" = []
+            if baseline.enabled and baseline.command_policy is not None:
+                from .policy.command import CommandRule
+                rules.append(CommandRule(
+                    denied_patterns=baseline.command_policy.denied_patterns))
             resolved_executor = ToolExecutor(
-                policy=PolicyEngine(rules=()),
+                policy=PolicyEngine(rules=tuple(rules)),
                 approval_store=storage.approvals,
                 pause_on_approval=True,
             )
@@ -195,6 +199,20 @@ class Runtime:
             if storage.capabilities.cross_store_transactions else None
         )
         run_controller = RunController()
+        # Resolve the SecurityBaseline + pipeline for the runner.
+        from .security.baseline import SecurityBaseline
+        baseline = security if security is not None else SecurityBaseline()
+        runner_pipeline = getattr(baseline, "pipeline", None)
+        from .tool.policy import ResolvedToolPolicy
+        runner_baseline_policy = ResolvedToolPolicy() if baseline.enabled else None
+
+        # Wrap the old-style tool policy provider (get_metadata_map) into the
+        # new ToolPolicyProvider Protocol (resolve descriptor -> ResolvedToolPolicy).
+        runner_policy_provider = None
+        if bundle.tool_policies is not None:
+            from .tool.policy_adapter import MetadataBackedPolicyProvider
+            runner_policy_provider = MetadataBackedPolicyProvider(bundle.tool_policies)
+
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
             event_store=storage.events, checkpoint_store=storage.checkpoints,
@@ -206,7 +224,13 @@ class Runtime:
             execution=execution,
             approval_store=storage.approvals,
             capability_options=resolved_options,
+            security_pipeline=runner_pipeline,
+            baseline_policy=runner_baseline_policy,
+            tool_policy_provider=runner_policy_provider,
         )
+        # Wire the ToolExecutor so ManagedToolsetWrapper can delegate policy/
+        # approval checks for managed tool calls.
+        runner._tool_executor_for_managed = resolved_executor
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
             run_store=storage.runs,
@@ -261,14 +285,8 @@ class Runtime:
         return self._capability_assembler
 
     async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
-        """Deprecated: use ``runtime.capability_assembler.assemble(spec, context)``.
-        Removal target: next major version. Kept for compatibility; emits
-        DeprecationWarning."""
-        import warnings
-        warnings.warn(
-            "Runtime.assemble is deprecated; use runtime.capability_assembler.assemble",
-            DeprecationWarning, stacklevel=2,
-        )
+        """Convenience wrapper around ``runtime.capability_assembler.assemble(spec, context)``.
+        ."""
         from .capability.provider import CapabilityContext
 
         if self._capability_assembler is None:
@@ -282,28 +300,16 @@ class Runtime:
         return await self._capability_assembler.assemble(spec, context)
 
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
-        """Deprecated: use ``runtime.providers.swarms.get(swarm_id)``.
-        Removal target: next major version. Kept for compatibility; emits
-        DeprecationWarning."""
-        import warnings
-        warnings.warn(
-            "Runtime.resolve_swarm is deprecated; use runtime.providers.swarms.get",
-            DeprecationWarning, stacklevel=2,
-        )
+        """Convenience wrapper around ``runtime.providers.swarms.get(swarm_id)``.
+        ."""
         bundle = self._provider_bundle
         if bundle is None or bundle.swarms is None:
             raise SwarmError("no SwarmSpecProvider configured")
         return await bundle.swarms.get(swarm_id)
 
     async def resolve_agent(self, agent_id: str) -> AgentSpec:
-        """Deprecated: use ``runtime.providers.agents.get(agent_id)``.
-        Removal target: next major version. Kept for compatibility; emits
-        DeprecationWarning."""
-        import warnings
-        warnings.warn(
-            "Runtime.resolve_agent is deprecated; use runtime.providers.agents.get",
-            DeprecationWarning, stacklevel=2,
-        )
+        """Convenience wrapper around ``runtime.providers.agents.get(agent_id)``.
+        ."""
         bundle = self._provider_bundle
         if bundle is None or bundle.agents is None:
             raise SwarmError("no AgentSpecProvider configured")
@@ -518,7 +524,8 @@ def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler
     from .subagent.runner import _CURRENT_DEPTH
 
     async def execute(*, agent_spec, task, context, parent_run_id, root_run_id,
-                      parent_session_id, scope, timeout_seconds):
+                      parent_session_id, scope, timeout_seconds,
+                      user_id=None, tenant_id=None, workspace=None):
         child_session = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         await storage.sessions.create(SessionRecord(
@@ -531,8 +538,8 @@ def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler
         run_ctx = RunContext(
             run_id=child_run, root_run_id=effective_root, parent_run_id=parent_run_id,
             session_id=child_session, runnable_id=agent_spec.id,
-            runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None,
-            workspace=None,
+            runnable_type=RunnableType.AGENT, user_id=user_id, tenant_id=tenant_id,
+            workspace=workspace,
         )
         scope_dict = None
         if scope is not None:
