@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Container discovery and loading (refactor spec Phase 4).
+"""Container discovery and loading.
 
-Extracted verbatim from ContainerManager._load_containers / _walk_containers /
-_load_container. Behavior is unchanged: scan builtin assets (depth 1) and each
-configured repo (depth 2), importing the first concrete BaseContainer subclass
-in a ``container.py`` or falling back to a SimpleContainer for a compose file.
+Scans builtin assets (depth 1) and each configured repo (depth 2), importing
+the first concrete BaseContainer subclass in a ``container.py`` or falling
+back to a SimpleContainer for a compose file.
 """
 import os
 from typing import TYPE_CHECKING

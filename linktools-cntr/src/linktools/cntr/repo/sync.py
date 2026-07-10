@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Git / local repo synchronization (refactor spec Phase 4).
-
-Extracted from ContainerManager.update_repos and the clone steps of add_repo.
-Behavior is unchanged: clone-on-demand for missing git repos, stash-or-reset on
-dirty working trees, branch checkout/create, fast-forward sync with a
-diverged-fallback, and stashed-change restore.
+"""Git / local repo synchronization: clone-on-demand for missing git repos,
+stash-or-reset on dirty working trees, branch checkout/create, fast-forward
+sync with a diverged-fallback, and stashed-change restore.
 """
 import os
 from typing import TYPE_CHECKING

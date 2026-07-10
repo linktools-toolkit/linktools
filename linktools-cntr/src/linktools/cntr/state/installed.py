@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Installed-container state (refactor spec Phase 4).
-
-Extracted verbatim from ContainerManager: get/add/remove installed containers and
-the INSTALLED_CONTAINERS load/dump helpers. Behavior is unchanged, including the
-dependency-aware removal (compare by name; refuse without --force; force removes
-dependents) fixed in §5.2.
+"""Installed-container state: get/add/remove installed containers and the
+dependency-aware removal (compare by name; refuse without --force unless a
+dependent is also being removed; --force removes dependents too).
 """
 from typing import TYPE_CHECKING
 
@@ -28,7 +25,7 @@ class InstalledStateStore:
 
     def get(self, resolve: bool = True) -> "list[BaseContainer]":
         with self.manager.environ.locks.process_lock("cntr:settings"):
-            containers = self._load(reload=False)
+            containers = self._load()
         if resolve:
             containers = self.manager.resolver.resolve_dependencies(containers)
         return containers
@@ -40,14 +37,14 @@ class InstalledStateStore:
                 container = self.manager.containers.get(name, None)
                 if container:
                     result.add(container)
-            containers = self._load(reload=True)
+            containers = self._load()
             containers.extend(result)
             self._dump(containers)
             return list(result)
 
     def remove(self, *names: str, force: bool = False) -> "list[BaseContainer]":
         with self.manager.environ.locks.process_lock("cntr:settings"):
-            containers = self._load(reload=True)
+            containers = self._load()
 
             result = set()
             remove_names = set(names)
@@ -77,13 +74,27 @@ class InstalledStateStore:
 
             return list(result)
 
-    def _load(self, reload: bool = False) -> "list[BaseContainer]":
+    def load_names(self) -> "list[str]":
+        """Return the raw persisted installed-container names, unresolved.
+
+        Used directly by manager.containers -- resolving these names to
+        container objects here (via manager.containers) would recurse back
+        into the property this feeds.
+        """
+        # A failed migration is not cached, so retry it on every access.
+        self.manager._migrated
+        return list(self.manager._persistent_store.get(_INSTALLED_KEY, []) or [])
+
+    def _dump_names(self, names: "Iterable[str]") -> None:
+        self.manager._migrated
+        self.manager._persistent_store.set(_INSTALLED_KEY, list(names))
+
+    def _load(self) -> "list[BaseContainer]":
         result = set()
-        for name in self.manager._load_setting(_INSTALLED_KEY, reload=reload, default=[]):
+        for name in self.load_names():
             if name in self.manager.containers:
                 result.add(self.manager.containers[name])
         return list(result)
 
     def _dump(self, containers: "Iterable[BaseContainer]") -> None:
-        self.manager._dump_setting(
-            _INSTALLED_KEY, list(set([container.name for container in containers])))
+        self._dump_names(list(set([container.name for container in containers])))

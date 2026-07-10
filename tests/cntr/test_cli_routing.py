@@ -7,6 +7,7 @@ replaced by a recorder and lifecycle hooks neutralized, then asserts the
 recorded docker-compose arguments match each command's pre-refactor line.
 """
 import linktools.cntr.__main__ as cntr_main
+import linktools.cntr.commands._shared as cntr_shared
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
@@ -34,7 +35,7 @@ def _record(manager, monkeypatch):
 def test_cli_up_partial_records_exact_args(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
     cntr_main.command.on_command_up(names=["portainer"], build=True, pull=False)
@@ -46,7 +47,7 @@ def test_cli_up_partial_records_exact_args(monkeypatch, fresh_manager):
 def test_cli_restart_partial_omits_default_pull(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
     cntr_main.command.on_command_restart(names=["portainer"], build=True, pull=False)
@@ -58,7 +59,7 @@ def test_cli_restart_partial_omits_default_pull(monkeypatch, fresh_manager):
 
 
 def test_cli_down_full_records_down(monkeypatch, fresh_manager):
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
     cntr_main.command.on_command_down(names=None)
@@ -70,10 +71,26 @@ def test_cli_down_full_records_down(monkeypatch, fresh_manager):
 def test_cli_up_pull_true_uses_always(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
     cntr_main.command.on_command_up(names=["portainer"], build=False, pull=True)
 
     assert ("build", "--pull", "portainer") not in recorded  # build=False
     assert ("up", "--detach", "--no-build", "--pull", "always", "portainer") in recorded
+
+
+def test_only_one_manager_singleton_backs_the_cli():
+    import linktools.cntr.__main__ as main_module
+    from linktools.cntr.manager import ContainerManager
+
+    assert isinstance(main_module.command, main_module.Command)
+    assert isinstance(main_module.manager, ContainerManager)
+
+
+def test_root_command_mounts_subcommands_in_order():
+    import linktools.cntr.__main__ as main_module
+
+    subcommands = main_module.Command().init_subcommands()
+    wrapped_names = [type(sub.command).__name__ for sub in subcommands[1:]]
+    assert wrapped_names == ["ExecCommand", "ConfigCommand", "RepoCommand"]

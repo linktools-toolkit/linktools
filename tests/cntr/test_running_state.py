@@ -10,6 +10,7 @@ by a recorder, hooks neutralized).
 import pytest
 
 import linktools.cntr.__main__ as cntr_main
+import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.context import EventContext
 from linktools.cntr.state.running import RuntimeStateUnavailable
 
@@ -91,7 +92,7 @@ def test_mark_stopped_full_clears(fresh_manager):
 def test_cli_partial_up_marks_only_target(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False)
     running = set(fresh_manager.running_state.get_persisted())
@@ -101,7 +102,7 @@ def test_cli_partial_up_marks_only_target(monkeypatch, fresh_manager):
 
 def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):
     fresh_manager.running_state._set(["portainer"])
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_down(names=["portainer"])
     assert "portainer" not in fresh_manager.running_state.get_persisted()
@@ -109,7 +110,7 @@ def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):
 
 def test_cli_full_down_clears_running(monkeypatch, fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer", "flare"])
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_down(names=None)
     assert fresh_manager.running_state.get_persisted() == []
@@ -118,7 +119,7 @@ def test_cli_full_down_clears_running(monkeypatch, fresh_manager):
 def test_cli_failed_up_does_not_mark_running(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(cntr_main, "manager", fresh_manager)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     fresh_manager.running_state._set([])
     _record(fresh_manager, monkeypatch, fail=True)
     with pytest.raises(RuntimeError):

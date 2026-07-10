@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Unified Docker Compose command assembly (refactor spec Phase 2).
+"""Unified Docker Compose command assembly.
 
 Both the CLI (``ct-cntr up/restart/down``) and the per-container ``exec``
 subcommands build the same kind of ``docker compose`` argument lists. This
-module centralizes that assembly so the two paths cannot drift, while preserving
-each path's exact pre-refactor command line.
+module centralizes that assembly so the two paths cannot drift.
 
 Two behavioral subtleties, each captured by a ``ComposeOptions`` flag so every
-caller reproduces its original arguments bit-for-bit (refactor spec §6.3):
+caller reproduces its own exact arguments:
 
 - when ``--pull`` is not requested, CLI ``up`` still emits ``--pull=false``
   (to build) and ``--pull missing`` (to up); ``restart`` and ``exec`` emit
@@ -38,13 +37,10 @@ class ComposeOptions:
     remove_orphans: bool = False
     services: "list[str]" = field(default_factory=list)
     # Only CLI ``up`` emits --pull=false / --pull missing when ``pull`` is False.
-    # ``restart`` and ``exec`` emit no pull flags in that case. Preserves the
-    # exact pre-refactor command lines (refactor spec §6.3 note 3).
+    # ``restart`` and ``exec`` emit no pull flags in that case.
     emit_default_pull: bool = False
     # CLI `up` and both `exec up`/`exec restart` include proxy --build-args;
-    # CLI `restart` deliberately never did (its own build_options list never
-    # collected them pre-refactor, unlike on_command_up's). Preserves that
-    # one divergence now that build_args() is shared by every caller.
+    # CLI `restart` deliberately never did.
     include_proxy_build_args: bool = True
 
 

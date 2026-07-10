@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lifecycle event dispatch (refactor spec Phase 4).
+"""Lifecycle event dispatch.
 
-Extracted verbatim from ContainerManager.notify_start/notify_stop/notify_remove.
-The hook/callback ordering is unchanged (refactor spec §8.5). ``notify_remove``'s
-full-container-only cleanup logic is preserved as-is; its known limitation is not
-fixed here to avoid mixing a behavior change with the code move.
+``notify_remove`` only reconciles the running-container set on a *full*
+container run; a partial removal leaves it untouched. This is a known
+limitation, not fixed here to keep this module a pure behavior-preserving
+move.
 """
 import contextlib
 from typing import TYPE_CHECKING

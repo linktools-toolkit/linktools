@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""One-time migration of cntr's legacy settings into ConfigStore (spec §21.2).
+"""One-time migration of cntr's legacy settings into ConfigStore.
 
 cntr historically stored its persistent user state (INSTALLED_CONTAINERS /
 INSTALLED_REPOS) in three successive formats. This module consolidates all of
@@ -33,7 +33,7 @@ module only supplies cntr's own legacy source paths.
 This is the ONLY module in the codebase that still (transitively, via
 ``ConfigMigration.migrate_shelve``) deals with the legacy ``FileCache``
 shelve format; both this migrator and ``linktools/cache.py`` are removed
-after one release (spec §21.2 / §3.3).
+after one release.
 """
 import os
 

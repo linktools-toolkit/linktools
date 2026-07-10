@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Repo configuration store (refactor spec Phase 4).
+"""Repo configuration store.
 
-Extracted from ContainerManager: read/add/update/remove the INSTALLED_REPOS store
-and manage the on-disk repo clone/symlink layout. Git sync is delegated to
-RepoSync. Behavior is unchanged.
+Read/add/update/remove the INSTALLED_REPOS store and manage the on-disk repo
+clone/symlink layout. Git sync is delegated to RepoSync.
 """
 import os
 import shutil
 from typing import TYPE_CHECKING
 
 from linktools import utils
+from linktools.decorator import cached_property
 
 from ..container import ContainerError
 from .sync import RepoSync
@@ -34,12 +34,27 @@ class RepoStore:
     def logger(self):
         return self.manager.logger
 
+    @cached_property
+    def _repo_path(self):
+        path = self.manager.data_path.joinpath("repo")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _load(self) -> "dict[str, dict[str, str]]":
+        # A failed migration is not cached, so retry it on every access.
+        self.manager._migrated
+        return self.manager._persistent_store.get(_REPO_KEY, {})
+
+    def _dump(self, repos: "dict[str, dict[str, str]]") -> None:
+        self.manager._migrated
+        self.manager._persistent_store.set(_REPO_KEY, repos)
+
     def get_all(self) -> "dict[str, dict[str, str]]":
-        return self.manager._load_setting(_REPO_KEY, default={})
+        return self._load()
 
     def add(self, url: str, branch: str = None, force: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
-            repos = self.manager._load_setting(_REPO_KEY, reload=True, default={})
+            repos = self._load()
 
             def ensure_repo_not_exist(key):
                 if key not in repos:
@@ -47,7 +62,7 @@ class RepoStore:
                 if not force:
                     raise ContainerError(f"Repository `{key}` already exists.")
                 self._remove_repo_file(repos.pop(key))
-                self.manager._dump_setting(_REPO_KEY, repos)
+                self._dump(repos)
 
             if url.startswith(_GIT_PREFIXES):
                 ensure_repo_not_exist(url)
@@ -68,7 +83,7 @@ class RepoStore:
                 self.sync.link_local(path, repo_path)
                 repos[path] = dict(type="local", repo_path=repo_path, repo_name=repo_name)
 
-            self.manager._dump_setting(_REPO_KEY, repos)
+            self._dump(repos)
 
     def update(self, branch: str = None, reset: bool = False) -> None:
         for url, meta in self.get_all().items():
@@ -76,17 +91,17 @@ class RepoStore:
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
-            repos = self.manager._load_setting(_REPO_KEY, reload=True, default={})
+            repos = self._load()
             if url not in repos:
                 raise ContainerError(f"Repository `{url}` not found.")
             self._remove_repo_file(repos.pop(url))
-            self.manager._dump_setting(_REPO_KEY, repos)
+            self._dump(repos)
 
     def _choose_repo_path(self, name: str) -> str:
         index = 0
-        path = os.path.join(self.manager._repo_path, name)
+        path = os.path.join(self._repo_path, name)
         while os.path.lexists(path):
-            path = os.path.join(self.manager._repo_path, f"{name}_{index}")
+            path = os.path.join(self._repo_path, f"{name}_{index}")
             index += 1
         return path
 

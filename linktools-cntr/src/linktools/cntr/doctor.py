@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Read-only environment & security checks (refactor spec Phase 6).
+"""Read-only environment & security checks.
 
 ``ct-cntr doctor`` inspects the runtime, generated compose, repos and config and
 reports findings as [WARN]/[INFO]/[OK]. It never modifies anything -- every new
-or safer behavior stays opt-in elsewhere (refactor spec §2.3, §10.4).
+or safer behavior stays opt-in elsewhere.
 """
 import os
 import shutil

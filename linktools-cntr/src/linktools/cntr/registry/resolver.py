@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Container dependency resolution (refactor spec Phase 4).
+"""Container dependency resolution.
 
-Extracted verbatim from ContainerManager.resolve_depend_containers so the
-manager can delegate to it. Behavior is unchanged: topological sort by declared
-dependencies (stable by (order, name)), with cycle and missing-dependency errors
-identical to the legacy implementation.
+Topological sort by declared dependencies (stable by (order, name)), with
+cycle and missing-dependency errors.
 """
 from typing import TYPE_CHECKING
 

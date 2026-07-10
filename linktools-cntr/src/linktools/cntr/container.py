@@ -1,232 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-@author  : Hu Ji
-@file    : deploy.py 
-@time    : 2023/05/21
-@site    :  
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
 import os
 import re
 import textwrap
-from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
-
-import yaml
-from jinja2 import Environment, TemplateError, FileSystemLoader
 
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
-from linktools.core import ConfigField, LazyProvider
+from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.errors import Error
+from linktools.rich import choose
 from linktools.runtime import lazy_load
-from linktools.rich import choose, confirm
 from linktools.types import MISSING
 from linktools.utils import get_md5
-from ..capabilities.cntr import __cap_cntr__
-from .runtime.compose import ComposeOptions
-
+from ._container import compose as _compose
+from ._container import exec as _exec
+from ._container import template as _template
+from ._container.expose import ExposeCategory, ExposeLink, ExposeMixin
+from ._container.nginx import NginxMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from pathlib import Path
     from typing import Any
-    from linktools.types import T, ConfigType, ConfigKeyType, PathType, QueryType
+    from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .manager import ContainerManager
     from .context import EventContext
-
-
-class ExposeCategory:
-
-    def __init__(self, name: str, desc: str):
-        self.name = name
-        self.desc = desc
-
-    def __call__(self, name: str, icon: str, desc: str, url: str):
-        return ExposeLink(self, name, icon, desc or name, url)
-
-
-class ExposeLink:
-
-    def __init__(self, category: "ExposeCategory", name: str, icon: str, desc: str, url: str):
-        self.category = category
-        self.name = name
-        self.icon = icon
-        self.desc = desc
-        self._url = url
-
-    @property
-    def url(self) -> "str | None":
-        if not self._url:
-            return None
-        return str(self._url)
-
-    @property
-    def is_valid(self) -> bool:
-        return not not self.url
-
-
-class ExposeMixin:
-    expose_public = ExposeCategory("public", "Public")
-    expose_private = ExposeCategory("private", "Private")
-    expose_container = ExposeCategory("container", "Internal")
-    expose_other = ExposeCategory("other", "Tools")
-
-    def load_config_url(self: "BaseContainer", key: "ConfigKeyType",
-                        *path: str, queries: "QueryType | None" = None):
-        def make_url():
-            url = self.get_config(key, type=str, default=None)
-            if url:
-                return utils.join_url(url, *path, queries=queries)
-            return ""
-
-        return lazy_load(make_url)
-
-    def load_port_url(self: "BaseContainer", key: "ConfigKeyType",
-                      *path: str, queries: "QueryType | None" = None, 
-                      https: bool = True):
-        def make_url():
-            port = self.get_config(key, type=int, default=0)
-            if 0 < port < 65535:
-                return utils.make_url(
-                    "https" if https else "http",
-                    self.manager.host,
-                    port,
-                    *path,
-                    queries=queries)
-            return ""
-
-        return lazy_load(make_url)
-
-    def load_nginx_url(
-            self: "BaseContainer", key: "ConfigKeyType",
-            *path: str, queries: "QueryType | None" = None, 
-            proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
-            proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
-            https_enable: bool = MISSING, waf_enable: bool = MISSING,
-            auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
-    ):
-
-        if not proxy_conf and not proxy_url:
-            return ""
-
-        def make_url():
-            domain = self.get_config(key, type=str, default=None)
-            if domain:
-                _https = True if https_enable is MISSING else https_enable
-                _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
-                scheme = "https" if _https else "http"
-                port = self.get_config("NGINX_HTTPS_PORT" if _https else "NGINX_HTTP_PORT")
-                return utils.make_url(scheme, domain, port, *path, queries=queries)
-            return ""
-
-        def make_nginx_conf():
-            domain = self.get_config(key, type=str, default=None)
-            if domain:
-
-                _https = True if https_enable is MISSING else https_enable
-                _https = _https and self.get_config("NGINX_HTTPS_ENABLE")
-
-                _waf = True if waf_enable is MISSING else waf_enable
-                _waf = _waf and self.get_config("NGINX_WAF_ENABLE")
-
-                self.write_nginx_conf(
-                    domain=domain,
-                    proxy_name=proxy_name,
-                    proxy_domain_name=proxy_domain_name,
-                    proxy_conf=proxy_conf,
-                    proxy_url=proxy_url,
-                    https_enable=_https,
-                    waf_enable=_waf,
-                    auth_enable=auth_enable,
-                    auth_extra=auth_extra,
-                )
-
-        # Idempotent: a container's nginx conf for a given proxy_conf/proxy_url is
-        # written once even if load_nginx_url is re-evaluated (refactor spec §7.5).
-        self.add_start_hook(("nginx_conf", str(proxy_conf), str(proxy_url)), make_nginx_conf)
-        return lazy_load(make_url)
-
-    def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType", 
-                             *path: str, queries: "QueryType | None" = None, 
-                             https: bool = True):
-        def make_url():
-            nonlocal https
-            domain = self.get_config(key, type=str, default=None)
-            if domain:
-                https = https and self.get_config("NGINX_HTTPS_ENABLE")
-                scheme = "https" if https else "http"
-                port = self.get_config("NGINX_HTTPS_PORT" if https else "NGINX_HTTP_PORT")
-                return utils.make_url(scheme, domain, port, *path, queries=queries)
-            return ""
-
-        return lazy_load(make_url)
-
-
-class NginxMixin:
-
-    def get_nginx_domain(self: "BaseContainer", name: str = None):
-
-        def get_domain(cfg: "Config"):
-            if not self.manager.containers["nginx"].enable:
-                return ""
-            if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
-                return cfg.get("NGINX_ROOT_DOMAIN")
-            root_domain = cfg.get("NGINX_ROOT_DOMAIN")
-            if root_domain in ("_", "localhost"):
-                return root_domain
-            if name is None:
-                return f"{self.name}.{root_domain}"
-            elif name.strip() == "":
-                return root_domain
-            return f"{name}.{root_domain}"
-
-        return LazyProvider(get_domain)
-
-    def write_nginx_conf(
-            self: "BaseContainer", domain: str, *,
-            proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
-            proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
-            https_enable: bool = MISSING, waf_enable: bool = MISSING,
-            auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
-    ):
-
-        nginx = self.manager.containers["nginx"]
-        if nginx.enable:
-            nginx.write_conf(
-                container=self,
-                domain=domain,
-                proxy_name=proxy_name,
-                proxy_domain_name=proxy_domain_name,
-                proxy_conf=proxy_conf,
-                proxy_url=proxy_url,
-                https_enable=https_enable,
-                waf_enable=waf_enable,
-                auth_enable=auth_enable,
-                auth_extra=auth_extra,
-                flush=False,
-            )
 
 
 class ContainerError(Error):
@@ -303,90 +104,20 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     @property
     def settings(self):
-        # Per-container operational settings (mount_paths, ...) moved off the
-        # legacy FileCache to a per-container cache namespace; use
-        # ``settings.transaction()`` for atomic read-modify-write batches.
+        """Return this container's operational cache namespace."""
         return self.manager.environ.cache.namespace("cntr:app:" + self.name)
 
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":
-        # A plain read -- no write happens in this property -- so it needs no
-        # transaction of its own. Wrapping the whole property (including
-        # render_template below) in one used to hold the settings store's
-        # transaction open for the full render: since CacheStore's nesting
-        # guard is store-wide, not per-namespace, any OTHER container's
-        # template that cross-references a container property backed by its
-        # own `with self.settings.transaction()` (e.g. authelia's
-        # oidc_clients/acl_rules, referenced by homelab containers doing
-        # OIDC integration) would collide with this one and raise
-        # "transactions cannot be nested" even though the two touch
-        # unrelated namespaces.
-        mount_paths = self.settings.get("mount_paths", {})
-        for name in self.manager.docker_compose_names:
-            path = self.get_source_path(name)
-            if not os.path.exists(path):
-                continue
-            data = self.render_template(path)
-            data = yaml.safe_load(data)
-            if "services" in data and isinstance(data["services"], dict):
-                for name, service in data["services"].items():
-                    if not isinstance(service, dict):
-                        continue
-                    service.setdefault("container_name", f"{self.manager.project_name}-{name}")
-                    service.setdefault("restart", self.get_config("SERVICE_RESTART_POLICY"))
-                    service.setdefault("logging", {
-                        "driver": self.get_config("SERVICE_LOG_DRIVER"),
-                        "options": {
-                            "max-size": self.get_config("SERVICE_LOG_MAX_SIZE"),
-                        }
-                    })
-                    network_mode = service.get("network_mode")
-                    if not (isinstance(network_mode, str) and (
-                        network_mode.startswith("container:")
-                        or network_mode.startswith("service:")
-                    )):
-                        service.setdefault("hostname", name)
-                    if "image" not in service:
-                        path = self.get_docker_file_path()
-                        if path and os.path.exists(path):
-                            build = service.setdefault("build", {})
-                            build.setdefault("context", str(self.get_docker_context_path()))
-                            build.setdefault("dockerfile", str(path))
-                    if "env_file" not in service:
-                        path = self.get_source_path(".env")
-                        if path and os.path.exists(path):
-                            service["env_file"] = [str(path)]
-                    container_paths = mount_paths.get(service.get("container_name"), {})
-                    if container_paths:
-                        volumes = service.setdefault("volumes", [])
-                        for container_path in container_paths.values():
-                            if container_path not in volumes:
-                                volumes.append(container_path)
-            if "networks" in data and isinstance(data["networks"], dict):
-                networks = data["networks"]
-                for name in list(networks.keys()):
-                    network = networks[name]
-                    if network is None:
-                        network = networks[name] = {}
-                    if not isinstance(network, dict):
-                        continue
-                    network.setdefault("name", self.get_service_name(name))
-            return data
-        return None
+        return _compose.load_docker_compose(self)
 
     @cached_property
     def docker_file(self) -> "str | None":
-        path = self.get_source_path("Dockerfile")
-        if os.path.exists(path):
-            return self.render_template(path)
-        return None
+        return _compose.load_docker_file(self)
 
     @cached_property
     def services(self) -> "dict[str, dict[str, Any]]":
-        services = utils.get_item(self.docker_compose, "services")
-        if not services or not isinstance(services, dict):
-            return {}
-        return services
+        return _compose.get_services(self)
 
     @cached_property
     def start_hooks(self) -> "list[Callable[[], Any]]":
@@ -398,20 +129,14 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     @cached_property
     def _rendered_hook_keys(self) -> "set[tuple]":
-        # Idempotency ledger for hook registration (refactor spec Phase 3).
-        # Tracks which (action, target, ...) keys have already produced a hook so
-        # re-rendering a template -- or rendering the same path in compose and
-        # Dockerfile -- does not register duplicate start/stop hooks.
+        # Idempotency ledger for hook registration: tracks which (action,
+        # target, ...) keys have already produced a hook so re-rendering a
+        # template -- or rendering the same path in compose and Dockerfile --
+        # does not register duplicate start/stop hooks.
         return set()
 
     def add_start_hook(self, key: "tuple", hook: "Callable[[], Any]") -> None:
-        """Register a start hook, deduped by ``key`` (refactor spec §7.4/§7.5).
-
-        Repeated renders of the same template (or the same ``mkdir``/``chown``/
-        ``chmod`` against one path across compose and Dockerfile) register a hook
-        only once. Callers that append directly (legacy nginx-conf / source-init
-        hooks) keep working; this is purely additive dedup.
-        """
+        """Register a start hook once per key."""
         if key in self._rendered_hook_keys:
             return
         self._rendered_hook_keys.add(key)
@@ -446,55 +171,22 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     def on_exec_up(self, build: bool = True, pull: bool = False):
-        context = self._make_exec_context(["up", pull and "pull", build and "build"])
-        services = self.manager.compose_runner.collect_services(context)
-        # exec never emitted default --pull flags -> emit_default_pull=False.
-        options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
-
-        with self.manager.notify_start(context):
-            if build:
-                self.manager.compose_runner.build(context, options)
-            self.manager.compose_runner.up(context, options)
-
-        # Record running state only after a successful up (refactor spec §9.6).
-        self.manager.running_state.mark_started(context)
+        return _exec.up(self, build=build, pull=pull)
 
     @subcommand("restart", help="restart this container")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     def on_exec_restart(self, build: bool = True, pull: bool = False):
-        context = self._make_exec_context(["restart", pull and "pull", build and "build"])
-        services = self.manager.compose_runner.collect_services(context)
-        options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
-
-        with self.manager.notify_stop(context):
-            self.manager.compose_runner.stop(context, services)
-
-        with self.manager.notify_start(context):
-            if build:
-                self.manager.compose_runner.build(context, options)
-            self.manager.compose_runner.up(context, options)
-
-        # restart ends with the target running.
-        self.manager.running_state.mark_started(context)
+        return _exec.restart(self, build=build, pull=pull)
 
     @subcommand("down", help="stop this container")
     def on_exec_down(self):
-        context = self._make_exec_context("down")
-        services = self.manager.compose_runner.collect_services(context)
-
-        with self.manager.notify_stop(context):
-            self.manager.compose_runner.down(context, services)
-
-        # Record stopped state only after a successful down (refactor spec §9.6).
-        self.manager.running_state.mark_stopped(context)
+        return _exec.down(self)
 
     @subcommand("config", help="show docker compose config for this container")
     def on_exec_config(self):
-        context = self._make_exec_context("config")
-        services = self.manager.compose_runner.collect_services(context)
-        return self.manager.compose_runner.config(context, services)
+        return _exec.config(self)
 
     @subcommand("shell", help="exec into container using command sh")
     @subcommand_argument("-c", "--command", help="shell command")
@@ -502,32 +194,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
-        service = self.choose_service(service_name)
-
-        options = []
-        if privileged:
-            options.append("--privileged")
-        if user:
-            options.append("--user")
-            options.append(user)
-
-        if not command:
-            commands = []
-            for shell in ["/bin/zsh", "/bin/fish", "/bin/bash", "/bin/ash", "/bin/sh"]:
-                shell_command = [
-                    "if" if len(commands) == 0 else "elif", "[", "-x", shell, "]", ";",
-                    "then", shell, ";",
-                ]
-                commands.extend(shell_command)
-            commands.extend(["else", "sh", ";"])
-            commands.append("fi")
-            commands = ("sh", "-c", utils.list2cmdline(commands))
-        else:
-            commands = utils.cmdline2list(command)
-
-        return self.manager.create_docker_process(
-            "exec", "-it", *options, service.get("container_name"), *commands
-        ).call()
+        return _exec.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
 
     @subcommand("logs", help="fetch the logs of container")
     @subcommand_argument("-f", "--follow",
@@ -544,25 +211,8 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_exec_logs(self, follow: bool = True, tail: str = None, timestamps: bool = True,
                      since: str = None, until: str = None,
                      service_name: str = None):
-        service = self.choose_service(service_name)
-
-        options = []
-        if follow:
-            options.append("--follow")
-        if timestamps:
-            options.append("--timestamps")
-        if tail:
-            options.append("--tail")
-            options.append(tail)
-        if since:
-            options.append("--since")
-            options.append(since)
-        if until:
-            options.append("--until")
-            options.append(until)
-        return self.manager.create_docker_process(
-            "logs", *options, service.get("container_name")
-        ).call()
+        return _exec.logs(self, follow=follow, tail=tail, timestamps=timestamps,
+                          since=since, until=until, service_name=service_name)
 
     @subcommand("mount", help="mount path")
     @subcommand_argument("source", nargs='?', help="host path")
@@ -570,62 +220,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("-p", "--permission", choices=("ro", "rw"))
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None):
-        if not source or not target:
-            if not source and not target:
-                with self.settings.transaction() as settings:
-                    result = {}
-                    mount_paths = settings.get("mount_paths") or {}
-                    for service in self.services.values():
-                        container_paths = mount_paths.get(service.get("container_name"), {})
-                        if container_paths:
-                            result[service.get("container_name")] = list(container_paths.values())
-                    if not result:
-                        self.logger.info("Not found any mount path")
-                        return
-                    self.logger.info(yaml.dump(result))
-                return
-            if not source:
-                self.logger.error("Argument error: source is empty")
-            if not target:
-                self.logger.error("Argument error: target is empty")
-            return
-
-        source_path = Path(os.path.expanduser(source)).absolute()
-        target_path = PurePosixPath(target).as_posix()
-        if not os.path.exists(source_path):
-            self.logger.error(f"{source_path} not exists.")
-            return
-
-        service = self.choose_service(service_name)
-        with self.settings.transaction() as settings:
-            mount_paths = settings.get("mount_paths") or {}
-            containers_paths = mount_paths.setdefault(service.get("container_name"), {})
-            container_path = f"{source_path}:{target_path}:{permission}"
-            if target_path in containers_paths:
-                if not confirm(f"{target_path} is mounted: {containers_paths.get(target_path)}, overwrite it?"):
-                    self.logger.info(f"cancel")
-                    return
-            containers_paths[target_path] = container_path
-            settings.set("mount_paths", mount_paths)
-            self.logger.info(f"add {container_path}")
+        return _exec.mount(self, source=source, target=target, permission=permission, service_name=service_name)
 
     @subcommand("umount", help="unmount path")
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_unmount_file(self, service_name: str = None):
-        service = self.choose_service(service_name)
-        with self.settings.transaction() as settings:
-            mount_paths = settings.get("mount_paths") or {}
-            containers_paths = mount_paths.setdefault(service.get("container_name"), {})
-            if not containers_paths:
-                self.logger.error("Not found any mount path")
-                return
-            dest_path = choose(
-                "Choose mount path",
-                choices=containers_paths
-            )
-            mount_path = containers_paths.pop(dest_path)
-            settings.set("mount_paths", mount_paths)
-            self.logger.info(f"remove {mount_path}")
+        return _exec.umount(self, service_name=service_name)
 
     def _resolve_config_key(self, key: "ConfigKeyType") -> str:
         """Accept either a plain field name or a ``ConfigField`` to define.
@@ -635,7 +235,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         name="X", default=...))`` -- instead of also declaring a ``configs``
         property purely to give the field a home. Defining is idempotent
         (``ConfigSchema.define`` just overwrites the same name), so repeated
-        calls -- e.g. from both ``load_nginx_url``'s lazy closures -- are safe.
+        calls are safe.
         """
         if isinstance(key, ConfigField):
             if not key.name:
@@ -703,26 +303,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self.services[key]
 
     def get_docker_compose_file(self) -> "Path | None":
-        destination = None
-        if self.docker_compose:
-            destination = utils.join_path(self.manager.data_path, "compose", f"{self.name}.yml")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            # safe_dump with the same defaults as the previous yaml.dump() call
-            # (sort_keys=True, allow_unicode=False) -> byte-identical output, minus
-            # any chance of Python-tag leakage on non-serializable values (§5.4).
-            utils.write_file(
-                destination,
-                yaml.safe_dump(self.docker_compose, sort_keys=True, allow_unicode=False),
-            )
-        return destination
+        return _compose.write_docker_compose_file(self)
 
     def get_docker_file_path(self) -> "Path | None":
-        destination = None
-        if self.docker_file:
-            destination = utils.join_path(self.manager.data_path, "dockerfile", f"{self.name}.Dockerfile")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            utils.write_file(destination, self.docker_file)
-        return destination
+        return _compose.write_docker_file(self)
 
     def get_docker_context_path(self) -> "Path":
         return self.get_source_path()
@@ -746,76 +330,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return False
 
     def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any"):
-        config = self.manager.env_config
-
-        def mkdir(path: "PathType") -> str:
-            path = config.cast(path, type="path")
-            self.add_start_hook(("mkdir", str(path)),
-                                lambda: os.makedirs(path, mode=0o755, exist_ok=True))
-            return path
-
-        def chown(path: "PathType", user: str = None, recursive: bool = False) -> str:
-            path = config.cast(path, type="path")
-            if user:
-                self.add_start_hook(("chown", str(path), str(user), bool(recursive)),
-                                    lambda: self.manager.change_file_owner(path, user, recursive=recursive))
-            return path
-
-        def chmod(path: "PathType", mode: int = 0o755, recursive: bool = False) -> str:
-            path = config.cast(path, type="path")
-            self.add_start_hook(("chmod", str(path), int(mode), bool(recursive)),
-                                lambda: self.manager.change_file_mode(path, mode, recursive=recursive))
-            return path
-
-        context = {
-            key: self.get_config_later(key)
-            for key in config.keys()
-        }
-
-        context.update(
-            DEBUG=self.manager.debug,
-
-            SOURCE_PATH=lazy_load(self.get_source_path),
-            APP_PATH=lazy_load(self.get_app_path),
-            APP_DATA_PATH=lazy_load(self.get_app_data_path),
-
-            manager=self.manager,
-            container=self,
-            containers=self.manager.containers,
-            config=config,
-            user=self.manager.user,
-            docker_user=self.get_config_later("DOCKER_USER"),
-
-            utils=utils,
-            mkdir=mkdir,
-            chown=chown,
-            chmod=chmod,
-        )
-
-        context.update(kwargs)
-
-        environment = Environment(
-            loader=FileSystemLoader([
-                Path(source).parent,
-                __cap_cntr__.get_asset_path("containers-snippets")
-            ])
-        )
-        environment.filters.update(
-            mkdir=mkdir,
-            chown=chown,
-            chmod=chmod,
-        )
-
-        try:
-            self.logger.debug(f"{self} render template {source} to {destination or 'memory'}")
-            template = environment.from_string(utils.read_file(source, text=True))
-            result = template.render(context)
-            if destination:
-                utils.write_file(destination, result)
-            return result
-
-        except TemplateError as e:
-            raise ContainerTemplateError(e)
+        return _template.render_template(self, source, destination=destination, **kwargs)
 
     def __repr__(self):
         return f"Container<{self.name}>"
@@ -833,10 +348,7 @@ class SourceContainer(BaseContainer):
         raise NotImplementedError()
 
     def _handle_source_file(self, source: "PathType", destination: "PathType"):
-        # Safe extraction (refactor spec §5.3): refuse path traversal / absolute
-        # paths / symlinks and enforce size caps. Reuses linktools.utils.safe_extract
-        # (zip + tar) instead of a raw zipfile loop. ``destination`` is guaranteed
-        # empty by ``_context_path`` (freshly makedirs'd before this is called).
+        # Archive extraction rejects traversal, absolute paths and unsafe links.
         from linktools.utils import safe_extract
         safe_extract(source, destination)
 

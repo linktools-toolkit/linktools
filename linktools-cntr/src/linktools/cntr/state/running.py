@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Running-container state (refactor spec Phase 5).
-
-The persisted RUNNING_CONTAINERS set previously drifted: only notify_remove
-updated it, only for full-container runs, and `down` left containers marked as
-running. This module owns the state and is updated by ComposeRunner/CLI/exec
-*after* a successful compose up/down (refactor spec §9.6):
+"""Running-container state, updated by ComposeRunner/CLI/exec *after* a
+successful compose up/down:
 
 - partial up  -> add target names
 - partial down -> remove target names
@@ -15,8 +11,8 @@ running. This module owns the state and is updated by ComposeRunner/CLI/exec
 ``get_actual`` (live ``docker compose ps``) is not implementable today because the
 runtime ``popen`` wrapper has no output capture, so it raises
 ``RuntimeStateUnavailable``. ``get_effective`` falls back to the persisted state,
-so ``ct-cntr list`` never crashes when Docker is absent (§9.2/§9.8). When output
-capture is added, only ``get_actual`` needs to change.
+so ``ct-cntr list`` never crashes when Docker is absent. When output capture is
+added, only ``get_actual`` needs to change.
 """
 from typing import TYPE_CHECKING
 
@@ -41,10 +37,13 @@ class RunningStateStore:
         self.manager = manager
 
     def _get(self) -> "list[str]":
-        return list(self.manager._load_setting(_RUNNING_KEY, reload=True, default=[]) or [])
+        # A failed migration is not cached, so retry it on every access.
+        self.manager._migrated
+        return list(self.manager._transient_ns.get(_RUNNING_KEY, []) or [])
 
     def _set(self, names: "Iterable[str]") -> None:
-        self.manager._dump_setting(_RUNNING_KEY, sorted(set(names)))
+        self.manager._migrated
+        self.manager._transient_ns.set(_RUNNING_KEY, sorted(set(names)))
 
     def get_persisted(self) -> "list[str]":
         """Names recorded as running in the persisted store."""
@@ -53,8 +52,8 @@ class RunningStateStore:
     def get_actual(self, containers: "Iterable[BaseContainer]") -> "list[str]":
         """Live running names via ``docker compose ps``.
 
-        Not implemented: the runtime popen wrapper has no output capture
-        (refactor spec §9.5). Raises so callers fall back to persisted state.
+        Not implemented: the runtime popen wrapper has no output capture.
+        Raises so callers fall back to persisted state.
         """
         raise RuntimeStateUnavailable("docker compose ps output capture is not supported")
 

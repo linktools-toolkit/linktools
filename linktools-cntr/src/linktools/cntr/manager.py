@@ -29,26 +29,23 @@
 import inspect
 import os
 import pathlib
-import shutil
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
-from linktools.core import (
-    ConfigField, PromptProvider, LazyProvider, AliasProvider,
-)
+from linktools.system import get_gid, get_machine, get_system, get_uid, get_user
 from linktools.decorator import cached_property
 from linktools.types import MISSING
 
 from . import _migrate
+from .config.manager import build_manager_configs
 from .container import BaseContainer, ContainerError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import Any
     from linktools.core import Environ
-    from linktools.types import PathType
     from linktools.runtime import Process
+    from linktools.types import PathType
     from .context import EventContext
     from .registry.resolver import ContainerResolver
     from .registry.loader import ContainerLoader
@@ -58,14 +55,6 @@ if TYPE_CHECKING:
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
     from .repo.store import RepoStore
-
-
-def _is_chown_supported(system: str = None) -> bool:
-    """Return whether chown/chmod on a host path is reflected inside a container
-    bind-mounting that path. Docker Desktop's VM-backed bind mounts on macOS and
-    Windows don't honor host-side ownership/permission changes, so this is only
-    true on Linux."""
-    return (system or get_system()) == "linux"
 
 
 class ContainerManager:
@@ -87,13 +76,11 @@ class ContainerManager:
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 
-        self._setting_cache = {}
-
         # Trigger legacy -> ConfigStore migration now, before any config or
-        # setting is read/written. _load_setting also touches self._migrated,
-        # but "config set/list/edit" reach env_config directly without ever
-        # calling _load_setting, so relying on that alone would let those
-        # commands run against pre-migration data.
+        # setting is read/written. State/repo stores also touch self._migrated
+        # on every access, but "config set/list/edit" reach env_config
+        # directly without ever going through a state/repo store, so relying
+        # on that alone would let those commands run against pre-migration data.
         try:
             self._migrated
         except Exception as exc:
@@ -101,45 +88,9 @@ class ContainerManager:
 
     @property
     def configs(self) -> "dict[str, Any]":
-        return dict(
-            HOST=ConfigField.chain(
-                PromptProvider(),
-                LazyProvider(lambda r: get_lan_ip()),
-            ),
-            DOCKER_HOST="/var/run/docker.sock",
-
-            COMPOSE_PROJECT_NAME=self.name,
-            SERVICE_RESTART_POLICY="unless-stopped",
-            SERVICE_LOG_DRIVER="json-file",
-            SERVICE_LOG_MAX_SIZE="10m",
-
-            DOCKER_USER=ConfigField.chain(
-                PromptProvider(cached=True),
-                default=os.environ.get("SUDO_USER", self.user).replace(" ", ""),
-            ),
-            DOCKER_UID=ConfigField(provider=LazyProvider(
-                lambda r: get_uid(r.get("DOCKER_USER", type=str)),
-            )),
-            DOCKER_GID=ConfigField(provider=LazyProvider(
-                lambda r: get_gid(r.get("DOCKER_USER", type=str)),
-            )),
-            DOCKER_TYPE=ConfigField.chain(
-                AliasProvider("CONTAINER_TYPE"),
-                PromptProvider(choices=["docker", "docker-rootless"], cached=True),
-                default="docker",
-            ) if self.system == "linux" and os.getuid() != 0 else ConfigField(default="docker"),
-
-            DOCKER_APP_PATH=ConfigField.chain(
-                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("app")),
-            ),
-            DOCKER_APP_DATA_PATH=ConfigField(cast="path", provider=AliasProvider("DOCKER_APP_PATH")),
-            DOCKER_USER_DATA_PATH=ConfigField.chain(
-                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("user_data")),
-            ),
-            DOCKER_DOWNLOAD_PATH=ConfigField.chain(
-                PromptProvider(cached=True), cast="path", default=str(self.data_path.joinpath("download")),
-            ),
-        )
+        # Resolved through the property (not called directly) so a subclass
+        # overriding `configs` still has its extra fields registered.
+        return build_manager_configs(self)
 
     @property
     def debug(self) -> bool:
@@ -193,7 +144,7 @@ class ContainerManager:
 
     @cached_property
     def _persistent_store(self):
-        """Persistent user state (spec §8.5): INSTALLED_CONTAINERS / REPOS."""
+        """Persistent user state: INSTALLED_CONTAINERS / INSTALLED_REPOS."""
         return self.environ.config_store
 
     @cached_property
@@ -220,19 +171,15 @@ class ContainerManager:
         return True
 
     @cached_property
-    def _repo_path(self):
-        path = self.data_path.joinpath("repo")
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
         result = dict()
         for container in self.loader.load_all():
             if container.name in result:
                 self.logger.debug(f"Container `{container.name}` already exists, overwrite.")
             result[container.name] = container
-        for name in self._load_setting("INSTALLED_CONTAINERS", default=[]):
+        # Raw persisted names only -- resolving them to container objects here
+        # would recurse back into this same property via InstalledStateStore.
+        for name in self.installed_state.load_names():
             if name not in result:
                 self.logger.warning(f"Not found installed container `{name}`, skip.")
         return result
@@ -247,51 +194,43 @@ class ContainerManager:
 
     @cached_property
     def compose_runner(self) -> "ComposeRunner":
-        # Unified docker-compose command assembly (refactor spec Phase 2).
-        # CLI and per-container exec route through this so the two paths share
-        # one argument builder while each preserves its exact original commands.
+        # CLI and per-container exec route through this so both share one
+        # docker-compose argument builder.
         from .runtime.compose import ComposeRunner
         return ComposeRunner(self)
 
     @cached_property
     def resolver(self) -> "ContainerResolver":
-        # Dependency resolution behind the facade (refactor spec Phase 4).
         from .registry.resolver import ContainerResolver
         return ContainerResolver(self)
 
     @cached_property
     def loader(self) -> "ContainerLoader":
-        # Container discovery/import behind the facade (refactor spec Phase 4).
         from .registry.loader import ContainerLoader
         return ContainerLoader(self)
 
     @cached_property
     def runtime(self) -> "RuntimeProcessFactory":
-        # docker/podman/compose process creation behind the facade (Phase 4).
         from .runtime.process import RuntimeProcessFactory
         return RuntimeProcessFactory(self)
 
     @cached_property
     def lifecycle(self) -> "LifecycleDispatcher":
-        # Lifecycle hook dispatch behind the facade (refactor spec Phase 4).
         from .lifecycle.dispatcher import LifecycleDispatcher
         return LifecycleDispatcher(self)
 
     @cached_property
     def running_state(self) -> "RunningStateStore":
-        # Persisted running-container state behind the facade (refactor spec Phase 5).
         from .state.running import RunningStateStore
         return RunningStateStore(self)
 
     @cached_property
     def installed_state(self) -> "InstalledStateStore":
-        # Persisted installed-container set behind the facade (refactor spec Phase 4).
         from .state.installed import InstalledStateStore
         return InstalledStateStore(self)
 
     @cached_property
     def repo_store(self) -> "RepoStore":
-        # External repository management behind the facade (refactor spec Phase 4).
         from .repo.store import RepoStore
         return RepoStore(self)
 
@@ -332,14 +271,18 @@ class ContainerManager:
             return self._load_running_containers()
 
     def _load_running_containers(self):
+        # A failed migration is not cached, so retry it on every access.
+        self._migrated
         result = set()
-        for name in self._load_setting("RUNNING_CONTAINERS", reload=True, default=[]):
+        for name in self._transient_ns.get("RUNNING_CONTAINERS", []) or []:
             if name in self.containers:
                 result.add(self.containers[name])
         return list(result)
 
     def _dump_running_containers(self, containers: "Iterable[BaseContainer]") -> None:
-        self._dump_setting("RUNNING_CONTAINERS", list(set([container.name for container in containers])))
+        self._migrated
+        self._transient_ns.set(
+            "RUNNING_CONTAINERS", list({container.name for container in containers}))
 
     def notify_start(self, context: "EventContext"):
         return self.lifecycle.notify_start(context)
@@ -387,52 +330,10 @@ class ContainerManager:
         return self.runtime.create_docker_compose_process(containers, *args, privilege=privilege, **kwargs)
 
     def change_file_owner(self, path: "PathType", user: str, recursive: bool = False) -> None:
-        path = self.env_config.cast(path, type="path")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Path not found: {path}")
-        if not _is_chown_supported(self.system):
-            self.logger.debug(f"Skip chown of {path} on {self.system}")
-            return
-        if not shutil.which("chown"):
-            self.logger.debug("Command `chown` not found")
-            return
-        args = ["chown"]
-        if recursive:
-            args.append("-R")
-        uid, gid = get_uid(user), get_gid(user)
-        args.extend([f"{uid}:{gid}", str(path)])
-        try:
-            stat = os.stat(path)
-            self.create_process(
-                *args,
-                privilege=self.uid != stat.st_uid or self.uid != uid
-            ).check_call()
-        except Exception as e:
-            self.logger.warning(f"Failed to chown of {path}")
-            raise e
+        return self.runtime.chown(path, user, recursive=recursive)
 
     def change_file_mode(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Path not found: {path}")
-        if not _is_chown_supported(self.system):
-            self.logger.debug(f"Skip chmod of {path} on {self.system}")
-            return
-        if not shutil.which("chmod"):
-            self.logger.debug("Command `chmod` not found")
-            return
-        args = ["chmod"]
-        if recursive:
-            args.append("-R")
-        args.extend([oct(mode)[2:], str(path)])
-        try:
-            stat = os.stat(path)
-            self.create_process(
-                *args,
-                privilege=self.uid != stat.st_uid
-            ).check_call()
-        except Exception as e:
-            self.logger.warning(f"Failed to chmod of {path}")
-            raise e
+        return self.runtime.chmod(path, mode, recursive=recursive)
 
     def get_all_repos(self) -> "dict[str, dict[str, str]]":
         return self.repo_store.get_all()
@@ -445,25 +346,3 @@ class ContainerManager:
 
     def remove_repo(self, url: str):
         return self.repo_store.remove(url)
-
-    def _load_setting(self, key: str, reload: bool = False, default: "Any" = None) -> "dict | list | tuple":
-        self._migrated  # ensure legacy data has been moved into ConfigStore
-        if reload:
-            self._setting_cache.pop(key, None)
-        elif key in self._setting_cache:
-            return self._setting_cache[key]
-        if key in _migrate.PERSISTENT_KEYS:
-            result = self._persistent_store.get(key, default)
-        else:
-            result = self._transient_ns.get(key, default)
-        # Existence is decided by row presence in the new stores (no falsy drop),
-        # so the old `if result is None: result = default` workaround is gone.
-        self._setting_cache[key] = result
-        return result
-
-    def _dump_setting(self, key: str, setting: "dict | list | tuple"):
-        self._setting_cache.pop(key, None)
-        if key in _migrate.PERSISTENT_KEYS:
-            self._persistent_store.set(key, setting)
-        else:
-            self._transient_ns.set(key, setting)

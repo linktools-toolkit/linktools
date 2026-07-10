@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generate / check linktools-cntr builtin compose snapshots (refactor Phase 0).
+"""Generate / check linktools-cntr builtin compose snapshots.
 
 Usage:
     python scripts/cntr_generate_snapshots.py          # (re)write snapshots
     python scripts/cntr_generate_snapshots.py --check   # fail if drift (CI)
 
 Snapshots are the ``normalize_compose`` output of each builtin container's
-``docker_compose``. They lock the current compose ABI so the refactor (Phases
-2-5) can be verified not to alter generated output.
+``docker_compose``. They lock the current compose ABI so internal changes to
+cntr can be verified not to alter generated output.
 """
 import argparse
 import sys
