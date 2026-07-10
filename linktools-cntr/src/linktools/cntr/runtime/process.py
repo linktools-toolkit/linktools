@@ -113,6 +113,7 @@ class RuntimeProcessFactory:
 
     def chmod(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
         manager = self.manager
+        path = manager.env_config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
         if not _is_chown_supported(manager.system):

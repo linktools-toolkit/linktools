@@ -31,6 +31,11 @@ class _FakeEnvConfig:
     def update_defaults(self, **kwargs):
         pass
 
+    def cast(self, value, type=None):
+        if type == "path":
+            return os.path.abspath(os.path.expanduser(str(value)))
+        return value
+
 
 class _FakeEnviron:
     name = "test-env"
@@ -166,8 +171,12 @@ def test_manager_method_signatures_unchanged():
     for name, expected_params in _METHOD_SIGNATURES.items():
         method = getattr(ContainerManager, name)
         params = [p for p in inspect.signature(method).parameters.values() if p.name != "self"]
-        # Only check the named params this contract cares about; **kwargs/*args
-        # tails beyond them (e.g. create_process's **kwargs) are allowed to vary.
+        # None of these methods have a **kwargs/*args tail beyond what's
+        # listed, so the param count itself must match exactly -- zip() would
+        # silently ignore a dropped trailing parameter otherwise.
+        assert len(params) == len(expected_params), (
+            f"{name}: expected {len(expected_params)} params, got {len(params)}"
+        )
         for (exp_name, exp_kind, exp_default), param in zip(expected_params, params):
             assert param.name == exp_name, f"{name}: param order changed at {param.name!r}"
             assert param.kind == exp_kind, f"{name}.{param.name}: kind changed"

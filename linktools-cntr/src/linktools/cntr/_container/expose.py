@@ -15,12 +15,18 @@ if TYPE_CHECKING:
 
 
 def _freeze(value):
-    """Recursively turn dict/list/set values into a hashable, order-stable
-    tuple so they can be used inside a start-hook dedup key."""
+    """Recursively turn dict/list/set values into a hashable, deterministic
+    tuple so they can be used inside a start-hook dedup key. set iteration
+    order depends on insertion history, not just content, so sets are sorted
+    by their frozen representation; list/tuple order is preserved as-is since
+    it's semantically meaningful. Each container type is tagged so a list and
+    a set with the same elements don't collide."""
     if isinstance(value, dict):
-        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
-    if isinstance(value, (list, tuple, set)):
-        return tuple(_freeze(v) for v in value)
+        return ("dict", tuple(sorted((k, _freeze(v)) for k, v in value.items())))
+    if isinstance(value, set):
+        return ("set", tuple(sorted((_freeze(v) for v in value), key=repr)))
+    if isinstance(value, (list, tuple)):
+        return ("list" if isinstance(value, list) else "tuple", tuple(_freeze(v) for v in value))
     return value
 
 
@@ -130,9 +136,9 @@ class ExposeMixin:
                     auth_extra=auth_extra,
                 )
 
-        # Idempotent, keyed on every parameter that shapes the generated conf
-        # (not just proxy_conf/proxy_url) -- two domains proxying to the same
-        # backend must each get their own conf written, not collapse into one.
+        # Include every input that determines the generated conf, so two
+        # domains proxying to the same backend each get their own conf
+        # written under distinct keys.
         hook_key = (
             "nginx_conf", self._resolve_config_key(key),
             str(proxy_name), str(proxy_domain_name), str(proxy_conf), str(proxy_url),

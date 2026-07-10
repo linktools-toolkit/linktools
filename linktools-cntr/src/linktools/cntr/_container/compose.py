@@ -103,9 +103,8 @@ def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
     if container.docker_compose:
         destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        # safe_dump with the same defaults as the previous yaml.dump() call
-        # (sort_keys=True, allow_unicode=False): byte-identical output, minus
-        # any chance of Python-tag leakage on non-serializable values.
+        # safe_dump (not dump) so non-serializable values raise instead of
+        # leaking a Python object tag into the written YAML.
         utils.write_file(
             destination,
             yaml.safe_dump(container.docker_compose, sort_keys=True, allow_unicode=False),
