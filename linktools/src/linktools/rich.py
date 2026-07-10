@@ -45,7 +45,7 @@ _no_input = False
 
 
 def set_no_input(enabled=True):
-    """Enable or disable non-interactive mode (spec §16.6)."""
+    """Enable or disable non-interactive mode."""
     global _no_input
     _no_input = bool(enabled)
 

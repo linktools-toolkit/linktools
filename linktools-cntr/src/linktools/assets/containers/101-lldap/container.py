@@ -32,9 +32,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.core import (
-    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
-)
+from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -54,14 +52,12 @@ class Container(BaseContainer):
         return dict(
             LLDAP_TAG="stable",
             LLDAP_DOMAIN=self.get_nginx_domain("ldap"),
-            LLDAP_PORT=ConfigField(name="LLDAP_PORT", cast=int, default=0),
-            LLDAP_WEB_PORT=ConfigField(name="LLDAP_WEB_PORT", cast=int, default=0),
-            LLDAP_BASE_DN=ConfigField(name="LLDAP_BASE_DN", provider=LazyProvider(lambda r: get_base_dn(r))),
-            LLDAP_ADMIN_PASSWORD=ConfigField(
-                name="LLDAP_ADMIN_PASSWORD",
-                default=utils.random_string(20),
-                provider=ChainProvider(PromptProvider("LLDAP_ADMIN_PASSWORD")),
-            ),
+            LLDAP_PORT=ConfigField(cast=int, default=0),
+            LLDAP_WEB_PORT=ConfigField(cast=int, default=0),
+            LLDAP_BASE_DN=ConfigField(provider=LazyProvider(lambda r: get_base_dn(r))),
+            LLDAP_ADMIN_PASSWORD=ConfigField(provider=PromptProvider(
+                default=utils.random_string(20), cached=True,
+            )),
         )
 
     @cached_property

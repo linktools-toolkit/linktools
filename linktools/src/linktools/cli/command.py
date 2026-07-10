@@ -1443,7 +1443,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
 
         group = parser.add_argument_group(title="interaction options")
         group.add_argument(f"{prefix}{prefix}no-input", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
-                           help="never prompt; return defaults or error (spec §16.6)")
+                           help="never prompt; return defaults or error")
         group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
                            help="answer yes/accept defaults to all prompts (alias for --no-input)")
 

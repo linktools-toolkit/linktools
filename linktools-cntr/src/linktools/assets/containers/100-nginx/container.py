@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import (
-    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
+    ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
 from linktools.decorator import cached_property
 from linktools.rich import prompt
@@ -57,44 +57,55 @@ class Container(BaseContainer):
     def configs(self):
         return dict(
             NGINX_TAG="stable-alpine",
-            NGINX_WILDCARD_DOMAIN=ConfigField(
-                name="NGINX_WILDCARD_DOMAIN", default=False, provider=AliasProvider("WILDCARD_DOMAIN"),
+            NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
+            NGINX_ROOT_DOMAIN=ConfigField.chain(
+                AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), default="_",
             ),
-            NGINX_ROOT_DOMAIN=ConfigField(name="NGINX_ROOT_DOMAIN", default="_", provider=ChainProvider(
-                AliasProvider("ROOT_DOMAIN"), PromptProvider("NGINX_ROOT_DOMAIN"),
-            )),
-            NGINX_HTTP_PORT=ConfigField(name="NGINX_HTTP_PORT", cast=int, default=80, provider=ChainProvider(
-                AliasProvider("HTTP_PORT"), PromptProvider("NGINX_HTTP_PORT"),
-            )),
-            NGINX_HTTPS_ENABLE=ConfigField(name="NGINX_HTTPS_ENABLE", cast=bool, default=True, provider=(
-                ChainProvider(AliasProvider("HTTPS_ENABLE"), ConfirmProvider("NGINX_HTTPS_ENABLE"))
-            )),
-            NGINX_HTTPS_PORT=ConfigField(name="NGINX_HTTPS_PORT", cast=int, default=0, provider=LazyProvider(
+            NGINX_HTTP_PORT=ConfigField.chain(
+                AliasProvider("HTTP_PORT"), PromptProvider(cached=True), cast=int, default=80,
+            ),
+            NGINX_HTTPS_ENABLE=ConfigField.chain(
+                AliasProvider("HTTPS_ENABLE"), ConfirmProvider(cached=True), cast=bool, default=True,
+            ),
+            NGINX_HTTPS_PORT=ConfigField(cast=int, default=0, provider=LazyProvider(
                 lambda r: 443 if r.get("NGINX_HTTPS_ENABLE") else 0
             )),
-            NGINX_DEFAULT_SCHEME=ConfigField(name="NGINX_DEFAULT_SCHEME", provider=LazyProvider(
+            NGINX_DEFAULT_SCHEME=ConfigField(provider=LazyProvider(
                 lambda r: "https" if r.get("NGINX_HTTPS_ENABLE") else "http"
             )),
-            NGINX_DEFAULT_PORT=ConfigField(name="NGINX_DEFAULT_PORT", provider=LazyProvider(
+            NGINX_DEFAULT_PORT=ConfigField(provider=LazyProvider(
                 lambda r: r.get("NGINX_HTTPS_PORT") if r.get("NGINX_HTTPS_ENABLE") else r.get("NGINX_HTTP_PORT")
             )),
-            NGINX_INDEX_URL=ConfigField(name="NGINX_INDEX_URL", provider=LazyProvider(
+            NGINX_INDEX_URL=ConfigField(provider=LazyProvider(
                 lambda r: self._get_default_index_url()
             )),
-            NGINX_WAF_ENABLE=ConfigField(name="NGINX_WAF_ENABLE", cast=bool, provider=ChainProvider(
+            NGINX_WAF_ENABLE=ConfigField.chain(
                 AliasProvider("WAF_ENABLE"), LazyProvider(lambda r: self.manager.containers["safeline"].enable),
-            )),
-            NGINX_WAF_PORT=ConfigField(name="NGINX_WAF_PORT", cast=int, default=0, provider=LazyProvider(
+                cast=bool,
+            ),
+            NGINX_WAF_PORT=ConfigField(cast=int, default=0, provider=LazyProvider(
                 lambda r: 8000 if r.get("NGINX_WAF_ENABLE") else 0
             )),
-            NGINX_AUTH_ENABLE=ConfigField(name="NGINX_AUTH_ENABLE", cast=bool, provider=ChainProvider(
+            NGINX_AUTH_ENABLE=ConfigField.chain(
                 AliasProvider("AUTH_ENABLE"), LazyProvider(lambda r: self.manager.containers["authelia"].enable),
-            )),
-            ACME_DNS_API=ConfigField(name="ACME_DNS_API", cast=str, default="", provider=LazyProvider(
-                lambda r: prompt("ACME_DNS_API", choices=list(self.dnsapi.keys()))
-                    if r.get("NGINX_HTTPS_ENABLE") else ""
-            )),
+                cast=bool,
+            ),
+            ACME_DNS_API=ConfigField.chain(
+                LazyProvider(lambda r: self._prompt_acme_dns_api(r), cached=True),
+                cast=str, default="",
+            ),
         )
+
+    def _prompt_acme_dns_api(self, r):
+        # Raise (rather than return "") when HTTPS is disabled, so the
+        # enclosing ChainProvider falls through to field.default="" without
+        # ever persisting it -- a plain cached=True here would otherwise
+        # permanently cache "" the first time this resolves while HTTPS
+        # happens to be off, and never prompt again even after HTTPS is
+        # enabled later.
+        if not r.get("NGINX_HTTPS_ENABLE"):
+            raise LookupError("NGINX_HTTPS_ENABLE is disabled")
+        return prompt("ACME_DNS_API", choices=list(self.dnsapi.keys()))
 
     @cached_property
     def extend_configs(self):
@@ -105,8 +116,9 @@ class Container(BaseContainer):
                 raise ContainerError(f"Not supported dns_api: {dns_api}")
             env_vars = self.dnsapi.get(dns_api).get("env", {})
             for env_var, meta in env_vars.items():
-                configs[env_var] = ConfigField(
-                    name=env_var, provider=ChainProvider(PromptProvider(env_var)),
+                configs[env_var] = ConfigField.chain(
+                    PromptProvider(cached=True, allow_empty=meta.get("required", True)),
+                    name=env_var,
                 )
         return configs
 

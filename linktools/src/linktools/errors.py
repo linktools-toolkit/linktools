@@ -73,7 +73,7 @@ class LinktoolsError(Exception):
 
     All linktools errors inherit from here, so ``except LinktoolsError`` is the
     broadest safe catch in business code. ``str(error)`` must never contain a
-    secret (spec §18.2); subclasses carry structured fields where useful.
+    secret; subclasses carry structured fields where useful.
     """
 
 
@@ -96,7 +96,7 @@ class LoggingError(LinktoolsError):
 
 
 class CacheError(LinktoolsError):
-    """Local persistence (cache store) failures (spec §7.12)."""
+    """Local persistence (cache store) failures."""
 
 
 class CacheValueError(CacheError):
@@ -136,7 +136,7 @@ class ConfigError(LinktoolsError):
 
 
 class ConfigFieldError(ConfigError):
-    """A config field definition is invalid (spec §8.12)."""
+    """A config field definition is invalid."""
 
 
 class ConfigNotFoundError(ConfigError):
@@ -160,7 +160,7 @@ class ConfigPersistenceError(ConfigError):
 
 
 class ConfigCycleError(ConfigError):
-    """An Alias/Lazy dependency cycle was detected (spec §8.10)."""
+    """An Alias/Lazy dependency cycle was detected."""
 
 
 class ConfigPromptError(ConfigError):
@@ -196,7 +196,7 @@ class SSHAuthenticationError(SSHError):
 
 
 class SSHHostKeyError(SSHError):
-    """A remote host key was missing, changed, or rejected (spec §13.4)."""
+    """A remote host key was missing, changed, or rejected."""
 
 
 class SSHCommandError(SSHError):
@@ -212,7 +212,7 @@ class SSHTransferError(SSHError):
 
 
 class SSHForwardError(SSHError):
-    """A local or reverse port forward failed (spec §13.7/§13.8)."""
+    """A local or reverse port forward failed."""
 
 
 class SSHTimeoutError(SSHError):
@@ -280,15 +280,15 @@ class ExecError(ProcessError):
 
 
 class ProcessStartError(ProcessError):
-    """A subprocess could not be started (spec §15.1.5)."""
+    """A subprocess could not be started."""
 
 
 class ProcessTimeoutError(ProcessError):
-    """A subprocess exceeded its timeout (spec §15.1.5)."""
+    """A subprocess exceeded its timeout."""
 
 
 class ProcessCleanupError(ProcessError):
-    """A subprocess could not be cleaned up (terminate/kill) (spec §15.1.5)."""
+    """A subprocess could not be cleaned up (terminate/kill)."""
 
 
 class ToolNotFound(ToolError):
@@ -304,11 +304,11 @@ class ToolExecError(ToolError):
 
 
 class ToolDefinitionError(ToolError):
-    """A tool definition is malformed (spec §10.13 / §10.4)."""
+    """A tool definition is malformed."""
 
 
 class ToolDependencyError(ToolError):
-    """A tool dependency is missing or cyclic (spec §10.5)."""
+    """A tool dependency is missing or cyclic."""
 
 
 class ToolPlatformError(ToolError):
@@ -320,15 +320,15 @@ class ToolIntegrityError(ToolError):
 
 
 class ToolArchiveError(ToolError):
-    """A tool archive could not be extracted safely (spec §10.7)."""
+    """A tool archive could not be extracted safely."""
 
 
 class ToolInstallError(ToolError):
-    """A tool installation failed (spec §10.6)."""
+    """A tool installation failed."""
 
 
 class ToolHealthcheckError(ToolError):
-    """A tool failed its post-install healthcheck (spec §10.8)."""
+    """A tool failed its post-install healthcheck."""
 
 
 class NoFreePortFoundError(SystemError):

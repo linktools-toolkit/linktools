@@ -60,10 +60,10 @@ def test_same_key_in_different_sections_does_not_collide(setup):
         "CONTAINER.CACHE": {"PORT": "2"},
     })
     report = ConfigMigration(store).migrate(old)
-    # both preserved distinctly under legacy.<section>.port
-    assert store.get("legacy.main.cache.port") == "1"
-    assert store.get("legacy.container.cache.port") == "2"
-    assert len([e for e in report["entries"] if e["new_key"].startswith("legacy.")]) == 2
+    # both migrated distinctly to their own namespace, not collapsed onto one key
+    assert store.get("main.PORT") == "1"
+    assert store.get("container.PORT") == "2"
+    assert len([e for e in report["entries"] if e["reason"] == "mapped_generic"]) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -78,14 +78,28 @@ def test_migrate_writes_to_config_store(setup):
     assert store.get("network.host") == "1.2.3.4"
 
 
-def test_migrate_unmapped_keys_go_to_legacy_section_key(setup):
+def test_migrate_unmapped_cache_key_maps_generically(setup):
+    # Not one of ConfigMigration's built-in exceptions and not in any
+    # caller-supplied key_map -- e.g. a custom homelab container's own field --
+    # still migrates to a real, readable "<namespace>.<KEY>" location rather
+    # than being dropped into a dead legacy.* key.
     store, old, _ = setup
     _write_old(old, {"UNKNOWN_KEY": "val"})
     report = ConfigMigration(store).migrate(old)
-    assert "CONTAINER.CACHE.UNKNOWN_KEY" in report["legacy"]
-    assert store.get("legacy.container.cache.unknown_key") == "val"
-    # entry carries the reason
+    assert "CONTAINER.CACHE.UNKNOWN_KEY" in report["migrated"]
+    assert store.get("container.UNKNOWN_KEY") == "val"
     entry = [e for e in report["entries"] if e["old_key"] == "CONTAINER.CACHE.UNKNOWN_KEY"][0]
+    assert entry["reason"] == "mapped_generic"
+
+
+def test_migrate_unrecognized_section_shape_falls_back_to_legacy(setup):
+    # A section that doesn't follow the "*.CACHE" convention at all has no
+    # namespace to derive -- this is the one case still preserved dead.
+    store, old, _ = setup
+    _write_sections(old, {"SOME.OTHER.SECTION": {"KEY": "val"}})
+    report = ConfigMigration(store).migrate(old)
+    assert store.get("legacy.some.other.section.key") == "val"
+    entry = report["entries"][0]
     assert entry["reason"] == "unknown_key_preserved"
 
 
@@ -138,11 +152,13 @@ def test_ambiguous_bare_key_not_auto_mapped(setup):
         "CONTAINER.CACHE": {"CUSTOM": "b"},
     })
     # bare CUSTOM is ambiguous (2 sections) and only a bare map is given -> the
-    # bare fallback is refused so the two sections do not collapse onto one key
+    # bare fallback is refused; each still migrates to its own namespace via
+    # the generic per-section rule, so the two sections never collapse onto
+    # the one bare key the caller supplied.
     ConfigMigration(store).migrate(old, key_map={"CUSTOM": "should.not.win"})
     assert "should.not.win" not in store
-    assert store.get("legacy.main.cache.custom") == "a"
-    assert store.get("legacy.container.cache.custom") == "b"
+    assert store.get("main.CUSTOM") == "a"
+    assert store.get("container.CUSTOM") == "b"
 
 
 def test_ambiguous_bare_key_mapped_via_full_keys(setup):
@@ -194,13 +210,13 @@ def test_secret_entry_has_no_raw_value_in_report(setup):
 
 def test_main_cache_host_not_mapped_to_container_host_by_default(setup):
     # A section-sensitive bare key (HOST) is NOT bare-mapped by default, so a
-    # stray MAIN.CACHE.HOST must NOT be pulled onto container.host -- it is
-    # preserved under legacy.<section>.<key> instead.
+    # stray MAIN.CACHE.HOST must NOT be pulled onto container.HOST -- the
+    # section-qualified generic rule sends it to its own main.HOST instead.
     store, old, _ = setup
     _write_sections(old, {"MAIN.CACHE": {"HOST": "main-host"}})
     ConfigMigration(store).migrate(old)
-    assert "container.host" not in store
-    assert store.get("legacy.main.cache.host") == "main-host"
+    assert "container.HOST" not in store
+    assert store.get("main.HOST") == "main-host"
 
 
 def test_container_host_mapped_only_via_full_key(setup):
@@ -208,7 +224,7 @@ def test_container_host_mapped_only_via_full_key(setup):
     store, old, _ = setup
     _write_sections(old, {"CONTAINER.CACHE": {"HOST": "c-host"}})
     ConfigMigration(store).migrate(old)
-    assert store.get("container.host") == "c-host"
+    assert store.get("container.HOST") == "c-host"
 
 
 # --------------------------------------------------------------------------- #
@@ -270,3 +286,51 @@ def test_verify_report_checks_every_claimed_key(setup):
     # if a claimed key is missing, verify must fail
     store.remove("network.port")
     assert mig.verify(report) is False
+
+
+# --------------------------------------------------------------------------- #
+# Migrated targets must actually be readable back through PersistentSource
+# (regression: a lowercase/dotted target key like "container.docker_type" is
+# written but PersistentSource only ever looks up "<namespace>.<FIELD_NAME>"
+# verbatim, so the migrated value could never be read back).
+# --------------------------------------------------------------------------- #
+
+def test_migrated_generic_targets_are_readable_via_persistent_source(setup):
+    from linktools.core._config import PersistentSource
+
+    store, old, _ = setup
+    _write_sections(old, {
+        "MAIN.CACHE": {"DEBUG": "true"},
+        "CONTAINER.CACHE": {"DOCKER_TYPE": "podman", "HOST": "1.2.3.4"},
+    })
+    ConfigMigration(store).migrate(old)
+
+    main_source = PersistentSource(store, "main")
+    assert main_source.get("DEBUG") == ("true", True)
+
+    container_source = PersistentSource(store, "container")
+    assert container_source.get("DOCKER_TYPE") == ("podman", True)
+    assert container_source.get("HOST") == ("1.2.3.4", True)
+
+
+def test_installed_state_keys_migrate_bare(setup):
+    # ContainerManager reads these via _load_setting, straight off the store
+    # with no namespace prefix (see _migrate.py / manager._persistent_store).
+    store, old, _ = setup
+    _write_sections(old, {"CONTAINER.CACHE": {"INSTALLED_CONTAINERS": '["nginx"]'}})
+    ConfigMigration(store).migrate(old)
+    assert store.get("INSTALLED_CONTAINERS") == '["nginx"]'
+
+
+def test_flare_doamin_misspelling_renamed_to_flare_domain(setup):
+    # A built-in exception to the generic rule: the legacy misspelling must be
+    # renamed on the way in, not migrated verbatim to container.FLARE_DOAMIN
+    # (a key nothing reads).
+    store, old, _ = setup
+    _write_sections(old, {"CONTAINER.CACHE": {"FLARE_DOAMIN": "example.com"}})
+    report = ConfigMigration(store).migrate(old)
+    assert store.get("container.FLARE_DOMAIN") == "example.com"
+    assert "container.FLARE_DOAMIN" not in store
+    entry = [e for e in report["entries"] if e["old_key"] == "CONTAINER.CACHE.FLARE_DOAMIN"][0]
+    assert entry["new_key"] == "container.FLARE_DOMAIN"
+    assert entry["reason"] == "mapped"

@@ -1,0 +1,31 @@
+{
+  "networks": {
+    "nginx": {
+      "name": "aio-nginx"
+    }
+  },
+  "services": {
+    "portainer": {
+      "container_name": "aio-portainer",
+      "hostname": "portainer",
+      "image": "portainer/portainer-ce:alpine",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": [
+        "nginx"
+      ],
+      "ports": [
+        "9000:9000"
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "<APP_DATA>/portainer/data:/data"
+      ]
+    }
+  }
+}

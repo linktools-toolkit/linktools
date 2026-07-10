@@ -1,0 +1,43 @@
+{
+  "networks": {
+    "nginx": {
+      "name": "aio-nginx"
+    }
+  },
+  "services": {
+    "nginx": {
+      "build": {
+        "context": "<ASSETS>/100-nginx",
+        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
+      },
+      "container_name": "aio-nginx",
+      "healthcheck": {
+        "interval": "5s",
+        "start_interval": "1s",
+        "start_period": "1s",
+        "test": [
+          "CMD",
+          "curl",
+          "http://localhost:80/"
+        ]
+      },
+      "hostname": "nginx",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": [
+        "nginx"
+      ],
+      "ports": [
+        "80:80"
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        "<APP_DATA>/nginx/conf.d:/etc/nginx/conf.d"
+      ]
+    }
+  }
+}

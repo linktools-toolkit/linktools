@@ -42,8 +42,13 @@ TimeoutType = _t.Union["Timeout", float, int, None]
 
 if _t.TYPE_CHECKING:
     from .core._environ import ConfigDict  # noqa
+    from .core._config import ConfigField  # noqa
     from typing import Any, Dict, Union
-    ConfigKeyType = str
+    # A container helper (get_config/get_config_later/load_*_url) may be
+    # given either a plain field name already defined elsewhere, or a
+    # ConfigField to define (idempotently) and resolve in one step -- see
+    # BaseContainer._resolve_config_key.
+    ConfigKeyType = Union[str, ConfigField]
     ConfigType = Any
     ConfigLiteralType = str
     ConfigTypeMap = Dict[str, Any]

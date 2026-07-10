@@ -28,9 +28,7 @@
 """
 from typing import TYPE_CHECKING
 
-from linktools.core import (
-    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
-)
+from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 
@@ -46,8 +44,8 @@ class Container(BaseContainer):
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=self.get_nginx_domain(),
-            PORTAINER_AUTH_ENABLE=ConfigField(name="PORTAINER_AUTH_ENABLE", cast=bool, default=True),
-            PORTAINER_PORT=ConfigField(name="PORTAINER_PORT", cast=int, default=9000),
+            PORTAINER_AUTH_ENABLE=ConfigField(cast=bool, default=True),
+            PORTAINER_PORT=ConfigField(cast=int, default=9000),
         )
 
     @cached_property

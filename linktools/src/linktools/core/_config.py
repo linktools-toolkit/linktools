@@ -20,10 +20,18 @@ from ..errors import (
     ConfigValidationError,
 )
 from ..types import MISSING
-from ..utils import atomic_write, get_file_hash
+from ..utils import atomic_write, get_file_hash, remove_file
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Iterator, Sequence
+    from typing import Any, Callable, Iterator, Literal, Sequence
+
+    # The two string literals _cast_value special-cases (mirrors the old,
+    # pre-v2 CONFIG_TYPES dispatch table): "path" expands/absolutizes a
+    # filesystem path, "json" parses a JSON string. Anything else must be a
+    # callable (including the builtins ``bool``/``str``, which _cast_value
+    # also special-cases -- see _cast_bool/_cast_str).
+    ConfigLiteralType = Literal["path", "json"]
+    ConfigType = Union[ConfigLiteralType, Callable[[Any], Any], None]
 
 __all__ = [
     "ConfigStore", "ConfigMigration", "Config", "ConfigField", "ConfigSchema",
@@ -181,55 +189,6 @@ class ConfigMigration(object):
         else:
             self._config_dir = Path(str(getattr(config_store, "path", "."))).parent
 
-    # built-in key map covering core + cntr configuration keys.
-    # Section-qualified keys (SECTION.KEY) are authoritative; the bare-key
-    # entries are a convenience fallback used ONLY when the bare key is
- # unambiguous .
-    DEFAULT_KEY_MAP = {
-        # -- explicit section-qualified mappings (preferred) --
-        # Core (legacy ConfigCacheParser stored core under MAIN.CACHE)
-        "MAIN.CACHE.DEBUG": "debug",
-        "MAIN.CACHE.DATA_PATH": "data.path",
-        "MAIN.CACHE.TEMP_PATH": "temp.path",
-        "MAIN.CACHE.STORAGE_PATH": "storage.path",
-        "MAIN.CACHE.DEFAULT_USER_AGENT": "download.user_agent",
-        "MAIN.CACHE.DEFAULT_WAN_IP_URL": "network.wan_ip_url",
-        # Cntr container manager (legacy CONTAINER.CACHE)
-        "CONTAINER.CACHE.HOST": "container.host",
-        "CONTAINER.CACHE.DOCKER_HOST": "container.docker_host",
-        "CONTAINER.CACHE.COMPOSE_PROJECT_NAME": "container.compose_project_name",
-        "CONTAINER.CACHE.SERVICE_RESTART_POLICY": "container.service_restart_policy",
-        "CONTAINER.CACHE.SERVICE_LOG_DRIVER": "container.service_log_driver",
-        "CONTAINER.CACHE.SERVICE_LOG_MAX_SIZE": "container.service_log_max_size",
-        "CONTAINER.CACHE.DOCKER_USER": "container.docker_user",
-        "CONTAINER.CACHE.DOCKER_UID": "container.docker_uid",
-        "CONTAINER.CACHE.DOCKER_GID": "container.docker_gid",
-        "CONTAINER.CACHE.DOCKER_TYPE": "container.docker_type",
-        "CONTAINER.CACHE.DOCKER_APP_PATH": "container.docker_app_path",
-        "CONTAINER.CACHE.DOCKER_APP_DATA_PATH": "container.docker_app_data_path",
-        "CONTAINER.CACHE.DOCKER_USER_DATA_PATH": "container.docker_user_data_path",
-        "CONTAINER.CACHE.DOCKER_DOWNLOAD_PATH": "container.docker_download_path",
-        # Cntr flare container: FLARE_DOMAIN is canonical; the legacy
-        # misspelling FLARE_DOAMIN maps to the same new key.
-        "CONTAINER.CACHE.FLARE_DOMAIN": "container.flare.domain",
-        "CONTAINER.CACHE.FLARE_DOAMIN": "container.flare.domain",
-        # Cntr installed state (also migrated via _migrate.py)
-        "CONTAINER.CACHE.INSTALLED_CONTAINERS": "container.installed_containers",
-        "CONTAINER.CACHE.INSTALLED_REPOS": "container.installed_repos",
-        "CONTAINER.CACHE.RUNNING_CONTAINERS": "container.running_containers",
-        # -- bare-key fallback: only genuinely global core keys. Section-
-        # sensitive keys (HOST, DOCKER_*, COMPOSE_*, SERVICE_*, FLARE_*,
-        # INSTALLED_*) are deliberately NOT bare-mapped -- they must use their
-        # full SECTION.KEY entry. Otherwise a stray MAIN.CACHE.HOST could be
-        # pulled onto container.host via the (unambiguous) bare fallback.
-        "DEBUG": "debug",
-        "DATA_PATH": "data.path",
-        "TEMP_PATH": "temp.path",
-        "STORAGE_PATH": "storage.path",
-        "DEFAULT_USER_AGENT": "download.user_agent",
-        "DEFAULT_WAN_IP_URL": "network.wan_ip_url",
-    }
-
     def _log(self, level: str, msg: str) -> None:
         if self._logger is not None:
             getattr(self._logger, level)(msg)
@@ -250,21 +209,34 @@ class ConfigMigration(object):
 
     @staticmethod
     def _merged_key_map(key_map):
-        merged = dict(ConfigMigration.DEFAULT_KEY_MAP)
-        if key_map:
-            merged.update(key_map)
-        return merged
+        return dict(key_map) if key_map else {}
 
     def _resolve_new_key(self, section, key, key_map, ambiguous_keys=None):
         """Map an old (section, key) to a new namespaced key.
 
-        Resolution order (fix-plan §1.3.2):
-          1. explicit ``SECTION.KEY``
+        Resolution order:
+          1. explicit ``SECTION.KEY`` (caller-supplied ``key_map`` overrides)
           2. normalized ``section.key``
           3. bare ``KEY`` -- only if that bare key is NOT ambiguous (i.e. it
              does not appear in more than one section); ambiguous bare keys
-             must be mapped via the full ``SECTION.KEY`` or they are preserved
-          4. otherwise ``legacy.<section>.<key>`` (never dropped)
+             must be mapped via the full ``SECTION.KEY`` or fall through below
+          4. generic: any section following the legacy ConfigCacheParser
+             "<NAMESPACE>.CACHE" convention maps to "<namespace-lower>.<KEY>"
+             -- the same format ``Config.wrap_config(namespace=...)`` reads via
+             PersistentSource. This is what lets ALL fields migrate (goal: not
+             just the ones a caller happens to enumerate), including custom
+             fields defined by sub-package/container configs this module has
+             never heard of. Section-qualification already makes this
+             collision-free, so no ambiguity check is needed here. Two cntr
+             keys need special handling because the generic rule would land
+             them somewhere nothing reads: the legacy misspelling
+             FLARE_DOAMIN (renamed to FLARE_DOMAIN, the key the code actually
+             reads) and INSTALLED_CONTAINERS/INSTALLED_REPOS (read bare, with
+             no namespace prefix -- see ContainerManager._persistent_store /
+             _migrate.py; RUNNING_CONTAINERS is deliberately excluded, it's
+             transient state read from the *cache* store instead).
+          5. otherwise ``legacy.<section>.<key>`` (never dropped) -- only hit
+             for a section that doesn't even follow the "*.CACHE" convention.
 
         Returning ``mapped_legacy_bare`` for the bare-key fallback lets callers
         distinguish an explicit full-key mapping from an ambiguous-prone bare one.
@@ -281,6 +253,14 @@ class ConfigMigration(object):
         nkey = _normalize(key)
         if nkey in key_map and nkey not in ambiguous_keys:
             return key_map[nkey], "mapped_legacy_bare"
+        if section.upper().endswith(".CACHE"):
+            namespace = section[:-len(".CACHE")].lower()
+            if namespace:
+                if key == "FLARE_DOAMIN":
+                    return "%s.FLARE_DOMAIN" % namespace, "mapped"
+                if key in ("INSTALLED_CONTAINERS", "INSTALLED_REPOS"):
+                    return key, "mapped"
+                return "%s.%s" % (namespace, key), "mapped_generic"
         return ("legacy.%s.%s" % (_normalize(section), _normalize(key)),
                 "unknown_key_preserved")
 
@@ -351,15 +331,19 @@ class ConfigMigration(object):
     ) -> "dict[str, Any]":
         """Read old config and write to ConfigStore. Returns a report.
 
-        Each old ``<section>.<key>`` is mapped via ``key_map``. Bare-key
-        fallback is only used when the bare key is unambiguous (appears in a
-        single section); otherwise the key must be mapped via its full
-        ``SECTION.KEY`` or it is preserved at ``legacy.<section>.<key>`` so two
-        same-named keys in different sections never collapse (fix-plan §1.3.2).
+        Every old ``<section>.<key>`` is migrated -- not just the ones a
+        caller happens to enumerate. An optional ``key_map`` of exceptions
+        (renames, ambiguous-bare-key overrides) wins first; anything else
+        under a "<NAMESPACE>.CACHE"-style section falls through to the
+        generic "<namespace-lower>.<KEY>" mapping (with two built-in cntr
+        exceptions -- FLARE_DOAMIN and INSTALLED_CONTAINERS/REPOS) so it is
+        still migrated to a real, readable location (see
+        ``_resolve_new_key``). Only a section that doesn't even follow that
+        convention is preserved (never dropped) at ``legacy.<section>.<key>``.
 
         Writes are planned first and applied in a single batch via
         ``store.save()`` so an interrupted migration cannot leave a half-written
-        new store (fix-plan §1.3.4).
+        new store.
         """
         from collections import defaultdict
 
@@ -410,6 +394,85 @@ class ConfigMigration(object):
             len(report["migrated"]), len(report["skipped"]), len(report["legacy"])))
         return report
 
+    # -- migrate other legacy formats (shared with sub-packages) -----------
+    #
+    # ``migrate()`` above only understands the ini-style ConfigCacheParser
+    # ``.cfg`` format. Sub-packages (e.g. cntr) have their own pre-ConfigStore
+    # legacy formats -- a bare JSON blob file, or a legacy FileCache shelve --
+    # that need the exact same "migrate once, never overwrite newer data,
+    # clean up the source" behaviour. These two methods are that shared
+    # mechanism, so core's and cntr's config migrations go through the same
+    # ConfigMigration methods instead of each hand-rolling it.
+
+    @staticmethod
+    def _remove(path: "PathLike") -> None:
+        try:
+            remove_file(str(path))
+        except Exception:
+            pass
+
+    def migrate_json_file(self, source_path: "PathLike", key: str,
+                          also_remove: "Sequence[PathLike]" = ()) -> bool:
+        """Migrate one legacy JSON blob file into ``store[key]``.
+
+        Returns True if a value was migrated. If ``key`` is already present,
+        the source is dropped (never overwritten) and this returns False.
+        ``also_remove`` lets a source directory/lockfile be cleaned up
+        alongside the primary file even when nothing was migrated.
+        """
+        source_path = str(source_path)
+        if not os.path.isfile(source_path):
+            return False
+        cleanup = tuple(also_remove) or (source_path,)
+        if key in self._store:
+            for p in cleanup:
+                self._remove(p)
+            return False
+        try:
+            with open(source_path, encoding="utf-8") as fd:
+                value = json.load(fd)
+        except Exception as exc:
+            self._log("warning", "ConfigMigration.migrate_json_file: failed to read %s: %s"
+                      % (source_path, exc))
+            return False
+        self._store.set(key, value)
+        self._log("warning", "ConfigMigration.migrate_json_file: migrated %s from %s"
+                  % (key, source_path))
+        for p in cleanup:
+            self._remove(p)
+        return True
+
+    def migrate_shelve(self, legacy_dir: "PathLike", keys: "Sequence[str]") -> "set[str]":
+        """Migrate the given ``keys`` out of a legacy FileCache shelve dir.
+
+        Only the listed keys are moved (regenerable/transient state should be
+        left for the caller to handle separately); the shelve directory is
+        removed once considered, whether or not anything was migrated.
+        """
+        from ..cache import FileCache  # legacy structure; import kept local
+
+        legacy_dir = str(legacy_dir)
+        if not os.path.isdir(legacy_dir):
+            return set()
+        migrated: "set[str]" = set()
+        try:
+            cache = FileCache(legacy_dir)
+            with cache.session() as data:
+                for key in keys:
+                    if key in self._store:
+                        continue
+                    value = data.get(key, None)
+                    if value is not None:
+                        self._store.set(key, value)
+                        migrated.add(key)
+                        self._log("warning",
+                                  "ConfigMigration.migrate_shelve: migrated %s from legacy FileCache" % key)
+        except Exception as exc:
+            self._log("warning", "ConfigMigration.migrate_shelve: failed at %s: %s" % (legacy_dir, exc))
+            return migrated
+        self._remove(legacy_dir)
+        return migrated
+
  # -- verify (full check) ----------------------
 
     def verify(self, report: "dict[str, Any] | None" = None) -> bool:
@@ -425,7 +488,7 @@ class ConfigMigration(object):
             if report is not None:
                 for entry in report.get("entries", []):
                     if entry["reason"] in ("mapped", "mapped_legacy_bare",
-                                            "unknown_key_preserved"):
+                                            "mapped_generic", "unknown_key_preserved"):
                         if entry["new_key"] not in self._store:
                             self._log("error", "ConfigMigration.verify: missing %s" % entry["new_key"])
                             return False
@@ -459,29 +522,52 @@ class AliasProvider:
 
 
 class LazyProvider:
-    """Compute a value from a callable. Stateless."""
+    """Compute a value from a callable.
 
-    def __init__(self, func: "Callable[[ConfigResolver], Any]") -> None:
+    ``cached=True`` persists the computed value (via the schema's
+    PersistentSource, keyed by field name) the first time it is computed, so a
+    non-deterministic ``func`` (e.g. one that generates a random secret) is
+    only ever invoked once -- later resolutions reuse the persisted value
+    instead of recomputing. Stateless otherwise.
+    """
+
+    def __init__(self, func: "Callable[[ConfigResolver], Any]", cached: bool = False) -> None:
         self.func = func
+        self.cached = cached
 
 
 class PromptProvider:
-    """Prompt the user for a value. Stateless."""
+    """Prompt the user for a value.
+
+    ``cached=True`` persists the answer (via the schema's PersistentSource,
+    keyed by field name) so the user is only ever asked once -- later
+    resolutions reuse the persisted answer instead of prompting again.
+    Stateless otherwise.
+    """
 
     def __init__(self, message: str = None, default: "Any" = MISSING,
-                 password: bool = False, choices: "list | None" = None) -> None:
+                 password: bool = False, choices: "list | None" = None,
+                 cached: bool = False, allow_empty: bool = False) -> None:
         self.message = message
         self.default = default
         self.password = password
         self.choices = choices
+        self.cached = cached
+        self.allow_empty = allow_empty
 
 
 class ConfirmProvider:
-    """Ask the user for a yes/no confirmation."""
+    """Ask the user for a yes/no confirmation.
 
-    def __init__(self, message: str = None, default: "Any" = MISSING) -> None:
+    ``cached=True`` persists the answer (via the schema's PersistentSource,
+    keyed by field name) so the user is only ever asked once. Stateless
+    otherwise.
+    """
+
+    def __init__(self, message: str = None, default: "Any" = MISSING, cached: bool = False) -> None:
         self.message = message
         self.default = default
+        self.cached = cached
 
 
 class ErrorProvider:
@@ -499,7 +585,7 @@ class ChainProvider:
 
 
 class ConfigField:
-    def __init__(self, name: str, default: "Any" = MISSING, cast: "Callable | None" = None,
+    def __init__(self, name: "str | None" = None, default: "Any" = MISSING, cast: "ConfigType" = None,
                  validator: "Callable | None" = None, aliases: "Sequence[str]" = (),
                  required: bool = False, secret: bool = False, description: str = "",
                  deprecated: bool = False, provider: "Any" = None) -> None:
@@ -513,6 +599,26 @@ class ConfigField:
         self.description = description
         self.deprecated = deprecated
         self.provider = provider
+
+    @classmethod
+    def chain(cls, *providers: "Any", **kwargs: "Any") -> "ConfigField":
+        """Build a field whose provider is a ``ChainProvider`` of ``providers``.
+
+        Shorthand for the common
+        ``ConfigField(name=..., provider=ChainProvider(a, b, ...))`` spelling,
+        which repeats the field name and adds a level of nesting for every
+        chained field. ``name`` is normally omitted here: dict-based callers
+        (``configs`` properties consumed via ``Config.update_defaults``) get it
+        from the dict key automatically.
+
+        Always wraps in ``ChainProvider`` even for a single provider: that
+        wrapper is not a no-op -- ``ConfigResolver`` lets a ``ChainProvider``
+        sub-provider's exception fall through to ``_first_present``/
+        ``field.default``, while a bare provider's exception propagates
+        directly. Collapsing a single-provider chain to the bare provider
+        would silently drop that fallback.
+        """
+        return cls(provider=ChainProvider(*providers), **kwargs)
 
 
 class ConfigSchema:
@@ -656,6 +762,76 @@ class ResolvedConfig:
         self.raw_value = raw_value
 
 
+def _cast_bool(value: "Any") -> bool:
+    """Cast a config value to bool without Python's ``bool("false") == True`` trap.
+
+    The builtin ``bool()`` treats any non-empty string as truthy, so a bare
+    ``cast=bool`` would turn an env var / persisted string like ``"false"``
+    into ``True``. Recognize the common textual forms explicitly instead.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in ("true", "yes", "y", "on", "1"):
+            return True
+        if lowered in ("false", "no", "n", "off", "0"):
+            return False
+        raise TypeError("str %r cannot be converted to type bool" % (value,))
+    return bool(value)
+
+
+def _cast_str(value: "Any") -> str:
+    """Cast a config value to str, JSON-dumping structured values instead of
+    falling back to their Python ``repr`` (e.g. ``str(["a"])`` == ``"['a']"``,
+    not valid JSON), and mapping ``None`` to ``""`` rather than ``"None"``.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (tuple, list, dict)):
+        return json.dumps(value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _cast_json(value: "Any") -> "list | dict":
+    """Cast a config value (typically a raw env-var/persisted string) to
+    JSON-compatible data."""
+    if isinstance(value, str):
+        return json.loads(value)
+    if isinstance(value, (tuple, list, dict)):
+        return value
+    raise TypeError("%s cannot be converted to json" % (type(value).__name__,))
+
+
+def _cast_value(cast: "ConfigType", value: "Any") -> "Any":
+    """Apply a cast that may be a callable, ``bool``/``str``, or one of the
+    string literals ``"path"``/``"json"``.
+
+    ``ConfigField.cast`` accepts a callable or one of the ``ConfigType``
+    literals (mirroring the explicit ``Config.cast(value, type=...)`` API);
+    both must resolve identically. A bare ``field.cast(value)`` call fails on
+    the string literal forms with ``TypeError: 'str' object is not
+    callable``, so callers route through here. ``bool``/``str`` are
+    special-cased the same way ``"path"``/``"json"`` are: passed straight to
+    the builtin, ``bool`` would silently misparse strings (see
+    ``_cast_bool``) and ``str`` would produce non-JSON reprs for structured
+    values (see ``_cast_str``).
+    """
+    if cast == "path":
+        return os.path.abspath(os.path.expanduser(str(value)))
+    if cast == "json":
+        return _cast_json(value)
+    if cast is bool:
+        return _cast_bool(value)
+    if cast is str:
+        return _cast_str(value)
+    if callable(cast):
+        return cast(value)
+    return value
+
+
 class ConfigResolver:
     def __init__(self, schema: "ConfigSchema", sources: "Sequence[ConfigSource]") -> None:
         self._schema = schema
@@ -687,11 +863,56 @@ class ConfigResolver:
     def _candidates(field: "ConfigField") -> "tuple[str, Ellipsis]":
         return (field.name,) + field.aliases
 
+    @staticmethod
+    def _prompt_value(provider: "PromptProvider", field: "ConfigField") -> "Any":
+        message = provider.message or field.name
+        if provider.choices:
+            from ..rich import choose
+            return choose(message, provider.choices, default=provider.default)
+        from ..rich import prompt
+        # Forward the field's cast as the prompt's target type (rich.prompt
+        # only knows str/int/float/bool -- anything else, e.g. a custom
+        # callable or the "path" literal, still gets a plain string prompt
+        # and is cast afterwards by _cast_validate). Without this, an int/bool
+        # field always got a bare string prompt, so a real user's typed answer
+        # only worked by coincidence (str -> int/bool casts cleanly for valid
+        # input) and any type-aware placeholder (e.g. in tests) had no way to
+        # return a plausible value for the field it was actually asking about.
+        type_hint = field.cast if field.cast in (str, int, float, bool) else str
+        return prompt(message, type=type_hint, default=provider.default,
+                      password=provider.password, allow_empty=provider.allow_empty)
+
+    def _persistent_source(self) -> "PersistentSource | None":
+        for source in self._sources:
+            if isinstance(source, PersistentSource):
+                return source
+        return None
+
+    def _resolve_cached(self, field: "ConfigField", compute: "Callable[[], Any]") -> "tuple[Any, str]":
+        """Resolve a ``cached=True`` provider: reuse a persisted value if one
+        exists for this field, else compute it once and persist the result.
+
+        Returns ``(value, source_name)``. Raises ``ConfigError`` if the schema
+        has no PersistentSource configured (cached=True requires one) -- this
+        surfaces the misconfiguration immediately rather than silently
+        recomputing (e.g. re-prompting or regenerating a secret) every call.
+        """
+        persistent = self._persistent_source()
+        if persistent is None:
+            raise ConfigError(
+                "cached=True provider for %r requires a PersistentSource" % (field.name,))
+        raw, present = persistent.get(field.name)
+        if present:
+            return raw, "persistent"
+        value = compute()
+        persistent.set(field.name, value)
+        return value, "persistent"
+
     def _cast_validate(self, field: "ConfigField", raw: "Any") -> "Any":
         value = raw
         if field.cast is not None:
             try:
-                value = field.cast(raw)
+                value = _cast_value(field.cast, raw)
             except Exception as exc:
                 raise ConfigCastError("cannot cast %r for %s: %s" % (raw, field.name, exc))
         if field.validator is not None:
@@ -718,6 +939,45 @@ class ConfigResolver:
                 return (source.name, raw, True)
         return (None, MISSING, False)
 
+    def _first_present_override(self, field: "ConfigField") -> "tuple[str | None, Any, bool]":
+        """Check the three *already-answered* sources (Environment,
+        RuntimeOverride, Persistent) ahead of the field's provider.
+
+        A field's ``provider`` must not silently outrank something already
+        set: without this check, any field with a provider (nearly every
+        meaningfully-configured field in practice) never even looks at these
+        sources, because ``_resolve_inner`` tries the provider first and only
+        falls back to ``_first_present`` if every sub-provider raises.
+
+        This mirrors the pre-refactor legacy ``Config``, whose ``_map`` was a
+        ``ChainMap(env_vars, persistent_cache, field_descriptors,
+        global_config)`` -- the persisted cache was checked, for every field,
+        *before* its ``Config.Prompt``/``Config.Lazy``/``Config.Alias``
+        descriptor ever ran, regardless of that descriptor's own ``cached=``
+        flag (which only controlled whether a freshly-computed answer got
+        saved back, not whether an existing one was read first). Without
+        Persistent here, a field whose provider lacks ``cached=True`` (e.g.
+        HOST) never looks at an already-persisted/migrated value at all --
+        every resolution re-prompts -- and even a ``cached=True`` field only
+        checks the persisted value via its own ``_resolve_cached``, which
+        still runs after ``AliasProvider``/other sub-providers earlier in a
+        ``ChainProvider`` have already had a chance to run first.
+
+        Also fixes: a same-named env var set for one particular invocation
+        (e.g. ``NGINX_ROOT_DOMAIN=x ct-cntr up``) used to be permanently
+        ignored once a cached=True provider had persisted an answer, since
+        the provider ran (and "succeeded" from cache) before the environment
+        was ever consulted.
+        """
+        for source in self._sources:
+            if not isinstance(source, (EnvironmentSource, RuntimeOverrideSource, PersistentSource)):
+                continue
+            for candidate in self._candidates(field):
+                raw, present = source.get(candidate)
+                if present:
+                    return (source.name, raw, True)
+        return (None, MISSING, False)
+
     def resolve(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
         if _stack is None and key in self._memo:
             return self._memo[key]
@@ -725,6 +985,50 @@ class ConfigResolver:
         if _stack is None:
             self._memo[key] = result
         return result
+
+    def _resolve_alias(self, provider: "AliasProvider", key: str,
+                       _stack: "list[str] | None") -> "ResolvedConfig":
+        stack = list(_stack or [])
+        if key in stack:
+            chain = stack[stack.index(key):] + [key]
+            raise ConfigCycleError("config alias cycle: " + " -> ".join(chain))
+        stack.append(key)
+        return self.resolve(provider.target, _stack=stack)
+
+    def _resolve_leaf_provider(self, provider: "Any", field: "ConfigField") -> "ResolvedConfig":
+        """Resolve a Lazy/Prompt/Confirm/Error provider (no Alias/Chain nesting).
+
+        ``cached=True`` on Lazy/Prompt/Confirm routes the actual compute/ask
+        through ``_resolve_cached`` so it only ever runs once per field.
+        """
+        if isinstance(provider, LazyProvider):
+            if provider.cached:
+                value, source_name = self._resolve_cached(field, lambda: provider.func(self))
+                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
+            value = provider.func(self)
+            return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
+
+        if isinstance(provider, PromptProvider):
+            if provider.cached:
+                value, source_name = self._resolve_cached(
+                    field, lambda: self._prompt_value(provider, field))
+                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
+            value = self._prompt_value(provider, field)
+            return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
+
+        if isinstance(provider, ConfirmProvider):
+            from ..rich import confirm
+            if provider.cached:
+                value, source_name = self._resolve_cached(
+                    field, lambda: confirm(provider.message or field.name, default=provider.default))
+                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
+            value = confirm(provider.message or field.name, default=provider.default)
+            return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
+
+        if isinstance(provider, ErrorProvider):
+            raise ConfigError(provider.message)
+
+        raise ConfigNotFoundError("unknown provider type: %r" % type(provider).__name__)
 
     def _resolve_inner(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
         field = self._schema.get(key)
@@ -736,32 +1040,17 @@ class ConfigResolver:
                 raise ConfigNotFoundError("config %r is not set and has no default" % (key,))
             raise ConfigNotFoundError("unknown config key %r" % (key,))
 
+        # An explicit Environment/RuntimeOverride value always outranks the
+        # field's provider (see _first_present_override) -- checked ahead of
+        # AliasProvider/ChainProvider/leaf-provider resolution, not merely as
+        # their failure fallback.
+        override_source, override_raw, override_present = self._first_present_override(field)
+        if override_present:
+            return ResolvedConfig(self._cast_validate(field, override_raw), field, override_source, override_raw)
+
         provider = field.provider
         if isinstance(provider, AliasProvider):
-            stack = _stack if _stack is not None else []
-            if key in stack:
-                chain = stack[stack.index(key):] + [key]
-                raise ConfigCycleError("config alias cycle: " + " -> ".join(chain))
-            stack.append(key)
-            return self.resolve(provider.target, _stack=stack)
-
-        if isinstance(provider, LazyProvider):
-            value = provider.func(self)
-            return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
-
-        if isinstance(provider, PromptProvider):
-            from ..rich import prompt
-            value = prompt(provider.message or field.name, default=provider.default,
-                           password=provider.password, choices=provider.choices)
-            return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
-
-        if isinstance(provider, ConfirmProvider):
-            from ..rich import confirm
-            value = confirm(provider.message or field.name, default=provider.default)
-            return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
-
-        if isinstance(provider, ErrorProvider):
-            raise ConfigError(provider.message)
+            return self._resolve_alias(provider, key, _stack)
 
         if isinstance(provider, ChainProvider):
             for sub in provider.providers:
@@ -769,6 +1058,8 @@ class ConfigResolver:
                     return self._try_provider(sub, field, key, _stack)
                 except Exception:
                     continue
+        elif provider is not None:
+            return self._resolve_leaf_provider(provider, field)
 
         source_name, raw, present = self._first_present(field)
         if present:
@@ -782,32 +1073,8 @@ class ConfigResolver:
     def _try_provider(self, provider: "Any", field: "ConfigField",
                       key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
         if isinstance(provider, AliasProvider):
-            stack = list(_stack or [])
-            if key in stack:
-                chain = stack[stack.index(key):] + [key]
-                raise ConfigCycleError("config alias cycle: " + " -> ".join(chain))
-            stack.append(key)
-            return self.resolve(provider.target, _stack=stack)
-
-        if isinstance(provider, LazyProvider):
-            value = provider.func(self)
-            return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
-
-        if isinstance(provider, PromptProvider):
-            from ..rich import prompt
-            value = prompt(provider.message or field.name, default=provider.default,
-                           password=provider.password, choices=provider.choices)
-            return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
-
-        if isinstance(provider, ConfirmProvider):
-            from ..rich import confirm
-            value = confirm(provider.message or field.name, default=provider.default)
-            return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
-
-        if isinstance(provider, ErrorProvider):
-            raise ConfigError(provider.message)
-
-        raise ConfigNotFoundError("unknown provider type: %r" % type(provider).__name__)
+            return self._resolve_alias(provider, key, _stack)
+        return self._resolve_leaf_provider(provider, field)
 
     def explain(self, key: str) -> dict:
         try:
@@ -972,6 +1239,23 @@ class Config:
                     pass
         return sorted(known)
 
+    def persisted_keys(self) -> "list[str]":
+        """Keys already answered/configured in the PersistentSource.
+
+        Unlike ``keys()`` (every schema-declared field name, whether or not
+        it has ever been set, plus every persisted/env/runtime key), this is
+        only the keys someone has actually set. A caller that lists "every
+        current config value" by resolving each key must use this instead of
+        ``keys()`` for whatever it adds beyond its own explicitly-declared
+        fields -- otherwise it forces resolution (and, for an uncached-so-far
+        Prompt/Confirm-backed field, an interactive prompt) for every field
+        merely because it's *possible* to set, not because it's been set.
+        """
+        persistent = self._find(PersistentSource)
+        if persistent is None:
+            return []
+        return sorted(persistent.keys())
+
     def update_defaults(self, **kwargs: "Any") -> "Config":
         for key, value in kwargs.items():
             if isinstance(value, ConfigField):
@@ -999,8 +1283,4 @@ class Config:
     def cast(self, value: "Any", type: "Any" = None) -> "Any":
         if type is None or type is MISSING:
             return value
-        if type == "path":
-            return os.path.abspath(os.path.expanduser(str(value)))
-        if callable(type):
-            return type(value)
-        return value
+        return _cast_value(type, value)

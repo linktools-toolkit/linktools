@@ -37,11 +37,13 @@ from linktools.cli import BaseCommand, subcommand, SubCommandWrapper, subcommand
 from linktools.cli.argparse import KeyValueAction, BooleanOptionalAction, ArgParseComplete, LazyChoices
 from linktools.core import environ
 from linktools.core import ConfigField
-from linktools.rich import confirm, choose
+from linktools.rich import confirm, choose, is_no_input
 from linktools.errors import ConfigError, GitError
 from .container import ContainerError
 from .context import EventContext
+from .doctor import Finding, Doctor, OK, INFO, WARN
 from .manager import ContainerManager
+from .runtime.compose import ComposeOptions
 
 if TYPE_CHECKING:
     from typing import Any
@@ -80,9 +82,40 @@ class RepoCommand(BaseCommandGroup):
     @subcommand("add", help="add repository")
     @subcommand_argument("url", help="repository url")
     @subcommand_argument("-b", "--branch", help="branch name")
-    @subcommand_argument("-f", "--force", help="force add")
+    @subcommand_argument("-f", "--force", help="force add (skip trust prompt)")
     def on_command_add(self, url: str, branch: str = None, force: bool = False):
+        # Trust prompt (refactor spec §11.2): a repo may carry executable Python
+        # container definitions, so interactive `add` asks for confirmation unless
+        # --force. Non-interactive runs keep the legacy behavior (no blocking).
+        if not force and not is_no_input():
+            if not confirm(
+                    "This repository may contain executable Python container definitions. "
+                    "Only add repositories you trust. Continue?",
+                    default=False):
+                raise ContainerError("Canceled")
         manager.add_repo(url, branch=branch, force=force)
+
+    @subcommand("status", help="show repository status (read-only)")
+    def on_command_status(self):
+        repos = manager.get_all_repos()
+        if not repos:
+            self.logger.info("No repository found")
+            return
+        from linktools.git import GitRepository
+        from dulwich.errors import NotGitRepository
+        for url, meta in repos.items():
+            repo_type = meta.get("type", "unknown")
+            repo_path = meta.get("repo_path")
+            line = f"{url} ({repo_type}) -> {repo_path}"
+            if repo_type == "git" and repo_path and os.path.exists(repo_path):
+                try:
+                    repo = GitRepository(manager.environ, repo_path)
+                    line += f" [dirty={repo.is_dirty()}]"
+                except NotGitRepository:
+                    pass
+                except Exception:
+                    pass
+            self.logger.info(line)
 
     @subcommand("update", help="update repositories")
     @subcommand_argument("-b", "--branch", help="branch name")
@@ -156,7 +189,9 @@ class ConfigCommand(BaseCommand):
                          choices=LazyChoices(_iter_installed_container_names))
     @subcommand_argument("-d", "--with-dependencies", action="store_true", default=False,
                          help="include configs from dependency containers")
-    def on_command_list(self, names: "list[str]", with_dependencies: bool = False):
+    @subcommand_argument("--show-secret", action="store_true", default=False,
+                         help="show secret values in plain text instead of the logger's automatic ***-redaction")
+    def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False):
         containers = manager.prepare_installed_containers()
         target_containers = [c for c in containers if c.name in names] if names else containers
         if with_dependencies and names:
@@ -169,10 +204,24 @@ class ConfigCommand(BaseCommand):
             keys.update(container.extend_configs.keys())
         if not names:
             keys.update([key for key, value in manager.configs.items() if not isinstance(value, ConfigField)])
-            keys.update(manager.env_config.keys())
+            # Only keys someone has actually set (persisted_keys()), not every
+            # schema-declared field name (keys()) -- otherwise a manager-level
+            # field that's never actually been configured (e.g.
+            # DOCKER_DOWNLOAD_PATH) gets force-resolved just because it's
+            # *possible* to set, prompting for it even though nothing needs it.
+            keys.update(manager.env_config.persisted_keys())
         for key in sorted(keys):
             value = manager.env_config.get(key)
-            self.logger.info(f"{key}={value}")
+            if show_secret:
+                # self.logger.info goes through the logging redaction filter,
+                # which masks anything that looks like a secret/password/token
+                # (by design -- never leak one into a log file/CI output by
+                # accident). --show-secret is an explicit, opt-in request to
+                # see the real value, so print it directly instead (same
+                # pattern as e.g. litellm's `key` subcommand).
+                print(f"{key}={value}")
+            else:
+                self.logger.info(f"{key}={value}")
 
     @subcommand("edit", help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
@@ -183,40 +232,6 @@ class ConfigCommand(BaseCommand):
     def on_command_reload(self):
         manager.env_config.reload()
         manager.prepare_installed_containers()
-
-    @subcommand("migrate", help="migrate old config data to new format (v2 §3.3/§13.2)")
-    @subcommand_argument("--dry-run", action="store_true", default=False,
-                         help="inspect only, do not modify anything")
-    @subcommand_argument("--backup", action="store_true", default=False,
-                         help="backup old config before migrating")
-    def on_command_migrate(self, dry_run: bool, backup: bool):
-        from linktools.core import ConfigMigration
-        old_path = str(manager.environ.paths.config / "settings.json")
-        mig = ConfigMigration(manager.environ.config_store, self.logger)
-        info = mig.inspect(old_path)
-        if info["count"] == 0:
-            self.logger.info("No old config data found to migrate.")
-            return
-        self.logger.info(f"Found {info['count']} keys in old config: {old_path}")
-        if dry_run:
-            for key in info["keys"]:
-                self.logger.info(f"  {key}")
-            return
-        backup_path = None
-        if backup:
-            backup_path = mig.backup(old_path)
-            self.logger.info(f"Backed up to {backup_path}")
-        report = mig.migrate(old_path)
-        self.logger.info(
-            f"Migrated {len(report['migrated'])}, skipped {len(report['skipped'])}, "
-            f"legacy {len(report['legacy'])}")
-        if mig.verify():
-            self.logger.info("Verification passed.")
-        else:
-            self.logger.error("Verification FAILED!")
-            if backup_path:
-                self.logger.warning("Rolling back...")
-                mig.rollback(backup_path, old_path)
 
 
 class ExecCommand(BaseCommand):
@@ -306,13 +321,15 @@ class Command(BaseCommandGroup):
     def on_command_list(self, names: "list[str]" = None, detail: bool = False):
         install_containers = manager.get_installed_containers(resolve=False)
         all_install_containers = manager.resolve_depend_containers(install_containers)
-        running_containers = manager.get_running_containers()
+        # Prefer live state, fall back to persisted when Docker is unavailable
+        # (refactor spec §9.2/§9.8) so `list` never crashes.
+        running_names = set(manager.running_state.get_effective(install_containers))
         for container in sorted(manager.containers.values(), key=lambda o: o.order):
             if names and container.name not in names:
                 continue
             installed = container in all_install_containers
             added = container in install_containers
-            running = container in running_containers
+            running = container.name in running_names
             if not installed and running:
                 style, symbol, label = "yellow bold", "[-]", "pending remove"
             elif not installed:
@@ -363,48 +380,25 @@ class Command(BaseCommandGroup):
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False):
         context = self._make_context(["up", pull and "pull", build and "build"], names)
-
-        build_options = []
-        up_options = ["--detach", "--no-build"]
-        if pull:
-            build_options.extend(["--pull"])
-            up_options.extend(["--pull", "always"])
-        else:
-            build_options.extend(["--pull=false"])
-            up_options.extend(["--pull", "missing"])
-        if context.is_full_containers:
-            up_options.extend(["--remove-orphans"])
-
-        for key in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
-            if key in os.environ:
-                build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
-            key = key.upper()
-            if key in os.environ:
-                build_options.extend(["--build-arg", f"{key}={os.environ[key]}"])
-
-        services = []
-        if not context.is_full_containers:
-            for container in context.target_containers:
-                services.extend(container.services.keys())
-            if not services:
-                raise ContainerError(
-                    f"No service found in container "
-                    f"`{','.join([c.name for c in context.target_containers])}`"
-                )
+        services = manager.compose_runner.collect_services(context)
+        options = ComposeOptions(
+            build=build,
+            pull=pull,
+            remove_orphans=context.is_full_containers,
+            services=services,
+            emit_default_pull=True,
+        )
 
         with manager.notify_start(context):
             if build:
-                manager.create_docker_compose_process(
-                    context.containers,
-                    "build", *build_options, *services,
-                ).check_call()
-            manager.create_docker_compose_process(
-                context.containers,
-                "up", *up_options, *services
-            ).check_call()
+                manager.compose_runner.build(context, options)
+            manager.compose_runner.up(context, options)
 
         with manager.notify_remove(context):
             pass
+
+        # Record running state only after a successful up (refactor spec §9.6).
+        manager.running_state.mark_started(context)
 
     @subcommand("restart", help="restart installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
@@ -414,69 +408,57 @@ class Command(BaseCommandGroup):
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False):
         context = self._make_context(["restart", pull and "pull", build and "build"], names)
-
-        build_options = []
-        up_options = ["--detach", "--no-build"]
-        if pull:
-            build_options.extend(["--pull"])
-            up_options.extend(["--pull", "always"])
-        if context.is_full_containers:
-            up_options.extend(["--remove-orphans"])
-
-        services = []
-        if not context.is_full_containers:
-            for container in context.target_containers:
-                services.extend(container.services.keys())
-            if not services:
-                raise ContainerError(
-                    f"No service found in container "
-                    f"`{','.join([c.name for c in context.target_containers])}`"
-                )
+        services = manager.compose_runner.collect_services(context)
+        # restart omits the --pull=false / --pull missing defaults that `up`
+        # emits, and (unlike `up`/`exec up`/`exec restart`) never included
+        # proxy --build-args pre-refactor either.
+        options = ComposeOptions(
+            build=build,
+            pull=pull,
+            remove_orphans=context.is_full_containers,
+            services=services,
+            emit_default_pull=False,
+            include_proxy_build_args=False,
+        )
 
         with manager.notify_stop(context):
-            manager.create_docker_compose_process(
-                context.containers,
-                "stop", *services
-            ).check_call()
+            manager.compose_runner.stop(context, services)
 
         with manager.notify_start(context):
             if build:
-                manager.create_docker_compose_process(
-                    context.containers,
-                    "build", *build_options, *services,
-                ).check_call()
-            manager.create_docker_compose_process(
-                context.containers,
-                "up", *up_options, *services
-            ).check_call()
+                manager.compose_runner.build(context, options)
+            manager.compose_runner.up(context, options)
 
         with manager.notify_remove(context):
             pass
+
+        # restart ends with the targets running.
+        manager.running_state.mark_started(context)
 
     @subcommand("down", help="stop installed containers")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_iter_installed_container_names))
     def on_command_down(self, names: "list[str]" = None):
         context = self._make_context("down", names)
-
-        services = []
-        if not context.is_full_containers:
-            for container in context.target_containers:
-                services.extend(container.services.keys())
-            if not services:
-                raise ContainerError(
-                    f"No service found in container "
-                    f"`{','.join([c.name for c in context.target_containers])}`"
-                )
+        services = manager.compose_runner.collect_services(context)
 
         with manager.notify_stop(context):
-            manager.create_docker_compose_process(
-                context.containers,
-                "down", *services
-            ).check_call()
+            manager.compose_runner.down(context, services)
 
         with manager.notify_remove(context):
             pass
+
+        # Record stopped state only after a successful down (refactor spec §9.6).
+        manager.running_state.mark_stopped(context)
+
+    @subcommand("doctor", help="read-only environment and security checks (changes nothing)")
+    def on_command_doctor(self):
+        # Read-only checks (refactor spec Phase 6). Reports risks as [WARN]/[INFO]
+        # but never modifies config, repos, or containers.
+        findings = Doctor(manager).run()
+        for finding in findings:
+            self.logger.info(f"[{finding.severity}] {finding.message}")
+        self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
 
     def _make_context(self, commands, names):
         context = EventContext()

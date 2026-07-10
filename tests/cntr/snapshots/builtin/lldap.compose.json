@@ -1,0 +1,35 @@
+{
+  "networks": {
+    "lldap": {
+      "name": "aio-lldap"
+    }
+  },
+  "services": {
+    "lldap": {
+      "container_name": "aio-lldap",
+      "environment": [
+        "UID=0",
+        "GID=0",
+        "LLDAP_LDAP_BASE_DN=dc=_",
+        "LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret",
+        "LLDAP_LDAP_USER_PASS_FILE=/secrets/ldap_user_pass"
+      ],
+      "hostname": "lldap",
+      "image": "lldap/lldap:stable",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "lldap": null
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "<APP_DATA>/lldap/data:/data",
+        "<APP_DATA>/lldap/secrets:/secrets:ro"
+      ]
+    }
+  }
+}

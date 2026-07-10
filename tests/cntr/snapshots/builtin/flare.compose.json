@@ -1,0 +1,36 @@
+{
+  "networks": {
+    "nginx": {
+      "name": "aio-nginx"
+    }
+  },
+  "services": {
+    "flare": {
+      "command": "flare",
+      "container_name": "aio-flare",
+      "environment": [
+        "FLARE_DISABLE_LOGIN=1",
+        "FLARE_GUIDE=1"
+      ],
+      "hostname": "flare",
+      "image": "soulteary/flare:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": [
+        "nginx"
+      ],
+      "ports": [
+        "5000:5005"
+      ],
+      "restart": "unless-stopped",
+      "user": "1000:1001",
+      "volumes": [
+        "<APP_DATA>/flare/app:/app"
+      ]
+    }
+  }
+}

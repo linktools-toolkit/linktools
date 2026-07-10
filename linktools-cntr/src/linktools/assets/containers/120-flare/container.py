@@ -31,9 +31,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools import utils
-from linktools.core import (
-    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
-)
+from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
@@ -52,16 +50,33 @@ class Container(BaseContainer):
             NGINX_WILDCARD_DOMAIN=True,
             FLARE_TAG="latest",
             FLARE_DOMAIN=self.get_nginx_domain(""),
-            FLARE_PORT=ConfigField(name="FLARE_PORT", cast=int, default=5000),
-            FLARE_AUTH_ENABLE=ConfigField(name="FLARE_AUTH_ENABLE", cast=bool, default=True),
-            FLARE_LOGIN_ENABLE=ConfigField(name="FLARE_LOGIN_ENABLE", cast=bool, default=False),
-            FLARE_USER=ConfigField(name="FLARE_USER", default="", provider=LazyProvider(
-                lambda r: "admin" if r.get("FLARE_LOGIN_ENABLE") else ""
-            )),
-            FLARE_PASSWORD=ConfigField(name="FLARE_PASSWORD", default="", provider=LazyProvider(
-                lambda r: prompt("FLARE_PASSWORD") if r.get("FLARE_LOGIN_ENABLE") else ""
-            )),
+            FLARE_PORT=ConfigField(cast=int, default=5000),
+            FLARE_AUTH_ENABLE=ConfigField(cast=bool, default=True),
+            FLARE_LOGIN_ENABLE=ConfigField(cast=bool, default=False),
+            FLARE_USER=ConfigField.chain(
+                LazyProvider(lambda r: self._prompt_flare_user(r), cached=True),
+                default="",
+            ),
+            FLARE_PASSWORD=ConfigField.chain(
+                LazyProvider(lambda r: self._prompt_flare_password(r), cached=True),
+                default="",
+            ),
         )
+
+    def _prompt_flare_user(self, r):
+        # Raise (rather than return "") when login is disabled, so the
+        # enclosing ChainProvider falls through to field.default="" without
+        # ever persisting it -- a plain cached=True here would otherwise
+        # permanently cache "" the first time this resolves while login
+        # happens to be off, and never prompt again once it's enabled.
+        if not r.get("FLARE_LOGIN_ENABLE"):
+            raise LookupError("FLARE_LOGIN_ENABLE is disabled")
+        return prompt("FLARE_USER", default="admin")
+
+    def _prompt_flare_password(self, r):
+        if not r.get("FLARE_LOGIN_ENABLE"):
+            raise LookupError("FLARE_LOGIN_ENABLE is disabled")
+        return prompt("FLARE_PASSWORD")
 
     @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":

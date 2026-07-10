@@ -13,19 +13,29 @@ order:
   3. legacy FileCache shelve ``<setting>/manager``  -- the format this refactor
      replaces
 
+The original, older ConfigCacheParser ini file (``<data>/.config/<name>.cfg``,
+which also holds CONTAINER.CACHE.* tunables like HOST/DOCKER_TYPE/DOCKER_USER)
+is migrated by core itself: ``Environ.config_store`` runs it the first time
+anything touches the persistent store, before cntr's ContainerManager is even
+constructed (see ``core/_environ.py: BaseEnviron._migrate_legacy_cfg``). By the
+time this module runs, that file is already gone.
+
 Each source is migrated ONLY if the target key is absent from ConfigStore (so a
 user who already has newer data is never overwritten), and the source is removed
 once migrated. Idempotent: a no-op when nothing legacy remains.
 
-This is the ONLY module in the codebase that still imports the legacy
-``FileCache``; both this migrator and ``linktools/cache.py`` are removed after
-one release (spec §21.2 / §3.3).
-"""
-import json
-import os
+The actual read/write/cleanup mechanics are shared with core's own
+``.cfg`` migration via ``ConfigMigration.migrate_json_file`` /
+``migrate_shelve`` (core's config and cntr's config go through the same
+``ConfigMigration`` methods, not two hand-rolled implementations) -- this
+module only supplies cntr's own legacy source paths.
 
-from linktools.cache import FileCache  # legacy -- imported only for migration
-from linktools.utils import remove_file
+This is the ONLY module in the codebase that still (transitively, via
+``ConfigMigration.migrate_shelve``) deals with the legacy ``FileCache``
+shelve format; both this migrator and ``linktools/cache.py`` are removed
+after one release (spec §21.2 / §3.3).
+"""
+import os
 
 __all__ = ["PERSISTENT_KEYS", "migrate_legacy_container_settings"]
 
@@ -33,59 +43,6 @@ __all__ = ["PERSISTENT_KEYS", "migrate_legacy_container_settings"]
 # Transient keys (RUNNING_CONTAINERS, per-container mount paths) are regenerable
 # and are NOT migrated; they move straight to the CacheStore.
 PERSISTENT_KEYS = ("INSTALLED_CONTAINERS", "INSTALLED_REPOS")
-
-
-def _remove(path: str) -> None:
-    try:
-        remove_file(path)
-    except Exception:
-        pass
-
-
-def _migrate_json_file(config_store: object, source_path: str, key: str,
-                       also_remove: tuple, logger: object) -> bool:
-    """Migrate one legacy JSON file -> config_store[key]; clean up afterwards."""
-    if not os.path.isfile(source_path):
-        return False
-    if key in config_store:
-        # Newer data already present -- just drop the legacy artefact.
-        for p in also_remove:
-            _remove(p)
-        return False
-    try:
-        with open(source_path) as fd:
-            config_store.set(key, json.load(fd))
-        logger.warning("Migrated %s from legacy %s", key, source_path)
-    except Exception as exc:
-        logger.warning("Failed to migrate %s from %s: %s", key, source_path, exc)
-        return False
-    for p in also_remove:
-        _remove(p)
-    return True
-
-
-def _migrate_shelve(config_store: object, legacy_dir: str, logger: object) -> "set[str]":
-    """Migrate persistent keys from the legacy FileCache shelve -> config_store."""
-    if not os.path.isdir(legacy_dir):
-        return set()
-    migrated: "set[str]" = set()
-    try:
-        cache = FileCache(legacy_dir)
-        with cache.session() as data:
-            for key in PERSISTENT_KEYS:
-                if key in config_store:
-                    continue
-                value = data.get(key, None)
-                if value is not None:
-                    config_store.set(key, value)
-                    migrated.add(key)
-                    logger.warning("Migrated %s from legacy FileCache", key)
-    except Exception as exc:
-        logger.warning("Failed to migrate legacy FileCache at %s: %s", legacy_dir, exc)
-        return migrated
-    # Shelve fully consumed -> remove the legacy store directory.
-    _remove(legacy_dir)
-    return migrated
 
 
 def migrate_legacy_container_settings(config_store: object, data_path: object,
@@ -102,30 +59,30 @@ def migrate_legacy_container_settings(config_store: object, data_path: object,
         The set of keys migrated in this call (empty on a clean, already-current
         install).
     """
+    from linktools.core import ConfigMigration
+
     data_path = str(data_path)
     setting_path = str(setting_path)
+    mig = ConfigMigration(config_store, logger=logger)
     migrated: "set[str]" = set()
 
-    if _migrate_json_file(
-        config_store,
+    if mig.migrate_json_file(
         os.path.join(data_path, "config", "containers.yml"),
         "INSTALLED_CONTAINERS",
-        (os.path.join(data_path, "config"),),
-        logger,
+        also_remove=(os.path.join(data_path, "config"),),
     ):
         migrated.add("INSTALLED_CONTAINERS")
 
-    if _migrate_json_file(
-        config_store,
+    if mig.migrate_json_file(
         os.path.join(data_path, "repo", "repo.json"),
         "INSTALLED_REPOS",
-        (os.path.join(data_path, "repo", "repo.json"),
-         os.path.join(data_path, "repo", "repo.lock")),
-        logger,
+        also_remove=(os.path.join(data_path, "repo", "repo.json"),
+                     os.path.join(data_path, "repo", "repo.lock")),
     ):
         migrated.add("INSTALLED_REPOS")
 
-    migrated |= _migrate_shelve(
-        config_store, os.path.join(setting_path, "manager"), logger
+    migrated |= mig.migrate_shelve(
+        os.path.join(setting_path, "manager"), PERSISTENT_KEYS
     )
+
     return migrated

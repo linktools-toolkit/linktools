@@ -36,9 +36,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.core import (
-    ConfigField, ChainProvider, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
-)
+from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -58,25 +56,24 @@ class Container(BaseContainer):
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
             AUTHELIA_LDAP_HOST="lldap",
-            AUTHELIA_LDAP_PORT=ConfigField(name="AUTHELIA_LDAP_PORT", cast=int, default=3890),
-            AUTHELIA_LDAP_ADDRESS=ConfigField(name="AUTHELIA_LDAP_ADDRESS", provider=LazyProvider(
+            AUTHELIA_LDAP_PORT=ConfigField(cast=int, default=3890),
+            AUTHELIA_LDAP_ADDRESS=ConfigField(provider=LazyProvider(
                 lambda r: f"ldap://{r.get('AUTHELIA_LDAP_HOST')}:{r.get('AUTHELIA_LDAP_PORT')}")),
-            AUTHELIA_LDAP_WEB_PORT=ConfigField(name="AUTHELIA_LDAP_WEB_PORT", cast=int, default=17170),
-            AUTHELIA_LDAP_WEB_ADDRESS=ConfigField(name="AUTHELIA_LDAP_WEB_ADDRESS", provider=LazyProvider(
+            AUTHELIA_LDAP_WEB_PORT=ConfigField(cast=int, default=17170),
+            AUTHELIA_LDAP_WEB_ADDRESS=ConfigField(provider=LazyProvider(
                 lambda r: f"http://{r.get('AUTHELIA_LDAP_HOST')}:{r.get('AUTHELIA_LDAP_WEB_PORT')}")),
             AUTHELIA_LDAP_USER="admin",
-            AUTHELIA_LDAP_PASSWORD=ConfigField(name="AUTHELIA_LDAP_PASSWORD", provider=ChainProvider(
-                AliasProvider("LLDAP_ADMIN_PASSWORD"), PromptProvider("AUTHELIA_LDAP_PASSWORD"),
-            )),
-            AUTHELIA_LDAP_BASE_DN=ConfigField(
-                name="AUTHELIA_LDAP_BASE_DN", default="dc=example,dc=org",
-                provider=AliasProvider("LLDAP_BASE_DN"),
+            AUTHELIA_LDAP_PASSWORD=ConfigField.chain(
+                AliasProvider("LLDAP_ADMIN_PASSWORD"), PromptProvider(cached=True),
             ),
-            AUTHELIA_MIN_AUTH_LEVEL=ConfigField(name="AUTHELIA_MIN_AUTH_LEVEL", cast=int, default=2),
+            AUTHELIA_LDAP_BASE_DN=ConfigField.chain(
+                AliasProvider("LLDAP_BASE_DN"), default="dc=example,dc=org",
+            ),
+            AUTHELIA_MIN_AUTH_LEVEL=ConfigField(cast=int, default=2),
             AUTHELIA_OIDC_CLIENT_SECRET=ConfigField(
-                name="AUTHELIA_OIDC_CLIENT_SECRET", default=utils.random_string(20),
+                provider=LazyProvider(lambda r: utils.random_string(20), cached=True),
             ),
-            AUTHELIA_ADMIN_AUTH_ENABLE=ConfigField(name="AUTHELIA_ADMIN_AUTH_ENABLE", cast=bool, default=True),
+            AUTHELIA_ADMIN_AUTH_ENABLE=ConfigField(cast=bool, default=True),
         )
 
     @cached_property
@@ -111,6 +108,14 @@ class Container(BaseContainer):
 
         return result
 
+    @staticmethod
+    def _oidc_clients_json_safe(result):
+        # RedirectURLs is kept as a set in memory (nginx's write_conf, across
+        # every container doing OIDC integration, calls .add() on it), which
+        # CacheStore's JSON codec cannot persist -- serialize a shallow copy
+        # with it converted to a sorted list instead of mutating the original.
+        return [dict(client, RedirectURLs=sorted(client.get("RedirectURLs", ()))) for client in result]
+
     @cached_property
     def oidc_clients(self):
         result = None
@@ -134,12 +139,16 @@ class Container(BaseContainer):
                 client["UserIdentifier"] = "preferred_username"
                 client["Scopes"] = "openid profile groups email phone"
                 result = [client]
-                settings.set(f"{self._key_prefix}_oidc_clients", result)
+            else:
+                # Persisted as a list (see _oidc_clients_json_safe); restore
+                # the set so .add() keeps working for this run.
+                result[0]["RedirectURLs"] = set(result[0].get("RedirectURLs", ()))
 
             client = result[0]
             client["ClientID"] = f"{self.manager.project_name}-web-client"
             client["ClientName"] = f"Web Client ({self.manager.project_name})"
             client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
+            settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(result))
 
         return result
 
@@ -179,7 +188,7 @@ class Container(BaseContainer):
 
         with self.settings.transaction() as settings:
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
-            settings.set(f"{self._key_prefix}_oidc_clients", self.oidc_clients)
+            settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(self.oidc_clients))
 
     def on_stopped(self, context: "EventContext"):
         if context.is_full_containers:

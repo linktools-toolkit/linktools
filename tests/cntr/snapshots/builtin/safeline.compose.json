@@ -1,0 +1,237 @@
+{
+  "networks": {
+    "nginx": {
+      "name": "aio-nginx"
+    },
+    "safeline-ce": {
+      "driver": "bridge",
+      "driver_opts": {
+        "com.docker.network.bridge.name": "aio-safeline-ce"
+      },
+      "ipam": {
+        "config": [
+          {
+            "gateway": "172.22.242.1",
+            "subnet": "172.22.242.0/24"
+          }
+        ],
+        "driver": "default"
+      },
+      "name": "aio-safeline-ce"
+    }
+  },
+  "services": {
+    "safeline-chaos": {
+      "container_name": "aio-safeline-chaos",
+      "environment": [
+        "DB_ADDR=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable"
+      ],
+      "hostname": "safeline-chaos",
+      "image": "chaitin/safeline-chaos:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.10"
+        }
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "<APP_DATA>/safeline/resources/sock:/app/sock",
+        "<APP_DATA>/safeline/resources/chaos:/app/chaos"
+      ]
+    },
+    "safeline-detector": {
+      "container_name": "aio-safeline-detector",
+      "environment": [
+        "LOG_DIR=/logs/detector"
+      ],
+      "hostname": "safeline-detector",
+      "image": "chaitin/safeline-detector:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "nginx": null,
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.5"
+        }
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "<APP_DATA>/safeline/resources/detector:/resources/detector",
+        "<APP_DATA>/safeline/logs/detector:/logs/detector",
+        "/etc/localtime:/etc/localtime:ro"
+      ]
+    },
+    "safeline-fvm": {
+      "container_name": "aio-safeline-fvm",
+      "hostname": "safeline-fvm",
+      "image": "chaitin/safeline-fvm:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.8"
+        }
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "/etc/localtime:/etc/localtime:ro"
+      ]
+    },
+    "safeline-luigi": {
+      "container_name": "aio-safeline-luigi",
+      "depends_on": [
+        "safeline-detector",
+        "safeline-mgt"
+      ],
+      "environment": [
+        "MGT_IP=172.22.242.4",
+        "LUIGI_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable"
+      ],
+      "hostname": "safeline-luigi",
+      "image": "chaitin/safeline-luigi:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.7"
+        }
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "/etc/localtime:/etc/localtime:ro",
+        "<APP_DATA>/safeline/resources/luigi:/app/data"
+      ]
+    },
+    "safeline-mgt": {
+      "container_name": "aio-safeline-mgt",
+      "depends_on": [
+        "safeline-pg",
+        "safeline-fvm"
+      ],
+      "environment": [
+        "MGT_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable",
+        "MGT_PROXY=0"
+      ],
+      "healthcheck": {
+        "test": "curl -k -f https://localhost:1443/api/open/health"
+      },
+      "hostname": "safeline-mgt",
+      "image": "chaitin/safeline-mgt:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "nginx": null,
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.4"
+        }
+      },
+      "ports": [
+        "9200:1443"
+      ],
+      "restart": "unless-stopped",
+      "volumes": [
+        "/etc/localtime:/etc/localtime:ro",
+        "<APP_DATA>/safeline/resources/mgt:/app/data",
+        "<APP_DATA>/safeline/logs/nginx:/app/log/nginx:z",
+        "<APP_DATA>/safeline/resources/sock:/app/sock",
+        "/var/run:/app/run"
+      ]
+    },
+    "safeline-pg": {
+      "command": [
+        "postgres",
+        "-c",
+        "max_connections=600"
+      ],
+      "container_name": "aio-safeline-pg",
+      "environment": [
+        "POSTGRES_USER=safeline-ce",
+        "POSTGRES_PASSWORD=Pg-pAssw0rd"
+      ],
+      "healthcheck": {
+        "test": "pg_isready -U safeline-ce -d safeline-ce"
+      },
+      "hostname": "safeline-pg",
+      "image": "chaitin/safeline-postgres:15.2",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.2"
+        }
+      },
+      "restart": "unless-stopped",
+      "volumes": [
+        "<APP_DATA>/safeline/resources/postgres/data:/var/lib/postgresql/data",
+        "/etc/localtime:/etc/localtime:ro"
+      ]
+    },
+    "safeline-tengine": {
+      "container_name": "aio-safeline-tengine",
+      "depends_on": {
+        "nginx": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": [
+        "TCD_MGT_API=https://172.22.242.4:1443/api/open/publish/server",
+        "TCD_SNSERVER=172.22.242.5:8000",
+        "SNSERVER_ADDR=172.22.242.5:8000",
+        "CHAOS_ADDR=172.22.242.10"
+      ],
+      "hostname": "safeline-tengine",
+      "image": "chaitin/safeline-tengine:latest",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m"
+        }
+      },
+      "networks": {
+        "nginx": null,
+        "safeline-ce": {
+          "ipv4_address": "172.22.242.254"
+        }
+      },
+      "restart": "unless-stopped",
+      "ulimits": {
+        "nofile": 131072
+      },
+      "volumes": [
+        "/etc/localtime:/etc/localtime:ro",
+        "<APP_DATA>/safeline/resources/nginx:/etc/nginx",
+        "<APP_DATA>/safeline/resources/detector:/resources/detector",
+        "<APP_DATA>/safeline/resources/chaos:/resources/chaos",
+        "<APP_DATA>/safeline/logs/nginx:/var/log/nginx:z",
+        "<APP_DATA>/safeline/resources/cache:/usr/local/nginx/cache",
+        "<APP_DATA>/safeline/resources/sock:/app/sock"
+      ]
+    }
+  }
+}

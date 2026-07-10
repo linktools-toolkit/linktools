@@ -226,7 +226,49 @@ class BaseEnviron(abc.ABC):
         from ._config import ConfigStore
 
         self.paths.ensure_config()
-        return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
+        store = ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
+        self._migrate_legacy_cfg(store)
+        return store
+
+    def _migrate_legacy_cfg(self, store: "ConfigStore") -> None:
+        """One-time migration of the original ConfigCacheParser ini file
+        (``<data>/.config/<name>.cfg``) into ``store``. Idempotent: a no-op once
+        the legacy file is gone. Never overwrites a key already in ``store``.
+
+        This is the only place core auto-migrates; sub-packages with their own
+        legacy sources (e.g. cntr's installed/repo state) hook their own
+        migration into their own first-use path.
+        """
+        cfg_path = self.get_data_path(".config", f"{self.name}.cfg")
+        if not os.path.isfile(cfg_path):
+            return
+        from ._config import ConfigMigration
+
+        mig = ConfigMigration(store, logger=self.get_logger("migrate"))
+        info = mig.inspect(cfg_path)
+        if info["count"] == 0:
+            try:
+                os.remove(cfg_path)
+            except OSError:
+                pass
+            return
+        try:
+            mig.backup(cfg_path)
+            report = mig.migrate(cfg_path)
+        except Exception as exc:
+            self.get_logger("migrate").warning(f"Failed to migrate legacy config {cfg_path}: {exc}")
+            return
+        if not mig.verify(report):
+            self.get_logger("migrate").warning(
+                f"Verification failed migrating legacy config {cfg_path}; left in place")
+            return
+        try:
+            os.remove(cfg_path)
+        except OSError:
+            pass
+        self.get_logger("migrate").warning(
+            f"Migrated {len(report['migrated']) + len(report['legacy'])} key(s) "
+            f"from legacy config {cfg_path}")
 
     @cached_property(lock=True)
     def downloads(self) -> "DownloadManager":
