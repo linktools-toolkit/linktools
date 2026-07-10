@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Running-state consistency (refactor spec Phase 5).
+"""Running-state consistency.
 
-partial up/down and full down previously left RUNNING_CONTAINERS stale. The
-RunningStateStore now owns it, updated after a successful compose run. These
-tests cover the store directly and via the CLI down/up flows (process replaced
-by a recorder, hooks neutralized).
+RunningStateStore owns RUNNING_CONTAINERS, updated only after a successful
+compose run (partial up/down adjust just the target names; full down clears
+it). These tests cover the store directly and via the CLI down/up flows
+(process replaced by a recorder, hooks neutralized).
 """
 import pytest
 

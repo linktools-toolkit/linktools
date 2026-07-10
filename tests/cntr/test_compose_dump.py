@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compose YAML write safety (refactor spec §5.4).
+"""Compose YAML write safety.
 
 The compose file written by ``get_docker_compose_file`` must use ``safe_dump``
-(sort_keys=True, allow_unicode=False) so the output is byte-identical to the
-previous ``yaml.dump`` call but cannot leak Python object tags.
+(sort_keys=True, allow_unicode=False) so it cannot leak Python object tags for
+non-serializable values.
 """
 import yaml
 

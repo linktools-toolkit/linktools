@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Builtin compose snapshot regression tests (refactor spec Phase 0).
+"""Builtin compose snapshot regression tests.
 
 Each builtin container's normalized ``docker_compose`` must match its committed
-snapshot. Any drift means the refactor changed generated compose output and must
-be explained (refactor spec §4.5 / §17.1).
+snapshot. Any drift means a change altered generated compose output and must
+be explained.
 """
 import _harness
 

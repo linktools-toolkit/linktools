@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared test harness for linktools-cntr snapshot tests (refactor spec Phase 0).
+"""Shared test harness for linktools-cntr snapshot tests.
 
 Builds a deterministic, non-interactive :class:`ContainerManager` over a
 temporary data directory so builtin/fixture compose output can be rendered and

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""remove_installed_containers correctness (refactor spec §5.2).
+"""remove_installed_containers correctness.
 
-The old code compared a container object against a set of name strings
-(``container not in remove_names``), which is always true. Removal must compare
-by ``container.name``. These tests lock the intended behavior: a leaf container
+Removal must compare containers by ``container.name``, not object identity
+against a set of name strings. These tests lock the intended behavior: a leaf
+container
 removes cleanly; a container with dependents refuses without ``--force``; ``force``
 removes the container and its dependents together.
 """

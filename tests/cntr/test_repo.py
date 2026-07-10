@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Repo trust prompt + repo status (refactor spec Phase 7).
+"""Repo trust prompt + repo status.
 
 Interactive `repo add` asks for confirmation (a repo may carry executable Python
-container definitions); --force and non-interactive runs skip the prompt and keep
-legacy behavior. `repo status` is read-only.
+container definitions); --force and non-interactive runs skip the prompt.
+`repo status` is read-only.
 """
 import pytest
 

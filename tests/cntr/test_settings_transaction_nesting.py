@@ -2,23 +2,17 @@
 """BaseContainer.docker_compose must not hold a settings transaction open
 across template rendering.
 
-Regression: `ct-cntr config list` crashed with `CacheTransactionError:
-transactions cannot be nested`. docker_compose wrapped its entire body --
-including render_template(), which builds a Jinja context giving templates
-access to every other installed container (`containers=self.manager.containers`)
--- in `with self.settings.transaction()`, even though it only ever *reads*
-`mount_paths` (no write happens in that property). Since CacheStore's
-transaction-nesting guard (`_tx_owner`) is store-wide, not per-namespace, any
-OTHER container's compose template that cross-references a container property
-backed by its own `with self.settings.transaction()` (e.g. authelia's
-oidc_clients/acl_rules, used by homelab containers doing OIDC integration)
-collided with this needlessly-held-open transaction.
+docker_compose only ever *reads* `mount_paths` (no write happens in that
+property), so it needs no transaction of its own. render_template() builds a
+Jinja context giving templates access to every other installed container
+(`containers=self.manager.containers`); since CacheStore's transaction-nesting
+guard (`_tx_owner`) is store-wide, not per-namespace, holding a transaction
+open across the whole render would collide with any OTHER container's compose
+template that cross-references a container property backed by its own
+`with self.settings.transaction()`.
 
-This is reproduced here with a synthetic container (not a real homelab one,
-to keep the test self-contained) whose compose.yml does exactly what
-linktools-homelab's gitlab/litellm containers do: reference another
-container's settings-backed property from within its own docker_compose
-render.
+Reproduced here with a synthetic two-container repo whose compose.yml
+references another container's settings-backed property mid-render.
 """
 import os
 

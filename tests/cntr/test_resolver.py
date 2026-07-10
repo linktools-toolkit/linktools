@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ContainerResolver dependency resolution (refactor spec Phase 4).
+"""ContainerResolver dependency resolution.
 
-The resolver was extracted verbatim from ContainerManager; these tests lock its
-pure topological-sort behavior (order, missing-dependency error, cycle error)
-independently of the full manager.
+Locks its pure topological-sort behavior (order, missing-dependency error,
+cycle error) independently of the full manager.
 """
 import pytest
 

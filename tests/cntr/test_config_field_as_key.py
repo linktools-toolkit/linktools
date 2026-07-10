@@ -3,8 +3,7 @@
 
 Lets a container reference a one-off field (e.g. a nginx domain with its own
 fallback) directly at the call site instead of also declaring a separate
-`configs` property purely to give the field a home (see
-linktools-homelab-extra/container.py, which used to need one just for this).
+`configs` property purely to give the field a home.
 """
 import os
 
@@ -90,8 +89,8 @@ def test_get_config_still_accepts_plain_string_key(fresh_manager):
 
 
 def test_get_nginx_domain_provider_via_configfield_key(fresh_manager):
-    # get_nginx_domain() returns a LazyProvider -- must go on provider=, and
-    # this is exactly the pattern linktools-homelab-extra relies on.
+    # get_nginx_domain() returns a LazyProvider -- must go on provider=, not
+    # default=.
     portainer = fresh_manager.containers["portainer"]
     field = ConfigField(name="SOME_DOMAIN", provider=portainer.get_nginx_domain("x"))
     assert isinstance(field.provider, LazyProvider)

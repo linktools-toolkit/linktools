@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CLI up/restart/down routing through ComposeRunner (refactor spec Phase 2).
+"""CLI up/restart/down routing through ComposeRunner.
 
 Drives the real Command methods end-to-end with create_docker_compose_process
 replaced by a recorder and lifecycle hooks neutralized, then asserts the
-recorded docker-compose arguments match each command's pre-refactor line.
+recorded docker-compose arguments for each command.
 """
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared

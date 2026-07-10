@@ -2,15 +2,14 @@
 """`ct-cntr config list` (no container names) must not force-resolve every
 schema-declared manager field -- only ones actually configured.
 
-Regression: on_command_list's "add everything else" fallback used to be
+Regression: on_command_list's "add everything else" fallback used
 `manager.env_config.keys()`, which (per Config.keys()) includes every
-schema-declared field name whether or not it has ever been set -- unlike the
-pre-refactor equivalent, `manager.env_config.cache.keys()`, which only ever
-returned already-persisted keys. So a manager-level field nothing has
-configured yet (e.g. DOCKER_DOWNLOAD_PATH -- a cached=True PromptProvider
-field almost nothing actually reads) got force-resolved by `config list`
-merely because it's *possible* to configure, prompting for it in a real
-terminal even though the user never asked to set it.
+schema-declared field name whether or not it has ever been set. So a
+manager-level field nothing has configured yet (e.g. DOCKER_DOWNLOAD_PATH -- a
+cached=True PromptProvider field almost nothing actually reads) got
+force-resolved by `config list` merely because it's *possible* to configure,
+prompting for it in a real terminal even though the user never asked to set
+it. `persisted_keys()` (only already-persisted keys) fixes this.
 """
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared

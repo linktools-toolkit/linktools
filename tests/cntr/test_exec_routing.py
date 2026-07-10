@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Per-container exec up/restart/down/config routing (refactor spec Phase 2).
+"""Per-container exec up/restart/down/config routing.
 
 Drives the BaseContainer exec subcommands end-to-end with
 create_docker_compose_process replaced by a recorder and lifecycle hooks
-neutralized, then asserts the recorded docker-compose args match the pre-refactor
-exec command line (no default --pull flags; pull=True uniform).
+neutralized, then asserts the recorded docker-compose args (no default
+--pull flags; pull=True uniform).
 """
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")

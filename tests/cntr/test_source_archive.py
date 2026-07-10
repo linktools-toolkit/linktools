@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SourceContainer safe archive extraction (refactor spec §5.3).
+"""SourceContainer safe archive extraction.
 
 ``_handle_source_file`` must route through ``linktools.utils.safe_extract`` so a
 malicious source archive cannot escape its destination directory (Zip Slip /

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""pytest fixtures for the cntr snapshot suite (refactor spec Phase 0)."""
+"""pytest fixtures for the cntr snapshot suite."""
 import pytest
 
 import _harness

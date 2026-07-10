@@ -4,11 +4,9 @@
 Regression: NGINX_WILDCARD_DOMAIN=ConfigField(default=False,
 provider=AliasProvider("WILDCARD_DOMAIN")) crashed `ct-cntr config list` with
 ConfigNotFoundError, because a bare (non-chain) AliasProvider has no fallback
-when its target is unset -- unlike the pre-refactor legacy API's
-`Config.Alias("WILDCARD_DOMAIN") | False`, which fell through to False.
-ConfigField.chain(AliasProvider(...), default=...) restores that fallback via
-ChainProvider's exception-swallowing (falls through to field.default when
-every sub-provider raises).
+when its target is unset. ConfigField.chain(AliasProvider(...), default=...)
+restores a fallback via ChainProvider's exception-swallowing (falls through to
+field.default when every sub-provider raises).
 """
 
 

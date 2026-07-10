@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ComposeRunner argument assembly (refactor spec Phase 2).
+"""ComposeRunner argument assembly.
 
-Verifies the unified compose command builder reproduces each path's exact
-pre-refactor command line: CLI ``up`` emits --pull=false / --pull missing when
-not pulling; ``restart`` and ``exec`` emit nothing; pull=True is uniform; proxy
-build args preserve both cases.
+Verifies the unified compose command builder: CLI ``up`` emits --pull=false /
+--pull missing when not pulling; ``restart`` and ``exec`` emit nothing;
+pull=True is uniform; proxy build args differ between the two paths.
 """
 import pytest
 
@@ -108,8 +107,8 @@ def test_build_args_include_proxy_build_args_by_default(fresh_manager, monkeypat
 
 
 def test_cli_restart_omits_proxy_build_args(fresh_manager, monkeypatch):
-    # CLI `restart` never included proxy build-args pre-refactor -- unlike
-    # `up`/`exec up`/`exec restart`, which all still do (the two tests above).
+    # CLI `restart` never includes proxy build-args -- unlike `up`/`exec up`/
+    # `exec restart`, which all do (the two tests above).
     monkeypatch.setenv("http_proxy", "http://proxy")
     runner = fresh_manager.compose_runner
     opts = ComposeOptions(pull=False, emit_default_pull=False, services=["portainer"],

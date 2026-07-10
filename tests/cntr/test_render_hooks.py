@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Idempotent template-helper hook registration (refactor spec Phase 3).
+"""Idempotent template-helper hook registration.
 
 The mkdir/chown/chmod template helpers (and filters) must register start hooks
 idempotently: rendering the same path twice -- within one template or across

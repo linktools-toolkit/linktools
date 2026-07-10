@@ -3,19 +3,18 @@
 without cached=True.
 
 Regression: HOST=ConfigField.chain(PromptProvider(), LazyProvider(get_lan_ip))
-has no cached=True (matches the pre-refactor legacy field, which also never
-had it) -- so with only the Environment/RuntimeOverride override check (an
-earlier, narrower fix), resolving HOST never even looked at "container.HOST"
-in settings.json once it had been migrated/set there; PromptProvider's own
-(non-cached) resolution always ran and always prompted.
+has no cached=True -- so with only the Environment/RuntimeOverride override
+check (an earlier, narrower fix), resolving HOST never even looked at
+"container.HOST" in settings.json once it had been migrated/set there;
+PromptProvider's own (non-cached) resolution always ran and always prompted.
 
-The pre-refactor Config's `_map` was `ChainMap(env_vars, persistent_cache,
-field_descriptors, global_config)`: the persisted cache was checked, for
-EVERY field, before its Prompt/Lazy/Alias descriptor ever ran -- regardless
-of that descriptor's own `cached=` flag (which only controlled whether a
-freshly-computed answer got saved back, not whether an existing one was read
-first). ConfigResolver._first_present_override now includes PersistentSource
-for exactly this reason.
+The old Config implementation's `_map` was `ChainMap(env_vars,
+persistent_cache, field_descriptors, global_config)`: the persisted cache was
+checked, for EVERY field, before its Prompt/Lazy/Alias descriptor ever ran --
+regardless of that descriptor's own `cached=` flag (which only controlled
+whether a freshly-computed answer got saved back, not whether an existing one
+was read first). ConfigResolver._first_present_override now includes
+PersistentSource for exactly this reason.
 """
 from linktools.core import ConfigField, LazyProvider, PromptProvider, ChainProvider
 

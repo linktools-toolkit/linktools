@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Read-only doctor checks (refactor spec Phase 6).
+"""Read-only doctor checks.
 
 scan_compose is a pure function over a rendered compose dict; Doctor.run ties the
 checks together and must never modify the config store.

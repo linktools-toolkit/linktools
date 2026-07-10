@@ -192,17 +192,9 @@ class ContainerManager:
 
     @cached_property
     def _migrated(self):
-        # One-time legacy -> ConfigStore migration. Runs on first
-        # access of any setting; idempotent.
-        #
-        # The legacy <data>/.config/<name>.cfg ini file (CONTAINER.CACHE.* +
-        # MAIN.CACHE.*) is migrated by Environ.config_store itself, the first
-        # time anything touches the persistent store -- which happens before
-        # this point (self.env_config in __init__ already forced it via
-        # wrap_config -> PersistentSource(self.config_store, ...)). So by the
-        # time _migrated runs, that file is already gone; only cntr's other
-        # three legacy sources (containers.yml / repo.json / FileCache shelve)
-        # remain here.
+        # See _migrate.py for what this consolidates and why. A failed
+        # migration is not cached, so later access (e.g. from a state/repo
+        # store) retries it.
         _migrate.migrate_legacy_container_settings(
             self._persistent_store, self.data_path, self.setting_path, self.logger,
         )
