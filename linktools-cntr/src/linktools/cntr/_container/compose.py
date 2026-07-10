@@ -26,8 +26,12 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
         path = container.get_source_path(name)
         if not os.path.exists(path):
             continue
-        data = container.render_template(path)
-        data = yaml.safe_load(data)
+        data = yaml.safe_load(container.render_template(path))
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            from ..container import ContainerError
+            raise ContainerError(f"Compose root must be a mapping: {path}")
         if "services" in data and isinstance(data["services"], dict):
             for name, service in data["services"].items():
                 if not isinstance(service, dict):
@@ -47,11 +51,16 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                 )):
                     service.setdefault("hostname", name)
                 if "image" not in service:
-                    path = container.get_docker_file_path()
-                    if path and os.path.exists(path):
-                        build = service.setdefault("build", {})
-                        build.setdefault("context", str(container.get_docker_context_path()))
-                        build.setdefault("dockerfile", str(path))
+                    dockerfile = container.get_docker_file_path()
+                    if dockerfile and os.path.exists(dockerfile):
+                        build = service.get("build")
+                        if build is None:
+                            build = service["build"] = {}
+                        # A string `build: ./context` is valid Compose shorthand;
+                        # only fill in context/dockerfile for the mapping form.
+                        if isinstance(build, dict):
+                            build.setdefault("context", str(container.get_docker_context_path()))
+                            build.setdefault("dockerfile", str(dockerfile))
                 if "env_file" not in service:
                     path = container.get_source_path(".env")
                     if path and os.path.exists(path):

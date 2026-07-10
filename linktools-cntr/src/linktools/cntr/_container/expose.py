@@ -14,6 +14,16 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
 
 
+def _freeze(value):
+    """Recursively turn dict/list/set values into a hashable, order-stable
+    tuple so they can be used inside a start-hook dedup key."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple, set)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
 class ExposeCategory:
 
     def __init__(self, name: str, desc: str):
@@ -120,9 +130,15 @@ class ExposeMixin:
                     auth_extra=auth_extra,
                 )
 
-        # Idempotent: a container's nginx conf for a given proxy_conf/proxy_url is
-        # written once even if load_nginx_url is re-evaluated.
-        self.add_start_hook(("nginx_conf", str(proxy_conf), str(proxy_url)), make_nginx_conf)
+        # Idempotent, keyed on every parameter that shapes the generated conf
+        # (not just proxy_conf/proxy_url) -- two domains proxying to the same
+        # backend must each get their own conf written, not collapse into one.
+        hook_key = (
+            "nginx_conf", self._resolve_config_key(key),
+            str(proxy_name), str(proxy_domain_name), str(proxy_conf), str(proxy_url),
+            str(https_enable), str(waf_enable), auth_enable, _freeze(auth_extra),
+        )
+        self.add_start_hook(hook_key, make_nginx_conf)
         return lazy_load(make_url)
 
     def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType",
