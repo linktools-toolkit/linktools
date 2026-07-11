@@ -164,11 +164,11 @@ def test_unrecognized_requirement_key_now_blocks_fail_closed(fresh_manager, tmp_
     the new generic-manifest-backed policy fails closed instead -- the
     manifest declared something this cntr version can't verify, so
     compatibility must never be assumed."""
-    _write(tmp_path, _cntr_manifest(requires={"some-other-tool": ">=1.0"}))
+    _write(tmp_path, _cntr_manifest(requires={"vendor:some-other-tool": ">=1.0"}))
     manifest = fresh_manager.manifest_policy.load(tmp_path)
     issues = fresh_manager.manifest_policy.check_host_requirements(manifest)
     assert len(issues) == 1
-    assert issues[0].key == "some-other-tool"
+    assert issues[0].key == "vendor:some-other-tool"
     with pytest.raises(ContainerIncompatible):
         fresh_manager.manifest_policy.ensure_loadable(manifest)
 
@@ -180,7 +180,7 @@ def test_ensure_loadable_is_noop_for_legacy_repo(fresh_manager, tmp_path):
 def test_ai_component_unrecognized_requirement_does_not_affect_cntr(fresh_manager, tmp_path):
     data = _cntr_manifest()
     data["components"]["ai"] = {
-        "schema_version": 1, "requires": {"some-ai-only-tool": ">=1.0"}, "config": {}, "metadata": {},
+        "schema_version": 1, "requires": {"vendor:some-ai-only-tool": ">=1.0"}, "config": {}, "metadata": {},
         "extensions": {},
     }
     _write(tmp_path, data)
@@ -471,6 +471,29 @@ def test_describe_repository_reports_manifest_error_for_missing_cntr_component(f
     data = {"schema_version": 1, "kind": "linktools-project", "components": {}}
     repo_dir = _make_local_repo(tmp_path, manifest_data=data)
     meta = {"type": "local", "repo_path": str(repo_dir)}
+    info = describe_repository(fresh_manager, str(repo_dir), meta)
+
+    assert info["compatible"] is False
+    assert "manifest_error" in info
+
+
+def test_describe_repository_does_not_crash_when_manifest_hash_read_fails(fresh_manager, tmp_path, monkeypatch):
+    """The sha256 read happens before the manifest is even parsed -- an
+    OSError there (permission denied, disappeared file, ...) must be
+    reported like any other manifest problem, not propagate raw."""
+    from linktools.cntr.repo.status import describe_repository
+
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_cntr_manifest())
+    meta = {"type": "local", "repo_path": str(repo_dir)}
+
+    real_open = open
+
+    def fail_open(path, *a, **k):
+        if str(path).endswith(".linktools.json"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", fail_open)
     info = describe_repository(fresh_manager, str(repo_dir), meta)
 
     assert info["compatible"] is False

@@ -33,14 +33,19 @@ def describe_repository(
         return info
 
     info["manifest"] = "present"
-    with open(manifest_path, "rb") as f:
-        info["manifest_sha256"] = hashlib.sha256(f.read()).hexdigest()
-
     try:
-        manifest = manager.manifest_policy.load(repo_path)
-        component = manager.manifest_policy.get_component(manifest)
+        with open(manifest_path, "rb") as f:
+            info["manifest_sha256"] = hashlib.sha256(f.read()).hexdigest()
+        manifest, component = manager.manifest_policy.load_and_get_component(repo_path)
+    except OSError as exc:
+        message = "Unable to read %s: %s" % (manager.manifest_policy.loader.file_name, exc.strerror or exc)
     except ContainerManifestError as exc:
-        info["manifest_error"] = str(exc)
+        message = str(exc)
+    else:
+        message = None
+
+    if message is not None:
+        info["manifest_error"] = message
         info["compatible"] = False
         return info
 

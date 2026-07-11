@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Single implementation behind both the root lifecycle shortcuts
-(``ct-cntr up/restart/down``) and the ``ct-cntr compose ...`` namespace.
+(``ct-cntr up/restart/down``) and the ``ct-cntr compose`` final-model
+rendering command.
 
 The CLI layer only defines arguments/help/routing; this module owns target
 selection, hook dispatch and state updates so the two entry points can never
@@ -39,7 +40,9 @@ class ComposeSelection:
 
 
 class ComposeOperations:
-    """Compose lifecycle/inspection operations shared by root and ``compose`` commands."""
+    """Compose lifecycle operations and final-model rendering, shared by
+    the root ``up``/``restart``/``down`` commands and the ``compose``
+    command."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
@@ -95,28 +98,34 @@ class ComposeOperations:
         """Block ``action`` when a repository's manifest declares a
         docker-engine/docker-compose requirement the actual runtime doesn't
         satisfy (or that can't even be verified -- an unqueryable runtime
-        fails closed here, it never silently proceeds). Deduplicated by
-        repository, and every repository's issues are collected before
-        raising once, so a multi-repo project never fails partway through
-        one repo only to leave the rest unreported.
+        fails closed here, it never silently proceeds).
 
-        Only called from up/restart/render (compose)/lock -- down/status/
-        doctor/remove keep their own warning-only reporting elsewhere, so a
-        version bump can never block stopping or inspecting what's already
-        running."""
+        Checked against ``project_containers``, not ``target_containers``:
+        a partial ``up``/``restart``/``compose`` still passes the *entire*
+        project's ``--file`` set to Compose, so an unselected repository's
+        requirement must still gate the action. Deduplicated by stable
+        repository identity (url, falling back to root_path for a local/
+        path-only repository), and every repository's issues are collected
+        before raising once, so a multi-repo project never fails partway
+        through one repo only to leave the rest unreported.
+
+        Only called from up/restart/render (compose)/plan up/plan restart --
+        down/status/doctor/remove keep their own warning-only reporting
+        elsewhere, so a version bump can never block stopping or inspecting
+        what's already running."""
         manager = self.manager
-        seen_urls = set()
+        seen_repositories = set()
         problems: "list[str]" = []
-        for container in selection.target_containers:
+        for container in selection.project_containers:
             repository = getattr(container, "_repository", None)
             if repository is None or repository.manifest is None:
                 continue
-            url = repository.url
-            if url in seen_urls:
+            label = repository.url or str(repository.root_path)
+            if label in seen_repositories:
                 continue
-            seen_urls.add(url)
+            seen_repositories.add(label)
             for issue in manager.manifest_policy.check_runtime_requirements(repository.manifest):
-                problems.append(f"Repository `{url}` requires {issue.key}{issue.required}: {issue.message}")
+                problems.append(f"Repository `{label}` requires {issue.key}{issue.required}: {issue.message}")
         if problems:
             raise ContainerError(
                 f"Cannot {action}: runtime requirement(s) not satisfied.\n" + "\n".join(problems)

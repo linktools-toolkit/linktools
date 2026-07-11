@@ -50,11 +50,12 @@ class ContainerLoader:
 
             # Manifest schema/kind/components.cntr/host-requirement
             # compatibility is validated before this repository's
-            # container.py is ever imported. A legacy repository (no
-            # .linktools.json) loads exactly as before -- no warning, no
-            # migration required. A manifest present but missing (or not
-            # opted into) the cntr component is skipped the same way: it
-            # simply hasn't declared cntr capability for this project.
+            # container.py is ever imported. A repository without a
+            # .linktools.json (a project without a manifest) loads exactly
+            # as before -- no warning, no migration required. A manifest
+            # present but missing (or not opted into) the cntr component is
+            # skipped the same way: it simply hasn't declared cntr
+            # capability for this project.
             try:
                 manifest = manager.manifest_policy.load(repo_path)
                 manager.manifest_policy.ensure_loadable(manifest)

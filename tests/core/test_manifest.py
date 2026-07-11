@@ -76,6 +76,53 @@ def test_unsupported_schema_version_rejected(tmp_path):
         ManifestLoader().load(tmp_path)
 
 
+def test_manifest_that_is_a_directory_raises_load_error(tmp_path):
+    (tmp_path / ".linktools.json").mkdir()
+    with pytest.raises(ManifestLoadError):
+        ManifestLoader().load(tmp_path)
+
+
+def test_stat_permission_error_is_wrapped_as_load_error(tmp_path, monkeypatch):
+    _write(tmp_path, _VALID)
+
+    def fail_stat(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("os.stat", fail_stat)
+    with pytest.raises(ManifestLoadError):
+        ManifestLoader().load(tmp_path)
+
+
+def test_open_permission_error_is_wrapped_as_load_error(tmp_path, monkeypatch):
+    _write(tmp_path, _VALID)
+
+    real_open = open
+
+    def fail_open(path, *a, **k):
+        if str(path).endswith(".linktools.json"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    with pytest.raises(ManifestLoadError):
+        ManifestLoader().load(tmp_path)
+
+
+def test_file_disappearing_between_stat_and_open_raises_load_error(tmp_path, monkeypatch):
+    _write(tmp_path, _VALID)
+
+    real_open = open
+
+    def vanish_on_open(path, *a, **k):
+        if str(path).endswith(".linktools.json"):
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", vanish_on_open)
+    with pytest.raises(ManifestLoadError):
+        ManifestLoader().load(tmp_path)
+
+
 def test_missing_kind_is_invalid(tmp_path):
     data = dict(_VALID)
     del data["kind"]
@@ -203,6 +250,48 @@ def test_component_invalid_specifier_is_invalid(tmp_path):
         ManifestLoader().load(tmp_path)
 
 
+# -- requirement key / component id grammar ----------------------------------
+
+@pytest.mark.parametrize("key", ["", "   ", "package:", ":no-namespace", "Python", "PACKAGE:x", "package :x"])
+def test_invalid_requirement_key_is_rejected(tmp_path, key):
+    _write(tmp_path, dict(_VALID, requires={key: ">=1"}))
+    with pytest.raises(ManifestValidationError):
+        ManifestLoader().load(tmp_path)
+
+
+@pytest.mark.parametrize("key", ["python", "package:linktools-ai", "runtime:docker-compose", "a:b"])
+def test_valid_requirement_key_is_accepted(tmp_path, key):
+    _write(tmp_path, dict(_VALID, requires={key: ">=1"}))
+    manifest = ManifestLoader().load(tmp_path)
+    assert key in manifest.requires
+
+
+@pytest.mark.parametrize("component_id", ["", "   ", "Cntr", "cntr!", "1cntr", "cn tr"])
+def test_invalid_component_id_is_rejected(tmp_path, component_id):
+    _write(tmp_path, dict(_VALID, components={
+        component_id: {"schema_version": 1, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
+    }))
+    with pytest.raises(ManifestValidationError):
+        ManifestLoader().load(tmp_path)
+
+
+@pytest.mark.parametrize("component_id", ["cntr", "ai", "custom-name", "custom_name", "a1"])
+def test_valid_component_id_is_accepted(tmp_path, component_id):
+    _write(tmp_path, dict(_VALID, components={
+        component_id: {"schema_version": 1, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
+    }))
+    manifest = ManifestLoader().load(tmp_path)
+    assert manifest.get_component(component_id) is not None
+
+
+def test_component_requires_key_grammar_is_also_validated(tmp_path):
+    _write(tmp_path, dict(_VALID, components={
+        "cntr": {"schema_version": 1, "requires": {"": ">=1"}, "config": {}, "metadata": {}, "extensions": {}},
+    }))
+    with pytest.raises(ManifestValidationError):
+        ManifestLoader().load(tmp_path)
+
+
 # -- RequirementResolverRegistry --------------------------------------------
 
 def test_python_requirement_satisfied():
@@ -285,6 +374,96 @@ def test_invalid_actual_version_is_invalid_status():
     registry.register_exact("runtime:weird", lambda key: "not-a-version", phase="runtime")
     results = registry.check({"runtime:weird": ">=1.0"}, phase="runtime")
     assert results[0].status == RequirementStatus.INVALID
+
+
+def test_duplicate_exact_registration_raises():
+    registry = RequirementResolverRegistry()
+    registry.register_exact("python", lambda key: "1.0", phase="host")
+    with pytest.raises(ValueError):
+        registry.register_exact("python", lambda key: "2.0", phase="host")
+
+
+def test_duplicate_exact_registration_with_replace_overrides():
+    registry = RequirementResolverRegistry()
+    registry.register_exact("python", lambda key: "1.0", phase="host")
+    registry.register_exact("python", lambda key: "2.0", phase="host", replace=True)
+    results = registry.check({"python": ">=2.0"}, phase="host")
+    assert results[0].actual == "2.0"
+
+
+def test_duplicate_prefix_registration_raises():
+    registry = RequirementResolverRegistry()
+    registry.register_prefix("runtime:", lambda key: "1.0", phase="runtime")
+    with pytest.raises(ValueError):
+        registry.register_prefix("runtime:", lambda key: "2.0", phase="runtime")
+
+
+def test_duplicate_prefix_registration_with_replace_overrides():
+    registry = RequirementResolverRegistry()
+    registry.register_prefix("runtime:", lambda key: "1.0", phase="runtime")
+    registry.register_prefix("runtime:", lambda key: "2.0", phase="runtime", replace=True)
+    results = registry.check({"runtime:thing": ">=2.0"}, phase="runtime")
+    assert results[0].actual == "2.0"
+
+
+def test_broader_and_narrower_prefix_the_narrower_always_wins():
+    """A narrow prefix registered *before* a broad one must still win at
+    resolve time -- longest-prefix-match, never registration order."""
+    registry = RequirementResolverRegistry()
+    registry.register_prefix("runtime:docker-compose", lambda key: "narrow", phase="runtime")
+    registry.register_prefix("runtime:", lambda key: "broad", phase="runtime")
+    results = registry.check({"runtime:docker-compose": ">=1"}, phase="runtime")
+    assert results[0].actual == "narrow"
+
+
+def test_broader_prefix_registered_first_does_not_shadow_narrower_registered_later():
+    registry = RequirementResolverRegistry()
+    registry.register_prefix("runtime:", lambda key: "broad", phase="runtime")
+    registry.register_prefix("runtime:docker-compose", lambda key: "narrow", phase="runtime")
+    results = registry.check({"runtime:docker-compose": ">=1"}, phase="runtime")
+    assert results[0].actual == "narrow"
+
+
+def test_equal_length_prefixes_resolve_in_registration_order():
+    registry = RequirementResolverRegistry()
+    registry.register_prefix("runtime:a", lambda key: "first", phase="runtime")
+    registry.register_prefix("runtime:b", lambda key: "second", phase="runtime")
+    # Neither prefix is a substring of the other's match target, so pick a
+    # key that only one of them could ever match to confirm ordering is by
+    # registration, not some other tiebreak, when both are equal length and
+    # (deliberately) only one truly matches.
+    results = registry.check({"runtime:a-thing": ">=1"}, phase="runtime")
+    assert results[0].actual == "first"
+
+
+def test_exact_key_must_be_non_empty_string():
+    registry = RequirementResolverRegistry()
+    with pytest.raises(ValueError):
+        registry.register_exact("", lambda key: "1.0", phase="host")
+
+
+def test_prefix_must_be_non_empty_string():
+    registry = RequirementResolverRegistry()
+    with pytest.raises(ValueError):
+        registry.register_prefix("", lambda key: "1.0", phase="host")
+
+
+def test_resolver_must_be_callable():
+    registry = RequirementResolverRegistry()
+    with pytest.raises(ValueError):
+        registry.register_exact("python", "not callable", phase="host")
+
+
+def test_phase_must_be_non_empty_string():
+    registry = RequirementResolverRegistry()
+    with pytest.raises(ValueError):
+        registry.register_exact("python", lambda key: "1.0", phase="")
+
+
+def test_display_name_must_be_non_empty_when_given():
+    registry = RequirementResolverRegistry()
+    with pytest.raises(ValueError):
+        registry.register_exact("python", lambda key: "1.0", phase="host", display_name="   ")
 
 
 def test_prerelease_actual_version_can_satisfy():

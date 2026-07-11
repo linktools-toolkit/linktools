@@ -22,6 +22,8 @@ fully-trusted code.
 import json
 import os
 import platform
+import re
+import stat
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -49,6 +51,17 @@ _TOP_LEVEL_FIELDS = frozenset({
 _COMPONENT_FIELDS = frozenset({
     "schema_version", "requires", "config", "metadata", "extensions",
 })
+
+# A requirement key is either the bare "python", or "<namespace>:<name>"
+# (e.g. "package:linktools-cntr", "runtime:docker-compose") -- the namespace
+# lets each capability register its own resolver prefix without colliding
+# with another's.
+_COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+_REQUIREMENT_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _is_valid_requirement_key(key: str) -> bool:
+    return key == "python" or bool(_REQUIREMENT_KEY_PATTERN.match(key))
 
 
 class ManifestComponent(NamedTuple):
@@ -93,19 +106,32 @@ class ManifestLoader:
 
     def load(self, root_path: "PathType") -> "Optional[LinktoolsManifest]":
         """``None`` means no manifest file is present -- a project without
-        one is not an error, just a project that opts out of the format."""
+        one is not an error, just a project that opts out of the format.
+        Any other filesystem failure between here and reading the file
+        (permission denied, path is a directory, disappears mid-read, a
+        broken symlink, ...) is a ``ManifestLoadError``, never a raw
+        ``OSError`` -- callers only ever need to catch ``ManifestError``."""
         path = os.path.join(str(root_path), self.file_name)
-        if not os.path.exists(path):
+        try:
+            stat_result = os.stat(path)
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise ManifestLoadError("Unable to inspect %s: %s" % (self.file_name, exc.strerror or exc)) from exc
 
-        size = os.path.getsize(path)
-        if size > self.max_bytes:
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise ManifestLoadError("%s must be a regular file" % self.file_name)
+
+        if stat_result.st_size > self.max_bytes:
             raise ManifestLoadError(
-                "%s is %d bytes, exceeding the %d-byte limit" % (self.file_name, size, self.max_bytes)
+                "%s is %d bytes, exceeding the %d-byte limit" % (self.file_name, stat_result.st_size, self.max_bytes)
             )
 
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as exc:
+            raise ManifestLoadError("Unable to read %s: %s" % (self.file_name, exc.strerror or exc)) from exc
         return self.loads(text)
 
     def loads(self, text: str) -> "LinktoolsManifest":
@@ -182,9 +208,19 @@ class ManifestLoader:
     def _parse_requires(self, requires: "Any", where: str) -> "Dict[str, str]":
         if not isinstance(requires, dict) or not all(isinstance(v, str) for v in requires.values()):
             raise ManifestValidationError("'%s' must be an object of string specifiers" % where)
+        invalid_keys = [key for key in requires if not _is_valid_requirement_key(key)]
+        if invalid_keys:
+            raise ManifestValidationError(
+                "'%s' has invalid key(s) (must be `python` or `<namespace>:<name>`): %s"
+                % (where, ", ".join(sorted(invalid_keys)))
+            )
         return dict(requires)
 
     def _parse_component(self, component_id: str, data: "Any") -> "ManifestComponent":
+        if not _COMPONENT_ID_PATTERN.match(component_id):
+            raise ManifestValidationError(
+                "component id %r is invalid (must match `%s`)" % (component_id, _COMPONENT_ID_PATTERN.pattern)
+            )
         if not isinstance(data, dict):
             raise ManifestValidationError("components.%s must be an object" % component_id)
 
@@ -292,7 +328,10 @@ class RequirementResolverRegistry:
 
     def __init__(self):
         self._exact: "Dict[str, _Resolver]" = {}
-        self._prefix = []  # [(prefix, _Resolver), ...], first-registered-match wins
+        # dict, not list: insertion order is the registration order, and
+        # replacing an existing key's value (register_prefix(replace=True))
+        # keeps its original position rather than moving it to the end.
+        self._prefix: "Dict[str, _Resolver]" = {}
 
     @classmethod
     def default(cls) -> "RequirementResolverRegistry":
@@ -303,23 +342,48 @@ class RequirementResolverRegistry:
                                  display_name="installed package")
         return registry
 
+    def _validate_registration(self, key: str, resolver: "Callable[[str], Optional[str]]",
+                               phase: str, display_name: "Optional[str]") -> None:
+        if not isinstance(key, str) or not key:
+            raise ValueError("key/prefix must be a non-empty string")
+        if not callable(resolver):
+            raise ValueError("resolver must be callable")
+        if not isinstance(phase, str) or not phase:
+            raise ValueError("phase must be a non-empty string")
+        if display_name is not None and (not isinstance(display_name, str) or not display_name.strip()):
+            raise ValueError("display_name must be a non-empty string when given")
+
     def register_exact(self, key: str, resolver: "Callable[[str], Optional[str]]",
-                       phase: str = "host", display_name: "Optional[str]" = None) -> None:
+                       phase: str = "host", display_name: "Optional[str]" = None,
+                       replace: bool = False) -> None:
+        self._validate_registration(key, resolver, phase, display_name)
+        if key in self._exact and not replace:
+            raise ValueError("Resolver already registered for exact key %r (pass replace=True to override)" % key)
         self._exact[key] = _Resolver(callable=resolver, phase=phase, display_name=display_name or key)
 
     def register_prefix(self, prefix: str, resolver: "Callable[[str], Optional[str]]",
-                        phase: str = "host", display_name: "Optional[str]" = None) -> None:
-        # Exact resolvers take precedence over prefix resolvers (checked
-        # first in resolve()); among prefixes, first-registered wins.
-        self._prefix.append((prefix, _Resolver(callable=resolver, phase=phase, display_name=display_name or prefix)))
+                        phase: str = "host", display_name: "Optional[str]" = None,
+                        replace: bool = False) -> None:
+        """Registers a fallback resolver for every key starting with
+        ``prefix``. At resolve time the *longest* matching prefix wins
+        (never registration order); among equal-length matches, the
+        earliest-registered one wins. Registering the exact same ``prefix``
+        string twice raises unless ``replace=True``."""
+        self._validate_registration(prefix, resolver, phase, display_name)
+        if prefix in self._prefix and not replace:
+            raise ValueError("Resolver already registered for prefix %r (pass replace=True to override)" % prefix)
+        self._prefix[prefix] = _Resolver(callable=resolver, phase=phase, display_name=display_name or prefix)
 
     def resolve(self, key: str) -> "Optional[_Resolver]":
         if key in self._exact:
             return self._exact[key]
-        for prefix, entry in self._prefix:
-            if key.startswith(prefix):
-                return entry
-        return None
+        best: "Optional[tuple[int, int, _Resolver]]" = None
+        for order, (prefix, entry) in enumerate(self._prefix.items()):
+            if not key.startswith(prefix):
+                continue
+            if best is None or len(prefix) > best[0] or (len(prefix) == best[0] and order < best[1]):
+                best = (len(prefix), order, entry)
+        return best[2] if best else None
 
     def check(self, requirements: "Dict[str, str]", phase: "Optional[str]" = None) -> list:
         """Evaluate every key in ``requirements`` against its registered

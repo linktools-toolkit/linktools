@@ -246,7 +246,7 @@ def test_check_repos_reports_unrecognized_manifest_requirement_as_warn(fresh_man
         "components": {
             "cntr": {
                 "schema_version": 1,
-                "requires": {"some-other-tool": ">=1.0"},
+                "requires": {"vendor:some-other-tool": ">=1.0"},
                 "config": {}, "metadata": {}, "extensions": {},
             },
         },
@@ -262,9 +262,93 @@ def test_check_repos_reports_unrecognized_manifest_requirement_as_warn(fresh_man
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(
-        f.severity == WARN and "some-other-tool" in f.message
+        f.severity == WARN and "vendor:some-other-tool" in f.message
         for f in findings
     )
+
+
+# -- Doctor and the loader must use the same cntr component gate -----------
+
+def test_doctor_reports_manifest_without_cntr_component(fresh_manager, tmp_path, monkeypatch):
+    """A manifest present but missing `components.cntr` is rejected by
+    ContainerLoader/RepoStore.add (ContainerManifestInvalid) -- Doctor must
+    report it too, not silently treat it as having nothing to check."""
+    import json as json_module
+    repo_dir = tmp_path / "repo_src"
+    repo_dir.mkdir()
+    (repo_dir / ".linktools.json").write_text(json_module.dumps({
+        "schema_version": 1,
+        "kind": "linktools-project",
+        "components": {
+            "ai": {"schema_version": 1, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
+        },
+    }), encoding="utf-8")
+    (repo_dir / "container.py").write_text(
+        "from linktools.cntr.container import BaseContainer\n\n\n"
+        "class Container(BaseContainer):\n    pass\n",
+        encoding="utf-8",
+    )
+    repos = dict(fresh_manager.repo_store.get_all())
+    repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
+    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+
+    findings = Doctor(fresh_manager).check_repos()
+    assert any(f.code == "repo.manifest_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+
+
+def test_doctor_reports_unsupported_cntr_component_schema(fresh_manager, tmp_path, monkeypatch):
+    import json as json_module
+    repo_dir = tmp_path / "repo_src"
+    repo_dir.mkdir()
+    (repo_dir / ".linktools.json").write_text(json_module.dumps({
+        "schema_version": 1,
+        "kind": "linktools-project",
+        "components": {
+            "cntr": {"schema_version": 999, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
+        },
+    }), encoding="utf-8")
+    (repo_dir / "container.py").write_text(
+        "from linktools.cntr.container import BaseContainer\n\n\n"
+        "class Container(BaseContainer):\n    pass\n",
+        encoding="utf-8",
+    )
+    repos = dict(fresh_manager.repo_store.get_all())
+    repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
+    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+
+    findings = Doctor(fresh_manager).check_repos()
+    assert any(f.code == "repo.manifest_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+
+
+def test_doctor_and_loader_use_same_component_gate(fresh_manager, tmp_path, monkeypatch):
+    """Whatever ContainerLoader/RepoStore.add reject as incompatible at
+    load-time, Doctor must also flag on an already-installed repo -- proving
+    they share one gate instead of silently disagreeing."""
+    import json as json_module
+    from linktools.cntr.container import ContainerError
+    import pytest as _pytest
+
+    data = {"schema_version": 1, "kind": "linktools-project", "components": {}}
+    repo_dir = tmp_path / "repo_src"
+    repo_dir.mkdir()
+    (repo_dir / ".linktools.json").write_text(json_module.dumps(data), encoding="utf-8")
+    (repo_dir / "container.py").write_text(
+        "from linktools.cntr.container import BaseContainer\n\n\n"
+        "class Container(BaseContainer):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    with _pytest.raises(ContainerError):
+        fresh_manager.repo_store.add(str(repo_dir), force=True)
+
+    # Simulate the repo having been installed anyway (e.g. pre-existing
+    # before this gate existed) to exercise Doctor's independent path.
+    repos = dict(fresh_manager.repo_store.get_all())
+    repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
+    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+
+    findings = Doctor(fresh_manager).check_repos()
+    assert any(f.code == "repo.manifest_invalid" for f in findings)
 
 
 def test_doctor_check_raises_when_warn_finding_present(fresh_manager, monkeypatch):

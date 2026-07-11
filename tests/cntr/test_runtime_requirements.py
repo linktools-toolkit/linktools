@@ -202,3 +202,47 @@ def test_plan_down_only_warns(fresh_manager, monkeypatch):
 
     plan = fresh_manager.planner.plan("down")  # must not raise
     assert any("docker-compose" in w for w in plan.warnings)
+
+
+def test_partial_up_checks_requirements_from_all_compose_files(fresh_manager, monkeypatch):
+    """A partial `up`/`restart`/`compose` still generates a `--file` set from
+    the whole installed project, so an unselected repository's requirement
+    must still gate the action -- not just the user's explicit target."""
+    nginx = fresh_manager.containers["nginx"]
+    lldap = fresh_manager.containers["lldap"]
+    _attach_manifest(nginx, {}, url="https://example.invalid/repo-a.git")
+    _attach_manifest(lldap, {"runtime:docker-compose": ">=2.30"}, url="https://example.invalid/repo-b.git")
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda *a, **k: "2.10.0")
+
+    # Only nginx is targeted; lldap's unmet requirement must still block.
+    selection = fresh_manager.compose_operations.select(["nginx"])
+    with pytest.raises(ContainerError, match="repo-b.git"):
+        fresh_manager.compose_operations.ensure_runtime_requirements(selection, "up")
+
+
+def test_partial_compose_checks_requirements_from_all_project_repositories(fresh_manager, monkeypatch):
+    nginx = fresh_manager.containers["nginx"]
+    lldap = fresh_manager.containers["lldap"]
+    _attach_manifest(nginx, {}, url="https://example.invalid/repo-a.git")
+    _attach_manifest(lldap, {"runtime:docker-compose": ">=2.30"}, url="https://example.invalid/repo-b.git")
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda *a, **k: "2.10.0")
+
+    with pytest.raises(ContainerError, match="repo-b.git"):
+        fresh_manager.compose_operations.render(names=["nginx"])
+
+
+def test_duplicate_repository_requirements_are_checked_once(fresh_manager, monkeypatch):
+    """Two containers backed by the same repository (same url) must not
+    duplicate that repository's problems in the aggregated error."""
+    nginx = fresh_manager.containers["nginx"]
+    lldap = fresh_manager.containers["lldap"]
+    _attach_manifest(nginx, {"runtime:docker-compose": ">=2.30"}, url="https://example.invalid/shared.git")
+    _attach_manifest(lldap, {"runtime:docker-compose": ">=2.30"}, url="https://example.invalid/shared.git")
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda *a, **k: "2.10.0")
+
+    # Even when only one of the two is targeted, the full project is scanned
+    # once per unique repository, not once per container.
+    selection = fresh_manager.compose_operations.select(["nginx"])
+    with pytest.raises(ContainerError) as exc_info:
+        fresh_manager.compose_operations.ensure_runtime_requirements(selection, "up")
+    assert str(exc_info.value).count("shared.git") == 1

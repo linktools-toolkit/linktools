@@ -220,9 +220,14 @@ class Doctor:
             if not repo_path or not os.path.exists(repo_path):
                 continue
 
+            # Same load+gate ContainerLoader/RepoStore.add use before
+            # accepting a repo: a manifest with no `components.cntr` block
+            # (or an unsupported one) is invalid, not silently skipped --
+            # Doctor must never report a repo as clean just because it has
+            # nothing to check.
             manifest = None
             try:
-                manifest = self.manager.manifest_policy.load(repo_path)
+                manifest, _ = self.manager.manifest_policy.load_and_get_component(repo_path)
             except ContainerManifestError as exc:
                 findings.append(Finding(
                     WARN, f"repo `{url}` has an invalid manifest: {exc}",

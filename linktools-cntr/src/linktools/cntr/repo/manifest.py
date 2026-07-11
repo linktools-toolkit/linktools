@@ -58,7 +58,7 @@ class ContainerManifestPolicy:
                                      display_name="docker-compose")
 
     def load(self, repo_path: "PathType") -> "Optional[LinktoolsManifest]":
-        """``None`` means a legacy repository (no manifest file) -- that is
+        """``None`` means a project without a manifest file -- that is
         not an error and must not warn. Any other load failure (bad JSON,
         wrong kind, unsupported top-level schema_version, ...) is raised as
         ``ContainerManifestInvalid``/``ContainerManifestSchemaUnsupported``
@@ -84,11 +84,25 @@ class ContainerManifestPolicy:
             )
         return component
 
+    def load_and_get_component(
+            self, repo_path: "PathType") -> "tuple[Optional[LinktoolsManifest], Optional[ManifestComponent]]":
+        """``load()`` + ``get_component()`` in one step -- the structural
+        gate every read-only consumer (Doctor, ``repo status``) needs before
+        looking at a repository's manifest, so they can never drift on what
+        counts as "this repo has no usable cntr manifest". ``(None, None)``
+        means a project without a manifest file; any other problem is
+        raised as ``ContainerManifestError``, same as ``load()``/
+        ``get_component()`` individually."""
+        manifest = self.load(repo_path)
+        if manifest is None:
+            return None, None
+        return manifest, self.get_component(manifest)
+
     def ensure_loadable(self, manifest: "Optional[LinktoolsManifest]") -> None:
         """Raise if ``manifest`` (already statically valid) fails the cntr
         component gate or a host requirement -- called right before
-        importing a repository's ``container.py``. ``None`` (legacy
-        repository) is a no-op."""
+        importing a repository's ``container.py``. ``None`` (a project
+        without a manifest) is a no-op."""
         if manifest is None:
             return
         component = self.get_component(manifest)

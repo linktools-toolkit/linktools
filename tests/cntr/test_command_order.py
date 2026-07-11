@@ -3,6 +3,7 @@
 """Command ordering is an explicit CLI contract: fixed by an ``order=``
 value on every visible subcommand, never by decorator declaration position,
 Mixin MRO, or wrapper registration order."""
+import re
 import subprocess
 import sys
 
@@ -25,9 +26,24 @@ def _help_text(*argv):
     return result.stdout
 
 
+# A command-tree entry is a line indented exactly 4 spaces, starting with a
+# lowercase identifier immediately followed by whitespace (argparse's
+# subcommand-listing indent) -- a wrapped help-text continuation line is
+# indented further and so never matches. This deliberately excludes any
+# other appearance of a command's name in the usage line, description,
+# banner or another command's help text, which `str.index` would happily
+# (and wrongly) match.
+_COMMAND_LINE = re.compile(r"^ {4}([a-z][a-z0-9-]*)(?=\s)")
+
+
+def _command_names_in_order(text):
+    return [m.group(1) for m in (_COMMAND_LINE.match(line) for line in text.splitlines()) if m]
+
+
 def _assert_in_order(text, names):
-    offsets = [text.index(name) for name in names]
-    assert offsets == sorted(offsets), f"expected {names} in order, got offsets {offsets} in:\n{text}"
+    found = _command_names_in_order(text)
+    offsets = [found.index(name) for name in names]
+    assert offsets == sorted(offsets), f"expected {names} in order, got {found} in:\n{text}"
 
 
 def test_root_help_matches_exact_order():
@@ -62,9 +78,10 @@ def test_status_mixin_position_does_not_affect_order():
     `status` must still land at its declared order (right after `list`),
     not wherever MRO resolution happens to place it."""
     text = _help_text()
-    idx_list = text.index("list")
-    idx_status = text.index("status")
-    idx_add = text.index("add")
+    found = _command_names_in_order(text)
+    idx_list = found.index("list")
+    idx_status = found.index("status")
+    idx_add = found.index("add")
     assert idx_list < idx_status < idx_add
 
 
@@ -111,3 +128,24 @@ def test_lock_and_diff_commands_no_longer_exist():
     text = _help_text()
     assert "lock" not in text.split()
     assert "diff" not in text.split()
+
+
+def test_command_line_matcher_ignores_decoy_substrings_outside_the_command_tree():
+    """Regression guard for the old `text.index(name)` approach: a command
+    name that also appears in the usage line, a description, or another
+    command's wrapped help text must not be picked up as if it were a
+    command-tree entry -- only the 4-space-indented listing line counts."""
+    decoy_text = (
+        "usage: __main__.py [-h] status ...\n"
+        "\n"
+        "This tool can show status info before you add anything.\n"
+        "\n"
+        "positional arguments:\n"
+        "  COMMAND     Command Help\n"
+        "    list      list all containers\n"
+        "    status    show actual Docker Compose status (read-only)\n"
+        "    add       add containers to installed list\n"
+        "    explain   show a value's resolved source, default, persisted\n"
+        "              state and add-on sensitivity\n"
+    )
+    assert _command_names_in_order(decoy_text) == ["list", "status", "add", "explain"]

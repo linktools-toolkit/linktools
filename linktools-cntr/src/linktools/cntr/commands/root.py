@@ -142,8 +142,8 @@ class Command(StatusCommands, BaseCommandGroup):
                       dry_run: bool = False, report: bool = False):
         if maybe_dry_run(_shared.manager, self.logger, "up", names=names, build=build, pull=pull, dry_run=dry_run):
             return
-        # Root `up` and `compose up` share one implementation (ComposeOperations)
-        # so they cannot drift from each other.
+        # Root `up` and `compose` (final-model rendering) share one
+        # implementation (ComposeOperations) so they cannot drift from each other.
         _shared.manager.compose_operations.up(names=names, build=build, pull=pull, report=report)
 
     @subcommand("restart", order=ROOT_COMMAND_ORDER["restart"], help="restart installed containers")

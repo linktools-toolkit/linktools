@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Breaking-change contract: no compatibility aliases remain anywhere in
 ``linktools.cntr.__main__`` or the wider cntr command surface -- downstream
-must call the formal entry points (``commands._shared.manager``,
-``commands.compose.ComposeCommand``, ...) directly."""
+must import the real implementation modules directly (e.g.
+``commands.compose.ComposeCommand``) instead of relying on a re-export.
+``commands._shared`` is internal (underscore-prefixed) and is not a public
+API downstream should depend on."""
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import linktools.cntr.__main__ as entry
@@ -68,14 +71,12 @@ def test_bare_config_help_has_no_compose_or_deprecation_output():
 
 
 def test_lock_command_is_unknown():
-    # Note: this sandbox's argparse-error exit code is 0 even for an
-    # unknown COMMAND (a pre-existing linktools.cli framework quirk,
-    # unrelated to this change) -- assert on the error text instead.
     result = subprocess.run(
         [sys.executable, "-m", "linktools.cntr", "lock"],
         capture_output=True, text=True,
     )
     assert "invalid choice: 'lock'" in result.stderr
+    assert result.returncode == 2
 
 
 def test_diff_command_is_unknown():
@@ -84,3 +85,47 @@ def test_diff_command_is_unknown():
         capture_output=True, text=True,
     )
     assert "invalid choice: 'diff'" in result.stderr
+    assert result.returncode == 2
+
+
+def test_unknown_command_is_unknown():
+    result = subprocess.run(
+        [sys.executable, "-m", "linktools.cntr", "unknown"],
+        capture_output=True, text=True,
+    )
+    assert "invalid choice: 'unknown'" in result.stderr
+    assert result.returncode == 2
+
+
+def test_compose_check_failure_exits_non_zero():
+    """A real business error (no compose files -- nothing installed in this
+    throwaway HOME) must also propagate a non-zero exit code, not just an
+    argparse usage error."""
+    import os
+    env = dict(os.environ)
+    env["HOME"] = tempfile.mkdtemp()
+    result = subprocess.run(
+        [sys.executable, "-m", "linktools.cntr", "compose", "--check", "--format", "json"],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode != 0
+
+
+def test_add_missing_container_exits_non_zero():
+    import os
+    env = dict(os.environ)
+    env["HOME"] = tempfile.mkdtemp()
+    result = subprocess.run(
+        [sys.executable, "-m", "linktools.cntr", "add", "this-container-does-not-exist"],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode != 0
+
+
+def test_module_entry_point_exit_code_matches_command_main_return_value():
+    """`python -m linktools.cntr` must propagate `command.main()`'s return
+    value via SystemExit -- not silently discard it and exit 0 regardless
+    (the ct-cntr console script, generated from `command.main`, already
+    does this via setuptools; the module entry point must match)."""
+    text = Path(entry.__file__).read_text(encoding="utf-8")
+    assert "raise SystemExit(command.main())" in text

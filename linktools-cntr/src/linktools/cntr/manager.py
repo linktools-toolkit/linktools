@@ -239,8 +239,8 @@ class ContainerManager:
 
     @cached_property
     def compose_operations(self) -> "ComposeOperations":
-        # Root up/restart/down and the `compose` command namespace both
-        # dispatch through this so they can never drift from each other.
+        # Root up/restart/down and the `compose` command both dispatch
+        # through this so they can never drift from each other.
         from .operations.compose import ComposeOperations
         return ComposeOperations(self)
 
