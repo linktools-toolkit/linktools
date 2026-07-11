@@ -3,8 +3,8 @@
 """Read-only environment & security checks.
 
 ``ct-cntr doctor`` inspects the runtime, generated compose, repos, lock and
-config, and reports findings as [WARN]/[INFO]/[OK]. It never modifies
-anything -- every new or safer behavior stays opt-in elsewhere.
+config, and reports findings as [ERROR]/[WARN]/[INFO]/[OK]. It never
+modifies anything -- every new or safer behavior stays opt-in elsewhere.
 """
 import os
 import shutil
@@ -13,18 +13,21 @@ from typing import TYPE_CHECKING, Any
 
 from dulwich.errors import NotGitRepository
 
+from .lock.store import LockInvalid
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from .container import BaseContainer
     from .manager import ContainerManager
 
 
+ERROR = "ERROR"
 WARN = "WARN"
 INFO = "INFO"
 OK = "OK"
 
-# Stable finding codes (Spec section 44) -- part of the --json contract;
-# don't rename once released.
+# Stable finding codes -- part of the --json contract; don't rename once
+# released.
 RUNTIME_BINARY_MISSING = "runtime.binary_missing"
 RUNTIME_ENDPOINT_MISSING = "runtime.endpoint_missing"
 RUNTIME_ACCESS_DENIED = "runtime.access_denied"
@@ -33,6 +36,7 @@ REPO_MANIFEST_INVALID = "repo.manifest_invalid"
 REPO_INCOMPATIBLE = "repo.incompatible"
 REPO_DIRTY = "repo.dirty"
 LOCK_DRIFT = "lock.drift"
+LOCK_INVALID = "lock.invalid"
 ARTIFACT_STALE = "artifact.stale"
 SECURITY_DOCKER_SOCKET_MOUNT = "security.docker_socket_mount"
 SECURITY_LATEST_IMAGE = "security.latest_image"
@@ -266,10 +270,18 @@ class Doctor:
         return findings
 
     def check_lock(self) -> "list[Finding]":
-        """Opt-in: only reports anything if a lock file already exists
-        (Spec section 43 -- a missing lock is never a warning)."""
+        """Opt-in: only reports anything if a lock file already exists --
+        a missing lock is never a finding. A lock file that exists but is
+        corrupt/invalid is a different, more severe case: it must never be
+        silently treated the same as "no lock", so it's reported as an
+        ERROR finding instead of propagating and crashing doctor."""
         findings: "list[Finding]" = []
-        persisted = self.manager.lock_store.load()
+        try:
+            persisted = self.manager.lock_store.load()
+        except LockInvalid as exc:
+            findings.append(Finding(
+                ERROR, f"container.lock.json is invalid: {exc}", code=LOCK_INVALID))
+            return findings
         if persisted is None:
             return findings
         from .lock.diff import compute_diff

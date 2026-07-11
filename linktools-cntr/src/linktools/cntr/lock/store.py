@@ -6,11 +6,13 @@ deployment lock. Fully opt-in (section 43): nothing here is called by
 up/restart/down, and a missing lock file is never a warning.
 """
 import hashlib
+import json
 import os
 from typing import TYPE_CHECKING
 
 from ..artifacts.index import collect_candidates, sha256_of
 from ..artifacts.writer import atomic_write_text_if_changed
+from ..container import ContainerError
 from ..repo.manifest import RepositoryManifestError, RepositoryManifestService
 from .model import DeploymentLock, LockedArtifact, LockedContainer, LockedRepository
 
@@ -20,10 +22,27 @@ if TYPE_CHECKING:
 
 LOCK_SCHEMA_VERSION = 1
 LOCK_FILE_NAME = "container.lock.json"
+_SUPPORTED_LOCK_SCHEMA_VERSIONS = (1,)
 
-# Static inputs ContainerLoader actually reads per directory (Spec section 41);
-# deliberately not "every file" -- large data/download/app dirs are never hashed.
+# Static inputs ContainerLoader actually reads per directory (deliberately
+# not "every file" -- large data/download/app dirs are never hashed).
 _STATIC_INPUT_NAMES = frozenset({RepositoryManifestService.file_name, "container.py", "Dockerfile"})
+
+
+class LockError(ContainerError):
+    pass
+
+
+class LockNotFound(LockError):
+    pass
+
+
+class LockInvalid(LockError):
+    pass
+
+
+class LockSchemaUnsupported(LockInvalid):
+    pass
 
 
 def _local_repo_definitions_sha256(repo_path: str, docker_compose_names, max_level: int = 2) -> "str | None":
@@ -226,19 +245,54 @@ class LockStore:
         )
 
     def write(self, lock: "DeploymentLock") -> bool:
-        import json
         content = json.dumps(self.to_dict(lock), sort_keys=True, indent=2) + "\n"
         return atomic_write_text_if_changed(self.path, content)
 
     def load(self) -> "DeploymentLock | None":
-        import json
+        """``None`` means "no lock file at all" -- the only case that isn't
+        an error. A lock file that exists but is corrupt/invalid raises
+        ``LockInvalid``/``LockSchemaUnsupported``; it must never be treated
+        the same as "no lock"."""
         if not os.path.exists(self.path):
             return None
+        return self._load_existing()
+
+    def load_required(self) -> "DeploymentLock":
+        """Like ``load()``, but a missing lock file is also an error."""
+        if not os.path.exists(self.path):
+            raise LockNotFound(f"No lock file found at {self.path}")
+        return self._load_existing()
+
+    def _load_existing(self) -> "DeploymentLock":
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return None
+                text = f.read()
+        except OSError as exc:
+            raise LockInvalid(f"Could not read lock file {self.path}: {exc}") from exc
+
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise LockInvalid(f"Lock file {self.path} is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):
-            return None
+            raise LockInvalid(f"Lock file {self.path} root must be a JSON object")
+
+        if "schema_version" not in data:
+            raise LockInvalid(f"Lock file {self.path} is missing required field 'schema_version'")
+        schema_version = data["schema_version"]
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise LockInvalid("'schema_version' must be an integer")
+        if schema_version not in _SUPPORTED_LOCK_SCHEMA_VERSIONS:
+            raise LockSchemaUnsupported(
+                f"Unsupported lock schema_version {schema_version}; this cntr supports "
+                f"{_SUPPORTED_LOCK_SCHEMA_VERSIONS}"
+            )
+
+        if not isinstance(data.get("repositories", []), list):
+            raise LockInvalid("'repositories' must be a list")
+        if not isinstance(data.get("containers", []), list):
+            raise LockInvalid("'containers' must be a list")
+        if not isinstance(data.get("artifacts", {}), dict):
+            raise LockInvalid("'artifacts' must be an object")
+
         return self.from_dict(data)

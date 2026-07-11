@@ -12,7 +12,7 @@ from linktools.cli import (
 from linktools.cli.argparse import BooleanOptionalAction, LazyChoices
 from linktools.errors import ConfigError, GitError
 from ..container import ContainerError
-from ..doctor import WARN, Doctor
+from ..doctor import ERROR, WARN, Doctor
 from . import _shared
 from .compose import ComposeCommand
 from .config import ConfigCommand
@@ -196,8 +196,8 @@ class Command(StatusCommands, BaseCommandGroup):
             self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
         # Default `doctor` exit behavior is unchanged; only --check turns
         # findings into a non-zero exit.
-        if check and any(f.severity == WARN for f in findings):
-            raise ContainerError("Doctor found WARN-level issues")
+        if check and any(f.severity in (WARN, ERROR) for f in findings):
+            raise ContainerError("Doctor found WARN-or-worse issues")
 
     def _make_context(self, commands, names):
         # Kept as a thin wrapper over the manager facade so external

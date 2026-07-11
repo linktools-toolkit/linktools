@@ -10,7 +10,7 @@ import pytest
 
 from linktools.cntr.lock.diff import compute_diff
 from linktools.cntr.lock.model import DeploymentLock, LockedArtifact, LockedContainer, LockedRepository
-from linktools.cntr.lock.store import LockStore
+from linktools.cntr.lock.store import LockInvalid, LockNotFound, LockSchemaUnsupported, LockStore
 from linktools.cntr.runtime.structured import CommandResult
 
 
@@ -72,12 +72,62 @@ def test_load_returns_none_when_missing(fresh_manager):
     assert fresh_manager.lock_store.load() is None
 
 
-def test_load_returns_none_on_corrupt_file(fresh_manager):
+def test_load_required_raises_not_found_when_missing(fresh_manager):
+    with pytest.raises(LockNotFound):
+        fresh_manager.lock_store.load_required()
+
+
+def _write_raw(fresh_manager, text):
     path = fresh_manager.lock_store.path
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("not json")
-    assert fresh_manager.lock_store.load() is None
+        f.write(text)
+
+
+def test_load_raises_invalid_on_corrupt_json(fresh_manager):
+    _write_raw(fresh_manager, "not json")
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_raises_invalid_on_empty_file(fresh_manager):
+    _write_raw(fresh_manager, "")
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_raises_invalid_on_non_object_root(fresh_manager):
+    _write_raw(fresh_manager, json.dumps([1, 2, 3]))
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_raises_invalid_when_schema_version_missing(fresh_manager):
+    _write_raw(fresh_manager, json.dumps({"project": "aio"}))
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_raises_schema_unsupported_for_unknown_version(fresh_manager):
+    _write_raw(fresh_manager, json.dumps({"schema_version": 999}))
+    with pytest.raises(LockSchemaUnsupported):
+        fresh_manager.lock_store.load()
+    # LockSchemaUnsupported is itself a kind of LockInvalid.
+    _write_raw(fresh_manager, json.dumps({"schema_version": 999}))
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_raises_invalid_when_repositories_is_not_a_list(fresh_manager):
+    _write_raw(fresh_manager, json.dumps({"schema_version": 1, "repositories": "nope"}))
+    with pytest.raises(LockInvalid):
+        fresh_manager.lock_store.load()
+
+
+def test_load_succeeds_for_a_valid_minimal_lock(fresh_manager):
+    _write_raw(fresh_manager, json.dumps({"schema_version": 1}))
+    lock = fresh_manager.lock_store.load()
+    assert lock.schema_version == 1
 
 
 def test_write_then_load_round_trips(fresh_manager):
@@ -298,6 +348,61 @@ def test_diff_command_is_read_only_and_does_not_write_lock(fresh_manager):
         assert not os.path.exists(fresh_manager.lock_store.path)
     finally:
         cntr_shared.manager = orig
+
+
+def test_lock_check_on_corrupt_lock_exits_non_zero_distinctly_from_missing(fresh_manager):
+    """A corrupt lock file must not be silently treated as "no lock" --
+    lock --check must fail loudly (LockInvalid), not report "missing"."""
+    from linktools.cntr.commands.lock import LockCommand
+    import linktools.cntr.commands._shared as cntr_shared
+    orig = cntr_shared.manager
+    cntr_shared.manager = fresh_manager
+    try:
+        _write_raw(fresh_manager, "not json")
+        command = LockCommand()
+
+        class _Args:
+            check = True
+            as_json = False
+
+        with pytest.raises(LockInvalid):
+            command.run(_Args())
+    finally:
+        cntr_shared.manager = orig
+
+
+def test_diff_on_corrupt_lock_exits_non_zero(fresh_manager):
+    from linktools.cntr.commands.lock import DiffCommand
+    import linktools.cntr.commands._shared as cntr_shared
+    orig = cntr_shared.manager
+    cntr_shared.manager = fresh_manager
+    try:
+        _write_raw(fresh_manager, "not json")
+        command = DiffCommand()
+
+        class _Args:
+            as_json = False
+
+        with pytest.raises(LockInvalid):
+            command.run(_Args())
+    finally:
+        cntr_shared.manager = orig
+
+
+def test_doctor_reports_lock_invalid_as_error_finding(fresh_manager):
+    from linktools.cntr.doctor import ERROR, LOCK_INVALID, Doctor
+    _write_raw(fresh_manager, "not json")
+    findings = Doctor(fresh_manager).check_lock()
+    assert len(findings) == 1
+    assert findings[0].severity == ERROR
+    assert findings[0].code == LOCK_INVALID
+
+
+def test_doctor_run_does_not_crash_on_corrupt_lock(fresh_manager):
+    from linktools.cntr.doctor import ERROR, Doctor
+    _write_raw(fresh_manager, "not json")
+    findings = Doctor(fresh_manager).run()  # must not raise
+    assert any(f.severity == ERROR for f in findings)
 
 
 def test_lock_write_is_atomic_and_skips_unchanged_content(fresh_manager):

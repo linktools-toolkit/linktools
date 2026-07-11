@@ -23,7 +23,7 @@
         "properties": {
           "severity": {
             "type": "string",
-            "enum": ["OK", "INFO", "WARN"]
+            "enum": ["OK", "INFO", "WARN", "ERROR"]
           },
           "code": {
             "type": ["string", "null"],
