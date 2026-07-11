@@ -40,10 +40,21 @@ from ._download import (
 )
 from ._environ import BaseEnviron, Environ, environ
 from ._capability import Updater, DevelopUpdater, GitUpdater, PypiUpdater, BaseCapability, Capability
+from ._manifest import (
+    LinktoolsManifest,
+    ManifestComponent,
+    ManifestLoader,
+    RequirementResolverRegistry,
+    RequirementResult,
+    RequirementStatus,
+)
 
 __all__ = [
     # environ
     "BaseEnviron", "Environ", "environ",
+    # manifest
+    "LinktoolsManifest", "ManifestComponent", "ManifestLoader",
+    "RequirementResolverRegistry", "RequirementResult", "RequirementStatus",
     # config
     "Config", "ConfigField", "ConfigSchema", "ConfigResolver", "ConfigSource",
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource",

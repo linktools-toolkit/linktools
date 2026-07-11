@@ -43,8 +43,11 @@ __all__ = [
     "EnvironmentError", "LoggingError", "CacheError", "ConfigError",
     "DownloadError", "ToolError", "CapabilityError", "GitError", "SSHError",
     "SystemError", "ProcessError", "EventError", "ReactorError", "CliError",
+    "ManifestError",
     # Specific exceptions.
     "ModuleError", "DownloadHttpError", "ExecError",
+    "ManifestLoadError", "ManifestValidationError", "ManifestSchemaUnsupported",
+    "ManifestRequirementError",
     "ToolNotFound", "ToolNotSupport", "ToolExecError",
     "NoFreePortFoundError", "GitDivergedError",
     # Cache subtree (
@@ -239,6 +242,10 @@ class CliError(LinktoolsError):
     """A CLI-framework operation failed."""
 
 
+class ManifestError(LinktoolsError):
+    """A ``.linktools.json`` project manifest is invalid or incompatible."""
+
+
 # ---------------------------------------------------------------------------
 # Specific exceptions, grouped under their domain root.
 # ---------------------------------------------------------------------------
@@ -329,6 +336,22 @@ class ToolInstallError(ToolError):
 
 class ToolHealthcheckError(ToolError):
     """A tool failed its post-install healthcheck."""
+
+
+class ManifestLoadError(ManifestError):
+    """A ``.linktools.json`` file could not be read or parsed."""
+
+
+class ManifestValidationError(ManifestError):
+    """A ``.linktools.json`` file failed static validation."""
+
+
+class ManifestSchemaUnsupported(ManifestValidationError):
+    """A ``.linktools.json`` file declares an unsupported schema_version."""
+
+
+class ManifestRequirementError(ManifestError):
+    """A manifest requirement could not be resolved or checked."""
 
 
 class NoFreePortFoundError(SystemError):
