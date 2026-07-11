@@ -16,19 +16,6 @@ if TYPE_CHECKING:
     from ..manager import ContainerManager
 
 
-def _resolve_relative_path(container: "BaseContainer", value):
-    # Compose resolves a compose file's relative paths against that file's
-    # own directory. This container's compose data ends up written to
-    # <data_path>/compose/<name>.yml, not the container's source directory,
-    # so a path an author wrote as "./app" (meaning "relative to my compose
-    # file") must be rewritten to an absolute path anchored at the source
-    # directory before it reaches the written file, or it resolves against
-    # the wrong location entirely.
-    if not isinstance(value, str) or not (value.startswith("./") or value.startswith("../")):
-        return value
-    return os.path.normpath(str(container.get_source_path(value)))
-
-
 def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
     # A plain read -- no write happens in this function -- so it needs no
     # transaction of its own. Rendering may resolve settings from another
@@ -64,11 +51,6 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                     or network_mode.startswith("service:")
                 )):
                     service.setdefault("hostname", name)
-                build = service.get("build")
-                if isinstance(build, str):
-                    service["build"] = _resolve_relative_path(container, build)
-                elif isinstance(build, dict) and "context" in build:
-                    build["context"] = _resolve_relative_path(container, build["context"])
                 if "image" not in service:
                     dockerfile = container.get_docker_file_path()
                     if dockerfile and os.path.exists(dockerfile):
@@ -84,25 +66,6 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                     path = container.get_source_path(".env")
                     if path and os.path.exists(path):
                         service["env_file"] = [str(path)]
-                else:
-                    env_file = service["env_file"]
-                    if isinstance(env_file, str):
-                        service["env_file"] = _resolve_relative_path(container, env_file)
-                    elif isinstance(env_file, list):
-                        service["env_file"] = [
-                            _resolve_relative_path(container, entry) if isinstance(entry, str) else entry
-                            for entry in env_file
-                        ]
-                existing_volumes = service.get("volumes")
-                if isinstance(existing_volumes, list):
-                    normalized_volumes = []
-                    for volume in existing_volumes:
-                        if isinstance(volume, str):
-                            source, sep, rest = volume.partition(":")
-                            if sep and (source.startswith("./") or source.startswith("../")):
-                                volume = _resolve_relative_path(container, source) + sep + rest
-                        normalized_volumes.append(volume)
-                    service["volumes"] = normalized_volumes
                 container_paths = mount_paths.get(service.get("container_name"), {})
                 if container_paths:
                     volumes = service.setdefault("volumes", [])
