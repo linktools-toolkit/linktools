@@ -54,6 +54,13 @@ class ExecutionPlanner:
         manager = self.manager
         selection = manager.compose_operations.select(names)
 
+        # up/restart planning is blocked the same as the real action would
+        # be; `down` only warns, since stopping/cleaning up must never be
+        # blocked by a manifest version constraint introduced after the
+        # fact (Spec Part V).
+        if action in ("up", "restart"):
+            manager.compose_operations.ensure_runtime_requirements(selection, f"plan {action}")
+
         candidates = collect_candidates(manager, selection.project_containers)
         artifacts = [
             self._planned_artifact(dest, kind, container_name, content)
@@ -95,11 +102,14 @@ class ExecutionPlanner:
                 hooks.append(PlannedHook(phase=phase.value, container=None, name=hook.name, opaque=hook.opaque))
 
         warnings = []
-        for container in selection.target_containers:
-            repository = getattr(container, "_repository", None)
-            if repository is not None and repository.manifest is not None:
-                for issue in manager.repo_manifest.check_runtime_requirements(repository.manifest):
-                    warnings.append(f"{container.name}: {issue.message}")
+        if action == "down":
+            # down is never blocked (Spec Part V): a manifest version
+            # constraint must not stand in the way of stopping/cleanup.
+            for container in selection.target_containers:
+                repository = getattr(container, "_repository", None)
+                if repository is not None and repository.manifest is not None:
+                    for issue in manager.repo_manifest.check_runtime_requirements(repository.manifest):
+                        warnings.append(f"{container.name}: {issue.message}")
 
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:

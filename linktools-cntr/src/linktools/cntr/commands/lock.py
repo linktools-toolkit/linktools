@@ -75,6 +75,9 @@ class LockCommand(BaseCommand):
                 raise ContainerError("Lock drift detected")
             return
 
+        selection = manager.compose_operations.select()
+        manager.compose_operations.ensure_runtime_requirements(selection, "lock")
+
         lock, preflight = manager.lock_store.build_and_preflight()
         if preflight == "failed":
             raise ContainerError("Compose preflight failed; lock not written")
