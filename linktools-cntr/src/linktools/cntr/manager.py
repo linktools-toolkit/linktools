@@ -42,7 +42,7 @@ from .container import BaseContainer, ContainerError
 if TYPE_CHECKING:
     from typing import Any
     from linktools.core import Environ
-    from .registry.resolver import ContainerResolver
+    from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
     from .operations import ComposeOperations
     from .runtime.compose import ComposeRunner
@@ -233,7 +233,7 @@ class ContainerManager:
 
     @cached_property
     def resolver(self) -> "ContainerResolver":
-        from .registry.resolver import ContainerResolver
+        from .registry.registry import ContainerResolver
         return ContainerResolver(self)
 
     @cached_property

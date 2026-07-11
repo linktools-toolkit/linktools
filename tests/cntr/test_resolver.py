@@ -8,7 +8,7 @@ cycle error) independently of the full manager.
 import pytest
 
 from linktools.cntr.container import ContainerError
-from linktools.cntr.registry.resolver import ContainerResolver
+from linktools.cntr.registry.registry import ContainerResolver
 
 
 class _FakeContainer:

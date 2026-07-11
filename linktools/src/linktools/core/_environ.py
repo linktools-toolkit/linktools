@@ -509,8 +509,13 @@ class BaseEnviron(abc.ABC):
             global_source.replace(fresh.global_config.environment, base_path=global_base_path)
             return fresh.local_config.environment, local_base_path
 
+        # global_source has no reload_fn of its own: local_source's reload_fn
+        # (above) already refreshes it as a side effect, atomically, before
+        # local_source's own data is replaced -- and local_source always
+        # precedes global_source in the source list, so Config.reload()'s
+        # plain per-source loop never needs global_source to refresh itself
+        # independently (nor read its own _data back out to do so).
         local_source._reload_fn = _reload_local
-        global_source._reload_fn = lambda: (global_source._data, global_source.base_path)
 
         return local_source, global_source
 
