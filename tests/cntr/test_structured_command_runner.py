@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """StructuredCommandRunner: uniform CommandResult over a captured process,
 JSON parsing, timeout/error mapping, and the sudo_non_interactive private
-kwarg on RuntimeProcessFactory.create_process (Spec Part I).
+kwarg on RuntimeProcessFactory.create_process.
 
 Uses plain `python3 -c ...` subprocesses (not Docker) to drive real
 Process.fetch()/recursive_kill() behavior end-to-end.
@@ -85,7 +85,7 @@ def test_args_are_recorded(runner):
     assert "-c" in result.args
 
 
-# -- command redaction (Spec sections 7/81: "敏感参数脱敏"/"命令脱敏") -------
+# -- command redaction ("敏感参数脱敏"/"命令脱敏") ---------------------------
 
 def _py_with_extra_args(code: str, *extra):
     return popen(sys.executable, "-c", code, *extra, capture_output=True)

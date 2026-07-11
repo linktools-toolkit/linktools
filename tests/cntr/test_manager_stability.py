@@ -154,7 +154,7 @@ def test_manager_api_surface_present(fresh_manager):
 
 
 def test_manager_wrapper_forwarding_methods_removed(fresh_manager):
-    """Spec section 68.4: these one-line delegating wrappers are deliberately
+    """These one-line delegating wrappers are deliberately
     removed with no compatibility alias; downstream must call the formal
     service instead (manager.runtime, manager.lifecycle, manager.resolver,
     manager.installed_state, manager.repo_store)."""

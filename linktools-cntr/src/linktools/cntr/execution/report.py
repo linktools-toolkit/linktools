@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Execution Report (Spec section 46): a per-phase timing/outcome record for
+"""Execution Report: a per-phase timing/outcome record for
 an actual up/restart/down run, opt-in via ``--report``. Stashed on the
 existing ``EventContext.metadata`` extension point rather than a new
 context field, so this stays additive.
 
 Not printed by default -- only ``--report`` renders the full list. But a
 failure's phase/container/command (redacted)/duration/error summary is
-always logged regardless of ``--report`` (spec section 46).
+always logged regardless of ``--report``.
 """
 import time
 from contextlib import contextmanager
@@ -52,8 +52,9 @@ def record_phase(context: "EventContext", phase: str, command: "tuple[str, ...] 
     whether it succeeds or raises. Re-raises whatever the body raised.
 
     When ``logger`` is given, a failure is always logged immediately --
-    independent of ``--report`` -- per spec section 46's "on failure always
-    show phase/container/command/duration/error summary".
+    independent of ``--report``: phase/container/command/duration/error
+    summary are shown on every failure regardless of whether the full
+    report is ever rendered.
     """
     command = _redact_command(command)
     started = time.monotonic()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deployment Lock (Spec Part VI): canonical JSON, no secrets, Git/local
+"""Deployment Lock: canonical JSON, no secrets, Git/local
 repo representation, lock --check/diff read-only, legacy no-lock
 compatibility."""
 import json
@@ -197,7 +197,7 @@ def test_local_repo_definitions_sha256_changes_with_content(fresh_manager, tmp_p
 def test_local_repo_definitions_sha256_covers_templates_directory(fresh_manager, tmp_path):
     # Every built-in container that ships a "templates" dir (nginx, authelia,
     # lldap) renders arbitrarily-named files from it via `render_template`
-    # -- those are the "same-directory template files" of spec section 41.
+    # -- those are the "same-directory template files" the definitions hash covers.
     repo_dir = tmp_path / "local_repo"
     repo_dir.mkdir()
     (repo_dir / "container.py").write_text(
@@ -419,7 +419,7 @@ def test_lock_write_is_atomic_and_skips_unchanged_content(fresh_manager):
 
 
 def test_up_command_does_not_require_or_touch_lock(fresh_manager, monkeypatch):
-    """Spec section 43: Lock is fully opt-in; up must work identically
+    """Lock is fully opt-in; up must work identically
     whether or not a lock file exists, and must never write/modify one."""
     import linktools.cntr.__main__ as cntr_main
     import linktools.cntr.commands._shared as cntr_shared

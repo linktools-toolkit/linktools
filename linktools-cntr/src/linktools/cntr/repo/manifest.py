@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Repository Manifest (Spec Part III): a static ``.linktools.json`` a
+"""Repository Manifest: a static ``.linktools.json`` a
 repository author may place at its root to declare who they are, which
 cntr/Python/Docker/Compose versions they require, and free-form metadata.
 
-Security boundary (section 22): standard JSON only, max 1 MiB, root must be
+Security boundary: standard JSON only, max 1 MiB, root must be
 an object, no JSON5/YAML/comments/trailing-commas/Jinja/env-interpolation/
 expression-execution, ``$schema`` is never downloaded. This is validated
 *before* a repository's ``container.py`` is imported -- but the manifest is
@@ -77,8 +77,8 @@ class CompatibilityIssue:
 class ContainerRepositoryContext:
     """Private container-side record of where a container came from.
 
-    Not exposed as public BaseContainer API (Spec section 27) -- Lock/Plan
-    (later phases) read it directly off ``container._repository``.
+    Not exposed as public BaseContainer API -- Lock/Plan read it directly
+    off ``container._repository``.
     """
     url: "str | None"
     root_path: "PathType | None"
@@ -290,7 +290,7 @@ class RepositoryManifestService:
 
     def unknown_requirement_keys(self, manifest: "RepositoryManifest") -> "list[str]":
         """``requires`` keys outside the v1 standard set. Kept, not an
-        error -- Doctor surfaces them as INFO (Spec section 21)."""
+        error -- Doctor surfaces them as an INFO finding."""
         known = set(_HOST_REQUIREMENT_KEYS) | set(_RUNTIME_REQUIREMENT_KEYS)
         return sorted(key for key in manifest.requires if key not in known)
 
@@ -299,7 +299,7 @@ def describe_repository(
         manager: "ContainerManager", url: str, meta: "dict[str, Any]", check_runtime: bool = False,
 ) -> "dict[str, Any]":
     """Read-only repository status/validation summary for ``repo status``/
-    ``repo validate`` (Spec section 28): manifest presence, name/version,
+    ``repo validate``: manifest presence, name/version,
     required cntr/Python (and, opt-in, docker-engine/docker-compose),
     compatibility result, manifest hash, Git revision and dirty state.
     Never imports the repository's ``container.py``.

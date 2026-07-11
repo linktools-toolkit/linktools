@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Atomic artifact writer and Generated Artifact Index (Spec Part IV)."""
+"""Atomic artifact writer and Generated Artifact Index."""
 import json
 import os
 
@@ -163,7 +163,7 @@ def test_prepare_installed_containers_records_dockerfile_artifact_as_a_side_effe
 
 
 def test_repo_backed_container_records_repository_url_and_revision(fresh_manager, tmp_path, monkeypatch):
-    """Spec section 30's example index entry includes both repository_url
+    """The Generated Artifact Index's own canonical example entry includes both repository_url
     and repository_revision for a git-backed container -- only the former
     was ever actually recorded."""
     from linktools.cntr.container import BaseContainer

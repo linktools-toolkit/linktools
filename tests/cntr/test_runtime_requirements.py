@@ -3,7 +3,7 @@
 """Manifest docker-engine/docker-compose runtime requirements are enforced
 before up/restart/compose/lock actually run -- and never for down/status/
 plan down, which must stay usable no matter what a repository's manifest
-declares (Spec Part V)."""
+declares."""
 import pytest
 
 from linktools.cntr.container import ContainerError

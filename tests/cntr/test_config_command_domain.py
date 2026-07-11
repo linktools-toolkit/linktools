@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr config get/explain/validate`` (Spec section 54): config's own
+"""``ct-cntr config get/explain/validate``: config's own
 command domain, distinct from `compose config`/`compose validate` -- config
 validate must never run `docker compose config`."""
 import json
@@ -78,7 +78,7 @@ def test_validate_raises_on_a_malformed_persisted_value(fresh_manager):
 
 
 def test_validate_does_not_invoke_docker_compose(fresh_manager, monkeypatch):
-    """Spec section 54: config validate must never run `docker compose
+    """config validate must never run `docker compose
     config` -- that's compose validate's job."""
     def fail(*a, **k):
         raise AssertionError("config validate must not create a docker compose process")

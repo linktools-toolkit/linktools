@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deployment Lock diff (Spec section 42/44): repo revision/manifest drift,
+"""Deployment Lock diff: repo revision/manifest drift,
 installed-container-set drift, and generated-artifact added/changed/removed
 -- used by both ``lock --check`` (pass/fail) and ``ct-cntr diff`` (detail).
 Never includes secrets or full config; only hashes/identifiers.

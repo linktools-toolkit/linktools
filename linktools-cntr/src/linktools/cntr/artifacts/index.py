@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generated Artifact Index (Spec section 30): ``<data_path>/generated/
+"""Generated Artifact Index: ``<data_path>/generated/
 index.json`` records which generated file came from which container/source
 and its content hash, for Plan/Lock/Doctor to reason about drift later.
 
 Never records config values, secrets, or full template context -- only a
 relative path, kind, owning container, sha256 and (best-effort) source path.
-This phase does not delete stale entries/files; it only records.
+Never deletes stale entries/files itself; it only records.
 """
 import hashlib
 import json

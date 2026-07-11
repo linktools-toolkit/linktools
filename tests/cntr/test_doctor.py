@@ -78,7 +78,7 @@ def test_doctor_does_not_write_to_config_store(fresh_manager, monkeypatch):
     assert writes == [], f"doctor wrote to config store: {writes}"
 
 
-# -- Finding stable codes (Spec section 44) -----------------------------------
+# -- Finding stable codes --------------------------------------------------
 
 def test_finding_is_frozen_with_code_component_details_defaults():
     finding = Finding(WARN, "message")
@@ -125,7 +125,7 @@ def test_check_lock_reports_drift_when_persisted_lock_is_stale(fresh_manager, mo
     assert any(f.code == LOCK_DRIFT for f in findings)
 
 
-# -- Artifact staleness (report-only, Spec section 30) ------------------------
+# -- Artifact staleness (report-only) --------------------------------------
 
 def test_check_artifacts_is_empty_when_index_is_empty(fresh_manager):
     assert Doctor(fresh_manager).check_artifacts(fresh_manager.containers.values()) == []
@@ -242,7 +242,7 @@ def test_doctor_run_with_runtime_false_skips_compose_validation(fresh_manager, m
     assert called == []
 
 
-# -- --sudo-prompt opts into an interactive sudo prompt (Spec section 10) ---
+# -- --sudo-prompt opts into an interactive sudo prompt --------------------
 
 def _stub_runtime_probes_recording_sudo_prompt(fresh_manager, monkeypatch, seen):
     from linktools.cntr.runtime.inspect import DockerEngineVersion
@@ -305,7 +305,7 @@ def test_doctor_cli_exposes_sudo_prompt_flag(fresh_manager, monkeypatch):
     assert captured["sudo_prompt"] is True
 
 
-# -- Repo manifest unknown-requirement-key reporting (Spec section 21) ------
+# -- Repo manifest unknown-requirement-key reporting ------------------------
 
 def test_check_repos_reports_unknown_manifest_requirement_as_info(fresh_manager, tmp_path):
     import json as json_module

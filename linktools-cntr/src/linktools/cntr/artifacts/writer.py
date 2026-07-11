@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Atomic writer for generated files (Spec section 29): same-directory
+"""Atomic writer for generated files: same-directory
 temp file, flush, fsync, ``os.replace`` -- reusing ``linktools.utils.
 atomic_write`` for that mechanics -- plus a same-content short-circuit so an
 unchanged generated file keeps its original mtime and no write happens at

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Repository Manifest (Spec Part III): static validation, host compatibility,
+"""Repository Manifest: static validation, host compatibility,
 repo add cleanup-on-failure, and pre-import gating in ContainerLoader."""
 import json
 import os
@@ -271,7 +271,7 @@ def test_incompatible_repo_container_py_is_not_imported(fresh_manager, tmp_path,
     assert "example" not in {c.name for c in containers.values()}
 
 
-# -- RepoStore.update() re-validates the manifest (Spec section 26) ----------
+# -- RepoStore.update() re-validates the manifest ---------------------------
 
 def test_update_reports_incompatible_when_manifest_becomes_incompatible(fresh_manager, tmp_path, monkeypatch):
     repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
@@ -409,7 +409,7 @@ def test_update_reports_sync_failure_without_stopping_other_repos(fresh_manager,
     assert "network unreachable" in by_url[str(broken_dir)].error
 
 
-# -- describe_repository() field completeness (Spec section 28) -------------
+# -- describe_repository() field completeness -------------------------------
 
 def test_describe_repository_reports_git_revision_and_dirty_state(fresh_manager, tmp_path, monkeypatch):
     from linktools.cntr.repo.manifest import describe_repository

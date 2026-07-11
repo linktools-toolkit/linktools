@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ExecutionPlanner (Spec Part V): a plan must never execute a Docker write
+"""ExecutionPlanner: a plan must never execute a Docker write
 operation, run a lifecycle hook, or write a generated artifact/state/lock
 file -- and must reuse the same selection/arg-building logic real commands
 use."""

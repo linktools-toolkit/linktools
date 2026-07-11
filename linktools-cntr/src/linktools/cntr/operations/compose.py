@@ -5,7 +5,7 @@
 
 The CLI layer only defines arguments/help/routing; this module owns target
 selection, hook dispatch and state updates so the two entry points can never
-drift from each other (Spec Part IX, "single implementation principle").
+drift from each other.
 """
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -240,7 +240,7 @@ class ComposeOperations:
         )
 
     def status(self, sudo_prompt: bool = False):
-        """Full-project actual status (Spec section 18): always queries every
+        """Full-project actual status: always queries every
         installed container -- the CONTAINER filter for ``ct-cntr status`` is
         a display-only narrowing, applied by the caller."""
         project_containers = tuple(self.manager.prepare_installed_containers())

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr plan up/restart/down`` (Spec Part V): shows what an action would
+"""``ct-cntr plan up/restart/down``: shows what an action would
 do without doing it. Never executes a Docker write operation, a lifecycle
 hook, or writes a generated artifact/state/lock file."""
 import dataclasses

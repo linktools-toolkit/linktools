@@ -311,9 +311,8 @@ class HookRegistry:
 
         A CONTEXT-invocation hook receives ``context`` (when one is given);
         a NO_ARGS (or opaque/legacy) hook is always called with no
-        arguments -- matching the pre-registry ``manager._callback`` calling
-        convention exactly, so every hook reachable through the legacy
-        start_hooks/stop_hooks view keeps being invoked zero-arg.
+        arguments, so every hook reachable through the legacy
+        start_hooks/stop_hooks view is invoked zero-arg.
         """
         self.validate(phase)
         hooks = list(self.iter_phase(phase))

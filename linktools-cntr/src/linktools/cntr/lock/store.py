@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""LockStore (Spec Part VI): builds, writes, and loads
+"""LockStore: builds, writes, and loads
 ``<data_path>/container.lock.json`` -- the local, not-committed-downstream
-deployment lock. Fully opt-in (section 43): nothing here is called by
+deployment lock. Fully opt-in: nothing here is called by
 up/restart/down, and a missing lock file is never a warning.
 """
 import hashlib
@@ -54,7 +54,7 @@ def _local_repo_definitions_sha256(repo_path: str, docker_compose_names, max_lev
     Besides the fixed filenames, every file under a ``templates`` directory
     is included: containers render arbitrary config templates (nginx/authelia/
     lldap all ship one) via ``render_template(self.get_source_path("templates",
-    ...))``, so those are "same-directory template files" per spec section 41
+    ...))``, so those are "same-directory template files"
     even though their names aren't known in advance.
     """
     static_names = _STATIC_INPUT_NAMES | set(docker_compose_names)
@@ -106,7 +106,7 @@ class LockStore:
 
     def build_and_preflight(self) -> "tuple[DeploymentLock, str]":
         """Build the lock and run Compose preflight against the exact same
-        rendered candidates (Spec section 42), in one pass -- so `ct-cntr
+        rendered candidates, in one pass -- so `ct-cntr
         lock` never prepares containers or renders candidates twice."""
         lock, candidates = self._build_with_candidates()
         candidate_files = {dest: content for dest, (_kind, _name, content) in candidates.items()}

@@ -108,7 +108,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         """Return this container's operational cache namespace."""
         return self.manager.environ.cache.namespace("cntr:app:" + self.name)
 
-    # -- Direct access to shared manager services (Spec section 64) ---------
+    # -- Direct access to shared manager services -------------------------
     # Lightweight `@property`, not `@cached_property`: the instance itself is
     # already cached on the manager, so these never construct a second copy.
 

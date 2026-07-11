@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr lock [--check] [--json]`` / ``ct-cntr diff [--json]`` (Spec Part
-VI). Lock is fully opt-in (section 43): up/restart/down never require it,
+"""``ct-cntr lock [--check] [--json]`` / ``ct-cntr diff [--json]``.
+Lock is fully opt-in: up/restart/down never require it,
 `repo update` never modifies it, and a missing lock is never a warning by
 itself -- only `lock --check`/`diff` treat a missing lock as something to
 report.

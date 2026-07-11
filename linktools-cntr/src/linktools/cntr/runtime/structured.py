@@ -46,8 +46,7 @@ _REDACTED = "***"
 # Flags whose following token is a KEY=VALUE pair that may embed a secret,
 # e.g. --build-arg http_proxy=http://user:pass@host -- the value, not the
 # whole token, needs redacting. Shared with execution/report.py so a
-# command is never displayed unredacted through either path (spec sections
-# 7/46: "敏感参数脱敏").
+# command is never displayed unredacted through either path.
 _VALUE_BEARING_FLAGS = ("--build-arg",)
 
 
@@ -118,8 +117,7 @@ class StructuredCommandRunner:
     ) -> "CommandResult":
         # Redacted immediately: CommandResult.args and every exception message
         # built from `args` below must never carry a secret (e.g. a
-        # --build-arg proxy URL with embedded credentials) -- spec sections
-        # 7/81 "敏感参数脱敏"/"命令脱敏".
+        # --build-arg proxy URL with embedded credentials).
         args = redact_command(tuple(str(a) for a in (getattr(process, "args", None) or ())))
         started = time.monotonic()
         stdout_chunks: "list[str]" = []

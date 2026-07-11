@@ -318,7 +318,7 @@ def test_project_and_backend_are_from_manager(inspector, fresh_manager, monkeypa
     assert state.source == "docker-inspect"
 
 
-# -- disappearance race recovery (Spec section 13) ----------------------------
+# -- disappearance race recovery --------------------------------------------
 
 def test_bulk_inspect_failure_recovers_via_individual_inspect(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])

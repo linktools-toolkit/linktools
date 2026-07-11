@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """HookRegistry/HookListView: typed registration, ordering, before/after
-constraints, and legacy MutableSequence compatibility (Spec Part X)."""
+constraints, and legacy MutableSequence compatibility."""
 import pytest
 
 from linktools.cntr.lifecycle.hooks import (
@@ -283,7 +283,7 @@ def test_hook_list_view_is_not_isinstance_list():
     assert not isinstance(view, list)
 
 
-# -- Callback invocation-mode validation (Spec Part VI section 38) -----------
+# -- Callback invocation-mode validation --------------------------------
 
 def test_two_required_positional_params_rejected_at_registration():
     registry = HookRegistry()
@@ -329,7 +329,7 @@ def test_optional_context_param_called_zero_arg_when_context_is_none():
     assert seen == [None]
 
 
-# -- key/metadata validation (Spec section 39) --------------------------------
+# -- key/metadata validation --------------------------------------------
 
 def test_hook_key_must_be_hashable():
     registry = HookRegistry()
@@ -361,7 +361,7 @@ def test_hook_metadata_accepts_nested_json_compatible_values():
     assert hook.metadata == {"a": [1, "two", {"b": None, "c": True}]}
 
 
-# -- HookListView.insert() real positional semantics (Spec section 41) -------
+# -- HookListView.insert() real positional semantics ---------------------
 
 def test_legacy_insert_at_start():
     registry = HookRegistry()
@@ -425,7 +425,7 @@ def test_legacy_insert_does_not_disturb_formal_hook_position():
     assert calls == ["formal", "legacy-0", "legacy-1"]
 
 
-# -- Slice assignment/deletion (Spec section 42) ------------------------------
+# -- Slice assignment/deletion --------------------------------------------
 
 def test_slice_assignment_contiguous_replace():
     registry = HookRegistry()

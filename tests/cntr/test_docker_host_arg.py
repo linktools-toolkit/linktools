@@ -56,7 +56,7 @@ def test_bare_socket_path_gets_a_unix_scheme(fresh_manager, monkeypatch):
 
 
 def test_podman_container_type_raises_explicit_error_not_silent_fallback(fresh_manager, monkeypatch):
-    """Spec section 48: a legacy DOCKER_TYPE=podman must fail loudly, never
+    """A legacy DOCKER_TYPE=podman must fail loudly, never
     silently resolve to docker."""
     from linktools.cntr.container import ContainerError
     monkeypatch.setattr(fresh_manager, "container_type", "podman")

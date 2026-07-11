@@ -158,7 +158,7 @@ def test_cli_failed_up_does_not_mark_running(monkeypatch, fresh_manager):
     assert fresh_manager.running_state.get_persisted() == []
 
 
-# -- RunningStateStore.remove() (Spec Part VII) -------------------------------
+# -- RunningStateStore.remove() --------------------------------------------
 
 def test_remove_drops_only_the_given_names(fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer", "stale"])

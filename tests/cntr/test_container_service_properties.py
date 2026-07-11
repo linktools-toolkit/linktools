@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Container direct access to shared manager services (Spec section 64/90):
+"""Container direct access to shared manager services:
 each property must return the exact same instance the manager already
 caches, never a second copy, and internal code must reach it directly
 instead of bouncing through a removed Manager wrapper."""
@@ -44,8 +44,7 @@ def test_container_lacks_global_manager_management_surface(fresh_manager):
 
 def test_custom_runtime_service_can_override_process_creation(fresh_manager):
     """A downstream ContainerManager subclass replaces manager.runtime (a
-    formal service) rather than re-adding a manager.create_process wrapper
-    (Spec section 68.2)."""
+    formal service) rather than re-adding a manager.create_process wrapper."""
 
     class CustomRuntimeProcessFactory(RuntimeProcessFactory):
         pass

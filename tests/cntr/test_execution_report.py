@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Execution Report (Spec section 46): opt-in --report; default behavior
+"""Execution Report: opt-in --report; default behavior
 (no --report) must be completely unchanged, including the return value of
 on_command_up/restart/down (never a non-int, non-None value that could
 reach sys.exit())."""
@@ -92,7 +92,7 @@ def test_down_records_failure_with_message(fresh_manager, monkeypatch):
 
 
 def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, monkeypatch):
-    """Spec section 46: on failure, phase/container/command/duration/error
+    """On failure, phase/container/command/duration/error
     summary must always be shown -- independent of --report."""
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)

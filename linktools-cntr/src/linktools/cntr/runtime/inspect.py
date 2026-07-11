@@ -247,7 +247,7 @@ class DockerInspector:
             self, container_ids: "Iterable[str]", allow_sudo_prompt: bool = False,
     ) -> "list[dict]":
         """One container may have disappeared between listing ids and
-        inspecting them (Spec section 13): retry one id at a time, ignore a
+        inspecting them: retry one id at a time, ignore a
         single "no such container/object", and let any other failure
         propagate immediately."""
         items: "list[dict]" = []

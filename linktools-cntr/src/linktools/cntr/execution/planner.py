@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ExecutionPlanner (Spec Part V): builds an ``ExecutionPlan`` describing
+"""ExecutionPlanner builds an ``ExecutionPlan`` describing
 what an ``up``/``restart``/``down`` would do, without doing any of it.
 
 Reuses existing logic rather than re-implementing it: ``ComposeOperations
@@ -56,8 +56,7 @@ class ExecutionPlanner:
 
         # up/restart planning is blocked the same as the real action would
         # be; `down` only warns, since stopping/cleaning up must never be
-        # blocked by a manifest version constraint introduced after the
-        # fact (Spec Part V).
+        # blocked by a manifest version constraint introduced after the fact.
         if action in ("up", "restart"):
             manager.compose_operations.ensure_runtime_requirements(selection, f"plan {action}")
 
@@ -108,8 +107,8 @@ class ExecutionPlanner:
 
         warnings = []
         if action == "down":
-            # down is never blocked (Spec Part V): a manifest version
-            # constraint must not stand in the way of stopping/cleanup.
+            # down is never blocked: a manifest version constraint must not
+            # stand in the way of stopping/cleanup.
             for container in selection.target_containers:
                 repository = getattr(container, "_repository", None)
                 if repository is not None and repository.manifest is not None:

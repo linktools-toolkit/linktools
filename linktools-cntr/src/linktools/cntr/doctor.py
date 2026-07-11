@@ -145,7 +145,7 @@ class Doctor:
 
     def _check_runtime_versions(self, sudo_prompt: bool = False) -> "list[Finding]":
         # Non-interactive (sudo -n) by default: doctor must never block
-        # waiting on a password prompt (Spec section 10). --sudo-prompt is an
+        # waiting on a password prompt. --sudo-prompt is an
         # explicit opt-in to an interactive prompt instead. A probe failure
         # (missing sudo policy, daemon unreachable, unparsable output) is
         # reported as WARN with runtime.access_denied, never mistaken for
@@ -300,8 +300,8 @@ class Doctor:
         return findings
 
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
-        """Report an indexed artifact whose container no longer produces it
-        (Spec section 30: report only, never auto-delete)."""
+        """Report an indexed artifact whose container no longer produces it.
+        Report-only: never deletes the stale index entry."""
         from .artifacts.index import collect_candidates
         findings: "list[Finding]" = []
         indexed = self.manager.artifact_index.load()

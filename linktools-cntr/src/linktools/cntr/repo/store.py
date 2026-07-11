@@ -169,10 +169,10 @@ class RepoStore:
     def _validate_new_repo_manifest(self, repo_path: str) -> None:
         # Read .linktools.json (if any) and check host requirements before
         # this repo is ever written to INSTALLED_REPOS; on failure, clean up
-        # the just-cloned/linked path rather than leaving a half-added repo
-        # (Spec section 26). The full manifest is intentionally not persisted
-        # into INSTALLED_REPOS itself, to avoid stale metadata drifting from
-        # the on-disk .linktools.json.
+        # the just-cloned/linked path rather than leaving a half-added repo.
+        # The full manifest is intentionally not persisted into
+        # INSTALLED_REPOS itself, to avoid stale metadata drifting from the
+        # on-disk .linktools.json.
         try:
             manifest = self.manager.repo_manifest.load(repo_path)
             self.manager.repo_manifest.ensure_loadable(manifest)

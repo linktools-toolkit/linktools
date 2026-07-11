@@ -29,8 +29,7 @@ class LifecycleDispatcher:
     def _invoke_callback(self, func, context: "Any" = MISSING) -> "Any":
         """Call an on_check/on_starting/... method: zero-arg if its signature
         takes no parameters (besides an already-bound self), otherwise with
-        ``context``. Formerly ``ContainerManager._callback``, relocated here
-        (Spec section 62) since dispatch is this class's sole concern."""
+        ``context``."""
         if self.manager.environ.debug:
             self.manager.logger.debug(f"Callback {func}")
         if context is MISSING:

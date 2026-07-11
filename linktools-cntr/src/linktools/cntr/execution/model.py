@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Execution Plan model (Spec Part V section 33).
+"""Execution Plan model.
 
 ``ExecutionPlan`` holds no BaseContainer/Process/callable -- only plain,
 JSON-friendly values -- so it can be serialized (``ct-cntr plan --json``)

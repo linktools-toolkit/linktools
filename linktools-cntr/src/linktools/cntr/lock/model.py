@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deployment Lock model (Spec Part VI section 39-40).
+"""Deployment Lock model.
 
 Records what a deployment's inputs and generated outputs *are*, for
 reproducibility and drift detection -- never a runtime-state snapshot, and
