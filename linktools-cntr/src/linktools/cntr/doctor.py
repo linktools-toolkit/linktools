@@ -111,7 +111,7 @@ class Doctor:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def check_runtime(self, sudo_prompt: bool = False) -> "list[Finding]":
+    def check_runtime(self) -> "list[Finding]":
         findings: "list[Finding]" = []
         container_type = self.manager.container_type
         runtimes = {
@@ -134,33 +134,31 @@ class Doctor:
                     code=RUNTIME_ENDPOINT_MISSING, component="docker"))
 
         if wanted:
-            findings.extend(self._check_runtime_versions(sudo_prompt=sudo_prompt))
+            findings.extend(self._check_runtime_versions())
         return findings
 
-    def _check_runtime_versions(self, sudo_prompt: bool = False) -> "list[Finding]":
-        # Non-interactive (sudo -n) by default: doctor must never block
-        # waiting on a password prompt. --sudo-prompt is an
-        # explicit opt-in to an interactive prompt instead. A probe failure
-        # (missing sudo policy, daemon unreachable, unparsable output) is
-        # reported as WARN with runtime.access_denied, never mistaken for
-        # "not installed".
+    def _check_runtime_versions(self) -> "list[Finding]":
+        # sudo (when required) blocks for a password interactively; a probe
+        # failure (sudo policy denied, daemon unreachable, unparsable
+        # output) is reported as WARN with runtime.access_denied, never
+        # mistaken for "not installed".
         findings: "list[Finding]" = []
-        engine = self.manager.docker_inspector.get_engine_version(allow_sudo_prompt=sudo_prompt)
+        engine = self.manager.docker_inspector.get_engine_version()
         if engine.server:
             findings.append(Finding(OK, f"docker engine version: {engine.server}.", component="docker"))
         else:
             findings.append(Finding(
                 WARN, "docker engine version could not be determined. "
-                      "Run `sudo -v` first, configure sudo policy, or use docker-rootless.",
+                      "Check sudo policy, or use docker-rootless.",
                 code=RUNTIME_ACCESS_DENIED, component="docker"))
 
-        compose_version = self.manager.docker_inspector.get_compose_version(allow_sudo_prompt=sudo_prompt)
+        compose_version = self.manager.docker_inspector.get_compose_version()
         if compose_version:
             findings.append(Finding(OK, f"docker compose version: {compose_version}.", component="docker-compose"))
         else:
             findings.append(Finding(
                 WARN, "docker compose version could not be determined. "
-                      "Run `sudo -v` first, configure sudo policy, or use docker-rootless.",
+                      "Check sudo policy, or use docker-rootless.",
                 code=RUNTIME_ACCESS_DENIED, component="docker-compose"))
         return findings
 
@@ -192,9 +190,7 @@ class Doctor:
                         seen_container_names[cname] = f"{container.name}/{service}"
         return findings
 
-    def check_compose_validation(
-            self, containers: "Iterable[BaseContainer]", sudo_prompt: bool = False,
-    ) -> "list[Finding]":
+    def check_compose_validation(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
         """``docker compose config`` validation (only when a runtime binary
         is present -- this genuinely talks to Docker, unlike check_compose's
         static scan)."""
@@ -205,7 +201,7 @@ class Doctor:
         if not containers:
             return findings
         try:
-            result = self.manager.docker_inspector.validate_compose(containers, allow_sudo_prompt=sudo_prompt)
+            result = self.manager.docker_inspector.validate_compose(containers)
         except Exception as exc:  # noqa: BLE001 - doctor must stay read-only & non-fatal
             findings.append(Finding(WARN, f"compose validation could not run: {exc}", code=COMPOSE_VALIDATION_FAILED))
             return findings
@@ -280,15 +276,15 @@ class Doctor:
                 code=ARTIFACT_STALE, component=path))
         return findings
 
-    def run(self, runtime: bool = False, sudo_prompt: bool = False) -> "list[Finding]":
-        findings = self.check_runtime(sudo_prompt=sudo_prompt)
+    def run(self, runtime: bool = False) -> "list[Finding]":
+        findings = self.check_runtime()
         findings.extend(self.check_repos(runtime=runtime))
         try:
             containers = self.manager.prepare_installed_containers()
             findings.extend(self.check_compose(containers))
             findings.extend(self.check_artifacts(containers))
             if runtime:
-                findings.extend(self.check_compose_validation(containers, sudo_prompt=sudo_prompt))
+                findings.extend(self.check_compose_validation(containers))
         except Exception as exc:  # noqa: BLE001 - doctor must stay read-only & non-fatal
             findings.append(Finding(INFO, f"skipped compose checks: {exc}"))
         return findings

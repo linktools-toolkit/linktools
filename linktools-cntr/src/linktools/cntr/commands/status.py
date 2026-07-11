@@ -4,8 +4,8 @@
 display.
 
 Read-only: never writes persisted state, never runs a lifecycle hook, never
-triggers build/up/down. Defaults to non-interactive sudo (``--sudo-prompt``
-opts into an interactive password prompt).
+triggers build/up/down. If the configured docker type needs sudo, this
+blocks on the password prompt like any other docker call.
 """
 import json
 from typing import TYPE_CHECKING
@@ -42,7 +42,6 @@ def _aggregate(services: "list[Any]") -> str:
 def collect_status(
         manager: "ContainerManager",
         names: "list[str] | None" = None,
-        sudo_prompt: bool = False,
         all_services: bool = False,
 ) -> "dict[str, Any]":
     """Build the JSON-shaped status payload; ``render_status`` formats it.
@@ -54,7 +53,7 @@ def collect_status(
     never masquerade as "every container is missing"."""
     error = None
     try:
-        project_containers, state = manager.compose_operations.status(sudo_prompt=sudo_prompt)
+        project_containers, state = manager.compose_operations.status()
         queryable = True
     except RuntimeInspectionUnavailable as exc:
         project_containers = tuple(manager.prepare_installed_containers())
@@ -151,15 +150,10 @@ class StatusCommands:
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    @subcommand_argument("--sudo-prompt", dest="sudo_prompt", action="store_true", default=False,
-                         help="allow an interactive sudo password prompt (default: never blocks on one)")
     @subcommand_argument("--all-services", dest="all_services", action="store_true", default=False,
                          help="also include services not owned by any installed container")
-    def on_command_status(self, names: "list[str]" = None, as_json: bool = False,
-                          sudo_prompt: bool = False, all_services: bool = False):
-        payload = collect_status(
-            _shared.manager, names=names, sudo_prompt=sudo_prompt, all_services=all_services,
-        )
+    def on_command_status(self, names: "list[str]" = None, as_json: bool = False, all_services: bool = False):
+        payload = collect_status(_shared.manager, names=names, all_services=all_services)
         if as_json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

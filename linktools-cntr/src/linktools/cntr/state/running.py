@@ -9,10 +9,11 @@ successful compose up/down:
 - full down   -> clear persisted
 
 ``get_actual`` queries live state via ``DockerInspector.get_project_state``
-(Compose project ids + ``docker inspect``, non-interactive sudo).
+(Compose project ids + ``docker inspect``; blocks on a sudo password prompt
+like any other docker call if the configured docker type needs one).
 ``get_effective`` falls back to the persisted state whenever the live query
-is unavailable, so ``ct-cntr list`` never crashes -- and never blocks on a
-sudo password prompt -- when Docker is absent or access is denied.
+is unavailable, so ``ct-cntr list`` never crashes when Docker itself is
+absent or unreachable.
 """
 from typing import TYPE_CHECKING
 
@@ -57,7 +58,7 @@ class RunningStateStore:
         to persisted state; ``list`` must never crash."""
         from ..runtime.inspect import RuntimeInspectionError
         try:
-            state = self.manager.docker_inspector.get_project_state(containers, allow_sudo_prompt=False)
+            state = self.manager.docker_inspector.get_project_state(containers)
         except RuntimeInspectionError as exc:
             raise RuntimeStateUnavailable(str(exc)) from exc
         return state.running_container_names

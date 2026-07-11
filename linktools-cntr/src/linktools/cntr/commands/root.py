@@ -183,11 +183,8 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--runtime", action="store_true", default=False,
                          help="also validate compose config and manifest-declared "
                               "docker-engine/docker-compose requirements")
-    @subcommand_argument("--sudo-prompt", dest="sudo_prompt", action="store_true", default=False,
-                         help="allow an interactive sudo password prompt (default: never blocks on one)")
-    def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False,
-                          sudo_prompt: bool = False):
-        findings = Doctor(_shared.manager).run(runtime=runtime, sudo_prompt=sudo_prompt)
+    def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False):
+        findings = Doctor(_shared.manager).run(runtime=runtime)
         if as_json:
             import json
             payload = dict(

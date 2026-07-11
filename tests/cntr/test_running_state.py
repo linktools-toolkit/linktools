@@ -70,7 +70,7 @@ def test_get_actual_treats_output_error_as_unavailable_too(fresh_manager, monkey
     it degrades to persisted state the same as an unqueryable runtime."""
     from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
 
-    def raise_error(containers, allow_sudo_prompt=False):
+    def raise_error(containers):
         raise RuntimeInspectionOutputError("docker inspect output root is not a list")
 
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)

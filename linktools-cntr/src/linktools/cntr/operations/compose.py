@@ -239,10 +239,10 @@ class ComposeOperations:
             context, selection.services, output_format=output_format, quiet=check,
         )
 
-    def status(self, sudo_prompt: bool = False):
+    def status(self):
         """Full-project actual status: always queries every
         installed container -- the CONTAINER filter for ``ct-cntr status`` is
         a display-only narrowing, applied by the caller."""
         project_containers = tuple(self.manager.prepare_installed_containers())
-        state = self.manager.docker_inspector.get_project_state(project_containers, allow_sudo_prompt=sudo_prompt)
+        state = self.manager.docker_inspector.get_project_state(project_containers)
         return project_containers, state

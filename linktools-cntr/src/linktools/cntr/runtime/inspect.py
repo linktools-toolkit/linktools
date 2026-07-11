@@ -29,8 +29,8 @@ class RuntimeInspectionError(ContainerError):
 
 
 class RuntimeInspectionUnavailable(RuntimeInspectionError):
-    """Docker/Compose could not be queried at all: missing binary, `sudo -n`
-    denial, no compose file for these containers, a timeout, or an
+    """Docker/Compose could not be queried at all: missing binary, a denied
+    sudo policy, no compose file for these containers, a timeout, or an
     unparsable container-id list. Callers treat this as "state unknown" and
     may fall back to persisted state."""
 
@@ -188,10 +188,10 @@ class DockerInspector:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def get_engine_version(self, allow_sudo_prompt: bool = False) -> "DockerEngineVersion":
+    def get_engine_version(self) -> "DockerEngineVersion":
         process = self.manager.runtime.create_docker_process(
             "version", "--format", "{{json .}}",
-            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            capture_output=True,
         )
         try:
             data = self.manager.structured_runner.execute_json(process, check=False)
@@ -207,10 +207,10 @@ class DockerInspector:
             api=client.get("ApiVersion") or server.get("ApiVersion"),
         )
 
-    def get_compose_version(self, allow_sudo_prompt: bool = False) -> "str | None":
+    def get_compose_version(self) -> "str | None":
         process = self.manager.runtime.create_docker_process(
             "compose", "version", "--short",
-            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            capture_output=True,
         )
         try:
             result = self.manager.structured_runner.execute_text(process, check=False)
@@ -220,20 +220,18 @@ class DockerInspector:
             return None
         return result.stdout.strip() or None
 
-    def _list_project_container_ids(
-            self, containers: "Iterable[BaseContainer]", allow_sudo_prompt: bool = False,
-    ) -> "list[str]":
+    def _list_project_container_ids(self, containers: "Iterable[BaseContainer]") -> "list[str]":
         process = self.manager.runtime.create_docker_compose_process(
             containers, "ps", "--all", "--quiet",
-            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            capture_output=True,
         )
         result = self.manager.structured_runner.execute_text(process, check=True)
         return _parse_container_ids(result.stdout)
 
-    def _inspect_containers(self, container_ids: "Iterable[str]", allow_sudo_prompt: bool = False) -> "list[dict]":
+    def _inspect_containers(self, container_ids: "Iterable[str]") -> "list[dict]":
         process = self.manager.runtime.create_docker_process(
             "inspect", "--type", "container", *container_ids,
-            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            capture_output=True,
         )
         data = self.manager.structured_runner.execute_json(process, check=True)
         if not isinstance(data, list):
@@ -243,9 +241,7 @@ class DockerInspector:
                 raise RuntimeInspectionOutputError("`docker inspect` item is not a JSON object")
         return data
 
-    def _inspect_containers_recovering(
-            self, container_ids: "Iterable[str]", allow_sudo_prompt: bool = False,
-    ) -> "list[dict]":
+    def _inspect_containers_recovering(self, container_ids: "Iterable[str]") -> "list[dict]":
         """One container may have disappeared between listing ids and
         inspecting them: retry one id at a time, ignore a
         single "no such container/object", and let any other failure
@@ -254,7 +250,7 @@ class DockerInspector:
         for container_id in container_ids:
             process = self.manager.runtime.create_docker_process(
                 "inspect", "--type", "container", container_id,
-                capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+                capture_output=True,
             )
             try:
                 result = self.manager.structured_runner.execute_json(process, check=True)
@@ -270,11 +266,7 @@ class DockerInspector:
                 items.append(result)
         return items
 
-    def get_project_state(
-            self,
-            containers: "Iterable[BaseContainer]",
-            allow_sudo_prompt: bool = False,
-    ) -> "ProjectRuntimeState":
+    def get_project_state(self, containers: "Iterable[BaseContainer]") -> "ProjectRuntimeState":
         containers = tuple(containers)
         if not containers:
             # Nothing to build a --file set from -- there is trivially
@@ -292,7 +284,7 @@ class DockerInspector:
                 service_owners.setdefault(service_name, container.name)
 
         try:
-            container_ids = self._list_project_container_ids(containers, allow_sudo_prompt=allow_sudo_prompt)
+            container_ids = self._list_project_container_ids(containers)
         except (StructuredCommandError, OSError) as exc:
             raise RuntimeInspectionUnavailable(str(exc)) from exc
 
@@ -302,12 +294,12 @@ class DockerInspector:
             )
 
         try:
-            items = self._inspect_containers(container_ids, allow_sudo_prompt=allow_sudo_prompt)
+            items = self._inspect_containers(container_ids)
         except (StructuredCommandError, OSError):
             # Every id just came from `compose ps`, so an empty recovery
             # result here means every one of them disappeared in the
             # meantime -- a legitimate empty project state, not an error.
-            items = self._inspect_containers_recovering(container_ids, allow_sudo_prompt=allow_sudo_prompt)
+            items = self._inspect_containers_recovering(container_ids)
         else:
             if not items:
                 raise RuntimeInspectionOutputError(
@@ -325,14 +317,10 @@ class DockerInspector:
             backend=self.manager.container_type,
         )
 
-    def validate_compose(
-            self,
-            containers: "Iterable[BaseContainer]",
-            allow_sudo_prompt: bool = False,
-    ):
+    def validate_compose(self, containers: "Iterable[BaseContainer]"):
         process = self.manager.runtime.create_docker_compose_process(
             tuple(containers), *self.manager.compose_runner.config_args(quiet=True),
-            privilege=False, capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            privilege=False, capture_output=True,
         )
         return self.manager.structured_runner.execute_text(process, check=False)
 
@@ -356,7 +344,7 @@ class DockerInspector:
                     return "skipped"
                 args.extend(["--project-name", manager.project_name, "config", "--quiet"])
                 process = manager.runtime.create_docker_process(
-                    "compose", *args, privilege=False, capture_output=True, sudo_non_interactive=True,
+                    "compose", *args, privilege=False, capture_output=True,
                 )
                 result = manager.structured_runner.execute_text(process, check=False)
                 return "passed" if result.succeeded else "failed"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """StructuredCommandRunner: uniform CommandResult over a captured process,
-JSON parsing, timeout/error mapping, and the sudo_non_interactive private
-kwarg on RuntimeProcessFactory.create_process.
+JSON parsing, timeout/error mapping, and sudo prefixing on
+RuntimeProcessFactory.create_process.
 
 Uses plain `python3 -c ...` subprocesses (not Docker) to drive real
 Process.fetch()/recursive_kill() behavior end-to-end.
@@ -161,9 +161,11 @@ def test_long_output_is_truncated_in_error_message(runner):
     assert len(str(exc_info.value)) < 10000
 
 
-# -- sudo_non_interactive (RuntimeProcessFactory.create_process) -------------
+# -- sudo prefixing (RuntimeProcessFactory.create_process) -------------------
 
-def test_sudo_interactive_by_default(fresh_manager, monkeypatch):
+def test_sudo_is_always_interactive(fresh_manager, monkeypatch):
+    """sudo never gets a `-n`: if the sudo policy needs a password, the
+    call blocks on the prompt rather than failing fast."""
     fresh_manager.system = "linux"
     fresh_manager.uid = 1000
     recorded = []
@@ -176,7 +178,7 @@ def test_sudo_interactive_by_default(fresh_manager, monkeypatch):
     assert "-n" not in recorded[0]
 
 
-def test_sudo_non_interactive_adds_dash_n(fresh_manager, monkeypatch):
+def test_no_privilege_never_invokes_sudo(fresh_manager, monkeypatch):
     fresh_manager.system = "linux"
     fresh_manager.uid = 1000
     recorded = []
@@ -184,16 +186,5 @@ def test_sudo_non_interactive_adds_dash_n(fresh_manager, monkeypatch):
         "linktools.cntr.runtime.process.popen",
         lambda *a, **k: recorded.append(a),
     )
-    fresh_manager.runtime.create_process("docker", "ps", privilege=True, sudo_non_interactive=True)
-    assert recorded[0][0] == "sudo"
-    assert recorded[0][1] == "-n"
-
-
-def test_sudo_non_interactive_kwarg_is_not_forwarded_to_popen(fresh_manager, monkeypatch):
-    captured_kwargs = {}
-    monkeypatch.setattr(
-        "linktools.cntr.runtime.process.popen",
-        lambda *a, **k: captured_kwargs.update(k),
-    )
-    fresh_manager.runtime.create_process("echo", "hi", privilege=False, sudo_non_interactive=True)
-    assert "sudo_non_interactive" not in captured_kwargs
+    fresh_manager.runtime.create_process("echo", "hi", privilege=False)
+    assert recorded[0][0] == "echo"

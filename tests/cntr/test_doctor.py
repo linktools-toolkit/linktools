@@ -170,7 +170,7 @@ def test_check_compose_validation_reports_failure_when_docker_present(fresh_mana
 
     monkeypatch.setattr(
         fresh_manager.docker_inspector, "validate_compose",
-        lambda containers, allow_sudo_prompt=False: _FailedResult(),
+        lambda containers: _FailedResult(),
     )
     findings = Doctor(fresh_manager).check_compose_validation(fresh_manager.containers.values())
     assert any(f.code == COMPOSE_VALIDATION_FAILED for f in findings)
@@ -185,7 +185,7 @@ def test_check_compose_validation_is_empty_when_it_succeeds(fresh_manager, monke
 
     monkeypatch.setattr(
         fresh_manager.docker_inspector, "validate_compose",
-        lambda containers, allow_sudo_prompt=False: _OkResult(),
+        lambda containers: _OkResult(),
     )
     findings = Doctor(fresh_manager).check_compose_validation(fresh_manager.containers.values())
     assert findings == []
@@ -197,8 +197,8 @@ def _stub_runtime_probes_and_docker_present(fresh_manager, monkeypatch):
     from linktools.cntr.runtime.inspect import DockerEngineVersion
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None)
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_engine_version",
-                        lambda allow_sudo_prompt=False: DockerEngineVersion(client="1.0", server="1.0", api="1.0"))
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda allow_sudo_prompt=False: "2.0")
+                        lambda: DockerEngineVersion(client="1.0", server="1.0", api="1.0"))
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda: "2.0")
 
 
 def test_doctor_run_with_runtime_true_includes_compose_validation(fresh_manager, monkeypatch):
@@ -210,7 +210,7 @@ def test_doctor_run_with_runtime_true_includes_compose_validation(fresh_manager,
 
     monkeypatch.setattr(
         fresh_manager.docker_inspector, "validate_compose",
-        lambda containers, allow_sudo_prompt=False: _FailedResult(),
+        lambda containers: _FailedResult(),
     )
     findings = Doctor(fresh_manager).run(runtime=True)
     assert any(f.code == COMPOSE_VALIDATION_FAILED for f in findings)
@@ -220,76 +220,13 @@ def test_doctor_run_with_runtime_false_skips_compose_validation(fresh_manager, m
     _stub_runtime_probes_and_docker_present(fresh_manager, monkeypatch)
     called = []
 
-    def fake_validate(containers, allow_sudo_prompt=False):
+    def fake_validate(containers):
         called.append(1)
         raise AssertionError("must not be called when runtime=False")
 
     monkeypatch.setattr(fresh_manager.docker_inspector, "validate_compose", fake_validate)
     Doctor(fresh_manager).run(runtime=False)
     assert called == []
-
-
-# -- --sudo-prompt opts into an interactive sudo prompt --------------------
-
-def _stub_runtime_probes_recording_sudo_prompt(fresh_manager, monkeypatch, seen):
-    from linktools.cntr.runtime.inspect import DockerEngineVersion
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/docker" if name == "docker" else None)
-
-    def fake_engine_version(allow_sudo_prompt=False):
-        seen.append(allow_sudo_prompt)
-        return DockerEngineVersion(client=None, server=None, api=None)
-
-    def fake_compose_version(allow_sudo_prompt=False):
-        seen.append(allow_sudo_prompt)
-        return None
-
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_engine_version", fake_engine_version)
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", fake_compose_version)
-
-
-def test_doctor_defaults_to_non_interactive_sudo_for_runtime_probes(fresh_manager, monkeypatch):
-    seen = []
-    _stub_runtime_probes_recording_sudo_prompt(fresh_manager, monkeypatch, seen)
-    Doctor(fresh_manager).run()
-    assert seen == [False, False]
-
-
-def test_doctor_sudo_prompt_flag_allows_interactive_sudo_for_runtime_probes(fresh_manager, monkeypatch):
-    seen = []
-    _stub_runtime_probes_recording_sudo_prompt(fresh_manager, monkeypatch, seen)
-    Doctor(fresh_manager).run(sudo_prompt=True)
-    assert seen == [True, True]
-
-
-def test_doctor_sudo_prompt_flag_threads_through_compose_validation(fresh_manager, monkeypatch):
-    _stub_runtime_probes_and_docker_present(fresh_manager, monkeypatch)
-    seen = []
-
-    class _OkResult:
-        succeeded = True
-        stderr = ""
-
-    monkeypatch.setattr(
-        fresh_manager.docker_inspector, "validate_compose",
-        lambda containers, allow_sudo_prompt=False: seen.append(allow_sudo_prompt) or _OkResult(),
-    )
-    Doctor(fresh_manager).run(runtime=True, sudo_prompt=True)
-    assert seen == [True]
-
-
-def test_doctor_cli_exposes_sudo_prompt_flag(fresh_manager, monkeypatch):
-    import linktools.cntr.__main__ as cntr_main
-    import linktools.cntr.commands._shared as cntr_shared
-    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    captured = {}
-
-    def fake_run(self, runtime=False, sudo_prompt=False):
-        captured["sudo_prompt"] = sudo_prompt
-        return []
-
-    monkeypatch.setattr(Doctor, "run", fake_run)
-    cntr_main.command.on_command_doctor(sudo_prompt=True)
-    assert captured["sudo_prompt"] is True
 
 
 # -- Repo manifest unrecognized-requirement-key reporting -------------------

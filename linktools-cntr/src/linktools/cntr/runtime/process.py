@@ -62,27 +62,25 @@ class RuntimeProcessFactory:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def _sudo_prefix(self, sudo_non_interactive: bool = False) -> "tuple[str, ...]":
+    def _sudo_prefix(self) -> "tuple[str, ...]":
         manager = self.manager
         if manager.system in ("darwin", "linux") and manager.uid != 0:
             proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
             preserve_keys = [*[e.lower() for e in proxy_keys], *[e.upper() for e in proxy_keys]]
             preserve_env = [key for key in preserve_keys if key in os.environ]
             sudo_args = ["sudo"]
-            if sudo_non_interactive:
-                sudo_args.append("-n")
             if preserve_env:
                 sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
             return tuple(sudo_args)
         return ()
 
-    def display_args(self, spec: CommandSpec, sudo_non_interactive: bool = False) -> "tuple[str, ...]":
+    def display_args(self, spec: CommandSpec) -> "tuple[str, ...]":
         """The full, copy-paste-executable command ``spec.args`` would
         actually run as, including a ``sudo`` prefix if privilege and the
         current platform/uid would actually trigger one. Never executed --
         display/Plan only."""
         if spec.privilege:
-            prefix = self._sudo_prefix(sudo_non_interactive)
+            prefix = self._sudo_prefix()
             if prefix:
                 return (*prefix, *spec.args)
         return spec.args
@@ -93,13 +91,13 @@ class RuntimeProcessFactory:
             privilege: bool = None,
             **kwargs,
     ) -> "Process":
-        # Private kwarg, not part of the public facade signature: read-only
-        # background queries (list/status, doctor) pass sudo_non_interactive=True
-        # so a missing sudo policy fails fast instead of blocking on a
-        # password prompt; up/restart/down keep the interactive default.
-        sudo_non_interactive = kwargs.pop("sudo_non_interactive", False)
+        # sudo is always interactive: if the sudo policy needs a password,
+        # this blocks on the prompt rather than failing fast. Callers that
+        # must never block (a read-only background probe with its own
+        # fallback) should catch the resulting error instead of relying on
+        # a non-interactive sudo mode.
         if privilege:
-            prefix = self._sudo_prefix(sudo_non_interactive)
+            prefix = self._sudo_prefix()
             if prefix:
                 return popen(*prefix, *args, **kwargs)
         return popen(*args, **kwargs)

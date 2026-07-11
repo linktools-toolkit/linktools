@@ -167,12 +167,11 @@ ct-cntr compose nginx --format json    # 只筛选 nginx 对应的 service
 ct-cntr compose --check                # 只校验，不输出内容
 
 #######################
-# 实际运行状态（只读，默认不弹 sudo 密码）
+# 实际运行状态（只读；如需要 sudo 密码会阻塞等待输入）
 #######################
 
 ct-cntr status
 ct-cntr status --json
-ct-cntr status --sudo-prompt
 
 #######################
 # 执行计划（只展示会发生什么，不实际执行）
@@ -188,7 +187,6 @@ ct-cntr up --dry-run
 ct-cntr doctor --json
 ct-cntr doctor --check        # 存在 WARN 级别 finding 时非零退出
 ct-cntr doctor --runtime      # 额外校验 compose config 及仓库声明的运行时版本要求
-ct-cntr doctor --sudo-prompt  # 允许运行时探测交互式输入 sudo 密码（默认 sudo -n，不阻塞）
 ```
 
 ### 项目清单（`.linktools.json`）

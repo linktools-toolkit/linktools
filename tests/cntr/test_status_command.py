@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr status``: read-only, defaults to non-interactive sudo."""
+"""``ct-cntr status``: read-only; blocks on a sudo password prompt like any
+other docker call if the configured docker type needs one."""
 import json
 
 import pytest
@@ -24,7 +25,7 @@ def with_nginx_services(fresh_manager):
 def test_status_is_read_only(fresh_manager, monkeypatch, with_nginx_services):
     monkeypatch.setattr(
         fresh_manager.compose_operations, "status",
-        lambda sudo_prompt=False: ((with_nginx_services,), _state([
+        lambda: ((with_nginx_services,), _state([
             ServiceRuntimeState(logical_container="nginx", service="nginx", runtime_name="aio-nginx",
                                 state="running", health="healthy", image=None, exit_code=0, labels={}),
         ])),
@@ -39,40 +40,18 @@ def test_status_is_read_only(fresh_manager, monkeypatch, with_nginx_services):
     assert payload["containers"][0]["status"] == "running"
 
 
-def test_status_defaults_to_non_interactive_sudo(fresh_manager, monkeypatch, with_nginx_services):
-    recorded = {}
-
-    def fake_get_project_state(containers, allow_sudo_prompt=False):
-        recorded["allow_sudo_prompt"] = allow_sudo_prompt
-        return _state([])
-
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", fake_get_project_state)
-    collect_status(fresh_manager)
-    assert recorded["allow_sudo_prompt"] is False
-
-
-def test_status_sudo_prompt_flag_is_forwarded(fresh_manager, monkeypatch, with_nginx_services):
-    recorded = {}
-
-    def fake_get_project_state(containers, allow_sudo_prompt=False):
-        recorded["allow_sudo_prompt"] = allow_sudo_prompt
-        return _state([])
-
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", fake_get_project_state)
-    collect_status(fresh_manager, sudo_prompt=True)
-    assert recorded["allow_sudo_prompt"] is True
-
-
 def test_status_query_failure_marks_unknown_instead_of_crashing(fresh_manager, monkeypatch, with_nginx_services):
+    """A denied sudo policy (or any other unqueryable-runtime failure) must
+    degrade to "unknown" status, not crash `ct-cntr status`."""
     from linktools.cntr.runtime.inspect import RuntimeInspectionUnavailable
 
-    def raise_error(containers, allow_sudo_prompt=False):
-        raise RuntimeInspectionUnavailable("docker unreachable")
+    def raise_error(containers):
+        raise RuntimeInspectionUnavailable("sudo: a password is required")
 
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
     payload = collect_status(fresh_manager)
     assert payload["queryable"] is False
-    assert payload["error"] == "docker unreachable"
+    assert payload["error"] == "sudo: a password is required"
     assert all(entry["status"] == "unknown" for entry in payload["containers"])
 
 
@@ -82,7 +61,7 @@ def test_status_output_error_propagates_instead_of_being_swallowed(fresh_manager
     (non-zero exit), not silently render every container as unknown."""
     from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
 
-    def raise_error(containers, allow_sudo_prompt=False):
+    def raise_error(containers):
         raise RuntimeInspectionOutputError("docker inspect output root is not a list")
 
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)

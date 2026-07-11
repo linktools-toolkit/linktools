@@ -158,9 +158,8 @@ class ExecutionPlanner:
         # use, so Plan's argv (file order, --project-name, docker/compose
         # prefix, privilege) can never drift from what actually runs.
         spec = self.manager.runtime.docker_args("compose", *compose_args, privilege=None)
-        # Real up/restart/down keep sudo interactive; Plan only *describes*
-        # the command, it never actually runs it.
-        display = self.manager.runtime.display_args(spec, sudo_non_interactive=False)
+        # Plan only *describes* the command, it never actually runs it.
+        display = self.manager.runtime.display_args(spec)
         return PlannedCommand(
             phase=phase,
             args=redact_command(spec.args),
