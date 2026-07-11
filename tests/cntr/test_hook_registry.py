@@ -77,12 +77,15 @@ def test_before_constraint_forces_dependent_after():
     assert calls == ["a", "b"]
 
 
-def test_missing_before_after_reference_is_ignored_at_call_time():
+def test_missing_required_before_after_reference_blocks_call():
+    """call() must auto-validate before running anything -- a missing
+    *required* before/after reference is never silently skipped."""
     registry = HookRegistry()
     calls = []
     registry.register(HookPhase.BEFORE_START, lambda: calls.append("a"), key="a", after=("does-not-exist",))
-    registry.call(HookPhase.BEFORE_START)
-    assert calls == ["a"]
+    with pytest.raises(HookValidationError):
+        registry.call(HookPhase.BEFORE_START)
+    assert calls == []
 
 
 def test_validate_raises_on_missing_reference():
@@ -278,3 +281,203 @@ def test_hook_list_view_is_not_isinstance_list():
     view = registry.legacy_view(HookPhase.BEFORE_START)
     assert isinstance(view, HookListView)
     assert not isinstance(view, list)
+
+
+# -- Callback invocation-mode validation (Spec Part VI section 38) -----------
+
+def test_two_required_positional_params_rejected_at_registration():
+    registry = HookRegistry()
+
+    def two_required(a, b):
+        pass
+
+    with pytest.raises(HookValidationError):
+        registry.register(HookPhase.BEFORE_START, two_required, key="bad")
+
+
+def test_keyword_only_required_param_rejected_at_registration():
+    registry = HookRegistry()
+
+    def kwonly_required(*, x):
+        pass
+
+    with pytest.raises(HookValidationError):
+        registry.register(HookPhase.BEFORE_START, kwonly_required, key="bad")
+
+
+def test_star_args_callback_prefers_context_invocation():
+    registry = HookRegistry()
+    seen = []
+    registry.register(HookPhase.BEFORE_START, lambda *args: seen.append(args), key="k")
+    registry.call(HookPhase.BEFORE_START, context="CTX")
+    assert seen == [("CTX",)]
+
+
+def test_optional_context_param_receives_context_when_given():
+    registry = HookRegistry()
+    seen = []
+    registry.register(HookPhase.BEFORE_START, lambda ctx=None: seen.append(ctx), key="k")
+    registry.call(HookPhase.BEFORE_START, context="CTX")
+    assert seen == ["CTX"]
+
+
+def test_optional_context_param_called_zero_arg_when_context_is_none():
+    registry = HookRegistry()
+    seen = []
+    registry.register(HookPhase.BEFORE_START, lambda ctx=None: seen.append(ctx), key="k")
+    registry.call(HookPhase.BEFORE_START, context=None)
+    assert seen == [None]
+
+
+# -- key/metadata validation (Spec section 39) --------------------------------
+
+def test_hook_key_must_be_hashable():
+    registry = HookRegistry()
+    with pytest.raises(HookValidationError):
+        registry.register(HookPhase.BEFORE_START, lambda: None, key=["not", "hashable"])
+
+
+def test_hook_metadata_must_be_json_compatible():
+    registry = HookRegistry()
+    with pytest.raises(HookValidationError):
+        registry.register(HookPhase.BEFORE_START, lambda: None, key="k",
+                          metadata={"callback": lambda: None})
+
+
+def test_hook_metadata_rejects_arbitrary_object():
+    class _Thing:
+        pass
+
+    registry = HookRegistry()
+    with pytest.raises(HookValidationError):
+        registry.register(HookPhase.BEFORE_START, lambda: None, key="k",
+                          metadata={"thing": _Thing()})
+
+
+def test_hook_metadata_accepts_nested_json_compatible_values():
+    registry = HookRegistry()
+    hook = registry.register(HookPhase.BEFORE_START, lambda: None, key="k",
+                             metadata={"a": [1, "two", {"b": None, "c": True}]})
+    assert hook.metadata == {"a": [1, "two", {"b": None, "c": True}]}
+
+
+# -- HookListView.insert() real positional semantics (Spec section 41) -------
+
+def test_legacy_insert_at_start():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2 = (lambda: 1), (lambda: 2)
+    view.append(f1)
+    view.insert(0, f2)
+    assert list(view) == [f2, f1]
+
+
+def test_legacy_insert_in_middle():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3 = (lambda: 1), (lambda: 2), (lambda: 3)
+    view.append(f1)
+    view.append(f2)
+    view.insert(1, f3)
+    assert list(view) == [f1, f3, f2]
+
+
+def test_legacy_insert_at_end():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3 = (lambda: 1), (lambda: 2), (lambda: 3)
+    view.append(f1)
+    view.append(f2)
+    view.insert(len(view), f3)
+    assert list(view) == [f1, f2, f3]
+
+
+def test_legacy_insert_index_beyond_end_clamps_to_append():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2 = (lambda: 1), (lambda: 2)
+    view.append(f1)
+    view.insert(999, f2)
+    assert list(view) == [f1, f2]
+
+
+def test_legacy_insert_negative_index_clamps_to_start():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2 = (lambda: 1), (lambda: 2)
+    view.append(f1)
+    view.insert(-5, f2)
+    assert list(view) == [f2, f1]
+
+
+def test_legacy_insert_does_not_disturb_formal_hook_position():
+    """A formal hook's own order value fixes its position; a legacy insert
+    can only reposition other legacy hooks around it."""
+    registry = HookRegistry()
+    calls = []
+    registry.register(HookPhase.BEFORE_START, lambda: calls.append("formal"), key="formal", order=250)
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    view.append(lambda: calls.append("legacy-1"))
+    view.insert(0, lambda: calls.append("legacy-0"))
+    registry.call(HookPhase.BEFORE_START)
+    # order=250 sorts before the legacy segment's order=500, regardless of
+    # where legacy-0/legacy-1 land relative to each other.
+    assert calls == ["formal", "legacy-0", "legacy-1"]
+
+
+# -- Slice assignment/deletion (Spec section 42) ------------------------------
+
+def test_slice_assignment_contiguous_replace():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3, f4 = (lambda: 1), (lambda: 2), (lambda: 3), (lambda: 4)
+    view.append(f1)
+    view.append(f2)
+    view.append(f3)
+    view[1:2] = [f4]
+    assert list(view) == [f1, f4, f3]
+
+
+def test_slice_assignment_contiguous_grow():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3 = (lambda: 1), (lambda: 2), (lambda: 3)
+    view.append(f1)
+    view.append(f2)
+    view[1:1] = [f3]
+    assert list(view) == [f1, f3, f2]
+
+
+def test_slice_assignment_extended_step_requires_matching_length():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3, f4 = (lambda: 1), (lambda: 2), (lambda: 3), (lambda: 4)
+    view.append(f1)
+    view.append(f2)
+    view.append(f3)
+    view.append(f4)
+    view[::2] = [lambda: 10, lambda: 30]
+    assert len(view) == 4
+    with pytest.raises(ValueError):
+        view[::2] = [lambda: 1]
+
+
+def test_slice_deletion():
+    registry = HookRegistry()
+    view = registry.legacy_view(HookPhase.BEFORE_START)
+    f1, f2, f3 = (lambda: 1), (lambda: 2), (lambda: 3)
+    view.append(f1)
+    view.append(f2)
+    view.append(f3)
+    del view[1:2]
+    assert list(view) == [f1, f3]
+
+
+# -- Plan auto-validates hook ordering ----------------------------------------
+
+def test_plan_fails_when_hook_ordering_is_invalid(fresh_manager):
+    from linktools.cntr.container import ContainerError
+    nginx = fresh_manager.containers["nginx"]
+    nginx.hooks.register(HookPhase.BEFORE_START, lambda: None, key="broken", after=("missing-dep",))
+    with pytest.raises(ContainerError):
+        fresh_manager.planner.plan("up", names=["nginx"])

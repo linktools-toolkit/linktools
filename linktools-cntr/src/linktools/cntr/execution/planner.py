@@ -95,9 +95,14 @@ class ExecutionPlanner:
         hooks = []
         for phase in _ACTION_PHASES[action]:
             for container in selection.target_containers:
+                # A hook order that couldn't actually execute (missing
+                # required before/after reference, or a cycle) must fail
+                # the plan, not be silently shown as if it would run.
+                container.hooks.validate(phase)
                 for hook in container.hooks.iter_phase(phase):
                     hooks.append(PlannedHook(phase=phase.value, container=container.name,
                                              name=hook.name, opaque=hook.opaque))
+            manager.hooks.validate(phase)
             for hook in manager.hooks.iter_phase(phase):
                 hooks.append(PlannedHook(phase=phase.value, container=None, name=hook.name, opaque=hook.opaque))
 

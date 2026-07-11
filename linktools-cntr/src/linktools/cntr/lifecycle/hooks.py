@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Typed, ordered lifecycle hook registry (Spec Part X).
+"""Typed, ordered lifecycle hook registry.
 
 Replaces the bare ``list[Callable]`` that used to back
 ``container.start_hooks``/``stop_hooks``/``manager.start_hooks``/``stop_hooks``
@@ -31,6 +31,16 @@ class HookPhase(str, Enum):
     AFTER_REMOVE = "after-remove"
 
 
+class HookInvocation(str, Enum):
+    """How a hook's callback is actually called -- fixed once at
+    registration time (not re-derived on every call), so a callback whose
+    signature can satisfy neither calling convention is rejected up front
+    instead of raising a confusing TypeError deep inside a real
+    up/restart/down."""
+    NO_ARGS = "no-args"
+    CONTEXT = "context"
+
+
 class HookError(ContainerError):
     pass
 
@@ -57,27 +67,58 @@ class Hook:
     before: "tuple" = ()
     after: "tuple" = ()
     # A missing before/after reference is a validation error by default; a
-    # reference listed here instead is allowed and only produces a warning
-    # (Spec section 58: "如果目标明确标记 optional").
+    # reference listed here instead is allowed and only produces a warning.
     optional_before: "tuple" = ()
     optional_after: "tuple" = ()
     source: "str | None" = None
     opaque: bool = False
+    invocation: HookInvocation = HookInvocation.NO_ARGS
     metadata: "dict[str, Any]" = field(default_factory=dict)
 
 
-def _accepts_context(callback) -> bool:
-    """True if ``callback``'s signature declares >=1 positional parameter.
+def _can_bind(signature: "inspect.Signature", *args) -> bool:
+    try:
+        signature.bind(*args)
+    except TypeError:
+        return False
+    return True
 
-    A callback whose signature cannot be introspected at all (e.g. some
-    builtins) is treated as opaque/zero-arg by the caller, not here.
-    """
-    sig = inspect.signature(callback)
-    params = [
-        p for p in sig.parameters.values()
-        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    return len(params) >= 1
+
+_SENTINEL_CONTEXT = object()
+
+
+def _resolve_invocation(callback: "Callable") -> "HookInvocation | None":
+    """``None`` means the signature could not be introspected at all (some
+    builtins) -- the caller falls back to opaque/NO_ARGS for those.
+
+    Raises ``HookValidationError`` if the signature can satisfy neither a
+    zero-arg nor a one-arg (context) call -- e.g. two required positional
+    parameters, or a required keyword-only parameter."""
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return None
+    can_context = _can_bind(signature, _SENTINEL_CONTEXT)
+    can_no_args = _can_bind(signature)
+    if can_context:
+        # Preferred: a hook that can take an optional context receives one.
+        return HookInvocation.CONTEXT
+    if can_no_args:
+        return HookInvocation.NO_ARGS
+    raise HookValidationError(
+        f"Hook callback {callback!r} must accept either zero arguments or exactly "
+        f"one (context); its signature {signature} accepts neither"
+    )
+
+
+def _is_json_compatible(value) -> bool:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_json_compatible(v) for v in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_json_compatible(v) for k, v in value.items())
+    return False
 
 
 class HookRegistry:
@@ -106,6 +147,11 @@ class HookRegistry:
     ) -> "Hook":
         if not callable(callback):
             raise HookValidationError(f"Hook callback must be callable: {callback!r}")
+        if key is not None:
+            try:
+                hash(key)
+            except TypeError as exc:
+                raise HookValidationError(f"Hook key must be hashable: {key!r}") from exc
         phase = HookPhase(phase)
         bucket = self._hooks.setdefault(phase, {})
 
@@ -125,13 +171,19 @@ class HookRegistry:
         if key in (*before, *after, *optional_before, *optional_after):
             raise HookCycleError(f"Hook {key!r} cannot reference itself in before/after")
 
+        metadata = dict(metadata or {})
+        if not _is_json_compatible(metadata):
+            raise HookValidationError(f"Hook metadata must be JSON-compatible: {metadata!r}")
+
+        invocation = HookInvocation.NO_ARGS
         if not opaque:
-            try:
-                _accepts_context(callback)
-            except (TypeError, ValueError):
+            resolved = _resolve_invocation(callback)
+            if resolved is None:
                 # Signature cannot be introspected (e.g. some builtins) --
                 # fall back to the always-zero-arg compatible calling strategy.
                 opaque = True
+            else:
+                invocation = resolved
 
         hook = Hook(
             phase=phase,
@@ -145,7 +197,8 @@ class HookRegistry:
             optional_after=optional_after,
             source=source,
             opaque=opaque,
-            metadata=dict(metadata or {}),
+            invocation=invocation,
+            metadata=metadata,
         )
         bucket[key] = hook
         return hook
@@ -207,7 +260,7 @@ class HookRegistry:
         """Raise on a missing *required* before/after reference or an
         ordering cycle; a missing reference listed in optional_before/
         optional_after instead only contributes a warning string to the
-        returned list (Spec section 58)."""
+        returned list."""
         warnings: "list[str]" = []
         phases = [HookPhase(phase)] if phase is not None else list(self._hooks.keys())
         for ph in phases:
@@ -252,12 +305,17 @@ class HookRegistry:
     def call(self, phase, context: "Any" = None, reverse: bool = False) -> None:
         """Invoke every hook registered for ``phase``, in registry order.
 
-        A hook accepting >=1 positional parameter receives ``context``; a
-        0-arg (or opaque/legacy) hook is called with no arguments -- matching
-        the pre-registry ``manager._callback`` calling convention exactly, so
-        every hook reachable through the legacy start_hooks/stop_hooks view
-        keeps being invoked zero-arg.
+        Always validates ``phase`` first: a missing *required* before/after
+        reference or an ordering cycle must fail before any hook runs, not
+        be silently skipped.
+
+        A CONTEXT-invocation hook receives ``context`` (when one is given);
+        a NO_ARGS (or opaque/legacy) hook is always called with no
+        arguments -- matching the pre-registry ``manager._callback`` calling
+        convention exactly, so every hook reachable through the legacy
+        start_hooks/stop_hooks view keeps being invoked zero-arg.
         """
+        self.validate(phase)
         hooks = list(self.iter_phase(phase))
         if reverse:
             hooks = list(reversed(hooks))
@@ -265,10 +323,9 @@ class HookRegistry:
             self._invoke(hook, context)
 
     def _invoke(self, hook: "Hook", context: "Any") -> "Any":
-        callback = hook.callback
-        if hook.opaque or context is None or not _accepts_context(callback):
-            return callback()
-        return callback(context)
+        if hook.invocation == HookInvocation.CONTEXT and context is not None:
+            return hook.callback(context)
+        return hook.callback()
 
 
 class HookListView(MutableSequence):
@@ -278,6 +335,13 @@ class HookListView(MutableSequence):
     (``append``/``extend``/``insert``/``remove``/``pop``/``clear``/``len``/
     ``bool``/indexing/iteration); reads and writes the raw callback, never a
     ``Hook`` object.
+
+    Registry ordering is by (topology, order, registration position), not
+    raw list index -- a formal hook's dependency-driven position can never
+    be overridden by a legacy `insert()`. Every hook this view itself
+    creates (``append``/``insert``/index-assignment) shares one
+    ``source="legacy"`` segment, and only that segment's members are ever
+    repositioned to honor an explicit ``insert(index, ...)``.
     """
 
     def __init__(self, registry: "HookRegistry", phase: "HookPhase"):
@@ -298,6 +362,30 @@ class HookListView(MutableSequence):
 
     def __setitem__(self, index, value):
         hooks = self._hooks()
+        if isinstance(index, slice):
+            start, _stop, step = index.indices(len(hooks))
+            targets = hooks[index]
+            if step != 1:
+                values = list(value)
+                if len(values) != len(targets):
+                    raise ValueError(
+                        f"attempt to assign sequence of size {len(values)} "
+                        f"to extended slice of size {len(targets)}"
+                    )
+                for hook, v in zip(targets, values):
+                    self._registry.unregister(self._phase, hook.key)
+                    self._registry.register(
+                        self._phase, v, key=hook.key, name=hook.name, order=hook.order,
+                        source=hook.source, opaque=True,
+                    )
+                return
+            # Contiguous slice: remove the old range, then insert the new
+            # values at its start position, preserving relative order.
+            del self[index]
+            for offset, v in enumerate(value):
+                self.insert(start + offset, v)
+            return
+
         hook = hooks[index]
         self._registry.unregister(self._phase, hook.key)
         self._registry.register(
@@ -318,12 +406,25 @@ class HookListView(MutableSequence):
         return repr([hook.callback for hook in self._hooks()])
 
     def insert(self, index, value):
-        # Registry ordering is by (before/after, order, registration
-        # sequence), not list position -- an explicit numeric `index` cannot
-        # be honored exactly. Every existing caller only ever uses `insert`
-        # via list-like `.append()`, so this registers `value` as a new
-        # opaque, unkeyed legacy hook appended after the existing ones.
+        """Insert ``value`` so that, among this view's own (legacy) hooks,
+        it ends up exactly at ``index`` -- existing legacy hooks before
+        ``index`` in the current view stay before it, the rest stay after.
+        Formal (keyed) hooks are never reordered; their dict position (and
+        so their same-``order`` tie-break) is left untouched."""
+        bucket = self._registry._hooks.setdefault(self._phase, {})
+        current = self._hooks()
+        index = max(0, min(index, len(current)))
+        before_keys = [hook.key for hook in current[:index] if hook.source == "legacy"]
+        after_keys = [hook.key for hook in current[index:] if hook.source == "legacy"]
+
+        def _requeue(key):
+            bucket[key] = bucket.pop(key)
+
+        for key in before_keys:
+            _requeue(key)
         self._registry.register(self._phase, value, source="legacy", opaque=True)
+        for key in after_keys:
+            _requeue(key)
 
     def append(self, value):
         self._registry.register(self._phase, value, source="legacy", opaque=True)
