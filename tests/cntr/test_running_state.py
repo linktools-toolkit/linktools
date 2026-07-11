@@ -64,6 +64,24 @@ def test_get_effective_falls_back_to_persisted(fresh_manager):
     assert fresh_manager.running_state.get_effective([container]) == ["portainer"]
 
 
+def test_get_actual_treats_output_error_as_unavailable_too(fresh_manager, monkeypatch):
+    """Unlike the explicit `ct-cntr status` command, `list`'s get_actual/
+    get_effective must never crash on a structurally invalid response --
+    it degrades to persisted state the same as an unqueryable runtime."""
+    from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
+
+    def raise_error(containers, allow_sudo_prompt=False):
+        raise RuntimeInspectionOutputError("docker inspect output root is not a list")
+
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
+    container = fresh_manager.containers["nginx"]
+    with pytest.raises(RuntimeStateUnavailable):
+        fresh_manager.running_state.get_actual([container])
+
+    fresh_manager.running_state._set(["portainer"])
+    assert fresh_manager.running_state.get_effective([container]) == ["portainer"]
+
+
 def test_mark_started_partial_adds_targets(fresh_manager):
     fresh_manager.running_state._set(["nginx"])
     fresh_manager.running_state.mark_started(_partial_ctx(fresh_manager, "portainer"))

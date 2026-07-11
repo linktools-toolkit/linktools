@@ -9,10 +9,10 @@ successful compose up/down:
 - full down   -> clear persisted
 
 ``get_actual`` queries live state via ``DockerInspector.get_project_state``
-(``docker compose ps``, non-interactive sudo). ``get_effective`` falls back
-to the persisted state whenever the live query is unavailable, so
-``ct-cntr list`` never crashes -- and never blocks on a sudo password
-prompt -- when Docker is absent or access is denied.
+(Compose project ids + ``docker inspect``, non-interactive sudo).
+``get_effective`` falls back to the persisted state whenever the live query
+is unavailable, so ``ct-cntr list`` never crashes -- and never blocks on a
+sudo password prompt -- when Docker is absent or access is denied.
 """
 from typing import TYPE_CHECKING
 
@@ -50,19 +50,15 @@ class RunningStateStore:
         return self._get()
 
     def get_actual(self, containers: "Iterable[BaseContainer]") -> "list[str]":
-        """Live running names via ``docker compose ps`` (read-only; never
-        writes persisted state, never auto-reconciles). Raises
-        ``RuntimeStateUnavailable`` -- from a missing/inaccessible runtime, a
-        `sudo -n` password prompt this must not block on, or unparsable
-        output -- so callers fall back to persisted state."""
-        from ..container import ContainerError
+        """Live running names via Compose project ids + ``docker inspect``
+        (read-only; never writes persisted state, never auto-reconciles).
+        Raises ``RuntimeStateUnavailable`` -- covering both an unqueryable
+        runtime and a structurally invalid response -- so callers fall back
+        to persisted state; ``list`` must never crash."""
+        from ..runtime.inspect import RuntimeInspectionError
         try:
             state = self.manager.docker_inspector.get_project_state(containers, allow_sudo_prompt=False)
-        except (ContainerError, OSError) as exc:
-            # ContainerError covers StructuredCommandError (failed/timed-out/
-            # unparsable `docker compose ps`) and "no compose file generated"
-            # for these containers; OSError covers a missing docker/sudo
-            # binary. Either way, this is "state unavailable", not a crash.
+        except RuntimeInspectionError as exc:
             raise RuntimeStateUnavailable(str(exc)) from exc
         return state.running_container_names
 

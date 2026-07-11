@@ -64,15 +64,30 @@ def test_status_sudo_prompt_flag_is_forwarded(fresh_manager, monkeypatch, with_n
 
 
 def test_status_query_failure_marks_unknown_instead_of_crashing(fresh_manager, monkeypatch, with_nginx_services):
-    from linktools.cntr.runtime.structured import StructuredCommandError
+    from linktools.cntr.runtime.inspect import RuntimeInspectionUnavailable
 
     def raise_error(containers, allow_sudo_prompt=False):
-        raise StructuredCommandError("docker unreachable")
+        raise RuntimeInspectionUnavailable("docker unreachable")
 
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
     payload = collect_status(fresh_manager)
     assert payload["queryable"] is False
+    assert payload["error"] == "docker unreachable"
     assert all(entry["status"] == "unknown" for entry in payload["containers"])
+
+
+def test_status_output_error_propagates_instead_of_being_swallowed(fresh_manager, monkeypatch, with_nginx_services):
+    """A structurally invalid docker inspect response must not be treated
+    the same as an unqueryable runtime -- it must surface as an error
+    (non-zero exit), not silently render every container as unknown."""
+    from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
+
+    def raise_error(containers, allow_sudo_prompt=False):
+        raise RuntimeInspectionOutputError("docker inspect output root is not a list")
+
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", raise_error)
+    with pytest.raises(RuntimeInspectionOutputError):
+        collect_status(fresh_manager)
 
 
 def test_status_rejects_unknown_container_name(fresh_manager, monkeypatch):

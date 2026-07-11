@@ -1,25 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Read-only Docker/Compose state inspection (Spec Part II).
+"""Read-only Docker/Compose state inspection.
 
-Wraps ``docker version``/``docker compose version``/``docker compose ps``
-through StructuredCommandRunner; never mutates state, never a second
-runtime. Only stable, documented ``compose ps`` fields are relied upon --
-unknown fields (added by newer Compose minor versions) are ignored, and the
-raw/unnormalized JSON is never exposed as public API.
+Wraps ``docker version``/``docker compose version``/``docker compose ps
+--quiet``/``docker inspect`` through StructuredCommandRunner; never mutates
+state, never a second runtime. Actual project state is built from a
+Compose-project container id list plus a batch ``docker inspect``, since
+``docker inspect`` has one stable JSON-array shape across Docker versions
+(unlike ``docker compose ps``'s json/JSON-lines variance).
 """
-import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..container import ContainerError
 from .structured import StructuredCommandError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from ..container import BaseContainer
     from ..manager import ContainerManager
+
+
+class RuntimeInspectionError(ContainerError):
+    pass
+
+
+class RuntimeInspectionUnavailable(RuntimeInspectionError):
+    """Docker/Compose could not be queried at all: missing binary, `sudo -n`
+    denial, no compose file for these containers, a timeout, or an
+    unparsable container-id list. Callers treat this as "state unknown" and
+    may fall back to persisted state."""
+
+
+class RuntimeInspectionOutputError(RuntimeInspectionError):
+    """Docker responded, but its output is structurally invalid (non-array
+    root, non-object item). Never treated as "nothing is running" -- that
+    would let a corrupted response masquerade as every container having
+    disappeared."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +52,7 @@ class DockerEngineVersion:
 @dataclass(frozen=True)
 class ServiceRuntimeState:
     logical_container: "str | None"
-    service: str
+    service: "str | None"
     runtime_name: str
     state: str
     health: "str | None"
@@ -49,6 +69,7 @@ class ProjectRuntimeState:
     project: str
     services: "tuple[ServiceRuntimeState, ...]"
     backend: str
+    source: str = "docker-inspect"
 
     @property
     def running_container_names(self) -> "list[str]":
@@ -66,46 +87,99 @@ class ProjectRuntimeState:
         return sorted(names)
 
 
-def _parse_labels(value) -> "dict[str, str]":
-    if isinstance(value, dict):
-        return {str(k): str(v) for k, v in value.items()}
-    if isinstance(value, str) and value:
-        labels = {}
-        for entry in value.split(","):
-            key, sep, val = entry.partition("=")
-            if sep:
-                labels[key.strip()] = val.strip()
-        return labels
-    return {}
+_CONTAINER_ID_RE = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
 
-def _parse_ps_output(text: str) -> "list[dict]":
-    """Tolerate a JSON array, a single JSON object, line-delimited JSON
-    objects, or empty output -- across observed Compose v2 minor versions."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = None
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        return [data]
-
-    items: "list[dict]" = []
-    for line in text.splitlines():
+def _parse_container_ids(text: str) -> "list[str]":
+    """Stably deduped, order-preserving container ids from ``compose ps
+    --quiet`` output. An empty result is a legitimate "nothing here" -- only
+    a non-empty line that isn't a plausible hex id is an error."""
+    ids: "list[str]" = []
+    seen = set()
+    for line in (text or "").splitlines():
         line = line.strip()
         if not line:
             continue
+        if not _CONTAINER_ID_RE.match(line):
+            raise RuntimeInspectionOutputError(f"Unexpected `compose ps --quiet` output line: {line!r}")
+        if line not in seen:
+            seen.add(line)
+            ids.append(line)
+    return ids
+
+
+def _looks_like_not_found(message: str) -> bool:
+    """Best-effort detection of Docker's own "no such object/container"
+    message. Not a stable structured error code -- used only to decide
+    whether one failed inspect in the recovery path is an ignorable
+    disappearance or a real error that must still propagate."""
+    lowered = (message or "").lower()
+    return "no such" in lowered and ("container" in lowered or "object" in lowered)
+
+
+def _normalize_state(state_data: dict) -> str:
+    status = str(state_data.get("Status") or "").strip().lower()
+    if status:
+        return status
+    if state_data.get("Running") is True:
+        return "running"
+    if state_data.get("Restarting") is True:
+        return "restarting"
+    if state_data.get("Paused") is True:
+        return "paused"
+    if state_data.get("Dead") is True:
+        return "dead"
+    return "unknown"
+
+
+def _normalize_exit_code(value) -> "int | None":
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            items.append(obj)
-    return items
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _map_inspect_item(
+        item: dict, service_owners: "dict[str, str]", project_name: str,
+) -> "ServiceRuntimeState | None":
+    """None means "not this project" -- filtered out by the caller."""
+    config = item.get("Config")
+    if not isinstance(config, dict):
+        config = {}
+    state_data = item.get("State")
+    if not isinstance(state_data, dict):
+        state_data = {}
+    labels = config.get("Labels")
+    if not isinstance(labels, dict):
+        labels = {}
+
+    if labels.get("com.docker.compose.project") != project_name:
+        return None
+
+    service = labels.get("com.docker.compose.service") or None
+    health_data = state_data.get("Health")
+    health = health_data.get("Status") if isinstance(health_data, dict) else None
+
+    name = str(item.get("Name") or "")
+    if name.startswith("/"):
+        name = name[1:]
+
+    return ServiceRuntimeState(
+        logical_container=service_owners.get(service) if service else None,
+        service=service,
+        runtime_name=name,
+        state=_normalize_state(state_data),
+        health=health,
+        image=config.get("Image"),
+        exit_code=_normalize_exit_code(state_data.get("ExitCode")),
+        labels={str(k): str(v) for k, v in labels.items()},
+    )
 
 
 class DockerInspector:
@@ -146,6 +220,56 @@ class DockerInspector:
             return None
         return result.stdout.strip() or None
 
+    def _list_project_container_ids(
+            self, containers: "Iterable[BaseContainer]", allow_sudo_prompt: bool = False,
+    ) -> "list[str]":
+        process = self.manager.runtime.create_docker_compose_process(
+            containers, "ps", "--all", "--quiet",
+            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+        )
+        result = self.manager.structured_runner.execute_text(process, check=True)
+        return _parse_container_ids(result.stdout)
+
+    def _inspect_containers(self, container_ids: "Iterable[str]", allow_sudo_prompt: bool = False) -> "list[dict]":
+        process = self.manager.runtime.create_docker_process(
+            "inspect", "--type", "container", *container_ids,
+            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+        )
+        data = self.manager.structured_runner.execute_json(process, check=True)
+        if not isinstance(data, list):
+            raise RuntimeInspectionOutputError("`docker inspect` output root is not a JSON array")
+        for item in data:
+            if not isinstance(item, dict):
+                raise RuntimeInspectionOutputError("`docker inspect` item is not a JSON object")
+        return data
+
+    def _inspect_containers_recovering(
+            self, container_ids: "Iterable[str]", allow_sudo_prompt: bool = False,
+    ) -> "list[dict]":
+        """One container may have disappeared between listing ids and
+        inspecting them (Spec section 13): retry one id at a time, ignore a
+        single "no such container/object", and let any other failure
+        propagate immediately."""
+        items: "list[dict]" = []
+        for container_id in container_ids:
+            process = self.manager.runtime.create_docker_process(
+                "inspect", "--type", "container", container_id,
+                capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
+            )
+            try:
+                result = self.manager.structured_runner.execute_json(process, check=True)
+            except StructuredCommandError as exc:
+                if _looks_like_not_found(str(exc)):
+                    continue
+                raise RuntimeInspectionUnavailable(str(exc)) from exc
+            except OSError as exc:
+                raise RuntimeInspectionUnavailable(str(exc)) from exc
+            if isinstance(result, list):
+                items.extend(item for item in result if isinstance(item, dict))
+            elif isinstance(result, dict):
+                items.append(result)
+        return items
+
     def get_project_state(
             self,
             containers: "Iterable[BaseContainer]",
@@ -163,29 +287,37 @@ class DockerInspector:
         for container in containers:
             for service_name in container.services.keys():
                 # Duplicate service names across containers are a deferred
-                # issue (Spec section 4); first-registered container wins,
-                # matching the existing Compose-merge-dependent behavior.
+                # issue; first-registered container wins, matching the
+                # existing Compose-merge-dependent behavior.
                 service_owners.setdefault(service_name, container.name)
 
-        process = self.manager.runtime.create_docker_compose_process(
-            containers, "ps", "--all", "--format", "json",
-            capture_output=True, sudo_non_interactive=not allow_sudo_prompt,
-        )
-        result = self.manager.structured_runner.execute_text(process, check=True)
+        try:
+            container_ids = self._list_project_container_ids(containers, allow_sudo_prompt=allow_sudo_prompt)
+        except (StructuredCommandError, OSError) as exc:
+            raise RuntimeInspectionUnavailable(str(exc)) from exc
+
+        if not container_ids:
+            return ProjectRuntimeState(
+                project=self.manager.project_name, services=(), backend=self.manager.container_type,
+            )
+
+        try:
+            items = self._inspect_containers(container_ids, allow_sudo_prompt=allow_sudo_prompt)
+        except (StructuredCommandError, OSError):
+            # Every id just came from `compose ps`, so an empty recovery
+            # result here means every one of them disappeared in the
+            # meantime -- a legitimate empty project state, not an error.
+            items = self._inspect_containers_recovering(container_ids, allow_sudo_prompt=allow_sudo_prompt)
+        else:
+            if not items:
+                raise RuntimeInspectionOutputError(
+                    "`docker inspect` returned no results for known container ids")
 
         services = []
-        for item in _parse_ps_output(result.stdout):
-            service = str(item.get("Service") or "")
-            services.append(ServiceRuntimeState(
-                logical_container=service_owners.get(service),
-                service=service,
-                runtime_name=str(item.get("Name") or ""),
-                state=str(item.get("State") or ""),
-                health=item.get("Health") or None,
-                image=item.get("Image") or None,
-                exit_code=item.get("ExitCode") if isinstance(item.get("ExitCode"), int) else None,
-                labels=_parse_labels(item.get("Labels")),
-            ))
+        for item in items:
+            mapped = _map_inspect_item(item, service_owners, self.manager.project_name)
+            if mapped is not None:
+                services.append(mapped)
 
         return ProjectRuntimeState(
             project=self.manager.project_name,

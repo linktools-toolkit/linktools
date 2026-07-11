@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr status`` / ``ct-cntr compose status``: read-only aggregated
-Docker Compose actual-state display (Spec Part II section 18).
+"""``ct-cntr status``: read-only aggregated Docker Compose actual-state
+display.
 
 Read-only: never writes persisted state, never runs a lifecycle hook, never
 triggers build/up/down. Defaults to non-interactive sudo (``--sudo-prompt``
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import LazyChoices
 from ..container import ContainerError
-from ..runtime.structured import StructuredCommandError
+from ..runtime.inspect import RuntimeInspectionUnavailable
 from . import _shared
 
 if TYPE_CHECKING:
@@ -44,14 +44,22 @@ def collect_status(
         sudo_prompt: bool = False,
         all_services: bool = False,
 ) -> "dict[str, Any]":
-    """Build the JSON-shaped status payload; ``render_status`` formats it."""
+    """Build the JSON-shaped status payload; ``render_status`` formats it.
+
+    Only ``RuntimeInspectionUnavailable`` (runtime unqueryable) is caught
+    here and turned into ``queryable=false``/an ``error`` field with a
+    default-zero exit code. ``RuntimeInspectionOutputError`` (a structurally
+    invalid response) is left to propagate -- a corrupted response must
+    never masquerade as "every container is missing"."""
+    error = None
     try:
         project_containers, state = manager.compose_operations.status(sudo_prompt=sudo_prompt)
         queryable = True
-    except StructuredCommandError:
+    except RuntimeInspectionUnavailable as exc:
         project_containers = tuple(manager.prepare_installed_containers())
         state = None
         queryable = False
+        error = str(exc)
 
     if names:
         installed_names = {c.name for c in project_containers}
@@ -91,16 +99,22 @@ def collect_status(
                 orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
                                     state=svc.state, health=svc.health))
 
-    return dict(
+    payload = dict(
         schema_version=STATUS_SCHEMA_VERSION,
         project=manager.project_name,
         queryable=queryable,
         containers=containers_payload,
         orphan_services=orphans,
     )
+    if error is not None:
+        payload["error"] = error
+    return payload
 
 
 def render_status(logger, payload: "dict[str, Any]") -> None:
+    if not payload["queryable"] and payload.get("error"):
+        logger.warning(f"Unable to query actual runtime state: {payload['error']}")
+
     rows = []
     for entry in payload["containers"]:
         if not entry["services"]:
@@ -130,9 +144,7 @@ def render_status(logger, payload: "dict[str, Any]") -> None:
 
 
 class StatusCommands:
-    """Mixin providing ``status`` -- mounted on both the root Command and
-    ComposeCommand so they share one implementation (single implementation
-    principle, Spec Part IX)."""
+    """Mixin providing the root ``status`` command."""
 
     @subcommand("status", help="show actual Docker Compose status (read-only)")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
