@@ -66,12 +66,20 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_list(self, names: "list[str]" = None, detail: bool = False):
-        install_containers = _shared.manager.installed_state.get(resolve=False)
-        all_install_containers = _shared.manager.resolver.resolve_dependencies(install_containers)
+        manager = _shared.manager
+        # Registers every resolved-installed container's own config defaults
+        # before anything below can indirectly render a container's own
+        # compose/Dockerfile template (get_effective -> get_actual ->
+        # DockerInspector iterates container.services, a cached_property
+        # that renders docker_compose) -- otherwise a template referencing
+        # its own container's config key sees it as genuinely undefined.
+        manager.prepare_installed_containers()
+        install_containers = manager.installed_state.get(resolve=False)
+        all_install_containers = manager.resolver.resolve_dependencies(install_containers)
         # Prefer live state, fall back to persisted when Docker is unavailable
         # so `list` never crashes.
-        running_names = set(_shared.manager.running_state.get_effective(install_containers))
-        for container in sorted(_shared.manager.containers.values(), key=lambda o: o.order):
+        running_names = set(manager.running_state.get_effective(install_containers))
+        for container in sorted(manager.containers.values(), key=lambda o: o.order):
             if names and container.name not in names:
                 continue
             installed = container in all_install_containers
