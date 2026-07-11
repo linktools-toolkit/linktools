@@ -6,8 +6,14 @@ Mixin MRO, or wrapper registration order."""
 import subprocess
 import sys
 
+from linktools.cli import CommandParser, SubCommandWrapper
 import linktools.cntr.__main__ as cntr_main
 from linktools.cntr.commands._order import CONFIG_COMMAND_ORDER, REPO_COMMAND_ORDER, ROOT_COMMAND_ORDER
+from linktools.cntr.commands.compose import ComposeCommand
+from linktools.cntr.commands.config import ConfigCommand
+from linktools.cntr.commands.exec_ import ExecCommand
+from linktools.cntr.commands.plan import PlanCommand
+from linktools.cntr.commands.repo import RepoCommand
 
 
 def _help_text(*argv):
@@ -74,6 +80,31 @@ def test_wrapper_registration_order_does_not_affect_final_order():
 
     text = _help_text()
     _assert_in_order(text, ["exec", "compose", "plan", "config", "repo"])
+
+
+def test_registration_list_order_is_genuinely_ignored_when_reversed(monkeypatch):
+    """Directly adversarial: register the exact same wrappers in the exact
+    reverse of ROOT_COMMAND_ORDER's intent and confirm the rendered help
+    order is unaffected -- proving `sort=True` truly drives the order,
+    rather than the test above merely coinciding with an already-sorted
+    declaration list."""
+    command = cntr_main.Command()
+
+    def reversed_registration():
+        return [
+            command,
+            SubCommandWrapper(RepoCommand(), order=ROOT_COMMAND_ORDER["repo"]),
+            SubCommandWrapper(ConfigCommand(), order=ROOT_COMMAND_ORDER["config"]),
+            SubCommandWrapper(PlanCommand(), order=ROOT_COMMAND_ORDER["plan"]),
+            SubCommandWrapper(ComposeCommand(), order=ROOT_COMMAND_ORDER["compose"]),
+            SubCommandWrapper(ExecCommand(), order=ROOT_COMMAND_ORDER["exec"]),
+        ]
+
+    monkeypatch.setattr(command, "init_subcommands", reversed_registration)
+    parser = CommandParser(command=command)
+    command.init_arguments(parser)
+    text = parser.format_help()
+    _assert_in_order(text, list(ROOT_COMMAND_ORDER.keys()))
 
 
 def test_lock_and_diff_commands_no_longer_exist():
