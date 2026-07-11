@@ -17,6 +17,7 @@ from ..errors import (
     PackageResourceAccessDeniedError,
 )
 from ..providers.package import PackageResourceProvider
+from ..run.identity import ParentRunIdentity
 from .entrypoint import EntrypointRef
 from .provider import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
 from .resolver import EntrypointResolver
@@ -92,8 +93,7 @@ def build_package_entrypoint_toolset(
     max_entrypoints_per_list: int = DEFAULT_LIST_LIMIT,
     emit=None,
     executor=None,
-    parent_run_id: "str | None" = None,
-    parent_session_id: "str | None" = None,
+    parent: "ParentRunIdentity | None" = None,
 ) -> FunctionToolset:
     """Level-1 list tool for package entrypoints (``list_package_entrypoints``).
     Calling an entrypoint is opt-in (``expose_call_tool``) and is wired through
@@ -153,10 +153,23 @@ def build_package_entrypoint_toolset(
                 from ..events.payloads import PackageEntrypointResolved
                 await emit(PackageEntrypointResolved(
                     package_id=package_id, kind=kind, name=name))
+            if parent is None:
+                # A tool can only be invoked from inside a running model call;
+                # Runtime.run always builds a real ParentRunIdentity. parent=None
+                # means assembly happened outside any run -- fail loudly rather
+                # than minting an unparented child run with no lineage.
+                raise PackageEntrypointDeniedError(
+                    "call_package_entrypoint invoked without a parent run "
+                    "identity; entrypoint tools cannot run outside a live Run"
+                )
+            # Reuse the SAME ParentRunIdentity the caller built -- in
+            # particular parent.root_run_id, never re-derived here as
+            # "= parent_run_id" (that would truncate lineage to one hop
+            # whenever this package entrypoint is itself already nested under
+            # a subagent/entrypoint chain).
             result = await executor.execute(
                 agent_spec=agent_spec, task=task, context=context,
-                parent_run_id=parent_run_id, root_run_id=parent_run_id,
-                parent_session_id=parent_session_id, scope=scope,
+                parent=parent, scope=scope,
                 timeout_seconds=None,
             )
             return result.model_dump()

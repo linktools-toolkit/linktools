@@ -46,6 +46,13 @@ class ToolPolicyMetadata:
     risk: RiskLevel
     side_effect: SideEffectKind
     approval: ApprovalMode
+    # Carried through from ToolSpec so the policy adapter can map them into
+    # ResolvedToolPolicy instead of silently dropping them. Defaults keep
+    # existing constructions (tests, older providers) working unchanged.
+    idempotent: bool = False
+    timeout_seconds: "float | None" = None
+    schema_version: str = "1"
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 class PolicyDecisionKind(str, Enum):
@@ -66,6 +73,15 @@ class PolicyDecision:
 class ToolRequest:
     tool_name: str
     arguments: "Mapping[str, Any]"
+    # Descriptor-sourced classification, when available (e.g. from
+    # ManagedToolAdapter, which always knows its ToolDescriptor, or from
+    # PolicyCapability when a per-run descriptor lookup is wired). Rules like
+    # CommandRule match on these so a tool rename cannot silently evade a
+    # category-based policy the way a tool_name string match could.
+    category: "str | None" = None
+    risk: "str | None" = None
+    mutating: "bool | None" = None
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

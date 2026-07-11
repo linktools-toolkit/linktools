@@ -12,6 +12,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..agent.spec import AgentSpec
 from ..package.scope import PackageScope
+from ..run.identity import ParentRunIdentity
 from .models import SubagentResult
 
 DEFAULT_MAX_DEPTH = 3
@@ -37,7 +38,11 @@ def current_depth() -> int:
 @runtime_checkable
 class SubagentExecutor(Protocol):
     """Executes a resolved child AgentSpec under a parent run. Implementations
-    create the child session + run, enforce timeout, and return the result."""
+    create the child session + run, enforce timeout, and return the result.
+    ``parent`` is the single ParentRunIdentity every spawner (subagent
+    toolset, package entrypoint toolset) builds identically -- a downstream
+    implementation written strictly to this Protocol must not fail on a call
+    it did not anticipate; there is exactly one call shape."""
 
     async def execute(
         self,
@@ -45,9 +50,7 @@ class SubagentExecutor(Protocol):
         agent_spec: AgentSpec,
         task: str,
         context: "dict[str, Any] | None",
-        parent_run_id: "str | None",
-        root_run_id: "str | None",
-        parent_session_id: "str | None",
+        parent: ParentRunIdentity,
         scope: "PackageScope | None",
         timeout_seconds: "float | None",
     ) -> SubagentResult:

@@ -153,6 +153,12 @@ class ToolApprovalRequiredError(ToolError):
     pass
 
 
+class ToolPolicyResolutionError(ToolError):
+    """A ToolPolicyProvider could not resolve a policy for a tool. The default
+    posture is fail closed: the ManagedToolAdapter catches this, emits a
+    SecurityDegraded event, and denies the call rather than running ungoverned."""
+
+
 class ToolTimeoutError(ToolError):
     pass
 

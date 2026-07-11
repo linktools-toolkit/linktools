@@ -12,7 +12,7 @@ explicitly declared package ids become reachable, and only the read/list tools
 are added by default."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, ClassVar, Mapping
 
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -20,6 +20,7 @@ from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.ref import CapabilityRef
 from ..providers.package import PackageResourceProvider
+from ..run.identity import ParentRunIdentity
 from ..security.descriptor import ToolDescriptor
 from ..tool.contribution import ToolContribution
 from ..subagent.runner import SubagentExecutor
@@ -38,6 +39,11 @@ class PackageProvider:
     can run scoped agents without runtime mutation."""
 
     kind: str = "package"
+    # Declares every kind this one provider handles, so the runtime registers
+    # it once under all three instead of alias-registering three copies.
+    supported_kinds: "ClassVar[frozenset[str]]" = frozenset(
+        {"package", "package-resource", "package-entrypoint"}
+    )
     resource_provider: "PackageResourceProvider | None" = None
     entrypoint_resolver: "EntrypointResolver | None" = None
     entrypoint_executor: "SubagentExecutor | None" = None
@@ -84,6 +90,17 @@ class PackageProvider:
             allowed_kinds = tuple(cfg.get("allowed_kinds", cap.allowed_entrypoint_kinds))
             allowed_names = cfg.get("allowed_names")
             expose_call = bool(cfg.get("expose_call_tool", False)) and cap.expose_execution_tools
+            # Same ParentRunIdentity shape every spawner builds -- root_run_id
+            # comes from context.root_run_id (the ACTUAL root of the chain),
+            # not context.run_id, so a package entrypoint nested under an
+            # existing subagent chain doesn't truncate lineage to itself.
+            parent = None
+            if context.run_id is not None and context.session_id is not None:
+                parent = ParentRunIdentity(
+                    run_id=context.run_id, root_run_id=context.root_run_id or context.run_id,
+                    session_id=context.session_id, user_id=context.user_id,
+                    tenant_id=context.tenant_id, workspace=context.workspace,
+                )
             ts = build_package_entrypoint_toolset(
                 self.entrypoint_resolver, allowed=allowed,
                 allowed_kinds=allowed_kinds,
@@ -93,8 +110,7 @@ class PackageProvider:
                     "max_entrypoints_per_package", cap.max_entrypoints_per_package),
                 emit=emit,
                 executor=self.entrypoint_executor,
-                parent_run_id=context.run_id,
-                parent_session_id=context.session_id,
+                parent=parent,
             )
             ekw = dict(source="package", capability_kind="package-entrypoint", capability_name=ref.name)
             descs = [ToolDescriptor(name="list_package_entrypoints", category="discovery",

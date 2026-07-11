@@ -55,3 +55,54 @@ async def test_call_without_resolver_raises_not_nameerror():
     call = ts.tools["call_package_entrypoint"].function
     with pytest.raises(PackageEntrypointNotFoundError):
         await call("pkg", "agent", "grader", "do it")
+
+
+@pytest.mark.asyncio
+async def test_call_package_entrypoint_forwards_parent_identity_unmodified():
+    """Regression: call_package_entrypoint used to hardcode
+    root_run_id=parent_run_id, truncating lineage to one hop whenever the
+    entrypoint call is itself already nested under an existing chain. It must
+    now forward the SAME ParentRunIdentity the caller built -- in particular
+    parent.root_run_id, never re-derived from parent.run_id here."""
+    from linktools.ai.package.scope import PackageScope
+    from linktools.ai.package.toolset import build_package_entrypoint_toolset
+    from linktools.ai.run.identity import ParentRunIdentity
+    from linktools.ai.subagent.models import SubagentResult
+
+    class _FakeResolver:
+        async def resolve_agent(self, ref):
+            from linktools.ai.agent.spec import AgentSpec, PromptSpec
+            from linktools.ai.model.policy import ModelPolicy
+            return AgentSpec(
+                id=ref.name, name=ref.name, model=ModelPolicy(primary="m"),
+                instructions=PromptSpec(instructions="hi"),
+            )
+
+    class _RecordingExecutor:
+        def __init__(self):
+            self.seen_parent = None
+
+        async def execute(self, *, agent_spec, task, context, parent, scope, timeout_seconds):
+            self.seen_parent = parent
+            return SubagentResult(
+                agent_id=agent_spec.id, session_id="cs", run_id="cr", status="succeeded",
+            )
+
+    # Simulates: run A -> subagent B -> (nested) package entrypoint call, so
+    # the immediate parent is B (run_id="B") but the true root is A ("A-root").
+    parent_identity = ParentRunIdentity(
+        run_id="B", root_run_id="A-root", session_id="session-B",
+        user_id="u1", tenant_id="t1",
+    )
+    executor = _RecordingExecutor()
+    ts = build_package_entrypoint_toolset(
+        resolver=_FakeResolver(), allowed={"pkg": PackageScope("pkg")},
+        allowed_kinds=("agent",), allowed_names=("grader",),
+        expose_call_tool=True, executor=executor, parent=parent_identity,
+    )
+    call = ts.tools["call_package_entrypoint"].function
+    await call("pkg", "agent", "grader", "do it")
+
+    assert executor.seen_parent is parent_identity
+    assert executor.seen_parent.root_run_id == "A-root"
+    assert executor.seen_parent.user_id == "u1"

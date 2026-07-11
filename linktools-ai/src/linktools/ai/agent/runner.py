@@ -49,6 +49,7 @@ default-None path is a no-op -- no spans opened, no metrics recorded."""
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 import uuid
@@ -429,36 +430,90 @@ class AgentRunner:
                         workspace=context.workspace,
                     )
                     # When tools is None, synthesize a default builtin:* ref.
+                    # dataclasses.replace() so any future AgentSpec field is
+                    # carried over automatically -- never hand-reconstruct the
+                    # spec field by field (a new field would silently be
+                    # dropped and the default path would diverge from the
+                    # declared spec).
                     if needs_default:
                         from ..agent.spec import ToolRef as _TR
-                        effective_spec = AgentSpec(
-                            id=agent.spec.id, name=agent.spec.name,
-                            model=agent.spec.model,
-                            instructions=agent.spec.instructions,
-                            tools=(_TR(name="*"),),
-                            middleware=agent.spec.middleware,
-                            output_schema=agent.spec.output_schema,
-                            metadata=agent.spec.metadata,
+                        effective_spec = dataclasses.replace(
+                            agent.spec, tools=(_TR(kind="builtin", name="*"),),
                         )
                     else:
                         effective_spec = agent.spec
                     cap_bundle = await self._capability_assembler.assemble(effective_spec, cap_ctx)
+                    # Publish this run's descriptor lookup so PolicyCapability
+                    # (the global before-every-tool-call hook, independent of
+                    # whether a tool is ManagedToolsetWrapper-wrapped) can
+                    # classify calls by category/risk/mutating too -- not just
+                    # by tool name.
+                    descriptor_lookup = {
+                        d.name: d
+                        for contrib in cap_bundle.tool_contributions
+                        for d in contrib.descriptors
+                    }
+                    if descriptor_lookup:
+                        deps = dataclasses.replace(deps, descriptor_lookup=descriptor_lookup)
                     # Managed governance applies to ALL tools (including default
-                    # builtin) when any security object is configured. When no
-                    # security is configured, pass through raw toolsets.
+                    # builtin) when any security object is configured OR a
+                    # capability declared a pipeline (a declared pipeline that
+                    # never wraps its tools is a silently-dropped declaration).
                     use_managed = (self._security_pipeline is not None
                                    or self._baseline_policy is not None
                                    or self._tool_policy_provider is not None)
+                    # Pipelines declared by capabilities are composed with the
+                    # baseline pipeline so they take effect for this run (a
+                    # capability-declared pipeline that is never wired in is a
+                    # silently-dropped declaration).
+                    effective_pipeline = self._security_pipeline
+                    if cap_bundle.pipelines:
+                        from ..security.pipeline import CompositeSecurityPipeline
+                        declared = tuple(cap_bundle.pipelines)
+                        if effective_pipeline is not None:
+                            effective_pipeline = CompositeSecurityPipeline(
+                                (effective_pipeline,) + declared)
+                        else:
+                            effective_pipeline = CompositeSecurityPipeline(declared)
+                    # A capability-declared pipeline forces the managed path so
+                    # the pipeline actually wraps its tools (otherwise the
+                    # declared pipeline would be computed then dropped on the
+                    # raw-toolsets fallback).
+                    if effective_pipeline is not None:
+                        use_managed = True
                     if use_managed and cap_bundle.tool_contributions:
                         from ..tool.managed_toolset import ManagedToolsetWrapper
                         for contrib in cap_bundle.tool_contributions:
-                            if contrib.descriptors:
+                            if contrib.tools:
+                                # Per-tool form: each tool gets its own wrapped
+                                # toolset built from the explicit handler, so
+                                # every tool is governed by its own descriptor
+                                # + handler pair (never "first descriptor for
+                                # the whole toolset").
+                                from pydantic_ai.toolsets import FunctionToolset
+                                for md in contrib.tools:
+                                    ts = FunctionToolset()
+                                    ts.add_function(md.handler, name=md.descriptor.name)
+                                    toolsets.append(ManagedToolsetWrapper(
+                                        ts,
+                                        descriptors={md.descriptor.name: md.descriptor},
+                                        security_pipeline=effective_pipeline,
+                                        tool_executor=self._tool_executor_for_managed,
+                                        policy_provider=self._tool_policy_provider,
+                                        baseline_policy=self._baseline_policy,
+                                        run_context=context,
+                                        event_store=self._event_store,
+                                    ))
+                            elif contrib.descriptors:
                                 wrapper = ManagedToolsetWrapper(
                                     contrib.toolset,
-                                    descriptor=contrib.descriptors[0],
-                                    security_pipeline=self._security_pipeline,
+                                    descriptors={d.name: d for d in contrib.descriptors},
+                                    security_pipeline=effective_pipeline,
                                     tool_executor=self._tool_executor_for_managed,
+                                    policy_provider=self._tool_policy_provider,
+                                    baseline_policy=self._baseline_policy,
                                     run_context=context,
+                                    event_store=self._event_store,
                                 )
                                 toolsets.append(wrapper)
                             else:
@@ -473,7 +528,7 @@ class AgentRunner:
                     )
                     toolsets.append(build_builtin_toolset(BuiltinToolContext(
                         backend=deps.execution,
-                        enabled_tools={"file", "terminal"},
+                        enabled_tools={"file-read", "file-write", "terminal"},
                     )))
                 # ToolExposureApplied + PromptCatalog events only fire when the
                 # capability assembler ran (cap_bundle exists).

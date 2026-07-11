@@ -116,9 +116,20 @@ class ToolExecutor:
             self._run_id_resolver(context) if self._run_id_resolver is not None
             else context.run_id
         )
+        return await self.is_approved(run_id, context.tool_call_id)
+
+    async def is_approved(self, run_id: "str | None", tool_call_id: "str | None") -> bool:
+        """Public resume gate: True iff the approval_store holds an APPROVED
+        request matching ``(run_id, tool_call_id)``. Used by managed-path
+        approval (pipeline REQUIRE_APPROVAL / policy.require_approval) to
+        recognize a re-driven call after external approval -- without it, a
+        stateless pipeline would re-raise RunPaused on every resume drive and
+        the run could never complete. False when no store/tool_call_id wired."""
+        if self._approval_store is None or run_id is None or tool_call_id is None:
+            return False
         requests = await self._approval_store.list_for_run(run_id)
         return any(
-            r.tool_call_id == context.tool_call_id
+            r.tool_call_id == tool_call_id
             and r.status is ApprovalStatus.APPROVED
             for r in requests
         )

@@ -11,6 +11,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..errors import SubagentExecutionError, SubagentNotFoundError
 from ..package.entrypoint import EntrypointRef
 from ..package.scope import PackageScope
+from ..run.identity import ParentRunIdentity
 from .runner import SubagentExecutor, enforce_depth
 
 
@@ -55,12 +56,7 @@ def build_subagent_toolset(
     timeout_seconds: "float | None",
     max_concurrency: int = 1,
     allowed_packages: "set[str] | None" = None,
-    parent_run_id: "str | None" = None,
-    root_run_id: "str | None" = None,
-    parent_session_id: "str | None" = None,
-    parent_user_id: "str | None" = None,
-    parent_tenant_id: "str | None" = None,
-    parent_workspace: Any = None,
+    parent: "ParentRunIdentity | None" = None,
 ) -> FunctionToolset:
     """Level-2 execution tool: call_subagent. Only declared agent ids are
     admitted; a package-scoped call must target a package in ``allowed_packages``
@@ -94,14 +90,21 @@ def build_subagent_toolset(
         spec = await _resolve_spec(agent_id, pkg_scope, subagent_provider, entrypoint_resolver)
         if executor is None:
             raise SubagentExecutionError("no subagent executor configured")
+        if parent is None:
+            # A tool can only be invoked from inside a running model call, and
+            # Runtime.run always sets run_id+session_id on the context (which
+            # the provider built this identity from). parent=None means
+            # assembly happened outside any run -- fail loudly rather than
+            # minting an unparented child run with no lineage.
+            raise SubagentExecutionError(
+                "call_subagent invoked without a parent run identity; subagent "
+                "tools cannot run outside a live Run"
+            )
         async with semaphore:
             result = await executor.execute(
                 agent_spec=spec, task=task, context=context,
-                parent_run_id=parent_run_id, root_run_id=root_run_id,
-                parent_session_id=parent_session_id, scope=pkg_scope,
+                parent=parent, scope=pkg_scope,
                 timeout_seconds=timeout_seconds,
-                user_id=parent_user_id, tenant_id=parent_tenant_id,
-                workspace=parent_workspace,
             )
         return result.model_dump()
 

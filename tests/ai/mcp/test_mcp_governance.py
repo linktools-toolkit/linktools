@@ -13,7 +13,9 @@ from linktools.ai.registry.mcp import MCPServerSpec
 
 
 class _FakeMgr:
-    """Fake manager: yields canned tool names per server + a stub toolset."""
+    """Fake manager: yields canned tool names per server + a real FunctionToolset
+    carrying those tools (so the provider's toolset filtering actually has
+    something to filter, the way a live MCPToolset does)."""
     def __init__(self, names_by_server):
         self._names = names_by_server
 
@@ -21,7 +23,14 @@ class _FakeMgr:
         return tuple(self._names.get(server.id, ()))
 
     async def get_toolset(self, server):
-        return object()
+        from pydantic_ai.toolsets import FunctionToolset
+        ts = FunctionToolset()
+        for name in self._names.get(server.id, ()):
+            async def _stub(**_kw):
+                return {}
+            _stub.__name__ = name
+            ts.add_function(_stub, name=name)
+        return ts
 
 
 def _spec(sid, **kw):

@@ -15,16 +15,20 @@ Exposure control applied at resolve time (when a connection manager is wired):
   5. enforce ``max_tools_per_capability``.
 tool_prefix is also applied at MCPServer construction (mcp/client.py).
 
-Boundary: live tool enumeration depends on the underlying pydantic-ai MCPToolset
-cooperating (it resolves names lazily). When ``list_tools`` returns () (cannot
-enumerate in this environment), the filter/conflict/cap checks operate on an
-empty set and are effectively skipped for live servers -- the live stdio/sse/
-http path is environment-gated. The governance logic itself (filter_tool_names /
-detect_mcp_conflicts / final_tool_name) is unit-tested with a fake manager that
-yields canned tool names."""
+Strict discovery (``MCPServerSpec.discovery_mode`` defaults to ``"strict"``):
+when a connection manager is wired but ``list_tools`` returns no names, the
+server fails closed with ``CapabilityResolutionError`` rather than silently
+proceeding with an empty/unenumerated tool set -- max_tools, conflict
+detection, ToolExposurePolicy and ToolPolicyProvider all need the real tool
+set to do their job. A ``MCPConnectionManager.list_tools`` implementation
+(real or fake) MUST cooperate with enumeration for a server to be usable under
+strict discovery; ``discovery_mode="best_effort"`` opts a server out. The
+governance logic itself (filter_tool_names / detect_mcp_conflicts /
+final_tool_name) is unit-tested with a fake manager that yields canned tool
+names."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext
@@ -45,6 +49,7 @@ class MCPProvider:
     connection_manager: "MCPConnectionManager | None" = None
     allow_mcp_wildcard: bool = False
     kind: str = "mcp"
+    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"mcp"})
 
     async def resolve(
         self,
@@ -60,14 +65,20 @@ class MCPProvider:
             spec = await self._spec(server_id)
             # Governance: enumerate -> filter -> prefix -> cap.
             raw = await self._list_tools(spec)
-            # Strict discovery: when governance config is present but tools
-            # cannot be enumerated, fail closed rather than silently passthrough.
-            has_governance = (spec.enabled_tools is not None or spec.disabled_tools
-                              or spec.tool_prefix is not None)
-            if not raw and has_governance and getattr(spec, "discovery_mode", "strict") == "strict":
+            # Strict discovery (the default): a connected server whose tools
+            # cannot be enumerated fails closed, full stop -- not only when
+            # enabled_tools/disabled_tools/tool_prefix happen to be declared.
+            # max_tools, conflict detection, ToolExposurePolicy, and
+            # ToolPolicyProvider all need the real tool set to do their job;
+            # proceeding on an empty/unknown set would silently skip every one
+            # of them. ``connection_manager is None`` is a distinct, explicit
+            # "MCP declared but not wired" no-op mode, not a discovery failure.
+            discovery_mode = getattr(spec, "discovery_mode", "strict")
+            if not raw and self.connection_manager is not None and discovery_mode == "strict":
                 raise CapabilityResolutionError(
                     f"mcp server {server_id!r}: strict discovery mode cannot verify "
-                    f"tool governance (enabled/disabled/prefix) without live enumeration"
+                    f"tool governance without live enumeration (list_tools "
+                    f"returned no tools) -- set discovery_mode='best_effort' to opt out"
                 )
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
@@ -79,7 +90,29 @@ class MCPProvider:
             final_names_by_server[server_id] = final
             toolset = await self._toolset(spec)
             if toolset is not None:
-                toolsets.append(toolset)
+                # Filter the ACTUAL toolset, not just the computed name list --
+                # enabled/disabled must shrink the tool surface the model sees,
+                # not merely the descriptor name list.
+                # A tool is kept iff its exposed name is one of the surviving
+                # names. The surviving set is the union of the final (prefixed)
+                # names and the raw filtered names: the real MCPToolset exposes
+                # prefixed names (prefix is applied at MCPServer construction),
+                # while a plain FunctionToolset exposes raw names -- the union
+                # covers both without ever letting a disabled name through.
+                allowed = set(final) | set(filtered)
+                if allowed:
+                    # Default-arg capture binds ``allowed`` by value at each
+                    # iteration. FilteredToolset.get_tools() runs lazily at
+                    # agent-run time (after this loop completes), so a plain
+                    # closure over ``allowed`` would see only the LAST server's
+                    # set for every server -- leaking disabled tools / dropping
+                    # legitimate ones whenever 2+ MCP servers are configured.
+                    filtered_toolset = toolset.filtered(
+                        lambda _ctx, tool_def, _allowed=allowed: tool_def.name in _allowed)
+                else:
+                    filtered_toolset = toolset.filtered(
+                        lambda _ctx, tool_def: False)
+                toolsets.append(filtered_toolset)
                 # Build ToolContribution with conservative MCP descriptors.
                 from ..security.descriptor import ToolDescriptor
                 from ..tool.contribution import ToolContribution
@@ -91,7 +124,7 @@ class MCPProvider:
                         name=n, category="mcp-write", risk="high", mutating=True, **kw,
                     ) for n in final
                 )
-                contributions.append(ToolContribution(toolset=toolset, descriptors=descs))
+                contributions.append(ToolContribution(toolset=filtered_toolset, descriptors=descs))
         detect_mcp_conflicts(final_names_by_server)
         return CapabilityBundle(
             toolsets=tuple(toolsets),

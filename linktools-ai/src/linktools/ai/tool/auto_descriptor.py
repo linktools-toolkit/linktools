@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compat layer: auto-generate ToolContribution from a raw toolset when a
-Provider does not yet return explicit descriptors. Uses conservative defaults
-(custom / high / mutating) for every tool — never infers category from the tool
-name. Providers should migrate to returning ToolContribution directly."""
+"""Compat layer + the formal ToolsetAdapter: auto-generate ToolContribution from
+a raw toolset when a Provider does not yet return explicit descriptors, and
+extract a named tool's raw handler. Uses conservative defaults (custom / high /
+mutating) for every tool — never infers category from the tool name. Providers
+should migrate to returning ToolContribution directly."""
 
 from typing import Any
 
@@ -12,7 +13,9 @@ from .contribution import ToolContribution
 
 
 def _toolset_tool_names(toolset: Any) -> "tuple[str, ...]":
-    """Best-effort tool-name extraction from a pydantic-ai toolset."""
+    """Best-effort tool-name extraction from a pydantic-ai toolset. Returns ()
+    for opaque toolsets (no ``.tools`` dict) -- e.g. a FilteredToolset wrapping
+    an MCPToolset -- so they are never falsely matched/mismatched."""
     tools = getattr(toolset, "tools", None)
     if isinstance(tools, dict):
         return tuple(str(k) for k in tools.keys())
@@ -46,9 +49,21 @@ def auto_contribute(
     return ToolContribution(toolset=toolset, descriptors=descriptors)
 
 
+class ToolsetAdapter:
+    """Formal adapter for resolving a descriptor name to the unique raw handler
+    in a toolset (spec §9.3). For introspectable toolsets (pydantic-ai
+    FunctionToolset) the handler is the tool's function; for opaque toolsets
+    (FilteredToolset/MCPToolset) extraction returns None -- those use the
+    ManagedToolsetWrapper forwarding model instead."""
+
+    @staticmethod
+    def extract_handler(toolset: Any, name: str) -> "Any | None":
+        tools = getattr(toolset, "tools", None)
+        if isinstance(tools, dict) and name in tools:
+            return tools[name].function
+        return None
+
+
+# Backward-compat alias used by existing call sites/tests.
 def extract_handler(toolset: Any, name: str) -> "Any | None":
-    """Extract the raw callable for a named tool from a FunctionToolset."""
-    tools = getattr(toolset, "tools", None)
-    if isinstance(tools, dict) and name in tools:
-        return tools[name].function
-    return None
+    return ToolsetAdapter.extract_handler(toolset, name)

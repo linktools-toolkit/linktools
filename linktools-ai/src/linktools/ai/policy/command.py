@@ -22,10 +22,20 @@ class CommandRule:
         self._compiled = tuple(re.compile(pattern) for pattern in denied_patterns)
 
     async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
-        # Match terminal-category tools by name (the builtin terminal tool is
-        # "bash"; legacy specs used "terminal"). Do NOT hard-branch on a single
-        # name — accept both so the denylist covers the real tool.
-        if request.tool_name not in ("bash", "terminal"):
+        # Category-based: a tool is subject to the command denylist because its
+        # descriptor declares category="terminal", not because of what it
+        # happens to be named -- renaming the terminal tool cannot evade this
+        # rule as long as its descriptor still says "terminal".
+        if request.category is not None:
+            if request.category != "terminal":
+                return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="command-rule", reason=None)
+        elif request.tool_name not in ("bash", "terminal"):
+            # Compat fallback: request.category is only populated by callers
+            # that resolved a ToolDescriptor (ManagedToolAdapter, or
+            # PolicyCapability with a descriptor lookup wired). A caller that
+            # never threads descriptor info through falls back to the legacy
+            # name check rather than silently losing command-injection
+            # protection.
             return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="command-rule", reason=None)
         command = str(request.arguments.get("command", ""))
         for pattern in self._compiled:

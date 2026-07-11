@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import SkipToolExecution
 
-from ..errors import ToolApprovalRequiredError, ToolDeniedError
+from ..errors import RunPaused, ToolApprovalRequiredError, ToolDeniedError
 from ..policy.engine import ToolRequest
 from .executor import ToolExecutor
 
@@ -41,7 +41,14 @@ class PolicyCapability(AbstractCapability[None]):
         tool_def: "ToolDefinition",
         args: Any,
     ) -> Any:
-        request = ToolRequest(tool_name=tool_def.name, arguments=args)
+        lookup = getattr(ctx.deps, "descriptor_lookup", None)
+        descriptor = lookup.get(tool_def.name) if lookup else None
+        request = ToolRequest(
+            tool_name=tool_def.name, arguments=args,
+            category=descriptor.category if descriptor else None,
+            risk=descriptor.risk if descriptor else None,
+            mutating=descriptor.mutating if descriptor else None,
+        )
         # Thread ToolCallPart.tool_call_id through ToolContext so the executor
         # keys ApprovalRequest.tool_call_id on the SAME id pydantic-ai's message
         # history uses -- the linchpin of resume (a re-driven call after
@@ -77,6 +84,13 @@ class PolicyCapability(AbstractCapability[None]):
         args: Any,
         error: BaseException,
     ) -> Any:
+        # RunPaused is a run-level control-flow signal (approval/pause raised
+        # from inside a managed tool handler via the pipeline or policy), NOT a
+        # tool error. Re-raise it so it propagates out of pydantic-ai's tool
+        # loop to AgentRunner's pause handler -- otherwise the run would
+        # surface a skip-result to the model and continue instead of pausing.
+        if isinstance(error, RunPaused):
+            raise error
         raise SkipToolExecution({"error": f"{type(error).__name__}: {error}"}) from error
 
 

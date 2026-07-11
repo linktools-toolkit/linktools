@@ -10,13 +10,14 @@ declares a subagent ref. Package-scoped subagents resolve through the
 EntrypointResolver; global ones through the SubagentSpecProvider."""
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, ClassVar
 
 from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.ref import CapabilityRef
 from ..package.resolver import EntrypointResolver
 from ..providers.subagent import SubagentSpecProvider
+from ..run.identity import ParentRunIdentity
 from .runner import (
     DEFAULT_MAX_CONCURRENCY,
     DEFAULT_MAX_DEPTH,
@@ -40,6 +41,7 @@ class SubagentProvider:
     # executor updates it per child run.
     depth_provider: "Callable[[], int]" = field(default=current_depth)
     kind: str = "subagent"
+    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"subagent"})
 
     async def resolve(
         self,
@@ -66,6 +68,15 @@ class SubagentProvider:
         # Scoped calls are confined to packages explicitly declared on this ref.
         allowed_packages = set(cfg.get("allowed_packages") or [])
 
+        # Assembly can happen outside a live run (e.g. static inspection) --
+        # only build an identity when the context actually carries one.
+        parent = None
+        if context.run_id is not None and context.session_id is not None:
+            parent = ParentRunIdentity(
+                run_id=context.run_id, root_run_id=context.root_run_id or context.run_id,
+                session_id=context.session_id, user_id=context.user_id,
+                tenant_id=context.tenant_id, workspace=context.workspace,
+            )
         toolset = build_subagent_toolset(
             allowed_names=allowed,
             subagent_provider=self.subagent_provider,
@@ -76,12 +87,7 @@ class SubagentProvider:
             timeout_seconds=float(timeout) if timeout is not None else None,
             max_concurrency=max_concurrency,
             allowed_packages=allowed_packages,
-            parent_run_id=context.run_id,
-            root_run_id=context.root_run_id or context.run_id,
-            parent_user_id=context.user_id,
-            parent_tenant_id=context.tenant_id,
-            parent_workspace=context.workspace,
-            parent_session_id=context.session_id,
+            parent=parent,
         )
         from ..security.descriptor import ToolDescriptor
         from ..tool.contribution import ToolContribution

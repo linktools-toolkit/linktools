@@ -40,10 +40,13 @@ class _Executor:
         self.calls = []
         self._fail = set(fail)
 
-    async def execute(self, *, agent_spec, task, context, parent_run_id, root_run_id,
-                      parent_session_id, scope, timeout_seconds,
-                      user_id=None, tenant_id=None, workspace=None):
-        self.calls.append((agent_spec.id, task, parent_run_id, parent_session_id, scope))
+    async def execute(self, *, agent_spec, task, context, parent, scope, timeout_seconds):
+        self.calls.append((
+            agent_spec.id, task,
+            parent.run_id if parent else None,
+            parent.session_id if parent else None,
+            scope,
+        ))
         if agent_spec.id in self._fail:
             return SubagentResult(
                 agent_id=agent_spec.id, session_id="cs", run_id="cr",

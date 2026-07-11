@@ -136,6 +136,10 @@ class ToolRegistry:
                 risk=spec.risk,
                 side_effect=spec.side_effect,
                 approval=spec.approval,
+                idempotent=spec.idempotent,
+                timeout_seconds=spec.timeout_seconds,
+                schema_version=spec.schema_version,
+                metadata=spec.metadata,
             )
         return result
 

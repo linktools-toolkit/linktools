@@ -285,6 +285,60 @@ class ToolExposureDenied:
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class SecurityDegraded:
+    """Emitted when a security-relevant component fails and the system falls
+    back to a safer-but-degraded posture rather than failing open -- e.g. a
+    ToolPolicyProvider error caught and replaced with a fail-closed policy."""
+    run_id: "str | None" = None
+    component: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicyResolved:
+    """tool.policy.resolved: the finalized policy that governs one tool call
+    (enabled/timeout/retries/idempotent/approval/risk), for audit."""
+    run_id: "str | None" = None
+    tool_name: str = ""
+    enabled: bool = True
+    timeout_seconds: "float | None" = None
+    max_retries: int = 0
+    idempotent: bool = False
+    require_approval: bool = False
+    risk: str = "medium"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPipelineBefore:
+    """tool.pipeline.before: a SecurityPipeline's before_tool was consulted for
+    a tool call."""
+    run_id: "str | None" = None
+    tool_name: str = ""
+    call_id: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPipelineDecision:
+    """tool.pipeline.decision: the decision a pipeline returned (allow/deny/
+    require_approval/modify) for a tool call."""
+    run_id: "str | None" = None
+    tool_name: str = ""
+    call_id: "str | None" = None
+    action: str = "allow"
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPipelineAfter:
+    """tool.pipeline.after: a SecurityPipeline's after_tool was consulted for a
+    completed tool call."""
+    run_id: "str | None" = None
+    tool_name: str = ""
+    call_id: "str | None" = None
+    success: bool = True
+
+
 # Union of every event payload type. This is the type of the ``payload`` field
 # EventStore.append accepts -- callers pass a concrete
 # payload instance and the store wraps it in an EventEnvelope.
@@ -332,4 +386,9 @@ EventPayload = Union[
     PromptWindowApplied,
     ToolExposureApplied,
     ToolExposureDenied,
+    SecurityDegraded,
+    ToolPolicyResolved,
+    ToolPipelineBefore,
+    ToolPipelineDecision,
+    ToolPipelineAfter,
 ]

@@ -90,12 +90,19 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
     enabled_tools = tuple(str(t) for t in enabled_raw) if enabled_raw else None
     disabled_raw = payload.get("disabled_tools") or ()
     disabled_tools = tuple(str(t) for t in disabled_raw)
+    discovery_mode = str(payload.get("discovery_mode") or "strict")
+    if discovery_mode not in ("strict", "best_effort"):
+        raise InvalidSpecError(
+            f"mcp {mcp_id}: unknown discovery_mode: {discovery_mode!r} "
+            f"(expected 'strict' or 'best_effort')"
+        )
 
     return MCPServerSpec(
         id=mcp_id,
         name=str(name),
         transport=transport,
         command_or_url=command_or_url,
+        discovery_mode=discovery_mode,
         command=command,
         url=url,
         cwd=str(cwd) if cwd is not None else None,

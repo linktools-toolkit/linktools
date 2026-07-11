@@ -19,9 +19,12 @@ class BuiltinToolContext:
 def build_builtin_toolset(context: BuiltinToolContext) -> FunctionToolset:
     toolset: FunctionToolset = FunctionToolset()
     backend = context.backend
-    enabled_tools = context.enabled_tools
+    enabled = set(context.enabled_tools)
+    # Compat: the deprecated monolithic "file" grant maps to read + write.
+    if "file" in enabled:
+        enabled.update({"file-read", "file-write"})
 
-    if "file" in enabled_tools:
+    if "file-read" in enabled:
         async def list_dir(path: str = ".", recursive: bool = False) -> "dict[str, Any]":
             """List directory contents (relative paths resolve from runtime_dir)."""
             return await backend.list_dir(path, recursive)
@@ -30,6 +33,10 @@ def build_builtin_toolset(context: BuiltinToolContext) -> FunctionToolset:
             """Read one file. For JSON, pass `selectors` to fetch only selected fields."""
             return await backend.read_file(path, selectors, max_chars)
 
+        for fn in (list_dir, read_file):
+            toolset.add_function(fn)
+
+    if "file-write" in enabled:
         async def write_file(path: str, content: Any = None, updates: "list[dict[str, Any]] | None" = None) -> "dict[str, Any]":
             """Write one file. String content writes text; object content writes JSON; `updates` patches JSON fields."""
             return await backend.write_file(path, content, updates)
@@ -42,10 +49,10 @@ def build_builtin_toolset(context: BuiltinToolContext) -> FunctionToolset:
             """Apply a unified diff (git-style `a/`/`b/` path prefixes accepted) to files under runtime_dir."""
             return await backend.apply_patch(diff)
 
-        for fn in (list_dir, read_file, write_file, batch_files, apply_patch):
+        for fn in (write_file, batch_files, apply_patch):
             toolset.add_function(fn)
 
-    if "terminal" in enabled_tools:
+    if "terminal" in enabled:
         async def bash(command: str, timeout_ms: "int | None" = None) -> "dict[str, Any]":
             """Execute a shell command with cwd set to runtime_dir."""
             return await backend.run_bash(command, timeout_ms)

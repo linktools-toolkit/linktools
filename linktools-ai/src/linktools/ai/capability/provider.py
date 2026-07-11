@@ -42,10 +42,16 @@ class CapabilityContext:
 
 @runtime_checkable
 class CapabilityProvider(Protocol):
-    """Resolves one capability kind. ``kind`` is the provider's selector (the
-    left side of a ``kind:name`` tool ref)."""
+    """Resolves one or more capability kinds. ``kind`` is the provider's primary
+    selector (left side of a ``kind:name`` tool ref); ``supported_kinds`` is the
+    full set of kinds this provider handles -- a provider that owns several
+    related kinds (e.g. PackageProvider: package / package-resource /
+    package-entrypoint) declares them all here instead of being registered
+    multiple times under aliases. Single-kind providers set ``kind`` and inherit
+    ``supported_kinds = frozenset({kind})`` via the helper."""
 
     kind: str
+    supported_kinds: "frozenset[str]"
 
     async def resolve(
         self,
@@ -53,6 +59,16 @@ class CapabilityProvider(Protocol):
         context: CapabilityContext,
     ) -> CapabilityBundle:
         ...
+
+
+def provider_kinds(provider: "CapabilityProvider") -> "frozenset[str]":
+    """All capability kinds a provider handles. Prefers an explicit
+    ``supported_kinds`` declaration; falls back to ``{kind}`` for single-kind
+    providers (and older/test providers that only set ``kind``)."""
+    multi = getattr(provider, "supported_kinds", None)
+    if multi:
+        return frozenset(multi)
+    return frozenset({provider.kind})
 
 
 def _toolset_tool_names(toolset: Any) -> "tuple[str, ...]":

@@ -5,6 +5,7 @@
 import asyncio
 import pytest
 
+from linktools.ai.run.identity import ParentRunIdentity
 from linktools.ai.subagent.models import SubagentResult
 from linktools.ai.subagent.toolset import build_subagent_toolset
 
@@ -29,6 +30,7 @@ def _toolset(max_concurrency, executor):
         allowed_names={"a"}, subagent_provider=None, entrypoint_resolver=None,
         executor=executor, depth_provider=lambda: 0, max_depth=3,
         timeout_seconds=None, max_concurrency=max_concurrency,
+        parent=ParentRunIdentity(run_id="run-1", root_run_id="run-1", session_id="sess-1"),
     )
 
 

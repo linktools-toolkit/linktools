@@ -87,14 +87,15 @@ def _build_capability_providers(
             executor=subagent_executor,
         )
     if bundle.package_resources is not None or bundle.entrypoints is not None:
-        # PackageProvider handles three tool-ref kinds; one instance registered
-        # under each so package-resource / package-entrypoint refs resolve.
+        # PackageProvider declares every kind it handles via supported_kinds;
+        # register the one instance under all of them (no manual alias hack).
+        from .capability.provider import provider_kinds
         pkg = PackageProvider(
             resource_provider=bundle.package_resources,
             entrypoint_resolver=bundle.entrypoints,
             entrypoint_executor=subagent_executor,
         )
-        for k in ("package", "package-resource", "package-entrypoint"):
+        for k in provider_kinds(pkg):
             providers[k] = pkg
     return providers
 
@@ -173,12 +174,20 @@ class Runtime:
         )
 
         router = model_router or ModelRouter()
-        resolved_executor = tool_executor
-        if tool_executor is None and pause_on_approval:
-            from .policy.engine import PolicyEngine
-            from .security.baseline import SecurityBaseline
 
-            baseline = security if security is not None else SecurityBaseline()
+        # Single resolution point for the default security configuration:
+        # every consumer below (the compiler's ToolExecutor, the runner's
+        # baseline policy/pipeline) reads from THIS ONE ``baseline`` object.
+        # SecurityBaseline(enabled=False) must reach every one of them --
+        # resolving ``security or SecurityBaseline()`` more than once risks a
+        # consumer silently reinstating a default the caller explicitly disabled.
+        from .security.baseline import SecurityBaseline
+        baseline = security if security is not None else SecurityBaseline()
+
+        resolved_executor = tool_executor
+        if tool_executor is None:
+            from .policy.engine import PolicyEngine
+
             rules: "list[Any]" = []
             if baseline.enabled and baseline.command_policy is not None:
                 from .policy.command import CommandRule
@@ -187,7 +196,7 @@ class Runtime:
             resolved_executor = ToolExecutor(
                 policy=PolicyEngine(rules=tuple(rules)),
                 approval_store=storage.approvals,
-                pause_on_approval=True,
+                pause_on_approval=pause_on_approval,
             )
         compiler = AgentCompiler(
             model_router=router,
@@ -199,9 +208,6 @@ class Runtime:
             if storage.capabilities.cross_store_transactions else None
         )
         run_controller = RunController()
-        # Resolve the SecurityBaseline + pipeline for the runner.
-        from .security.baseline import SecurityBaseline
-        baseline = security if security is not None else SecurityBaseline()
         runner_pipeline = getattr(baseline, "pipeline", None)
         from .tool.policy import ResolvedToolPolicy
         runner_baseline_policy = ResolvedToolPolicy() if baseline.enabled else None
@@ -523,9 +529,9 @@ def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler
     (the token is reset on return so parallel/sibling calls are unaffected)."""
     from .subagent.runner import _CURRENT_DEPTH
 
-    async def execute(*, agent_spec, task, context, parent_run_id, root_run_id,
-                      parent_session_id, scope, timeout_seconds,
-                      user_id=None, tenant_id=None, workspace=None):
+    async def execute(*, agent_spec, task, context, parent, scope, timeout_seconds):
+        parent_run_id = parent.run_id if parent is not None else None
+        parent_session_id = parent.session_id if parent is not None else None
         child_session = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         await storage.sessions.create(SessionRecord(
@@ -534,12 +540,14 @@ def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler
             created_at=now, updated_at=now,
         ))
         child_run = str(uuid.uuid4())
-        effective_root = root_run_id or parent_run_id or child_run
+        effective_root = (parent.root_run_id if parent is not None else None) or parent_run_id or child_run
         run_ctx = RunContext(
             run_id=child_run, root_run_id=effective_root, parent_run_id=parent_run_id,
             session_id=child_session, runnable_id=agent_spec.id,
-            runnable_type=RunnableType.AGENT, user_id=user_id, tenant_id=tenant_id,
-            workspace=workspace,
+            runnable_type=RunnableType.AGENT,
+            user_id=parent.user_id if parent is not None else None,
+            tenant_id=parent.tenant_id if parent is not None else None,
+            workspace=parent.workspace if parent is not None else None,
         )
         scope_dict = None
         if scope is not None:

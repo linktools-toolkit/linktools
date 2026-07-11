@@ -3,6 +3,7 @@
 """SecurityPipeline: the formal extension point for downstream safety audit,
 risk assessment, and decision-making on model invocations and tool calls."""
 
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
@@ -14,6 +15,12 @@ class PipelineAction(str, Enum):
     REQUIRE_APPROVAL = "require_approval"
     MODIFY = "modify"
     AUDIT_ONLY = "audit_only"
+    # after_tool-specific actions: distinct names so a result-level decision is
+    # not confused with a before_tool call-level DENY/MODIFY. DENY_RESULT
+    # discards the tool's result; MODIFY_RESULT replaces it. Treated as
+    # DENY/MODIFY respectively for precedence in CompositeSecurityPipeline.
+    DENY_RESULT = "deny_result"
+    MODIFY_RESULT = "modify_result"
 
 
 @dataclass(frozen=True)
@@ -40,9 +47,30 @@ class ModelResultEvent:
 
 @dataclass(frozen=True)
 class ToolInvocationEvent:
+    """Context for a tool-call governance decision. Carries the full identity
+    chain a downstream SecurityPipeline needs to audit/decide: the call id, the
+    run lineage (root/parent), session, agent, principal (user/tenant/workspace),
+    and the capability that contributed the tool. Fields default to None so
+    existing constructions keep working when only a subset is available."""
     tool_name: str
     arguments: "Mapping[str, Any]"
     run_id: "str | None" = None
+    call_id: "str | None" = None
+    root_run_id: "str | None" = None
+    parent_run_id: "str | None" = None
+    session_id: "str | None" = None
+    agent_id: "str | None" = None
+    user_id: "str | None" = None
+    tenant_id: "str | None" = None
+    workspace: Any = None
+    capability_kind: "str | None" = None
+    capability_name: "str | None" = None
+    risk: "str | None" = None
+    mutating: "bool | None" = None
+    # The tool's parameter JSON schema, so a CompositeSecurityPipeline can
+    # re-validate arguments after EACH MODIFY between pipelines (not only the
+    # final one). None when no schema is available (validation is then a no-op).
+    parameter_schema: "Mapping[str, Any] | None" = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +79,7 @@ class ToolResultEvent:
     result: Any
     success: bool = True
     run_id: "str | None" = None
+    call_id: "str | None" = None
 
 
 @dataclass(frozen=True)
@@ -73,31 +102,68 @@ class SecurityPipeline(Protocol):
     async def on_security_event(self, event: SecurityEvent) -> PipelineDecision: ...
 
 
+# Maps each event type to the field a MODIFY decision's modified_payload
+# replaces when threading it into the next pipeline in the chain.
+_MODIFY_FIELD: "dict[type, str]" = {
+    ModelInvocationEvent: "prompt",
+    ModelResultEvent: "output",
+    ToolInvocationEvent: "arguments",
+    ToolResultEvent: "result",
+}
+
+
+def _with_modified_payload(event: Any, payload: Any) -> Any:
+    field_name = _MODIFY_FIELD.get(type(event))
+    if field_name is None:
+        return event
+    return dataclasses.replace(event, **{field_name: payload})
+
+
 class CompositeSecurityPipeline:
     """Composes multiple SecurityPipelines. Decision precedence:
     DENY > REQUIRE_APPROVAL > MODIFY (in order) > ALLOW. AUDIT_ONLY never
-    changes the outcome."""
+    changes the outcome. Only DENY short-circuits the pipeline chain -- every
+    pipeline is still consulted after a REQUIRE_APPROVAL so a later pipeline's
+    DENY is never masked by an earlier approval requirement."""
 
     def __init__(self, pipelines: "Sequence[SecurityPipeline]") -> None:
         self._pipelines = tuple(pipelines)
 
     async def _evaluate(self, hook_name: str, event: Any) -> PipelineDecision:
-        # Collect ALL decisions; only DENY short-circuits. This ensures a later
-        # pipeline's DENY is not masked by an earlier REQUIRE_APPROVAL.
-        modifications: "list[Any]" = []
+        # Sequential MODIFY: each pipeline receives the PREVIOUS pipeline's
+        # modified payload (not the original event unmodified) -- pipeline B
+        # sees pipeline A's edits, not just its own view of the original call.
+        # After each MODIFY the payload is re-validated against the tool's
+        # parameter schema (carried on the event) so a misbehaving intermediate
+        # pipeline is caught before the next one observes an invalid payload.
+        current_event = event
+        schema = getattr(event, "parameter_schema", None)
+        last_modified_payload: Any = None
         require_approval: "PipelineDecision | None" = None
         for p in self._pipelines:
-            decision = await getattr(p, hook_name)(event)
-            if decision.action == PipelineAction.DENY:
+            decision = await getattr(p, hook_name)(current_event)
+            if decision.action in (PipelineAction.DENY, PipelineAction.DENY_RESULT):
                 return decision
             if decision.action == PipelineAction.REQUIRE_APPROVAL:
                 require_approval = decision
-            elif decision.action == PipelineAction.MODIFY and decision.modified_payload is not None:
-                modifications.append(decision.modified_payload)
+            elif (decision.action in (PipelineAction.MODIFY, PipelineAction.MODIFY_RESULT)
+                  and decision.modified_payload is not None):
+                last_modified_payload = decision.modified_payload
+                if schema is not None:
+                    from ..tool.schema_validate import validate_arguments
+                    tool_name = getattr(event, "tool_name", "")
+                    # Raise as a DENY so the bad MODIFY never propagates.
+                    try:
+                        validate_arguments(last_modified_payload, schema, tool_name=tool_name)
+                    except Exception as exc:
+                        return PipelineDecision(
+                            action=PipelineAction.DENY,
+                            reason=f"pipeline MODIFY failed schema validation: {exc}",
+                        )
+                current_event = _with_modified_payload(current_event, last_modified_payload)
         if require_approval is not None:
             return require_approval
-        final_payload = modifications[-1] if modifications else None
-        return PipelineDecision(action=PipelineAction.ALLOW, modified_payload=final_payload)
+        return PipelineDecision(action=PipelineAction.ALLOW, modified_payload=last_modified_payload)
 
     async def before_model(self, event: ModelInvocationEvent) -> PipelineDecision:
         return await self._evaluate("before_model", event)

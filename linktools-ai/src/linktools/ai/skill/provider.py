@@ -11,6 +11,7 @@ Package skills surface their package_id in summaries; deeper package-resource
 access is a separate ``package-resource`` capability, not auto-enabled here."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from ..capability.bundle import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
@@ -29,6 +30,7 @@ class SkillProvider:
 
     skill_provider: SkillSpecProvider
     kind: str = "skill"
+    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"skill"})
 
     async def resolve(
         self,

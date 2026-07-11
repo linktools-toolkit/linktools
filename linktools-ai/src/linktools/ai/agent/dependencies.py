@@ -21,15 +21,22 @@ exposes no builtin tools -- a conversational-only agent. Decoupling the backend
 from ``AgentCompiler`` keeps the compiler stateless (no filesystem surface)."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from ..policy.rule import ToolContext
 
 if TYPE_CHECKING:
     from ..execution.protocols import ExecutionBackend
+    from ..security.descriptor import ToolDescriptor
 
 
 @dataclass(frozen=True, slots=True)
 class AgentDependencies:
     tool_context: ToolContext
     execution: "ExecutionBackend | None" = None
+    # Per-run tool-name -> ToolDescriptor lookup, populated once the
+    # CapabilityAssembler has resolved this run's tool contributions. Lets
+    # PolicyCapability (the global before-every-tool-call hook) classify a
+    # call by category/risk/mutating instead of only by tool name -- None
+    # (default) when no assembler ran, preserving the legacy name-only path.
+    descriptor_lookup: "Mapping[str, ToolDescriptor] | None" = None
