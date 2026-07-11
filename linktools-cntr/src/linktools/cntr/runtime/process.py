@@ -4,6 +4,7 @@
 operations (chown/chmod) for paths bind-mounted into containers."""
 import os
 import shutil
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from linktools.runtime import popen
@@ -45,11 +46,46 @@ def _docker_host_args(host: "str | None") -> "list[str]":
     return ["-H", host]
 
 
+@dataclass(frozen=True)
+class CommandSpec:
+    """A fully-built argv (no sudo) plus whether it would run under
+    privilege -- constructed, never executed, so Plan can describe exactly
+    what a real docker/compose call would run without side effects."""
+
+    args: "tuple[str, ...]"
+    privilege: bool
+
+
 class RuntimeProcessFactory:
     """Create docker/compose subprocesses behind the facade."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
+
+    def _sudo_prefix(self, sudo_non_interactive: bool = False) -> "tuple[str, ...]":
+        manager = self.manager
+        if manager.system in ("darwin", "linux") and manager.uid != 0:
+            proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+            preserve_keys = [*[e.lower() for e in proxy_keys], *[e.upper() for e in proxy_keys]]
+            preserve_env = [key for key in preserve_keys if key in os.environ]
+            sudo_args = ["sudo"]
+            if sudo_non_interactive:
+                sudo_args.append("-n")
+            if preserve_env:
+                sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
+            return tuple(sudo_args)
+        return ()
+
+    def display_args(self, spec: CommandSpec, sudo_non_interactive: bool = False) -> "tuple[str, ...]":
+        """The full, copy-paste-executable command ``spec.args`` would
+        actually run as, including a ``sudo`` prefix if privilege and the
+        current platform/uid would actually trigger one. Never executed --
+        display/Plan only."""
+        if spec.privilege:
+            prefix = self._sudo_prefix(sudo_non_interactive)
+            if prefix:
+                return (*prefix, *spec.args)
+        return spec.args
 
     def create_process(
             self,
@@ -63,29 +99,19 @@ class RuntimeProcessFactory:
         # password prompt; up/restart/down keep the interactive default.
         sudo_non_interactive = kwargs.pop("sudo_non_interactive", False)
         if privilege:
-            if self.manager.system in ("darwin", "linux") and self.manager.uid != 0:
-                proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-                preserve_keys = [*[e.lower() for e in proxy_keys], *[e.upper() for e in proxy_keys]]
-                preserve_env = [key for key in preserve_keys if key in os.environ]
-                sudo_args = ["sudo"]
-                if sudo_non_interactive:
-                    sudo_args.append("-n")
-                if preserve_env:
-                    sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
-                sudo_args.extend(args)
-                return popen(*sudo_args, **kwargs)
+            prefix = self._sudo_prefix(sudo_non_interactive)
+            if prefix:
+                return popen(*prefix, *args, **kwargs)
         return popen(*args, **kwargs)
 
-    def create_docker_process(
-            self,
-            *args,
-            privilege: bool = None,
-            **kwargs,
-    ) -> "Process":
+    def docker_args(self, *args, privilege: bool = None) -> CommandSpec:
+        """Build the full ``docker ...`` argv (no sudo) without executing
+        it -- the single source of truth ``create_docker_process`` and
+        ``ExecutionPlanner`` both build on."""
         commands = []
         host = self.manager.env_config.get("DOCKER_HOST", type=str, default=None)
         if self.manager.container_type in ("docker", "docker-rootless"):
-            commands.extend(["docker"])
+            commands.append("docker")
             commands.extend(_docker_host_args(host))
             if privilege is None:
                 privilege = self.manager.container_type == "docker"
@@ -95,15 +121,19 @@ class RuntimeProcessFactory:
             )
         else:
             raise ContainerError(f"Invalid container type: {self.manager.container_type}")
-        return self.create_process(*commands, *args, privilege=privilege, **kwargs)
+        return CommandSpec(args=tuple(str(a) for a in (*commands, *args)), privilege=bool(privilege))
 
-    def create_docker_compose_process(
+    def docker_compose_args(
             self,
             containers: "Iterable[BaseContainer]",
             *args: str,
             privilege: bool = None,
-            **kwargs: "Any",
-    ) -> "Process":
+    ) -> CommandSpec:
+        """Build the full ``docker ... compose --file ... --project-name ...
+        ...`` argv. Resolves each container's real (already-written) compose
+        file path, so -- unlike ``docker_args`` -- this one has the same
+        "renders/writes a real generated file" side effect
+        ``get_docker_compose_file()`` always has."""
         options = []
         for container in containers:
             path = container.get_docker_compose_file()
@@ -116,7 +146,26 @@ class RuntimeProcessFactory:
             # a completely unrelated project instead of failing loudly.
             raise ContainerError("No Docker Compose file was generated for the targeted containers")
         options.extend(["--project-name", self.manager.project_name])
-        return self.create_docker_process("compose", *options, *args, privilege=privilege, **kwargs)
+        return self.docker_args("compose", *options, *args, privilege=privilege)
+
+    def create_docker_process(
+            self,
+            *args,
+            privilege: bool = None,
+            **kwargs,
+    ) -> "Process":
+        spec = self.docker_args(*args, privilege=privilege)
+        return self.create_process(*spec.args, privilege=spec.privilege, **kwargs)
+
+    def create_docker_compose_process(
+            self,
+            containers: "Iterable[BaseContainer]",
+            *args: str,
+            privilege: bool = None,
+            **kwargs: "Any",
+    ) -> "Process":
+        spec = self.docker_compose_args(containers, *args, privilege=privilege)
+        return self.create_process(*spec.args, privilege=spec.privilege, **kwargs)
 
     def chown(self, path: "PathType", user: str, recursive: bool = False) -> None:
         manager = self.manager

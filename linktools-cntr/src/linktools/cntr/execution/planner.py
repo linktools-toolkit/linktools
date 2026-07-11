@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from ..artifacts.index import collect_candidates, sha256_of
 from ..container import ContainerError
 from ..lifecycle.hooks import HookPhase
-from ..runtime.compose import ComposeOptions
+from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
 if TYPE_CHECKING:
@@ -61,8 +61,11 @@ class ExecutionPlanner:
         ]
         candidate_files = {dest: content for dest, (_, _, content) in candidates.items()}
 
-        privilege = manager.container_type == "docker"
-        compose_files = sorted(p for p in candidate_files if p.endswith((".yml", ".yaml")))
+        # `candidates` (and so `candidate_files`) is already in the same
+        # order as `selection.project_containers` -- a real up/restart/down
+        # forms its --file set the same way, one container at a time, and
+        # Compose's multi-file merge is order-sensitive. Never re-sort this.
+        compose_files = [p for p in candidate_files if p.endswith((".yml", ".yaml"))]
         file_args = []
         for path in compose_files:
             file_args.extend(["--file", path])
@@ -71,19 +74,16 @@ class ExecutionPlanner:
         commands = []
         services = list(selection.services)
         if action == "restart":
-            commands.append(self._planned_command("stop", [*file_args, "stop", *services], privilege))
-        options = ComposeOptions(
-            build=build, pull=pull, remove_orphans=selection.full, services=services,
-            emit_default_pull=(action == "up"),
-        )
+            commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
+            options = manager.compose_operations.build_options(action, selection, build, pull)
             if build:
                 commands.append(self._planned_command(
-                    "build", [*file_args, *manager.compose_runner.build_args(options)], privilege))
+                    "build", [*file_args, *manager.compose_runner.build_args(options)]))
             commands.append(self._planned_command(
-                "up", [*file_args, *manager.compose_runner.up_args(options)], privilege))
+                "up", [*file_args, *manager.compose_runner.up_args(options)]))
         elif action == "down":
-            commands.append(self._planned_command("down", [*file_args, "down", *services], privilege))
+            commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
         hooks = []
         for phase in _ACTION_PHASES[action]:
@@ -139,7 +139,18 @@ class ExecutionPlanner:
             old_sha256=old_sha256, new_sha256=new_sha256, change=change,
         )
 
-    def _planned_command(self, phase: str, args: "list[str]", privilege: bool) -> "PlannedCommand":
-        # Real up/restart/down keep sudo interactive (Spec section 3.3);
-        # Plan only *describes* the command, it never actually runs it.
-        return PlannedCommand(phase=phase, args=tuple(str(a) for a in args), privilege=privilege, interactive=True)
+    def _planned_command(self, phase: str, compose_args: "list[str]") -> "PlannedCommand":
+        # Same builder create_docker_compose_process()/create_docker_process()
+        # use, so Plan's argv (file order, --project-name, docker/compose
+        # prefix, privilege) can never drift from what actually runs.
+        spec = self.manager.runtime.docker_args("compose", *compose_args, privilege=None)
+        # Real up/restart/down keep sudo interactive; Plan only *describes*
+        # the command, it never actually runs it.
+        display = self.manager.runtime.display_args(spec, sudo_non_interactive=False)
+        return PlannedCommand(
+            phase=phase,
+            args=redact_command(spec.args),
+            display_args=redact_command(display),
+            privilege=spec.privilege,
+            interactive=True,
+        )

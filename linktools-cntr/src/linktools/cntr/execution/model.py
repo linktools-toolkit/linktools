@@ -25,8 +25,16 @@ class PlannedArtifact:
 
 @dataclass(frozen=True)
 class PlannedCommand:
+    """``args``/``display_args`` are both already redacted (see
+    ``runtime.structured.redact_command``) at construction time -- neither
+    field ever holds a raw secret, so serializing the whole plan (including
+    via ``dataclasses.asdict``) can never leak one. ``args`` omits ``sudo``,
+    for exact comparison against the real runtime argv in tests;
+    ``display_args`` is the full, copy-paste-executable command a user
+    would actually run, including ``sudo`` when privilege would apply it."""
     phase: str
     args: "tuple[str, ...]"
+    display_args: "tuple[str, ...]"
     privilege: bool
     interactive: bool
 

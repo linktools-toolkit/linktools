@@ -18,7 +18,13 @@ if TYPE_CHECKING:
 
 
 def _plan_to_dict(plan: "ExecutionPlan") -> dict:
-    return dataclasses.asdict(plan)
+    # Only display_args is ever surfaced -- args exists on PlannedCommand
+    # purely for exact-argv comparison in tests, and must never appear in
+    # a rendered/serialized plan even though it's already redacted.
+    data = dataclasses.asdict(plan)
+    for command in data.get("commands", []):
+        command.pop("args", None)
+    return data
 
 
 def render_plan(logger, plan: "ExecutionPlan") -> None:
@@ -43,8 +49,7 @@ def render_plan(logger, plan: "ExecutionPlan") -> None:
     if plan.commands:
         logger.info("commands:")
         for command in plan.commands:
-            privilege = "sudo " if command.privilege else ""
-            logger.info(f"  [{command.phase}] {privilege}docker {' '.join(command.args)}")
+            logger.info(f"  [{command.phase}] {' '.join(command.display_args)}")
 
     if plan.hooks:
         logger.info("hooks:")

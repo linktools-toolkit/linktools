@@ -91,18 +91,32 @@ class ComposeOperations:
         context.is_full_containers = selection.full
         return context
 
+    def build_options(
+            self, action: str, selection: ComposeSelection, build: bool, pull: bool,
+    ) -> ComposeOptions:
+        """The exact ``ComposeOptions`` ``up``/``restart`` build for this
+        action -- shared with ``ExecutionPlanner`` so a plan can never drift
+        from what actually runs. ``down`` never builds a ComposeOptions at
+        all (it doesn't build/pull/up anything)."""
+        if action == "restart":
+            # restart omits the --pull=false / --pull missing defaults that
+            # `up` emits, and (unlike `up`/`exec up`/`exec restart`) never
+            # includes proxy --build-args.
+            return ComposeOptions(
+                build=build, pull=pull, remove_orphans=selection.full,
+                services=list(selection.services), emit_default_pull=False, include_proxy_build_args=False,
+            )
+        return ComposeOptions(
+            build=build, pull=pull, remove_orphans=selection.full,
+            services=list(selection.services), emit_default_pull=True,
+        )
+
     def up(self, names: "Sequence[str] | None" = None, build: bool = True, pull: bool = False,
           report: bool = False) -> None:
         manager = self.manager
         selection = self.select(names)
         context = self._make_context(["up", pull and "pull", build and "build"], selection)
-        options = ComposeOptions(
-            build=build,
-            pull=pull,
-            remove_orphans=context.is_full_containers,
-            services=list(selection.services),
-            emit_default_pull=True,
-        )
+        options = self.build_options("up", selection, build, pull)
 
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)
@@ -129,17 +143,7 @@ class ComposeOperations:
         manager = self.manager
         selection = self.select(names)
         context = self._make_context(["restart", pull and "pull", build and "build"], selection)
-        # restart omits the --pull=false / --pull missing defaults that `up`
-        # emits, and (unlike `up`/`exec up`/`exec restart`) never includes
-        # proxy --build-args.
-        options = ComposeOptions(
-            build=build,
-            pull=pull,
-            remove_orphans=context.is_full_containers,
-            services=list(selection.services),
-            emit_default_pull=False,
-            include_proxy_build_args=False,
-        )
+        options = self.build_options("restart", selection, build, pull)
 
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)

@@ -4,6 +4,8 @@
 operation, run a lifecycle hook, or write a generated artifact/state/lock
 file -- and must reuse the same selection/arg-building logic real commands
 use."""
+import os
+
 import pytest
 
 import linktools.cntr.__main__ as cntr_main
@@ -13,6 +15,10 @@ from linktools.cntr.execution.model import ExecutionPlan
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from linktools.cntr.runtime.structured import CommandResult
+
+_PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
+               "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+_SECRET_PROXY_URL = "http://user:super-secret-password@proxy.example:8080"
 
 
 @pytest.fixture(autouse=True)
@@ -206,3 +212,198 @@ def test_dry_run_and_plan_command_share_one_model(fresh_manager, monkeypatch):
 
     assert len(recorded) == 2
     assert recorded[0] == recorded[1]
+
+
+# -- Command exactness/redaction (review issues #1-#4) -----------------------
+
+def test_plan_command_includes_full_docker_compose_prefix(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager, "container_type", "docker-rootless")
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
+    up_command = next(c for c in plan.commands if c.phase == "up")
+    assert up_command.args[:2] == ("docker", "compose")
+    assert up_command.display_args[:2] == ("docker", "compose")
+    assert "--file" in up_command.args
+    assert "--project-name" in up_command.args
+
+
+def test_plan_display_args_show_sudo_for_rootful_docker(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager, "container_type", "docker")
+    monkeypatch.setattr(fresh_manager, "system", "linux")
+    monkeypatch.setattr(fresh_manager, "uid", 1000)
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
+    up_command = next(c for c in plan.commands if c.phase == "up")
+    assert up_command.privilege is True
+    assert up_command.display_args[0] == "sudo"
+    # args (for test/structural comparison) never includes sudo.
+    assert "sudo" not in up_command.args
+
+
+def test_plan_display_args_no_sudo_for_rootless(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager, "container_type", "docker-rootless")
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
+    up_command = next(c for c in plan.commands if c.phase == "up")
+    assert up_command.privilege is False
+    assert "sudo" not in up_command.display_args
+
+
+def test_plan_respects_configured_docker_host(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager, "container_type", "docker")
+    monkeypatch.setattr(fresh_manager.env_config, "get",
+                        lambda key, type=None, default=None:
+                        "tcp://10.0.0.1:2376" if key == "DOCKER_HOST" else default)
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
+    up_command = next(c for c in plan.commands if c.phase == "up")
+    assert "-H" in up_command.args
+    assert "tcp://10.0.0.1:2376" in up_command.args
+
+
+def test_plan_compose_file_order_matches_container_order_not_sorted(fresh_manager):
+    plan = fresh_manager.planner.plan("up")
+    project_containers = fresh_manager.prepare_installed_containers()
+    expected_order = [c.name for c in project_containers if c.docker_compose]
+    actual_order = [os.path.basename(p).rsplit(".", 1)[0] for p in plan.compose_files]
+    assert actual_order == expected_order
+    # The actual regression: real container install order != alphabetical
+    # name order for this fixture's builtins, so sorting would have changed it.
+    assert actual_order != sorted(actual_order)
+
+
+def test_plan_up_command_file_args_match_display_order(fresh_manager):
+    plan = fresh_manager.planner.plan("up")
+    up_command = next(c for c in plan.commands if c.phase == "up")
+    file_positions = [i for i, a in enumerate(up_command.args) if a == "--file"]
+    files_in_command = [up_command.args[i + 1] for i in file_positions]
+    assert tuple(files_in_command) == plan.compose_files
+
+
+def test_plan_up_includes_proxy_build_args_but_redacted(fresh_manager, monkeypatch):
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("http_proxy", _SECRET_PROXY_URL)
+
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=True)
+    build_command = next(c for c in plan.commands if c.phase == "build")
+
+    assert "--build-arg" in build_command.args
+    joined = " ".join(build_command.args)
+    assert "super-secret-password" not in joined
+    assert _SECRET_PROXY_URL not in joined
+    assert any(a == "http_proxy=***" for a in build_command.args)
+
+
+def test_plan_restart_never_includes_proxy_build_args(fresh_manager, monkeypatch):
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("http_proxy", _SECRET_PROXY_URL)
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer"], build=True)
+    build_command = next(c for c in plan.commands if c.phase == "build")
+
+    assert "--build-arg" not in build_command.args
+    assert "super-secret-password" not in " ".join(build_command.args)
+
+
+def test_plan_json_never_contains_raw_proxy_secret(fresh_manager, monkeypatch):
+    import json
+    from linktools.cntr.commands.plan import _plan_to_dict
+
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("http_proxy", _SECRET_PROXY_URL)
+
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=True)
+    data = _plan_to_dict(plan)
+    for command in data["commands"]:
+        assert "args" not in command  # only display_args is ever serialized
+    payload = json.dumps(data)
+    assert "super-secret-password" not in payload
+    assert _SECRET_PROXY_URL not in payload
+
+
+def test_plan_text_render_never_contains_raw_proxy_secret(fresh_manager, monkeypatch):
+    from linktools.cntr.commands.plan import render_plan
+
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("http_proxy", _SECRET_PROXY_URL)
+
+    class _CollectingLogger:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, msg):
+            self.messages.append(str(msg))
+
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=True)
+    logger = _CollectingLogger()
+    render_plan(logger, plan)
+    text = "\n".join(logger.messages)
+    assert "super-secret-password" not in text
+    assert _SECRET_PROXY_URL not in text
+
+
+def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager, monkeypatch):
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    plan = fresh_manager.planner.plan("up", names=["portainer"], build=True, pull=False)
+    selection = fresh_manager.compose_operations.select(["portainer"])
+    options = fresh_manager.compose_operations.build_options("up", selection, True, False)
+    expected_tail = tuple(str(a) for a in fresh_manager.compose_runner.build_args(options))
+    build_command = next(c for c in plan.commands if c.phase == "build")
+    assert build_command.args[-len(expected_tail):] == expected_tail
+
+
+def test_plan_restart_options_match_real_restart_options(fresh_manager):
+    """The exact bug this guards against: Planner previously built its own
+    ComposeOptions for restart and forgot include_proxy_build_args=False,
+    letting a restart Plan show proxy args a real restart never sends."""
+    selection = fresh_manager.compose_operations.select(["portainer"])
+    plan_options = fresh_manager.compose_operations.build_options("restart", selection, True, False)
+    assert plan_options.include_proxy_build_args is False
+    assert plan_options.emit_default_pull is False
+
+
+def test_plan_up_options_match_real_up_options(fresh_manager):
+    selection = fresh_manager.compose_operations.select(["portainer"])
+    plan_options = fresh_manager.compose_operations.build_options("up", selection, True, False)
+    assert plan_options.include_proxy_build_args is True
+    assert plan_options.emit_default_pull is True
+
+
+def test_plan_restart_build_tail_matches_real_restart_dispatch(fresh_manager, monkeypatch):
+    """End-to-end: the real ComposeOperations.restart() build-phase argv and
+    the Plan's restart build-command argv must have an identical tail, since
+    both now come from the same build_options()/build_args() call."""
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    recorded = []
+
+    def fake(containers, *args, privilege=None, **kwargs):
+        recorded.append(args)
+
+        class _Proc:
+            def check_call(self):
+                return 0
+
+        return _Proc()
+
+    # Undo this module's autouse fail-stubs: this test exercises the real
+    # restart() dispatch path on purpose, unlike every other test here.
+    from linktools.cntr.runtime.compose import ComposeRunner
+    monkeypatch.setattr(fresh_manager.compose_runner, "stop",
+                        ComposeRunner.stop.__get__(fresh_manager.compose_runner, ComposeRunner))
+    monkeypatch.setattr(fresh_manager.compose_runner, "build",
+                        ComposeRunner.build.__get__(fresh_manager.compose_runner, ComposeRunner))
+    monkeypatch.setattr(fresh_manager.compose_runner, "up",
+                        ComposeRunner.up.__get__(fresh_manager.compose_runner, ComposeRunner))
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
+    monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
+
+    fresh_manager.compose_operations.restart(names=["portainer"], build=True, pull=False)
+    real_build_args = next(args for args in recorded if args and args[0] == "build")
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer"], build=True, pull=False)
+    plan_build_command = next(c for c in plan.commands if c.phase == "build")
+
+    assert plan_build_command.args[-len(real_build_args):] == real_build_args
