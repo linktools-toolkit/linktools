@@ -484,7 +484,7 @@ class BaseEnviron(abc.ABC):
         (the exception propagates out of ``reload_fn`` before either is
         touched).
 
-        Each source's ``base_path`` (spec §29) is the directory its backing
+        Each source's ``base_path`` is the directory its backing
         file lives in, so a ``cast="path"`` field's relative value resolves
         against that config file's own directory, not the process CWD:
         global-file -> ``~/.linktools/``; local-file -> ``local_root`` (or

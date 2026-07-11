@@ -160,6 +160,26 @@ def test_explain_masks_secret_value(monkeypatch):
     assert "***" in str(info["resolved_value"])
 
 
+def test_explain_masks_every_secret_candidate_not_just_the_selected_one(monkeypatch):
+    """A secret field with more than one source holding a value must not
+    leak the raw value of any non-selected candidate either -- only the
+    winning source's value used to be redacted."""
+    monkeypatch.setenv("LT_TOKEN", "env-secret")
+    schema = ConfigSchema().define(
+        ConfigField(name="TOKEN", secret=True, aliases=("OLD_TOKEN",), default="x"))
+    runtime = RuntimeOverrideSource()
+    runtime.set("OLD_TOKEN", "runtime-secret")
+    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), runtime, DefaultSource(schema)])
+    info = r.explain("TOKEN")
+
+    import json
+    payload = json.dumps(info, default=str)
+    assert "env-secret" not in payload
+    assert "runtime-secret" not in payload
+    for candidate in info["all_candidates"]:
+        assert candidate["raw"] == "***"
+
+
 # --------------------------------------------------------------------------- #
 # Cycle detection (§8.10) via Alias provider
 # --------------------------------------------------------------------------- #

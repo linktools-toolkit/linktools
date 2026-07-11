@@ -771,7 +771,7 @@ class Config:
         self._schema.define(field)
         # A schema change can affect any resolution that depends on this
         # field's aliases/provider/secret/cast, or on another field aliasing
-        # it -- clear the whole memo, not just field.key (spec §26).
+        # it -- clear the whole memo, not just field.key.
         self._resolver.clear_memo()
         return self
 

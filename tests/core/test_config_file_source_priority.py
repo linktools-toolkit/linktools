@@ -139,3 +139,55 @@ def test_reload_clears_runtime_when_requested(tmp_path):
     config.set("KEY", "runtime")
     config.reload(clear_runtime=True)
     assert config.get("KEY") == "fallback"
+
+
+# -- cast="path" resolves relative to the winning FileSource's base_path ----
+
+def test_relative_path_field_resolves_against_local_file_base_path(tmp_path):
+    store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
+    schema = ConfigSchema(allow_unknown=True)
+    local_root = tmp_path / "repo-root"
+    local_source = FileSource({"DATA_DIR": "./data"}, name="local-file", base_path=str(local_root))
+    config = Config(None, schema, sources=[
+        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        local_source, DefaultSource(schema),
+    ])
+    config.define(ConfigField(name="DATA_DIR", cast="path"))
+
+    assert config.get("DATA_DIR") == str((local_root / "data").resolve())
+
+
+def test_relative_path_field_resolves_against_global_file_base_path(tmp_path):
+    store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
+    schema = ConfigSchema(allow_unknown=True)
+    global_root = tmp_path / "home" / ".linktools"
+    local_source = FileSource({}, name="local-file", base_path=str(tmp_path / "cwd"))
+    global_source = FileSource({"DATA_DIR": "./data"}, name="global-file", base_path=str(global_root))
+    config = Config(None, schema, sources=[
+        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        local_source, global_source, DefaultSource(schema),
+    ])
+    config.define(ConfigField(name="DATA_DIR", cast="path"))
+
+    assert config.get("DATA_DIR") == str((global_root / "data").resolve())
+
+
+def test_absolute_path_field_ignores_base_path(tmp_path):
+    store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
+    schema = ConfigSchema(allow_unknown=True)
+    absolute = str(tmp_path / "elsewhere")
+    local_source = FileSource({"DATA_DIR": absolute}, name="local-file", base_path=str(tmp_path / "repo"))
+    config = Config(None, schema, sources=[
+        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        local_source, DefaultSource(schema),
+    ])
+    config.define(ConfigField(name="DATA_DIR", cast="path"))
+
+    assert config.get("DATA_DIR") == absolute
+
+
+def test_file_source_replace_updates_data_and_base_path():
+    source = FileSource({"K": "v1"}, name="local-file", base_path="/old")
+    source.replace({"K": "v2"}, base_path="/new")
+    assert source.get("K") == ("v2", True)
+    assert source.base_path == "/new"

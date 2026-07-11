@@ -112,6 +112,38 @@ def test_requires_invalid_specifier_raises(tmp_path):
         loader.load(local_root=tmp_path / "repo")
 
 
+# -- blank/whitespace keys ---------------------------------------------------
+
+def test_environment_empty_key_raises(tmp_path):
+    loader = _loader(tmp_path, {"environment": {"": "x"}})
+    with pytest.raises(ConfigValidationError):
+        loader.load(local_root=tmp_path / "repo")
+
+
+def test_environment_whitespace_only_key_raises(tmp_path):
+    loader = _loader(tmp_path, {"environment": {"   ": "x"}})
+    with pytest.raises(ConfigValidationError):
+        loader.load(local_root=tmp_path / "repo")
+
+
+def test_environment_key_with_leading_or_trailing_space_raises(tmp_path):
+    loader = _loader(tmp_path, {"environment": {" KEY": "x"}})
+    with pytest.raises(ConfigValidationError):
+        loader.load(local_root=tmp_path / "repo")
+
+
+def test_requires_empty_key_raises(tmp_path):
+    loader = _loader(tmp_path, {"requires": {"": ">=1.0"}})
+    with pytest.raises(ConfigValidationError):
+        loader.load(local_root=tmp_path / "repo")
+
+
+def test_requires_whitespace_only_value_raises(tmp_path):
+    loader = _loader(tmp_path, {"requires": {"linktools-cntr": "   "}})
+    with pytest.raises(ConfigError):
+        loader.load(local_root=tmp_path / "repo")
+
+
 def test_invalid_json_raises(tmp_path):
     loader = _loader(tmp_path, "{not json")
     with pytest.raises(ConfigError):

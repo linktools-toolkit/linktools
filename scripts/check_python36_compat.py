@@ -82,8 +82,11 @@ def _annotation_nodes(tree):
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             args = node.args
+            # `posonlyargs` was added to the ast.arguments grammar in Python
+            # 3.8 (PEP 570); this scanner itself runs under Python 3.6 in CI,
+            # where the attribute does not exist at all.
             candidates = (
-                list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+                list(getattr(args, "posonlyargs", ())) + list(args.args) + list(args.kwonlyargs)
                 + ([args.vararg] if args.vararg else [])
                 + ([args.kwarg] if args.kwarg else [])
             )
@@ -157,7 +160,7 @@ def scan_file(path):
             violations.append(_Violation(str(path), node.lineno, "except-star",
                                          "`except*` requires Python 3.11+"))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.args.posonlyargs:
+            if getattr(node.args, "posonlyargs", None):
                 violations.append(_Violation(str(path), node.lineno, "positional-only-params",
                                              "`/` positional-only parameters require Python 3.8+"))
         elif isinstance(node, ast.ImportFrom):
