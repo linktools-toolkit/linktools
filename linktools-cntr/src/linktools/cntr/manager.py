@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from linktools.core import Environ
     from .registry.resolver import ContainerResolver
     from .registry.loader import ContainerLoader
-    from .operations.compose import ComposeOperations
+    from .operations import ComposeOperations
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
     from .runtime.structured import StructuredCommandRunner
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
     from .repo.service import RepoService
-    from .artifacts.index import ArtifactIndex
+    from .artifacts import ArtifactIndex
     from .execution.planner import ExecutionPlanner
 
 
@@ -228,7 +228,7 @@ class ContainerManager:
     def compose_operations(self) -> "ComposeOperations":
         # Root up/restart/down and the `compose` command both dispatch
         # through this so they can never drift from each other.
-        from .operations.compose import ComposeOperations
+        from .operations import ComposeOperations
         return ComposeOperations(self)
 
     @cached_property
@@ -258,7 +258,7 @@ class ContainerManager:
 
     @cached_property
     def artifact_index(self) -> "ArtifactIndex":
-        from .artifacts.index import ArtifactIndex
+        from .artifacts import ArtifactIndex
         return ArtifactIndex(self)
 
     @cached_property

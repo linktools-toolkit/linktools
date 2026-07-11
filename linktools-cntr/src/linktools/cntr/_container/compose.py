@@ -100,7 +100,7 @@ def get_services(container: "BaseContainer") -> "dict[str, dict[str, Any]]":
 
 
 def _record_artifact(container: "BaseContainer", destination, kind: str, content: str, source_names) -> None:
-    from ..artifacts.index import sha256_of
+    from ..artifacts import sha256_of
     manager = container.manager
     rel_path = os.path.relpath(str(destination), str(manager.data_path))
     source = None
@@ -135,7 +135,7 @@ def _git_revision(manager: "ContainerManager", repo_path) -> "str | None":
 def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
     destination = None
     if container.docker_compose:
-        from ..artifacts.writer import atomic_write_text_if_changed
+        from ..artifacts import atomic_write_text_if_changed
         destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
         destination.parent.mkdir(parents=True, exist_ok=True)
         # safe_dump (not dump) so non-serializable values raise instead of
@@ -149,7 +149,7 @@ def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
 def write_docker_file(container: "BaseContainer") -> "Path | None":
     destination = None
     if container.docker_file:
-        from ..artifacts.writer import atomic_write_text_if_changed
+        from ..artifacts import atomic_write_text_if_changed
         destination = utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
         destination.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text_if_changed(destination, container.docker_file)

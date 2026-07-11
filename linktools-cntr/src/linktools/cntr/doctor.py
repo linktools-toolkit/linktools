@@ -252,7 +252,7 @@ class Doctor:
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
         """Report an indexed artifact whose container no longer produces it.
         Report-only: never deletes the stale index entry."""
-        from .artifacts.index import collect_candidates
+        from .artifacts import collect_candidates
         findings: "list[Finding]" = []
         indexed = self.manager.artifact_index.load()
         if not indexed:

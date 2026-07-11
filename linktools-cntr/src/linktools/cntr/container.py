@@ -15,11 +15,10 @@ from linktools.rich import choose
 from linktools.runtime import lazy_load
 from linktools.types import MISSING
 from linktools.utils import get_md5
+from ._container import actions as _actions
 from ._container import compose as _compose
-from ._container import exec as _exec
 from ._container import template as _template
-from ._container.expose import ExposeCategory, ExposeLink, ExposeMixin
-from ._container.nginx import NginxMixin
+from ._container.expose import ExposeCategory, ExposeLink, ExposeMixin, NginxMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -231,22 +230,22 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     def on_exec_up(self, build: bool = True, pull: bool = False):
-        return _exec.up(self, build=build, pull=pull)
+        return _actions.up(self, build=build, pull=pull)
 
     @subcommand("restart", help="restart this container")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     def on_exec_restart(self, build: bool = True, pull: bool = False):
-        return _exec.restart(self, build=build, pull=pull)
+        return _actions.restart(self, build=build, pull=pull)
 
     @subcommand("down", help="stop this container")
     def on_exec_down(self):
-        return _exec.down(self)
+        return _actions.down(self)
 
     @subcommand("config", help="show docker compose config for this container")
     def on_exec_config(self):
-        return _exec.config(self)
+        return _actions.config(self)
 
     @subcommand("shell", help="exec into container using command sh")
     @subcommand_argument("-c", "--command", help="shell command")
@@ -254,7 +253,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
-        return _exec.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
+        return _actions.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
 
     @subcommand("logs", help="fetch the logs of container")
     @subcommand_argument("-f", "--follow",
@@ -271,7 +270,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_exec_logs(self, follow: bool = True, tail: str = None, timestamps: bool = True,
                      since: str = None, until: str = None,
                      service_name: str = None):
-        return _exec.logs(self, follow=follow, tail=tail, timestamps=timestamps,
+        return _actions.logs(self, follow=follow, tail=tail, timestamps=timestamps,
                           since=since, until=until, service_name=service_name)
 
     @subcommand("mount", help="mount path")
@@ -280,12 +279,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("-p", "--permission", choices=("ro", "rw"))
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None):
-        return _exec.mount(self, source=source, target=target, permission=permission, service_name=service_name)
+        return _actions.mount(self, source=source, target=target, permission=permission, service_name=service_name)
 
     @subcommand("umount", help="unmount path")
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_unmount_file(self, service_name: str = None):
-        return _exec.umount(self, service_name=service_name)
+        return _actions.umount(self, service_name=service_name)
 
     def _resolve_config_key(self, key: "ConfigKeyType") -> str:
         """Accept either a plain field name or a ``ConfigField`` to define.

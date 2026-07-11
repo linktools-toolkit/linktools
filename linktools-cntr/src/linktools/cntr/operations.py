@@ -11,15 +11,15 @@ drift from each other.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..container import ContainerError
-from ..context import EventContext
-from ..execution.report import get_records, record_phase, render_report
-from ..runtime.compose import ComposeOptions
+from .container import ContainerError
+from .context import EventContext
+from .execution.model import get_records, record_phase, render_report
+from .runtime.compose import ComposeOptions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from ..container import BaseContainer
-    from ..manager import ContainerManager
+    from .container import BaseContainer
+    from .manager import ContainerManager
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,7 @@ import os
 
 import pytest
 
-from linktools.cntr.artifacts.index import ArtifactIndex, sha256_of
-from linktools.cntr.artifacts.writer import atomic_write_text_if_changed
+from linktools.cntr.artifacts import ArtifactIndex, atomic_write_text_if_changed, sha256_of
 
 
 def test_first_write_creates_file_and_returns_true(tmp_path):

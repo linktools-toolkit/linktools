@@ -6,7 +6,7 @@ on_command_up/restart/down (never a non-int, non-None value that could
 reach sys.exit())."""
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
-from linktools.cntr.execution.report import ExecutionRecord, get_records
+from linktools.cntr.execution.model import ExecutionRecord, get_records
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 

@@ -14,7 +14,7 @@ artifact or persisted state.
 import os
 from typing import TYPE_CHECKING
 
-from ..artifacts.index import collect_candidates, sha256_of
+from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
 from ..lifecycle.hooks import HookPhase
 from ..runtime.structured import redact_command

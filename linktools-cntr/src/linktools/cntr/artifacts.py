@@ -1,25 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generated Artifact Index: ``<data_path>/generated/
-index.json`` records which generated file came from which container/source
-and its content hash, for Plan/Doctor to reason about drift later.
+"""Generated Artifact Index: ``<data_path>/generated/index.json`` records
+which generated file came from which container/source and its content hash,
+for Plan/Doctor to reason about drift later. Also the atomic writer every
+generated-file write path (this module, the compose/Dockerfile writers)
+shares.
 
-Never records config values, secrets, or full template context -- only a
-relative path, kind, owning container, sha256 and (best-effort) source path.
-Never deletes stale entries/files itself; it only records.
+The index never records config values, secrets, or full template context --
+only a relative path, kind, owning container, sha256 and (best-effort)
+source path. It never deletes stale entries/files itself; it only records.
 """
 import hashlib
 import json
 import os
+import stat
 from typing import TYPE_CHECKING
 
-from .writer import atomic_write_text_if_changed
+from linktools import utils
 
 if TYPE_CHECKING:
     from typing import Any
-    from ..manager import ContainerManager
+    from linktools.types import PathType
+    from .manager import ContainerManager
 
 INDEX_SCHEMA_VERSION = 1
+
+
+def atomic_write_text_if_changed(path: "PathType", content: str, encoding: str = "utf-8") -> bool:
+    """Write ``content`` to ``path`` atomically. Return True iff it changed.
+
+    ``linktools.utils.atomic_write`` replaces the target with a freshly
+    created temp file (``tempfile.mkstemp``, mode 0600), which would
+    otherwise silently narrow an existing file's permissions on every
+    regeneration; the previous mode is restored here for an existing target.
+    """
+    path = str(path)
+    original_mode = None
+    if os.path.exists(path):
+        with open(path, "r", encoding=encoding) as f:
+            existing = f.read()
+        if existing == content:
+            return False
+        original_mode = stat.S_IMODE(os.stat(path).st_mode)
+    utils.atomic_write(path, content, encoding=encoding)
+    if original_mode is not None:
+        os.chmod(path, original_mode)
+    return True
 
 
 def sha256_of(content: str) -> str:
@@ -36,7 +62,6 @@ def collect_candidates(manager: "ContainerManager", containers) -> "dict[str, tu
     destination or content differently.
     """
     import yaml
-    from linktools import utils
 
     candidates: "dict[str, tuple[str, str, str]]" = {}
     for container in containers:
