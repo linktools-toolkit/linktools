@@ -2,6 +2,17 @@
 
 Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一的容器生命周期管理（命令前缀 `ct-cntr`）。
 
+## 重大变更（迁移说明）
+
+- `ct-cntr compose` 不再是命令组，`compose up/restart/down/status/config/validate` 全部删除，无兼容 alias：
+  - `ct-cntr compose up/restart/down/status` → `ct-cntr up/restart/down/status`
+  - `ct-cntr compose config` → `ct-cntr compose`
+  - `ct-cntr compose validate` → `ct-cntr compose --check`
+- Compose 中用户自己写的相对路径（`build`/`build.context`/`env_file`/`volumes` 短语法）不再被自动改写为绝对路径；仓库作者需要绝对路径时应在模板中显式使用 `{{ SOURCE_PATH }}`/`{{ APP_DATA_PATH }}` 等变量。
+- `ct-cntr status` 改为基于 `docker compose ... ps --quiet` + `docker inspect` 获取真实状态，不再依赖 `docker compose ps --format json` 的输出。
+- 损坏的 `container.lock.json` 现在会明确报错（`lock --check`/`diff` 非零退出，`doctor` 报告 `lock.invalid`），不再被当成“无锁文件”。
+- `.linktools.json` 中声明的 `docker-engine`/`docker-compose` 版本要求现在会实际阻断 `up`/`restart`/`compose`/`lock`/`plan up`/`plan restart`（`down`/`status`/`doctor`/`plan down` 不受影响）。
+
 ## 开始使用
 
 以基于 Debian 的系统为例，先安装运行环境：
@@ -175,13 +186,14 @@ ct-cntr diff          # 展示 repo/容器/生成文件的 drift 详情
 #######################
 
 ct-cntr doctor --json
-ct-cntr doctor --check    # 存在 WARN 级别 finding 时非零退出
-ct-cntr doctor --runtime  # 额外校验 compose config 及仓库声明的运行时版本要求
+ct-cntr doctor --check        # 存在 WARN 或更严重（ERROR）级别 finding 时非零退出
+ct-cntr doctor --runtime      # 额外校验 compose config 及仓库声明的运行时版本要求
+ct-cntr doctor --sudo-prompt  # 允许运行时探测交互式输入 sudo 密码（默认 sudo -n，不阻塞）
 ```
 
 ### 仓库清单（`.linktools.json`）
 
-容器仓库可以在根目录放置一个 `.linktools.json`，声明仓库自身的名称、版本以及最低 `linktools-cntr`/Python 版本要求。缺失该文件的仓库按“遗留仓库”处理，行为不变；版本不满足要求的仓库会在 `repo add`/加载前被拒绝，其中的 `container.py` 不会被执行。
+容器仓库可以在根目录放置一个 `.linktools.json`，声明仓库自身的名称、版本以及最低 `linktools-cntr`/Python/`docker-engine`/`docker-compose` 版本要求。缺失该文件的仓库按“遗留仓库”处理，行为不变；`linktools-cntr`/Python 版本不满足要求的仓库会在 `repo add`/加载前被拒绝，其中的 `container.py` 不会被执行。
 
 ```json
 {
@@ -191,14 +203,18 @@ ct-cntr doctor --runtime  # 额外校验 compose config 及仓库声明的运行
   "version": "1.2.0",
   "requires": {
     "linktools-cntr": ">=0.10.0,<1.0",
-    "python": ">=3.6"
+    "python": ">=3.6",
+    "docker-compose": ">=2.20"
   }
 }
 ```
 
+`docker-engine`/`docker-compose` 版本要求在实际运行时校验：不满足时会阻断 `up`/`restart`/`compose`/`compose --check`/`lock`/`plan up`/`plan restart`（聚合报告所有涉及的仓库后一次性失败），但不阻断 `down`/`status`/`doctor`/`plan down`——版本约束不应妨碍停止或诊断已运行的容器。
+
 ```bash
 ct-cntr repo status --runtime
 ct-cntr repo validate --json
+ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意仓库更新失败或不兼容都会让命令非零退出
 ```
 
 ## 容器事件时序
