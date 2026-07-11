@@ -203,13 +203,6 @@ class Command(StatusCommands, BaseCommandGroup):
         else:
             for finding in findings:
                 self.logger.info(f"[{finding.severity}] {finding.message}")
-            self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
-        # Default `doctor` exit behavior is unchanged; only --check turns
-        # findings into a non-zero exit.
+            self.logger.info("[INFO] No change has been made.")
         if check and any(f.severity == WARN for f in findings):
             raise ContainerError("Doctor found WARN-or-worse issues")
-
-    def _make_context(self, commands, names):
-        # Kept as a thin wrapper over the manager facade so external
-        # subclasses/tests calling Command._make_context keep working.
-        return _shared.manager.create_event_context(commands, names=names)

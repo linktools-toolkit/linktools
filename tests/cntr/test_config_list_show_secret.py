@@ -8,13 +8,13 @@ leak one into a log file/CI output by accident) -- but that also means
 the user explicitly wants to see it. --show-secret opts out for this one
 command by printing directly instead of going through the logger.
 """
-import linktools.cntr.__main__ as cntr_main
+from linktools.cntr.commands.config import ConfigCommand
 import linktools.cntr.commands._shared as cntr_shared
 
 
 def test_show_secret_prints_real_value_bypassing_redaction(monkeypatch, fresh_manager, capsys):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    config_command = cntr_main.ConfigCommand()
+    config_command = ConfigCommand()
 
     fresh_manager.env_config.persist("DOCKER_APP_PATH", "/srv/app")
     config_command.on_command_list(names=[], show_secret=True)
@@ -28,7 +28,7 @@ def test_show_secret_prints_real_value_bypassing_redaction(monkeypatch, fresh_ma
 def test_default_still_redacts_via_logger(monkeypatch, fresh_manager, caplog):
     import logging
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    config_command = cntr_main.ConfigCommand()
+    config_command = ConfigCommand()
 
     fresh_manager.env_config.persist("SOME_PASSWORD", "hunter2")
     with caplog.at_level(logging.INFO):
@@ -41,7 +41,7 @@ def test_default_still_redacts_via_logger(monkeypatch, fresh_manager, caplog):
 
 def test_show_secret_reveals_the_actual_password(monkeypatch, fresh_manager, capsys):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    config_command = cntr_main.ConfigCommand()
+    config_command = ConfigCommand()
 
     fresh_manager.env_config.persist("SOME_PASSWORD", "hunter2")
     config_command.on_command_list(names=[], show_secret=True)

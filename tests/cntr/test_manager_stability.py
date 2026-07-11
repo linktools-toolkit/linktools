@@ -84,7 +84,7 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
 
 MANAGER_API = (
     "containers",
-    "debug", "prepare_installed_containers", "create_event_context",
+    "debug", "prepare_installed_containers",
     "project_name", "hooks", "start_hooks", "stop_hooks",
     "user", "uid", "gid", "system", "machine", "host",
     "container_type", "container_host",
@@ -108,15 +108,14 @@ _REMOVED_MANAGER_WRAPPERS = (
     "get_all_repos", "add_repo", "update_repos", "remove_repo",
     "get_running_containers", "_load_running_containers", "_dump_running_containers",
     "_callback",
+    # Existed only to back Command._make_context's compatibility wrapper
+    # (also removed); no formal caller ever needed it directly.
+    "create_event_context",
+    "lock_store",
 )
 
 # name -> (descriptor type, [(param name, kind, default)])
-_METHOD_SIGNATURES = {
-    "create_event_context": [
-        ("commands", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
-        ("names", inspect.Parameter.POSITIONAL_OR_KEYWORD, None),
-    ],
-}
+_METHOD_SIGNATURES = {}
 
 # name -> expected class-level descriptor type
 _DESCRIPTOR_TYPES = {

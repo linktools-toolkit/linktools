@@ -41,10 +41,8 @@ from . import _migrate
 from .container import BaseContainer, ContainerError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from typing import Any
     from linktools.core import Environ
-    from .context import EventContext
     from .registry.resolver import ContainerResolver
     from .registry.loader import ContainerLoader
     from .operations.compose import ComposeOperations
@@ -326,20 +324,5 @@ class ContainerManager:
                 self.logger.debug(f"Load exposes for {container.name}")
         return containers
 
-    def create_event_context(self, commands, names: "Iterable[str] | None" = None) -> "EventContext":
-        # Kept as the single place that builds a plain-filter EventContext (no
-        # ComposeSelection validation) so external subclasses/tests calling
-        # Command._make_context keep their exact prior behavior.
-        from .context import EventContext
-        context = EventContext()
-        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
-        context.containers = self.prepare_installed_containers()
-        if not names:
-            context.target_containers = context.containers
-            context.is_full_containers = True
-        else:
-            context.target_containers = [c for c in context.containers if c.name in names]
-            context.is_full_containers = False
-        return context
 
 

@@ -11,7 +11,7 @@ force-resolved by `config list` merely because it's *possible* to configure,
 prompting for it in a real terminal even though the user never asked to set
 it. `persisted_keys()` (only already-persisted keys) fixes this.
 """
-import linktools.cntr.__main__ as cntr_main
+from linktools.cntr.commands.config import ConfigCommand
 import linktools.cntr.commands._shared as cntr_shared
 
 
@@ -37,7 +37,7 @@ def test_config_list_does_not_prompt_for_unconfigured_manager_fields(monkeypatch
 
     monkeypatch.setattr(rich, "prompt", fail_if_docker_download_path)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    config_command = cntr_main.ConfigCommand()
+    config_command = ConfigCommand()
 
     # Must not raise.
     config_command.on_command_list(names=[])
@@ -46,7 +46,7 @@ def test_config_list_does_not_prompt_for_unconfigured_manager_fields(monkeypatch
 def test_config_list_still_shows_persisted_manager_fields(monkeypatch, fresh_manager, capsys):
     fresh_manager.env_config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    config_command = cntr_main.ConfigCommand()
+    config_command = ConfigCommand()
 
     config_command.on_command_list(names=[], show_secret=True)
     out = capsys.readouterr().out

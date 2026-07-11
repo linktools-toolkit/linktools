@@ -86,10 +86,11 @@ def test_cli_up_pull_true_uses_always(monkeypatch, fresh_manager):
 
 def test_only_one_manager_singleton_backs_the_cli():
     import linktools.cntr.__main__ as main_module
+    import linktools.cntr.commands._shared as cntr_shared
     from linktools.cntr.manager import ContainerManager
 
     assert isinstance(main_module.command, main_module.Command)
-    assert isinstance(main_module.manager, ContainerManager)
+    assert isinstance(cntr_shared.manager, ContainerManager)
 
 
 def test_root_command_mounts_subcommands_in_order():

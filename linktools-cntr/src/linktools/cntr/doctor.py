@@ -82,8 +82,7 @@ def scan_compose(container_name: str, compose: "dict[str, Any] | None") -> "list
         if isinstance(image, str) and _image_uses_latest(image):
             findings.append(Finding(
                 WARN,
-                f"{where} uses image tag `latest`. Kept for compatibility; "
-                f"consider pinning an explicit tag.",
+                f"{where} uses image tag `latest`. Consider pinning an explicit tag.",
                 code=SECURITY_LATEST_IMAGE, component=where))
 
         for volume in config.get("volumes") or []:
@@ -101,7 +100,7 @@ def scan_compose(container_name: str, compose: "dict[str, Any] | None") -> "list
                 findings.append(Finding(
                     WARN,
                     f"{where} sets NODE_TLS_REJECT_UNAUTHORIZED=0, disabling TLS "
-                    f"verification. Kept for compatibility; consider removing it.",
+                    f"verification. Consider removing it.",
                     code=SECURITY_TLS_DISABLED, component=where))
     return findings
 
