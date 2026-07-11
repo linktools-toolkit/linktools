@@ -118,7 +118,7 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
 
 
 def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
-    # Phase 1 design note refactoring: PolicyCapability / MiddlewareCapability
+    # PolicyCapability / MiddlewareCapability
     # carry no mutable per-Run field at all -- the per-Run ToolContext reaches
     # them via pydantic-ai DI (ctx.deps.tool_context). A run leaves the
     # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).
@@ -133,7 +133,7 @@ def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
     assert not hasattr(compiled.policy_capability, "current_context")
 
 
-# -- Phase 5: Memory + Knowledge prompt injection ---------------------------
+# -- Memory + Knowledge prompt injection ------------------------------------
 # FunctionModel sees the FULL prompt pydantic-ai was called with as a
 # UserPromptPart inside the last ModelRequest.parts. An echo model returns that
 # text (wrapped for pydantic-ai's default dict output validator) so the test can
@@ -250,7 +250,7 @@ def test_empty_memory_store_injects_no_memory_section(tmp_path):
     assert "unmatched-query-token" in str(result.output)
 
 
-# --- GAP-08: ModelPolicy.timeout_seconds + max_tokens enforcement -----------
+# --- ModelPolicy.timeout_seconds + max_tokens enforcement -------------------
 
 def test_run_model_timeout_transitions_run_to_failed(tmp_path):
     """ModelPolicy.timeout_seconds wraps agent.run in asyncio.wait_for; a model
@@ -356,14 +356,14 @@ def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
 
     rec = asyncio.run(runner._run_store.get("run-ok"))
     assert rec.status == RunStatus.SUCCEEDED
-    # token_usage is now populated from run_result.usage (GAP-08 accounting hook).
+    # token_usage is now populated from run_result.usage (the accounting hook).
     assert result.token_usage.get("input_tokens") == 10
     assert result.token_usage.get("output_tokens") == 5
 
 
 def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
     """Defaults (timeout_seconds=None, max_tokens=None) must reproduce the
-    pre-GAP-08 lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
+    baseline lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
     compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
     compiled = asyncio.run(compiler.compile(AgentSpec(
         id="agent-def", name="a", model=ModelPolicy(primary="test-model"),

@@ -33,11 +33,21 @@ class DefaultSecurityEventSanitizer:
         result = self._value(event)
         try:
             serialized = json.dumps(result, default=str, ensure_ascii=False)
-            if len(serialized.encode("utf-8")) > self._MAX_PAYLOAD:
-                result = {"event_type": type(event).__name__,
-                          "payload": "<redacted: payload exceeded limit>"}
+            size = len(serialized.encode("utf-8"))
         except Exception:
-            pass
+            # If the sanitized value cannot be sized it cannot overflow either;
+            # return it as-is rather than synthesizing a placeholder.
+            return result
+        if size > self._MAX_PAYLOAD:
+            # Return a valid EventPayload dataclass (not a dict): FileEventStore
+            # persists via dataclasses.asdict and reconstructs by class name, so a
+            # dict here would TypeError and break the security audit trail.
+            from ..events.payloads import TruncatedSecurityEvent
+            return TruncatedSecurityEvent(
+                original_event_type=type(event).__name__,
+                reason="payload_too_large",
+                original_size_bytes=size,
+            )
         return result
 
     def _value(self, value: Any, key: str | None = None) -> Any:

@@ -6,7 +6,7 @@ Tool name is "terminal" (not "bash") because CommandRule (scenario) checks
 `request.tool_name != "terminal"` to decide whether to inspect the command at
 all -- using any other tool name would never reach the denied-pattern check.
 
-Phase 1 design note refactoring: the per-Run ToolContext reaches the capability
+The per-Run ToolContext reaches the capability
 via pydantic-ai dependency injection -- ``deps=AgentDependencies(tool_context=...)``
 on ``agent.run()`` becomes ``ctx.deps.tool_context`` inside the hook. No mutable
 ``current_context`` field is set on the capability anymore."""
@@ -77,7 +77,7 @@ async def test_allowed_tool_call_executes_normally():
 
 @pytest.mark.asyncio
 async def test_capability_has_no_current_context_field():
-    # Phase 1 refactoring: the mutable ``current_context`` field is gone
+    # The mutable ``current_context`` field is gone
     # entirely. The per-Run ToolContext arrives via pydantic-ai dependency
     # injection (ctx.deps.tool_context), so a fresh capability has no such
     # attribute and is identical before/after a run -- the concurrency-safety

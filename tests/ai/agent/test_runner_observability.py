@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for AgentRunner observability integration (Phase 6 scenario).
+"""Tests for AgentRunner observability integration.
 
 Verifies that when ``observability`` and ``metrics`` are wired into AgentRunner:
 - a successful run opens exactly one outer "agent.run" span and one nested

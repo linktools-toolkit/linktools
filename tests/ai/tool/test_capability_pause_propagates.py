@@ -14,7 +14,7 @@ directly: if ``RunPaused`` reaches the caller of ``before_tool_execute``,
 propagation holds; if it gets translated to ``SkipToolExecution``, the pause
 signal is lost (the bug this test guards against).
 
-Phase 1 design note refactoring: the per-Run ToolContext now arrives via
+The per-Run ToolContext now arrives via
 ``ctx.deps.tool_context`` (pydantic-ai dependency injection), not a mutable
 ``current_context`` field. The RunContext stub below carries a real
 ``AgentDependencies(tool_context=...)`` on its ``.deps``."""
@@ -88,7 +88,7 @@ async def test_run_paused_propagates_through_before_tool_execute():
 async def test_run_paused_propagates_with_distinct_context_per_call():
     """Propagation holds for any per-Run ToolContext supplied via deps -- the
     capability does not synthesize a fallback that swallows ``RunPaused``.
-    (Phase 1 refactoring note: with deps-driven DI there is no "unset
+    (With deps-driven DI there is no "unset
     current_context" case -- every real Run supplies one. This test exercises a
     distinct context to confirm the propagation invariant is per-call.)"""
     executor = _ExecutorThatPauses(run_id="r2", approval_id="a2")

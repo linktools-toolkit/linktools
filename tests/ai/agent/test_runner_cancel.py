@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GAP-16: AgentRunner CancelledError handling. When the caller cancels the
+"""AgentRunner CancelledError handling. When the caller cancels the
 asyncio.Task driving runner.run(), CancelledError surfaces at the current await
 point inside the lifecycle try/except. The handler transitions the RunRecord to
 CANCELLED (best-effort) and re-raises so the asyncio machinery observes the

@@ -33,6 +33,43 @@ def parse_idempotency_strategy(value: "str | IdempotencyStrategy | None") -> "Id
         raise ToolPolicyResolutionError(
             f"invalid idempotency strategy: {value!r}") from exc
 
+
+def validate_idempotency_policy(
+    *,
+    idempotent: "bool | None",
+    strategy: "IdempotencyStrategy | None",
+    key_field: "str | None",
+    effective: bool,
+) -> None:
+    """Single source of truth for the idempotency-field combination rules, shared
+    by the registry parser and both policy dataclasses so the three layers cannot
+    drift (a missing business_key key_field used to pass declaration and only
+    surface on the first tool call).
+
+    ``effective`` distinguishes the tri-state declaration layer (ResolvedToolPolicy)
+    from the finalized concrete layer (EffectiveToolPolicy). EXACT_CALL is the
+    legitimate default strategy of a non-idempotent finalized policy, so it is not
+    treated as a contradictory strategy at the effective layer; an explicitly
+    declared EXACT_CALL on an idempotent=False declaration still is."""
+    if key_field is not None:
+        key_field = key_field.strip()
+    if strategy == IdempotencyStrategy.BUSINESS_KEY:
+        if idempotent is False:
+            raise ValueError("business_key requires idempotent=true")
+        if effective and idempotent is not True:
+            raise ValueError("effective business_key policy requires idempotent=true")
+        if not key_field:
+            raise ValueError("business_key requires idempotency_key_field")
+    if key_field and strategy != IdempotencyStrategy.BUSINESS_KEY:
+        raise ValueError("idempotency_key_field is only valid for business_key")
+    if idempotent is False and strategy is not None:
+        # idempotent=False + EXACT_CALL is the normal finalized non-idempotent
+        # policy (EXACT_CALL is finalize_policy()'s fallback). At the declaration
+        # layer an explicit EXACT_CALL still contradicts idempotent=False.
+        if not (effective and strategy == IdempotencyStrategy.EXACT_CALL):
+            raise ValueError("idempotency_strategy requires idempotent=true")
+
+
 if TYPE_CHECKING:
     from ..run.context import RunContext
 
@@ -61,17 +98,18 @@ class ResolvedToolPolicy:
             raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
         strategy = parse_idempotency_strategy(self.idempotency_strategy)
         object.__setattr__(self, "idempotency_strategy", strategy)
+        key_field = self.idempotency_key_field
+        if key_field is not None:
+            key_field = key_field.strip() or None
+            object.__setattr__(self, "idempotency_key_field", key_field)
         if self.schema_version is not None:
             version = self.schema_version.strip()
             if not version:
                 raise ValueError("schema_version must be non-empty")
             object.__setattr__(self, "schema_version", version)
-        if strategy == IdempotencyStrategy.BUSINESS_KEY and self.idempotent is False:
-            raise ValueError("business_key requires idempotent=True")
-        if strategy == IdempotencyStrategy.EXACT_CALL and self.idempotency_key_field is not None:
-            raise ValueError("idempotency_key_field requires business_key")
-        if self.idempotent is False and (strategy is not None or self.idempotency_key_field is not None):
-            raise ValueError("idempotency configuration requires idempotent=True")
+        validate_idempotency_policy(
+            idempotent=self.idempotent, strategy=strategy,
+            key_field=key_field, effective=False)
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
@@ -95,15 +133,18 @@ class EffectiveToolPolicy:
         strategy = parse_idempotency_strategy(self.idempotency_strategy)
         if strategy is None:
             strategy = IdempotencyStrategy.EXACT_CALL
-        if self.idempotent is False and strategy != IdempotencyStrategy.EXACT_CALL:
-            raise ValueError("non-idempotent policy cannot select business_key")
-        if strategy == IdempotencyStrategy.EXACT_CALL and self.idempotency_key_field is not None:
-            raise ValueError("idempotency_key_field requires business_key")
+        key_field = self.idempotency_key_field
+        if key_field is not None:
+            key_field = key_field.strip() or None
+            object.__setattr__(self, "idempotency_key_field", key_field)
         version = self.schema_version.strip()
         if not version:
             raise ValueError("schema_version must be non-empty")
         object.__setattr__(self, "schema_version", version)
         object.__setattr__(self, "idempotency_strategy", strategy)
+        validate_idempotency_policy(
+            idempotent=self.idempotent, strategy=strategy,
+            key_field=key_field, effective=True)
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 

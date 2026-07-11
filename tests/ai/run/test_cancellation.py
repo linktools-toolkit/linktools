@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 3A (design note contract): CancellationToken behavior. The token is the
+"""CancellationToken behavior. The token is the
 cooperative-cancellation signal checked at execution points (before/after the
 model call). These tests cover the three surface methods -- ``cancel``,
 ``is_cancelled``, ``raise_if_cancelled`` -- and the idempotency contract."""

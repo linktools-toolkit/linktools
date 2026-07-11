@@ -80,7 +80,7 @@ def _make_model(output_text: str) -> FunctionModel:
 
 def _make_model_with_usage(output_text: str, *, input_tokens: int, output_tokens: int) -> FunctionModel:
     """Variant of _make_model that also reports token usage on each response --
-    needed for GAP-09 max_total_tokens enforcement (the swarm accumulates
+    needed for max_total_tokens enforcement (the swarm accumulates
     RunResult.token_usage which AgentRunner populates from run_result.usage)."""
     from pydantic_ai.usage import RunUsage
 
@@ -613,7 +613,7 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
         asyncio.run(_resume())
 
 
-# --- 5. SwarmLimits.timeout_seconds wraps strategy.run (GAP-09) -------------
+# --- 5. SwarmLimits.timeout_seconds wraps strategy.run ----------------------
 
 def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
     """SwarmLimits.timeout_seconds wraps strategy.run(ctx) in asyncio.wait_for.
@@ -739,7 +739,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
     )
 
 
-# --- 6. SwarmLimits.max_total_tokens accumulation (GAP-09) ------------------
+# --- 6. SwarmLimits.max_total_tokens accumulation ---------------------------
 
 def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     """Two worker tasks each report input=100 + output=100 = 200 tokens; with

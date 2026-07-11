@@ -19,7 +19,7 @@ def test_run_status_values():
     assert RunStatus.RUNNING == "running"
     assert RunStatus.WAITING_APPROVAL == "waiting_approval"
     assert RunStatus.PAUSED == "paused"
-    # Phase 3A: CANCELLING distinguishes "cancel requested" from "actually
+    # CANCELLING distinguishes "cancel requested" from "actually
     # cancelled" (design note contract).
     assert RunStatus.CANCELLING == "cancelling"
     assert RunStatus.SUCCEEDED == "succeeded"

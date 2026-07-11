@@ -188,6 +188,7 @@ class MCPProvider:
                 descriptor=d,
                 handler=self._handler(et, discovery.connection_ref),
                 parameters_json_schema=et.parameters_json_schema,
+                description=et.description,
             ) for d, et in zip(descs, exposed_tools))
             contributions.append(ToolContribution(tools=definitions))
         detect_mcp_conflicts(final_names_by_server)

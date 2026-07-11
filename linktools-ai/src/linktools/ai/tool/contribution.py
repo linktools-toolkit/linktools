@@ -23,10 +23,13 @@ class ManagedToolDefinition:
     consumed when the tool is registered with the model (a ``**kwargs`` handler
     -- e.g. an MCP forwarding closure -- has no signature to derive one from, so
     the explicit schema is what tells the model the tool's parameters) and is
-    re-used to re-validate arguments after a pipeline MODIFY."""
+    re-used to re-validate arguments after a pipeline MODIFY. ``description`` is
+    the human-readable text shown to the model; when absent the descriptor name
+    is used as a fallback."""
     descriptor: ToolDescriptor
     handler: Any  # Callable[..., Awaitable[Any]]
     parameters_json_schema: "Mapping[str, Any] | None" = None
+    description: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,9 @@ def declared_tool_definitions(
             parameters_json_schema=getattr(
                 getattr(tools[descriptor.name], "tool_def", None),
                 "parameters_json_schema", None),
+            description=getattr(
+                getattr(tools[descriptor.name], "tool_def", None),
+                "description", None),
         )
         for descriptor in descriptors
     )

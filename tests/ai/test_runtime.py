@@ -200,7 +200,7 @@ def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
         asyncio.run(_run())
 
 
-# -- Phase 5: Memory is on-by-default via storage.memories -------------------
+# -- Memory is on-by-default via storage.memories ----------------------------
 
 def _echo_model_fn(messages, info: AgentInfo) -> ModelResponse:
     # FunctionModel sees the full prompt pydantic-ai was called with as a

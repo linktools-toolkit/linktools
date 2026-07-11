@@ -87,3 +87,25 @@ runtime = Runtime.build(
 - MCP raw tool aliases are no longer registered as model-visible tools.
 - Invalid schemas, missing idempotency context, and security-audit failures now
   fail closed by default.
+- Oversized security events are persisted as a `TruncatedSecurityEvent`
+  dataclass instead of a plain dict, so `FileEventStore` no longer raises
+  `TypeError` and the audit trail survives in both `fail_closed` and
+  `best_effort` modes.
+- `idempotency_strategy: business_key` now requires `idempotency_key_field` at
+  declaration time (registry load, `ResolvedToolPolicy`, and
+  `EffectiveToolPolicy`); the misconfiguration is rejected before any tool call
+  rather than surfacing inside the idempotency key builder.
+- `Runtime.inspect()` injects a collecting security-event emitter, so an MCP
+  provider resolving under best-effort discovery degrades the same way under
+  inspection as under a real run (no hard failure) and records the degradation
+  as an inspection warning.
+- `Runtime` no longer exposes a public `capability_assembler` property;
+  `Runtime.inspect()` is the single public entry and returns only safe
+  `ToolDescriptor` snapshots (no raw handlers).
+- MCP tool `description` and `readOnlyHint` are preserved end to end:
+  `ManagedToolDefinition` carries a `description` field that reaches the model
+  tool definition, and only an explicit `readOnlyHint=true` marks a descriptor
+  non-mutating (unknown stays high-risk/mutating).
+- Security vs observability audit events are now classified explicitly at each
+  emission site instead of by payload class name, so a new audit event can no
+  longer be silently misrouted to the observability channel.

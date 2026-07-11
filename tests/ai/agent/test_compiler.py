@@ -36,7 +36,7 @@ async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     assert isinstance(compiled, CompiledAgent)
     assert compiled.spec is spec
     assert isinstance(compiled.pydantic_agent, PydanticAgent)
-    # Phase 1 refactoring: capabilities carry no mutable per-Run state -- the
+    # Capabilities carry no mutable per-Run state -- the
     # ToolContext arrives via pydantic-ai DI (ctx.deps.tool_context), so there
     # is no current_context field to assert is None. The deps_type the agent
     # was compiled with IS AgentDependencies (the gate the runner relies on).

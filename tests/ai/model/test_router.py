@@ -76,7 +76,7 @@ def test_model_policy_defaults():
     assert policy.budget is None
 
 
-# --- GAP-08: max_retries retry behavior -------------------------------------
+# --- max_retries retry behavior ---------------------------------------------
 
 @pytest.mark.asyncio
 async def test_resolve_retries_within_max_retries_then_succeeds():
@@ -135,7 +135,7 @@ async def test_resolve_raises_after_retrying_every_model_type():
 @pytest.mark.asyncio
 async def test_resolve_max_retries_zero_preserves_current_behavior():
     """max_retries=0 (default) means exactly one attempt per model_type -- no
-    retries. Confirms the new code path preserves the pre-GAP-08 behavior."""
+    retries. Confirms the new code path preserves the baseline behavior."""
     inner = ModelRegistry()
     inner.register("fallback-model", config=_config("fallback-model"))
     flaky = _FlakyRegistry(inner, fail_times={"primary-model": 1})

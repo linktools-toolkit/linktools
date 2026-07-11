@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 1 design note refactoring: concurrency-safety assertions.
+"""Concurrency-safety assertions.
 
 CompiledAgent is compiled once and reused across many Runs. Under the old
 ``current_context`` pattern, the runner set a mutable field on

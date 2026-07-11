@@ -59,6 +59,19 @@ if TYPE_CHECKING:
     from .knowledge.retriever import Retriever
 
 
+def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, ...]":
+    """Turn collected SecurityDegraded events into human-readable inspection
+    warnings. Only SecurityDegraded is surfaced -- and only its (already
+    sanitizer-redacted) reason -- so inspection never leaks a secret or exposes
+    the raw event objects."""
+    warnings: "list[str]" = []
+    from .events.payloads import SecurityDegraded
+    for event in events:
+        if isinstance(event, SecurityDegraded):
+            warnings.append(f"security degraded: {event.reason}")
+    return tuple(warnings)
+
+
 def _build_capability_providers(
     bundle: ProviderBundle,
     execution: "ExecutionBackend | None",
@@ -303,17 +316,17 @@ class Runtime:
         spec-by-id lookups (``runtime.providers.agents.get(id)``)."""
         return self._provider_bundle
 
-    @property
-    def capability_assembler(self) -> "CapabilityAssembler | None":
-        """The CapabilityAssembler used internally. Equivalent to assembling via
-        :meth:`assemble`; both resolve an AgentSpec's declared tools into a
-        CapabilityBundle."""
-        return self._capability_assembler
-
-    async def _assemble_internal(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
+    async def _assemble_internal(
+        self, spec: AgentSpec, *, execution: "ExecutionBackend | None",
+        security_event_emitter: Any = None,
+    ) -> Any:
         """Resolve ``spec.tools`` into a CapabilityBundle (prompt sections +
         tool contributions) under this runtime's exposure policy. Returns an
-        empty bundle when no capability providers are configured."""
+        empty bundle when no capability providers are configured.
+
+        ``security_event_emitter`` is wired into the CapabilityContext so a
+        resolution that degrades (e.g. MCP best-effort discovery) can emit its
+        SecurityDegraded event instead of failing for want of an emitter."""
         from .capability.provider import CapabilityContext
 
         if self._capability_assembler is None:
@@ -323,6 +336,7 @@ class Runtime:
             agent_id=spec.id,
             exposure_policy=self._options.tool_exposure,
             execution=execution,
+            security_event_emitter=security_event_emitter,
         )
         return await self._capability_assembler.assemble(spec, context)
 
@@ -335,11 +349,30 @@ class Runtime:
         tool descriptors, merged prompt sections, and any warnings. Unlike
         :meth:`assemble` (which returns the internal CapabilityBundle), this
         leaks no mutable internal state -- downstream tooling can rely on the
-        shape."""
+        shape.
+
+        A capability that degrades during resolution (e.g. MCP best-effort
+        discovery) emits a SecurityDegraded event into an in-memory collector
+        rather than an EventStore (inspection must not have audit side effects);
+        those events are surfaced as warnings so inspection reflects the same
+        degradation a real run would observe."""
         from .capability.inspection import CapabilityInspection
-        bundle = await self._assemble_internal(spec, execution=execution)
-        return CapabilityInspection.from_bundle(
+        from .security.collecting_emitter import CollectingSecurityEventEmitter
+        from .security.emitter import DefaultSecurityEventSanitizer
+
+        collector = CollectingSecurityEventEmitter(
+            sanitizer=DefaultSecurityEventSanitizer())
+        bundle = await self._assemble_internal(
+            spec, execution=execution, security_event_emitter=collector)
+        inspection = CapabilityInspection.from_bundle(
             bundle, exposure_policy=self._options.tool_exposure)
+        return dataclasses.replace(
+            inspection,
+            warnings=(
+                *inspection.warnings,
+                *_inspection_warnings_from_events(collector.security_events),
+            ),
+        )
 
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
         """Resolve a swarm id to its SwarmSpec via the configured

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 2D: approval-pause atomicity (design note contract).
+"""Approval-pause atomicity.
 
 When ``AgentRunner`` is wired with a ``uow_factory`` (SqlAlchemy mode), the
 ``RunPaused`` handler wraps checkpoint-save + Run-transition(WAITING_APPROVAL)

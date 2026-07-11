@@ -128,11 +128,12 @@ def _toolset_for_definition(md) -> Any:
         from pydantic_ai.tools import Tool
         ts.add_tool(Tool.from_schema(
             function=md.handler, name=md.descriptor.name,
-            description=md.descriptor.name,
+            description=md.description or md.descriptor.name,
             json_schema=dict(md.parameters_json_schema),
         ))
     else:
-        ts.add_function(md.handler, name=md.descriptor.name)
+        ts.add_function(md.handler, name=md.descriptor.name,
+                        description=md.description)
     return ts
 
 

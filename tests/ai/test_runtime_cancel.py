@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GAP-16: Runtime.cancel(run_id) -- best-effort store-level cancel for single
+"""Runtime.cancel(run_id) -- best-effort store-level cancel for single
 Agent runs. Mirrors SwarmRunner.cancel's store-only approach: flips the
 RunRecord to CANCELLED without cancelling any live asyncio.Task driving the run
 (the caller cancels that separately; AgentRunner catches CancelledError and

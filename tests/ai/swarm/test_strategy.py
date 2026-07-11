@@ -561,7 +561,7 @@ def test_build_strategy_unknown_kind_raises_swarm_error():
         build_strategy(SwarmStrategySpec(kind="no_such_strategy"))
 
 
-# --- 6. SwarmLimits.max_depth enforcement in _run_task (GAP-09) -------------
+# --- 6. SwarmLimits.max_depth enforcement in _run_task ----------------------
 
 def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
     """_run_task walks the parent_task_id chain via list_tasks and raises

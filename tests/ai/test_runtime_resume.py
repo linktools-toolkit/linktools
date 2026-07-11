@@ -160,7 +160,7 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
             version=1, created_at=now, updated_at=now,
         ))
 
-        # Phase 1: run_stream pauses on the risky tool.
+        # run_stream pauses on the risky tool.
         pause_events = await _collect(runtime.run_stream(
             spec, "call risky", session_id="session-r1", run_id="run-r1",
         ))
@@ -172,12 +172,12 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
         record = await storage.runs.get("run-r1")
         assert record.status is RunStatus.WAITING_APPROVAL
 
-        # Phase 2: human approves the pending request.
+        # human approves the pending request.
         await storage.approvals.approve(
             approval_id, expected_version=1, resolved_by="test",
         )
 
-        # Phase 3: resume re-enters run_stream with message_history.
+        # resume re-enters run_stream with message_history.
         resume_events = await _collect(runtime.resume("run-r1", spec))
 
         # Final record: SUCCEEDED.

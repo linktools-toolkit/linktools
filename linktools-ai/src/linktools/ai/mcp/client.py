@@ -179,11 +179,22 @@ class MCPConnectionManager:
         except Exception as exc:
             raise MCPToolDefinitionError(
                 f"invalid schema for MCP tool {name!r}") from exc
+        # Only an explicit readOnlyHint annotation marks a tool non-mutating;
+        # absent annotations stay None so unknown tools remain high-risk at the
+        # provider layer (mutating = not bool(read_only)).
+        annotations = getattr(tool, "annotations", None)
+        hint = getattr(annotations, "readOnlyHint", None) if annotations is not None else None
+        if hint is True:
+            read_only = True
+        elif hint is False:
+            read_only = False
+        else:
+            read_only = None
         return MCPToolInfo(
             name=name,
             description=getattr(tool, "description", None),
             parameters_json_schema=schema,
-            read_only=None,
+            read_only=read_only,
             metadata=getattr(tool, "metadata", {}) or {},
         )
 

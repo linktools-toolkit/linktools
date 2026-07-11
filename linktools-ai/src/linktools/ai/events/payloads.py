@@ -301,6 +301,18 @@ class SecurityDegraded:
 
 
 @dataclass(frozen=True, slots=True)
+class TruncatedSecurityEvent:
+    """Replaces an oversized security event so the audit store still receives a
+    valid dataclass payload (FileEventStore persists via dataclasses.asdict and
+    reconstructs by class name -- a plain dict would TypeError there). Carries
+    only the original type name and the measured size; the original payload is
+    deliberately dropped so a too-large event can never re-bloat the store."""
+    original_event_type: str
+    reason: str = "payload_too_large"
+    original_size_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ToolPolicyResolved:
     """tool.policy.resolved: the finalized policy that governs one tool call
     (enabled/timeout/retries/idempotent/approval/risk), for audit."""
@@ -393,6 +405,7 @@ EventPayload = Union[
     ToolExposureApplied,
     ToolExposureDenied,
     SecurityDegraded,
+    TruncatedSecurityEvent,
     ToolPolicyResolved,
     ToolPipelineBefore,
     ToolPipelineDecision,

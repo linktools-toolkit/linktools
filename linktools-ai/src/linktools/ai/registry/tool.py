@@ -109,12 +109,17 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     if key_field is not None and not str(key_field).strip():
         raise InvalidSpecError("idempotency_key_field must be non-empty")
     idempotent = payload.get("idempotent")
-    if strategy == "business_key" and idempotent is not True:
-        raise InvalidSpecError("business_key requires idempotent=true")
-    if key_field is not None and strategy != "business_key":
-        raise InvalidSpecError("idempotency_key_field requires business_key")
-    if idempotent is False and strategy is not None:
-        raise InvalidSpecError("idempotency_strategy requires idempotent=true")
+    # Reuse the policy layer's rules so the registry rejects the same bad
+    # combinations (e.g. business_key without idempotency_key_field) at load time
+    # rather than letting them reach the first tool call.
+    from ..tool.policy import IdempotencyStrategy, validate_idempotency_policy
+    strategy_enum = IdempotencyStrategy(strategy) if strategy is not None else None
+    try:
+        validate_idempotency_policy(
+            idempotent=idempotent, strategy=strategy_enum,
+            key_field=key_field, effective=False)
+    except ValueError as exc:
+        raise InvalidSpecError(str(exc)) from exc
     return ToolSpec(
         name=name,
         description=str(payload.get("description", "")),

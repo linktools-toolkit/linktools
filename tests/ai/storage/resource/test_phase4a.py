@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 4A tests (design note contract, contract, contract):
+"""Resource storage contract tests:
 
 1. Atomic Resource MOVE -- SqlAlchemy raw_move executes in ONE transaction.
    Observable proof: the revision counter bumps exactly once. A decomposed

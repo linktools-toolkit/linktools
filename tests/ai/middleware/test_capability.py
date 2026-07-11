@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 1 design note refactoring: the per-Run ToolContext reaches the
+"""The per-Run ToolContext reaches the
 capability via pydantic-ai dependency injection (``deps=AgentDependencies(...)``
 on ``agent.run()`` -> ``ctx.deps.tool_context`` inside hooks). No mutable
 ``current_context`` field is set on the capability."""
@@ -82,7 +82,7 @@ def test_middleware_capability_fires_all_four_hooks_in_order_with_deps():
 
 
 def test_middleware_capability_has_no_current_context_field():
-    # Phase 1 refactoring: the mutable ``current_context`` field is gone. A
+    # The mutable ``current_context`` field is gone. A
     # fresh capability has no such attribute, and a Run driven purely via
     # deps= leaves it gone -- the concurrency-safety invariant.
     log: "list[tuple]" = []
