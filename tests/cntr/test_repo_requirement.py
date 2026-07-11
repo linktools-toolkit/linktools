@@ -34,39 +34,39 @@ def _repo_with_container(tmp_path, name="repo_src", requires=None, marker_name="
 
 def test_add_repo_without_linktools_json_succeeds(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires=None)
-    fresh_manager.repo_store.add(str(repo_dir))
-    assert str(repo_dir) in fresh_manager.repo_store.get_all()
+    fresh_manager.repos.add(str(repo_dir))
+    assert str(repo_dir) in fresh_manager.repos.get_all()
 
 
 def test_add_repo_with_satisfied_requirement_succeeds(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=0.0.1"})
-    fresh_manager.repo_store.add(str(repo_dir))
-    assert str(repo_dir) in fresh_manager.repo_store.get_all()
+    fresh_manager.repos.add(str(repo_dir))
+    assert str(repo_dir) in fresh_manager.repos.get_all()
 
 
 def test_add_repo_with_unsatisfied_requirement_raises(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=999.0"})
     with pytest.raises(ContainerError):
-        fresh_manager.repo_store.add(str(repo_dir))
+        fresh_manager.repos.add(str(repo_dir))
 
 
 def test_add_repo_cleans_up_on_unsatisfied_requirement(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=999.0"})
     with pytest.raises(ContainerError):
-        fresh_manager.repo_store.add(str(repo_dir))
-    assert str(repo_dir) not in fresh_manager.repo_store.get_all()
+        fresh_manager.repos.add(str(repo_dir))
+    assert str(repo_dir) not in fresh_manager.repos.get_all()
 
 
 def test_add_repo_with_invalid_specifier_raises(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": "not a specifier!!"})
     with pytest.raises(ContainerError):
-        fresh_manager.repo_store.add(str(repo_dir))
+        fresh_manager.repos.add(str(repo_dir))
 
 
 def test_ai_requirement_is_ignored_by_cntr(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-ai": ">=999.0"})
-    fresh_manager.repo_store.add(str(repo_dir))
-    assert str(repo_dir) in fresh_manager.repo_store.get_all()
+    fresh_manager.repos.add(str(repo_dir))
+    assert str(repo_dir) in fresh_manager.repos.get_all()
 
 
 # -- global requires must never widen/override a repo's own declaration -----
@@ -79,8 +79,8 @@ def test_global_requires_does_not_affect_local_repo_gating(fresh_manager, tmp_pa
     # The repo itself declares no requirement -- the incompatible *global*
     # requires must not leak in and block it.
     repo_dir = _repo_with_container(tmp_path, requires=None)
-    fresh_manager.repo_store.add(str(repo_dir))
-    assert str(repo_dir) in fresh_manager.repo_store.get_all()
+    fresh_manager.repos.add(str(repo_dir))
+    assert str(repo_dir) in fresh_manager.repos.get_all()
 
 
 # -- requirement check happens before container.py is ever imported ---------
@@ -89,7 +89,7 @@ def test_unsatisfied_requirement_blocks_import_before_it_happens(fresh_manager, 
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=999.0"},
                                      marker_name="should_not_exist.marker")
     with pytest.raises(ContainerError):
-        fresh_manager.repo_store.add(str(repo_dir))
+        fresh_manager.repos.add(str(repo_dir))
     # add() only symlinks the repo path in; the marker file only gets
     # written if container.py is actually imported.
     assert not list(tmp_path.glob("**/should_not_exist.marker"))
@@ -99,7 +99,7 @@ def test_unsatisfied_requirement_blocks_import_before_it_happens(fresh_manager, 
 
 def test_loader_skips_repo_that_became_incompatible(fresh_manager, tmp_path, monkeypatch):
     repo_dir = _repo_with_container(tmp_path, requires=None)
-    fresh_manager.repo_store.add(str(repo_dir))
+    fresh_manager.repos.add(str(repo_dir))
 
     # Simulate the repo's .linktools.json changing to something unsatisfiable
     # after it was already installed (e.g. an in-place edit).
@@ -113,11 +113,11 @@ def test_loader_skips_repo_that_became_incompatible(fresh_manager, tmp_path, mon
 
 def test_update_reports_incompatible_after_requirement_regresses(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires=None)
-    fresh_manager.repo_store.add(str(repo_dir))
+    fresh_manager.repos.add(str(repo_dir))
 
     _write(repo_dir / ".linktools.json", {"requires": {"linktools-cntr": ">=999.0"}})
 
-    results = fresh_manager.repo_store.update()
+    results = fresh_manager.repos.update()
     assert len(results) == 1
     result = results[0]
     assert result.updated is True
@@ -127,34 +127,30 @@ def test_update_reports_incompatible_after_requirement_regresses(fresh_manager, 
 
 def test_update_reports_compatible_when_requirement_holds(fresh_manager, tmp_path):
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=0.0.1"})
-    fresh_manager.repo_store.add(str(repo_dir))
+    fresh_manager.repos.add(str(repo_dir))
 
-    results = fresh_manager.repo_store.update()
+    results = fresh_manager.repos.update()
     assert results[0].compatible is True
 
 
 # -- repo status --------------------------------------------------------------
 
 def test_describe_repository_reports_requires_and_compatible(fresh_manager, tmp_path):
-    from linktools.cntr.repo.status import describe_repository
-
     repo_dir = _repo_with_container(tmp_path, requires={"linktools-cntr": ">=0.0.1"})
-    fresh_manager.repo_store.add(str(repo_dir))
-    meta = fresh_manager.repo_store.get_all()[str(repo_dir)]
+    fresh_manager.repos.add(str(repo_dir))
+    meta = fresh_manager.repos.get_all()[str(repo_dir)]
 
-    info = describe_repository(fresh_manager, str(repo_dir), meta)
+    info = fresh_manager.repos.describe(str(repo_dir), meta)
     assert info["local_config"] == "present"
     assert info["requires"] == {"linktools-cntr": ">=0.0.1"}
     assert info["compatible"] is True
 
 
 def test_describe_repository_reports_absent_local_config(fresh_manager, tmp_path):
-    from linktools.cntr.repo.status import describe_repository
-
     repo_dir = _repo_with_container(tmp_path, requires=None)
-    fresh_manager.repo_store.add(str(repo_dir))
-    meta = fresh_manager.repo_store.get_all()[str(repo_dir)]
+    fresh_manager.repos.add(str(repo_dir))
+    meta = fresh_manager.repos.get_all()[str(repo_dir)]
 
-    info = describe_repository(fresh_manager, str(repo_dir), meta)
+    info = fresh_manager.repos.describe(str(repo_dir), meta)
     assert info["local_config"] == "absent"
     assert info["compatible"] is True

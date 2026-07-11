@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Repo configuration store.
+"""Repository business entry point: the configured repository set
+(add/update/remove/list), local-path and Git-backed repositories,
+``requires.linktools-cntr`` gating, and read-only describe/validate.
 
-Read/add/update/remove the INSTALLED_REPOS store and manage the on-disk repo
-clone/symlink layout. Git sync is delegated to RepoSync.
+Dulwich-backed work is delegated entirely to
+:class:`~linktools.cntr.repo.git.RepoGit`; this module never imports dulwich.
 """
 import os
 import shutil
@@ -11,15 +13,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.core import ensure_requirement
+from linktools.core import LinktoolsFileConfigLoader, ensure_requirement
 from linktools.decorator import cached_property
 from linktools.errors import ConfigError, ConfigValidationError
 
 from ..container import ContainerError
 from ...capabilities.cntr import __cap_cntr__
-from .sync import RepoSync
+from .git import RepoGit
 
 if TYPE_CHECKING:
+    from typing import Any
     from ..manager import ContainerManager
 
 
@@ -36,12 +39,12 @@ class RepoUpdateResult:
     error: "str | None"
 
 
-class RepoStore:
+class RepoService(object):
     """Owns the configured repository set behind the facade."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
-        self.sync = RepoSync(manager)
+        self.git = RepoGit(manager)
 
     @property
     def logger(self):
@@ -54,12 +57,9 @@ class RepoStore:
         return path
 
     def _load(self) -> "dict[str, dict[str, str]]":
-        # A failed migration is not cached, so retry it on every access.
-        self.manager._migrated
         return self.manager._persistent_store.get(_REPO_KEY, {})
 
     def _dump(self, repos: "dict[str, dict[str, str]]") -> None:
-        self.manager._migrated
         self.manager._persistent_store.set(_REPO_KEY, repos)
 
     def get_all(self) -> "dict[str, dict[str, str]]":
@@ -86,7 +86,7 @@ class RepoStore:
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
-                self.sync.clone_git(url, repo_path, branch)
+                self.git.clone(url, repo_path, branch)
                 self._validate_new_repo_requirement(repo_path)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
             else:
@@ -98,7 +98,7 @@ class RepoStore:
                 self.logger.info(f"Add local repository: {path}")
                 repo_name = utils.guess_file_name(path)
                 repo_path = self._choose_repo_path(repo_name)
-                self.sync.link_local(path, repo_path)
+                os.symlink(path, repo_path, target_is_directory=True)
                 self._validate_new_repo_requirement(repo_path)
                 repos[path] = dict(type="local", repo_path=repo_path, repo_name=repo_name)
 
@@ -117,43 +117,40 @@ class RepoStore:
         """
         results = []
         for url, meta in self.get_all().items():
+            repo_path = meta.get("repo_path")
+            if not repo_path:
+                continue
+
             try:
-                self.sync.sync(url, meta, branch=branch, reset=reset)
+                git_result = self.git.update(url, repo_path, branch=branch, reset=reset)
             except Exception as exc:  # noqa: BLE001 - one repo's sync failure must not hide the rest
                 results.append(RepoUpdateResult(url=url, updated=False, revision=None,
-                                                compatible=False, error=str(exc)))
+                                                 compatible=False, error=str(exc)))
                 continue
-            revision, compatible, error = self._revalidate_after_update(meta)
+
+            if not git_result.success:
+                results.append(RepoUpdateResult(url=url, updated=False, revision=git_result.revision,
+                                                 compatible=False, error=git_result.error))
+                continue
+
+            compatible, error = self._revalidate_after_update(repo_path)
             results.append(RepoUpdateResult(
-                url=url, updated=True, revision=revision, compatible=compatible, error=error,
+                url=url, updated=True, revision=git_result.revision, compatible=compatible, error=error,
             ))
         return results
 
-    def _revalidate_after_update(self, meta: "dict[str, str]") -> "tuple[str | None, bool, str | None]":
-        repo_path = meta.get("repo_path")
-
-        revision = None
-        if repo_path and os.path.exists(repo_path):
-            try:
-                from dulwich.errors import NotGitRepository
-                from linktools.git import GitRepository
-                revision = GitRepository(self.manager.environ, repo_path).head_sha()
-            except NotGitRepository:
-                pass
-            except Exception:  # noqa: BLE001 - revision is best-effort, never fails the update
-                pass
-
+    def _revalidate_after_update(self, repo_path: str) -> "tuple[bool, str | None]":
         if not repo_path or not os.path.exists(repo_path):
-            return revision, True, None
+            return True, None
 
         try:
             file_config = self.manager.environ.load_file_config(local_root=repo_path)
             ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
         except ConfigValidationError as exc:
-            return revision, False, f"incompatible with this host after update: {exc}"
+            return False, f"incompatible with this host after update: {exc}"
         except ConfigError as exc:
-            return revision, False, f".linktools.json is invalid after update: {exc}"
-        return revision, True, None
+            return False, f".linktools.json is invalid after update: {exc}"
+        return True, None
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
@@ -163,6 +160,49 @@ class RepoStore:
                 raise ContainerError(f"Repository `{url}` not found.")
             self._remove_repo_file(repos.pop(url))
             self._dump(repos)
+
+    def describe(self, url: str, meta: "dict[str, Any]") -> "dict[str, Any]":
+        """Read-only status: local file config presence, declared
+        ``requires.linktools-cntr``, compatibility, and Git revision/dirty
+        state. Never imports the repository's ``container.py``."""
+        repo_path = meta.get("repo_path")
+        info: "dict[str, Any]" = dict(url=url, type=meta.get("type", "unknown"), repo_path=repo_path)
+
+        local_path = (os.path.join(repo_path, LinktoolsFileConfigLoader.local_file_name)
+                      if repo_path else None)
+        if local_path and os.path.exists(local_path):
+            info["local_config"] = "present"
+            try:
+                file_config = self.manager.environ.load_file_config(local_root=repo_path)
+                info["requires"] = dict(file_config.local_config.requires)
+                ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+                info["compatible"] = True
+            except ConfigValidationError as exc:
+                info["compatible"] = False
+                info["compatibility_issues"] = [str(exc)]
+            except ConfigError as exc:
+                info["local_config_error"] = str(exc)
+                info["compatible"] = False
+        else:
+            info["local_config"] = "absent"
+            info["compatible"] = True
+
+        info["git"] = self.git.inspect(repo_path)
+        return info
+
+    def validate(self, url: str = None) -> "tuple[dict[str, Any], list[str]]":
+        """Describe one or all repositories; also report which are incompatible."""
+        repos = self.get_all()
+        if url is not None:
+            if url not in repos:
+                raise ContainerError(f"Repository `{url}` not found.")
+            targets = {url: repos[url]}
+        else:
+            targets = repos
+
+        results = {u: self.describe(u, m) for u, m in targets.items()}
+        incompatible = sorted(u for u, info in results.items() if info.get("compatible") is False)
+        return results, incompatible
 
     def _validate_new_repo_requirement(self, repo_path: str) -> None:
         # Read .linktools.json (if any) and check requires.linktools-cntr

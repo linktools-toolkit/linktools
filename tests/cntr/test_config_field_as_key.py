@@ -55,7 +55,7 @@ def _fresh_standalone_manager(tmp_path):
 
 def _install_single(tmp_path, repo, name):
     manager = _fresh_standalone_manager(tmp_path)
-    manager.repo_store.add(str(repo))
+    manager.repos.add(str(repo))
     manager.installed_state.add(name)
     manager.prepare_installed_containers()
     return manager, manager.containers[name]

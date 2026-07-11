@@ -99,7 +99,7 @@ MANAGER_API = (
     "data_path", "temp_path", "setting_path",
     "env_config", "compose_runner", "compose_operations",
     "resolver", "loader", "runtime",
-    "lifecycle", "running_state", "installed_state", "repo_store",
+    "lifecycle", "running_state", "installed_state", "repos",
 )
 
 # Manager forwarding wrappers deliberately removed: a breaking change with
@@ -149,7 +149,7 @@ _DESCRIPTOR_TYPES = {
     "lifecycle": _CachedProperty,
     "running_state": _CachedProperty,
     "installed_state": _CachedProperty,
-    "repo_store": _CachedProperty,
+    "repos": _CachedProperty,
 }
 
 
@@ -158,11 +158,17 @@ def test_manager_api_surface_present(fresh_manager):
         assert hasattr(fresh_manager, name), f"ContainerManager is missing {name}"
 
 
+def test_repo_store_renamed_to_repos(fresh_manager):
+    """RepoStore/repo_store -> RepoService/repos (no forwarding alias)."""
+    assert not hasattr(fresh_manager, "repo_store")
+    assert hasattr(fresh_manager, "repos")
+
+
 def test_manager_wrapper_forwarding_methods_removed(fresh_manager):
     """These one-line delegating wrappers are deliberately
     removed with no compatibility alias; downstream must call the formal
     service instead (manager.runtime, manager.lifecycle, manager.resolver,
-    manager.installed_state, manager.repo_store)."""
+    manager.installed_state, manager.repos)."""
     for name in _REMOVED_MANAGER_WRAPPERS:
         assert not hasattr(fresh_manager, name), f"{name} should have been removed from ContainerManager"
 
@@ -214,38 +220,6 @@ def test_manager_configs_override_is_dispatched_through_property(tmp_path, monke
     assert mgr.env_config.get("CUSTOM_KEY") == "custom-value"
 
 
-# -- Migration retry ----------------------------------------------------------
-
-def test_migrated_failure_is_not_cached_and_retries(fresh_manager, monkeypatch):
-    """A cached_property does not cache a raised exception (linktools.decorator
-    ._CachedProperty only stores the result on success), so a transient failure
-    in the one-time legacy migration must be retried on the next access rather
-    than being permanently "stuck" failed.
-    """
-    calls = []
-    descriptor = ContainerManager.__dict__["_migrated"]
-    real_migrate = descriptor.func
-
-    def flaky(self):
-        calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError("transient failure")
-        return real_migrate(self)
-
-    # Clear whatever _migrated already cached during fixture setup, then patch
-    # the underlying function so the next access fails once, then succeeds.
-    fresh_manager.__dict__.pop("_migrated", None)
-    monkeypatch.setattr(descriptor, "func", flaky)
-
-    with pytest.raises(RuntimeError):
-        fresh_manager._migrated
-
-    # Retried on next access: succeeds and is now cached.
-    assert fresh_manager._migrated is True
-    assert fresh_manager.__dict__["_migrated"] is True
-    assert len(calls) == 2
-
-
 # -- Persistent vs transient store routing ------------------------------------
 
 def test_installed_containers_route_through_persistent_store(fresh_manager, monkeypatch):
@@ -264,7 +238,7 @@ def test_installed_repos_route_through_persistent_store(fresh_manager, monkeypat
         fresh_manager._persistent_store, "get",
         lambda key, default=None: (calls.append(key), default)[1],
     )
-    fresh_manager.repo_store.get_all()
+    fresh_manager.repos.get_all()
     assert "INSTALLED_REPOS" in calls
 
 

@@ -11,8 +11,6 @@ import shutil
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from dulwich.errors import NotGitRepository
-
 from ..capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -215,15 +213,14 @@ class Doctor:
 
     def check_repos(self) -> "list[Finding]":
         findings: "list[Finding]" = []
-        from linktools.git import GitRepository
         from linktools.core import ensure_requirement
         from linktools.errors import ConfigError, ConfigValidationError
-        for url, meta in self.manager.repo_store.get_all().items():
+        for url, meta in self.manager.repos.get_all().items():
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path):
                 continue
 
-            # Same load+gate ContainerLoader/RepoStore.add use before
+            # Same load+gate ContainerLoader/RepoService.add use before
             # accepting a repo: an invalid .linktools.json is reported, not
             # silently skipped -- Doctor must never report a repo as clean
             # just because it has nothing to check.
@@ -246,16 +243,10 @@ class Doctor:
             if os.path.islink(repo_path):
                 findings.append(Finding(INFO, f"repo `{url}` is a local symlink ({repo_path}).", component=url))
                 continue
-            try:
-                repo = GitRepository(self.manager.environ, repo_path)
-            except NotGitRepository:
-                continue
-            try:
-                if repo.is_dirty():
-                    findings.append(Finding(
-                        INFO, f"repo `{url}` has uncommitted changes.", code=REPO_DIRTY, component=url))
-            except Exception:  # noqa: BLE001
-                pass
+
+            if self.manager.repos.git.inspect(repo_path).get("dirty"):
+                findings.append(Finding(
+                    INFO, f"repo `{url}` has uncommitted changes.", code=REPO_DIRTY, component=url))
         return findings
 
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":

@@ -12,7 +12,7 @@ from linktools.core import (
     AliasProvider, Config, ConfigField, ConfigSchema, ChainProvider,
     DefaultSource, EnvironmentSource, PersistentSource, RuntimeOverrideSource,
 )
-from linktools.core._config import ConfigStore
+from linktools.core._config_store import ConfigStore
 from linktools.core._locks import LockManager
 
 

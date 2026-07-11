@@ -59,12 +59,12 @@ def test_two_processes_adding_different_repos_both_persist(tmp_path, monkeypatch
     repo_b = tmp_path_factory.mktemp("repo_b")
     (repo_b / "container.py").write_text("# placeholder\n")
 
-    manager_a.repo_store.add(str(repo_a), force=True)
-    manager_b.repo_store.add(str(repo_b), force=True)  # manager_b's store was cached before A's write
+    manager_a.repos.add(str(repo_a), force=True)
+    manager_b.repos.add(str(repo_b), force=True)  # manager_b's store was cached before A's write
 
     from linktools.core._environ import Environ
     from linktools.cntr.manager import ContainerManager
     observer = ContainerManager(Environ(), name="aio")
-    repos = observer.repo_store.get_all()
+    repos = observer.repos.get_all()
     assert str(repo_a) in repos
     assert str(repo_b) in repos

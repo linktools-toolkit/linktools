@@ -38,12 +38,9 @@ class RunningStateStore:
         self.manager = manager
 
     def _get(self) -> "list[str]":
-        # A failed migration is not cached, so retry it on every access.
-        self.manager._migrated
         return list(self.manager._transient_ns.get(_RUNNING_KEY, []) or [])
 
     def _set(self, names: "Iterable[str]") -> None:
-        self.manager._migrated
         self.manager._transient_ns.set(_RUNNING_KEY, sorted(set(names)))
 
     def get_persisted(self) -> "list[str]":

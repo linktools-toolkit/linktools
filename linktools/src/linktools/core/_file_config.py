@@ -32,6 +32,16 @@ __all__ = [
 _MAX_FILE_BYTES = 1024 * 1024  # 1 MiB
 
 
+def _validate_key(key, field, path):
+    if not isinstance(key, str):
+        raise ConfigValidationError("'%s' key must be a string in %s" % (field, path))
+    if not key.strip():
+        raise ConfigValidationError("'%s' key must not be empty in %s" % (field, path))
+    if key != key.strip():
+        raise ConfigValidationError(
+            "'%s' key must not contain leading or trailing spaces in %s" % (field, path))
+
+
 def _validate_file_data(data, path):
     """Static shape validation of the two Core-reserved top-level fields.
 
@@ -43,18 +53,16 @@ def _validate_file_data(data, path):
         if not isinstance(environment, dict):
             raise ConfigError("'environment' must be an object in %s" % path)
         for key in environment:
-            if not isinstance(key, str) or not key:
-                raise ConfigError("'environment' has a non-string or empty key in %s" % path)
+            _validate_key(key, "environment", path)
 
     if "requires" in data:
         requires = data["requires"]
         if not isinstance(requires, dict):
             raise ConfigError("'requires' must be an object in %s" % path)
         for key, value in requires.items():
-            if not isinstance(key, str) or not key:
-                raise ConfigError("'requires' has a non-string or empty key in %s" % path)
-            if not isinstance(value, str) or not value:
-                raise ConfigError("'requires.%s' must be a non-empty string in %s" % (key, path))
+            _validate_key(key, "requires", path)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigValidationError("'requires.%s' must be a non-empty string in %s" % (key, path))
             try:
                 SpecifierSet(value)
             except InvalidSpecifier as exc:

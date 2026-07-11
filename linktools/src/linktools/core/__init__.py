@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
+from ._config_store import ConfigStore
 from ._config import (
-    ConfigStore,
-    ConfigMigration,
     Config,
     ConfigField,
     ConfigSchema,
@@ -60,7 +59,7 @@ __all__ = [
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource",
     "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
-    "ConfigStore", "ConfigMigration",
+    "ConfigStore",
     # download
     "DownloadRequest", "DownloadResult", "DownloadManager", "DownloadValidator",
     "SizeValidator", "HashValidator", "CompositeValidator", "FileTransport",

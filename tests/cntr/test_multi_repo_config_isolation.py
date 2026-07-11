@@ -60,7 +60,7 @@ def _install_two_repos(tmp_path, add_order):
     manager = _fresh_standalone_manager(tmp_path)
     repos = {"repo_a": repo_a, "repo_b": repo_b}
     for name in add_order:
-        manager.repo_store.add(str(repos[name]))
+        manager.repos.add(str(repos[name]))
     manager.installed_state.add("repo_a", "repo_b")
     manager.prepare_installed_containers()
     return manager

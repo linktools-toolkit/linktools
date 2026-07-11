@@ -17,7 +17,7 @@ from linktools.core import (
     DefaultSource, EnvironmentSource, LazyProvider, PersistentSource,
     PromptProvider, RuntimeOverrideSource,
 )
-from linktools.core._config import ConfigStore
+from linktools.core._config_store import ConfigStore
 from linktools.core._locks import LockManager
 
 

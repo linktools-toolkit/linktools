@@ -1,14 +1,11 @@
-"""Config subsystem: ConfigStore + ConfigMigration + Config schema/sources/resolver.
+"""Config subsystem: Config schema/sources/resolver.
 
-Merged (compact-layout spec §2.1) from the former _config_store.py,
-core/_config_schema.py, core/_config_migration.py. Behaviour unchanged.
+``ConfigStore`` (the persistence layer) lives in ``_config_store.py``;
+``LinktoolsFileConfig``/loader live in ``_file_config.py``.
 """
 
-import contextlib
-import datetime
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,10 +17,9 @@ from ..errors import (
     ConfigValidationError,
 )
 from ..types import MISSING
-from ..utils import atomic_write, get_file_hash, remove_file
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Iterator, Literal, Sequence, Union
+    from typing import Any, Callable, Literal, Sequence, Union
 
     # The two string literals _cast_value special-cases (mirrors the old,
     # pre-v2 CONFIG_TYPES dispatch table): "path" expands/absolutizes a
@@ -37,7 +33,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "ConfigStore", "ConfigMigration", "Config", "ConfigField", "ConfigSchema",
+    "Config", "ConfigField", "ConfigSchema",
     "ConfigResolver", "ConfigSource", "EnvironmentSource", "RuntimeOverrideSource",
     "PersistentSource", "FileSource", "DefaultSource", "AliasProvider",
     "ConfigProvider", "LazyProvider", "PromptProvider", "ConfirmProvider", "ErrorProvider",
@@ -45,475 +41,13 @@ __all__ = [
 ]
 
 
-class ConfigStore(object):
-    """A locked, atomically-written JSON key/value file."""
-
-    def __init__(self, path: "Any", lock_manager: "Any | None" = None) -> None:
-        self._path = Path(str(path))
-        self._lock_manager = lock_manager
-        self._data: "dict[str, Any]" = {}
-        self.reload()
-
-    @property
-    def path(self) -> "Path":
-        return self._path
-
-    # -- load / flush -------------------------------------------------------
-
-    def reload(self) -> None:
-        """Re-read the file; missing -> empty, corrupt -> ConfigError."""
-        if not self._path.exists():
-            self._data = {}
-            return
-        try:
-            text = self._path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise ConfigError("cannot read config %s: %s" % (self._path, exc))
-        try:
-            data = json.loads(text)
-        except ValueError as exc:
-            # User-editable file: surface the corruption rather than silently
-            # wiping it on the next write.
-            raise ConfigError("config %s is not valid JSON: %s" % (self._path, exc))
-        if not isinstance(data, dict):
-            raise ConfigError("config %s must be a JSON object, got %s" % (self._path, type(data).__name__))
-        self._data = data
-
-    def _flush(self) -> None:
-        atomic_write(
-            self._path,
-            json.dumps(self._data, indent=2, ensure_ascii=False, sort_keys=True),
-        )
-
-    # -- locking ------------------------------------------------------------
-
-    @contextlib.contextmanager
-    def _locked(self) -> "Iterator[None]":
-        """Acquire the cross-process lock, reread, yield, then flush on exit."""
-        if self._lock_manager is not None:
-            lock = self._lock_manager.process_lock("config:" + self._path.name)
-        else:
-            # Fall back to a private filelock beside the config file.
-            from filelock import FileLock
-
-            lock = FileLock(str(self._path) + ".lock")
-        with lock:
-            self.reload()
-            yield
-
-    # -- read ---------------------------------------------------------------
-
-    def get(self, key: str, default: "Any" = MISSING) -> "Any":
-        """Return the value for ``key``, or ``default`` if absent (v4 §3.4).
-
-        Uses MISSING as the sentinel so stored None is distinguishable from
-        a missing key (``key in store`` vs ``store.get(key) is None``).
-        """
-        if key in self._data:
-            return self._data[key]
-        return default
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._data
-
-    def keys(self) -> "list[str]":
-        return list(self._data.keys())
-
-    def items(self) -> "list[tuple]":
-        return list(self._data.items())
-
-    # -- write (all go through the locked, atomic protocol) -----------------
-
-    def set(self, key: str, value: "Any") -> None:
-        with self._locked():
-            self._data[key] = value
-            self._flush()
-
-    def save(self, **kwargs: "Any") -> None:
-        with self._locked():
-            self._data.update(kwargs)
-            self._flush()
-
-    def remove(self, *keys: str) -> bool:
-        removed = False
-        with self._locked():
-            for key in keys:
-                if key in self._data:
-                    self._data.pop(key, None)
-                    removed = True
-            self._flush()
-        return removed
-
-    def delete(self, key: str) -> bool:
-        """Alias for remove(key) (v5 P0-4: PersistentSource.delete calls this)."""
-        return self.remove(key)
-
-    def __repr__(self) -> str:
-        return "ConfigStore(path=%r, keys=%d)" % (str(self._path), len(self._data))
-
-
-
-# Heuristic: keys whose name matches one of these are treated as secrets and
-# masked in migration reports (secret must not leak into reports).
-_SECRET_HINTS = ("PASSWORD", "PASSWD", "PWD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY")
-
-
-def _normalize(value: str) -> str:
-    return (value or "").strip().lower()
-
-
-def _is_secret(key: str) -> bool:
-    upper = (key or "").upper()
-    return any(hint in upper for hint in _SECRET_HINTS)
-
-
-def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _utc_stamp() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-
-
-class ConfigMigration(object):
-    """One-time config data migration (v2 §3.3)."""
-
-    def __init__(self, config_store: "Any", logger: "Any" = None,
-                 config_dir: "PathLike | None" = None) -> None:
-        self._store = config_store
-        self._logger = logger
-        # Where migration backups/reports live . Defaults to the
-        # directory holding the ConfigStore file.
-        if config_dir is not None:
-            self._config_dir = Path(str(config_dir))
-        else:
-            self._config_dir = Path(str(getattr(config_store, "path", "."))).parent
-
-    def _log(self, level: str, msg: str) -> None:
-        if self._logger is not None:
-            getattr(self._logger, level)(msg)
-
-    # -- inspect -----------------------------------------------------------
-
-    def _read_old(self, old_path: "PathLike") -> "list[tuple[str, str, str]]":
-        """Return [(section, key, value), ...] with key case preserved."""
-        import configparser  # only the migrate CLI path needs it
-        parser = configparser.ConfigParser()
-        parser.optionxform = str  # preserve key case
-        parser.read(str(old_path))
-        entries = []
-        for section in parser.sections():
-            for key in parser[section]:
-                entries.append((section, key, parser[section][key]))
-        return entries
-
-    @staticmethod
-    def _merged_key_map(key_map):
-        return dict(key_map) if key_map else {}
-
-    def _resolve_new_key(self, section, key, key_map, ambiguous_keys=None):
-        """Map an old (section, key) to a new namespaced key.
-
-        Resolution order:
-          1. explicit ``SECTION.KEY`` (caller-supplied ``key_map`` overrides)
-          2. normalized ``section.key``
-          3. bare ``KEY`` -- only if that bare key is NOT ambiguous (i.e. it
-             does not appear in more than one section); ambiguous bare keys
-             must be mapped via the full ``SECTION.KEY`` or fall through below
-          4. generic: any section following the legacy ConfigCacheParser
-             "<NAMESPACE>.CACHE" convention maps to "<namespace-lower>.<KEY>"
-             -- the same format ``Config.wrap_config(namespace=...)`` reads via
-             PersistentSource. This is what lets ALL fields migrate (goal: not
-             just the ones a caller happens to enumerate), including custom
-             fields defined by sub-package/container configs this module has
-             never heard of. Section-qualification already makes this
-             collision-free, so no ambiguity check is needed here. Two cntr
-             keys need special handling because the generic rule would land
-             them somewhere nothing reads: the legacy misspelling
-             FLARE_DOAMIN (renamed to FLARE_DOMAIN, the key the code actually
-             reads) and INSTALLED_CONTAINERS/INSTALLED_REPOS (read bare, with
-             no namespace prefix -- see ContainerManager._persistent_store /
-             _migrate.py; RUNNING_CONTAINERS is deliberately excluded, it's
-             transient state read from the *cache* store instead).
-          5. otherwise ``legacy.<section>.<key>`` (never dropped) -- only hit
-             for a section that doesn't even follow the "*.CACHE" convention.
-
-        Returning ``mapped_legacy_bare`` for the bare-key fallback lets callers
-        distinguish an explicit full-key mapping from an ambiguous-prone bare one.
-        """
-        ambiguous_keys = ambiguous_keys or set()
-        full = "%s.%s" % (section, key)
-        if full in key_map:
-            return key_map[full], "mapped"
-        nfull = _normalize(full)
-        if nfull in key_map:
-            return key_map[nfull], "mapped"
-        if key in key_map and key not in ambiguous_keys:
-            return key_map[key], "mapped_legacy_bare"
-        nkey = _normalize(key)
-        if nkey in key_map and nkey not in ambiguous_keys:
-            return key_map[nkey], "mapped_legacy_bare"
-        if section.upper().endswith(".CACHE"):
-            namespace = section[:-len(".CACHE")].lower()
-            if namespace:
-                if key == "FLARE_DOAMIN":
-                    return "%s.FLARE_DOMAIN" % namespace, "mapped"
-                if key in ("INSTALLED_CONTAINERS", "INSTALLED_REPOS"):
-                    return key, "mapped"
-                return "%s.%s" % (namespace, key), "mapped_generic"
-        return ("legacy.%s.%s" % (_normalize(section), _normalize(key)),
-                "unknown_key_preserved")
-
-    def inspect(self, old_path: "PathLike") -> "dict[str, Any]":
-        """Read the old config file and report what would migrate (dry-run).
-
-        Keys are reported fully-qualified as ``<section>.<key>`` so same-named
-        keys in different sections do not collide (spec §4.3).
-        """
-        old_path = str(old_path)
-        result = {"file_exists": os.path.isfile(old_path), "keys": [], "count": 0}
-        if not result["file_exists"]:
-            return result
-        for section, key, _ in self._read_old(old_path):
-            result["keys"].append("%s.%s" % (section, key))
-            result["count"] += 1
-        self._log("info", "ConfigMigration.inspect: %d keys in %s" % (result["count"], old_path))
-        return result
-
- # -- backup (never overwrite) -----------------------------------
-
-    def _migration_dir(self, migration_id):
-        return self._config_dir / "migrations" / migration_id
-
-    def _new_migration_id(self, old_path):
-        # <UTC_TS>-<sha8>-<uuid8>: the uuid guarantees uniqueness even when two
- # backups of the same file land in the same second (never overwrite).
-        import uuid
-        return "%s-%s-%s" % (_utc_stamp(), get_file_hash(old_path, "sha256")[:8], uuid.uuid4().hex[:8])
-
-    def backup(self, old_path: "PathLike", migration_id: "str | None" = None,
-               backup_path: "PathLike | None" = None) -> str:
-        """Copy the old config into a unique migrations/<id>/ dir (§4.6).
-
-        Each call lands in ``<config_dir>/migrations/<UTC_TS>-<sha8>/`` with
-        ``old-config.backup`` and ``report.json``, so repeated migrations never
-        overwrite a previous backup. Returns the backup file path.
-        """
-        old_path = str(old_path)
-        if not os.path.isfile(old_path):
-            raise FileNotFoundError("old config not found: %s" % old_path)
-        if backup_path is None:
-            mid = migration_id or self._new_migration_id(old_path)
-            dest_dir = self._migration_dir(mid)
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            backup_path = dest_dir / "old-config.backup"
-            report_path = dest_dir / "report.json"
-            report_path.write_text(json.dumps({
-                "source": old_path,
-                "backup": str(backup_path),
-                "sha256": get_file_hash(old_path, "sha256"),
-                "created_at": _now_iso(),
-                "migration_id": mid,
-            }, indent=2))
-        backup_path = str(backup_path)
-        shutil.copy2(old_path, backup_path)
-        self._log("info", "ConfigMigration.backup: %s -> %s" % (old_path, backup_path))
-        return backup_path
-
- # -- migrate ----------------------------------------------
-
-    def migrate(
-        self,
-        old_path: "PathLike",
-        *,
-        key_map: "dict[str, str] | None" = None,
-        dry_run: bool = False,
-    ) -> "dict[str, Any]":
-        """Read old config and write to ConfigStore. Returns a report.
-
-        Every old ``<section>.<key>`` is migrated -- not just the ones a
-        caller happens to enumerate. An optional ``key_map`` of exceptions
-        (renames, ambiguous-bare-key overrides) wins first; anything else
-        under a "<NAMESPACE>.CACHE"-style section falls through to the
-        generic "<namespace-lower>.<KEY>" mapping (with two built-in cntr
-        exceptions -- FLARE_DOAMIN and INSTALLED_CONTAINERS/REPOS) so it is
-        still migrated to a real, readable location (see
-        ``_resolve_new_key``). Only a section that doesn't even follow that
-        convention is preserved (never dropped) at ``legacy.<section>.<key>``.
-
-        Writes are planned first and applied in a single batch via
-        ``store.save()`` so an interrupted migration cannot leave a half-written
-        new store.
-        """
-        from collections import defaultdict
-
-        old_path = str(old_path)
-        key_map = self._merged_key_map(key_map)
-        report = {"migrated": [], "skipped": [], "legacy": [], "entries": []}
-
-        if not os.path.isfile(old_path):
-            self._log("warning", "ConfigMigration: old config not found: %s" % old_path)
-            return report
-
-        entries = self._read_old(old_path)
-        # A bare key present in >1 section is ambiguous: refuse to auto-map it
-        # via the bare-key fallback (would collapse the sections onto one key).
-        by_key = defaultdict(set)
-        for section, key, _ in entries:
-            by_key[key].add(section)
-        ambiguous_keys = {k for k, secs in by_key.items() if len(secs) > 1}
-
-        # Plan every entry first; apply as one batch write below.
-        planned = {}  # new_key -> value
-        for section, key, value in entries:
-            full = "%s.%s" % (section, key)
-            new_key, reason = self._resolve_new_key(
-                section, key, key_map, ambiguous_keys)
-            secret = _is_secret(full)
-            # Skip if already in the store OR already claimed in this pass
-            # (do not overwrite an existing/newer value or a sibling mapping).
-            if new_key in self._store or new_key in planned:
-                report["skipped"].append(full)
-                report["entries"].append({"old_key": full, "new_key": new_key,
-                                          "reason": "skipped_exists", "secret": secret})
-                continue
-            planned[new_key] = value
-            if reason == "unknown_key_preserved":
-                report["legacy"].append(full)
-            else:
-                report["migrated"].append(full)
-            # NOTE: the raw value is intentionally NOT stored in the report, so
- # secret values can never leak into logs/CLI output .
-            report["entries"].append({"old_key": full, "new_key": new_key,
-                                      "reason": reason, "secret": secret})
-
-        if planned and not dry_run:
-            self._store.save(**planned)  # one locked, atomic batch write
-
-        self._log("info", "ConfigMigration: migrated %d, skipped %d, legacy %d" % (
-            len(report["migrated"]), len(report["skipped"]), len(report["legacy"])))
-        return report
-
-    # -- migrate other legacy formats (shared with sub-packages) -----------
-    #
-    # ``migrate()`` above only understands the ini-style ConfigCacheParser
-    # ``.cfg`` format. Sub-packages (e.g. cntr) have their own pre-ConfigStore
-    # legacy formats -- a bare JSON blob file, or a legacy FileCache shelve --
-    # that need the exact same "migrate once, never overwrite newer data,
-    # clean up the source" behaviour. These two methods are that shared
-    # mechanism, so core's and cntr's config migrations go through the same
-    # ConfigMigration methods instead of each hand-rolling it.
-
-    @staticmethod
-    def _remove(path: "PathLike") -> None:
-        try:
-            remove_file(str(path))
-        except Exception:
-            pass
-
-    def migrate_json_file(self, source_path: "PathLike", key: str,
-                          also_remove: "Sequence[PathLike]" = ()) -> bool:
-        """Migrate one legacy JSON blob file into ``store[key]``.
-
-        Returns True if a value was migrated. If ``key`` is already present,
-        the source is dropped (never overwritten) and this returns False.
-        ``also_remove`` lets a source directory/lockfile be cleaned up
-        alongside the primary file even when nothing was migrated.
-        """
-        source_path = str(source_path)
-        if not os.path.isfile(source_path):
-            return False
-        cleanup = tuple(also_remove) or (source_path,)
-        if key in self._store:
-            for p in cleanup:
-                self._remove(p)
-            return False
-        try:
-            with open(source_path, encoding="utf-8") as fd:
-                value = json.load(fd)
-        except Exception as exc:
-            self._log("warning", "ConfigMigration.migrate_json_file: failed to read %s: %s"
-                      % (source_path, exc))
-            return False
-        self._store.set(key, value)
-        self._log("warning", "ConfigMigration.migrate_json_file: migrated %s from %s"
-                  % (key, source_path))
-        for p in cleanup:
-            self._remove(p)
-        return True
-
-    def migrate_shelve(self, legacy_dir: "PathLike", keys: "Sequence[str]") -> "set[str]":
-        """Migrate the given ``keys`` out of a legacy FileCache shelve dir.
-
-        Only the listed keys are moved (regenerable/transient state should be
-        left for the caller to handle separately); the shelve directory is
-        removed once considered, whether or not anything was migrated.
-        """
-        from ..cache import FileCache  # legacy structure; import kept local
-
-        legacy_dir = str(legacy_dir)
-        if not os.path.isdir(legacy_dir):
-            return set()
-        migrated: "set[str]" = set()
-        try:
-            cache = FileCache(legacy_dir)
-            with cache.session() as data:
-                for key in keys:
-                    if key in self._store:
-                        continue
-                    value = data.get(key, None)
-                    if value is not None:
-                        self._store.set(key, value)
-                        migrated.add(key)
-                        self._log("warning",
-                                  "ConfigMigration.migrate_shelve: migrated %s from legacy FileCache" % key)
-        except Exception as exc:
-            self._log("warning", "ConfigMigration.migrate_shelve: failed at %s: %s" % (legacy_dir, exc))
-            return migrated
-        self._remove(legacy_dir)
-        return migrated
-
- # -- verify (full check) ----------------------
-
-    def verify(self, report: "dict[str, Any] | None" = None) -> bool:
-        """Verify the new ConfigStore is fully readable.
-
-        Every key in the store must be retrievable. If a migration ``report`` is
-        supplied, every mapped/legacy new_key it claims must be present and
-        readable, and no secret entry may carry a raw ``value`` field.
-        """
-        try:
-            for key in self._store.keys():
-                _ = self._store.get(key)
-            if report is not None:
-                for entry in report.get("entries", []):
-                    if entry["reason"] in ("mapped", "mapped_legacy_bare",
-                                            "mapped_generic", "unknown_key_preserved"):
-                        if entry["new_key"] not in self._store:
-                            self._log("error", "ConfigMigration.verify: missing %s" % entry["new_key"])
-                            return False
-                        _ = self._store.get(entry["new_key"])  # must be readable
-                    if entry.get("secret") and "value" in entry:
-                        self._log("error", "ConfigMigration.verify: secret value leaked for %s"
-                                  % entry["new_key"])
-                        return False
-            return True
-        except Exception as exc:
-            self._log("error", "ConfigMigration.verify failed: %s" % exc)
-            return False
-
-    # -- rollback ---------------------------------------------------------
-
-    def rollback(self, backup_path: "PathLike", old_path: "PathLike") -> None:
-        """Restore the old config from a backup."""
-        backup_path = str(backup_path)
-        old_path = str(old_path)
-        if not os.path.isfile(backup_path):
-            raise FileNotFoundError("backup not found: %s" % backup_path)
-        shutil.copy2(backup_path, old_path)
-        self._log("warning", "ConfigMigration.rollback: restored %s from %s" % (old_path, backup_path))
+def redact_config_value(field: "ConfigField | None", value: "Any") -> "Any":
+    """Mask ``value`` if ``field`` is a secret field; the single choke point
+    every secret-redaction site (explain candidates/resolved/raw, Config
+    list/get, CLI output) must go through."""
+    if field is not None and field.secret:
+        return "***"
+    return value
 
 
 class ConfigProvider:
@@ -681,8 +215,19 @@ class ConfigSource:
     # split.
     before_provider = False
 
+    # Directory a source's relative ``cast="path"`` values resolve against;
+    # None for sources with no filesystem origin (env/runtime/persistent).
+    # Only FileSource instances ever set this to something else.
+    base_path: "PathLike | None" = None
+
     def get(self, key: str) -> "tuple[Any, bool]":
         raise NotImplementedError
+
+    def keys(self) -> "list[str]":
+        return []
+
+    def reload(self) -> None:
+        return None
 
 
 class EnvironmentSource(ConfigSource):
@@ -744,7 +289,7 @@ class PersistentSource(ConfigSource):
         self._store.set(self._full(key), value)
 
     def delete(self, key: str) -> bool:
-        return self._store.delete(self._full(key))
+        return self._store.remove(self._full(key))
 
     def keys(self) -> "list[str]":
         """List this namespace's keys (store key minus the namespace prefix)."""
@@ -764,16 +309,21 @@ class FileSource(ConfigSource):
 
     ``name`` lets two instances (local-file / global-file) report distinct
     ``explain()`` source names instead of both showing up as ``"file"``.
-    ``reload_fn``, if given, is called by ``reload()`` to atomically replace
-    this source's data (e.g. from a fresh ``LinktoolsFileConfigLoader.load()``)
+    ``base_path`` is the directory the backing file lives in, used to resolve
+    a ``cast="path"`` field's relative value. ``reload_fn``, if given, is
+    called by ``reload()`` to atomically replace this source's data and
+    base_path (e.g. from a fresh ``LinktoolsFileConfigLoader.load()``)
     without ever leaving a half-updated state.
     """
 
     before_provider = True
 
-    def __init__(self, data: dict, name: str = "file", reload_fn: "Callable[[], dict] | None" = None) -> None:
+    def __init__(self, data: dict, name: str = "file",
+                 reload_fn: "Callable[[], tuple[dict, PathLike | None]] | None" = None,
+                 base_path: "PathLike | None" = None) -> None:
         self._data = dict(data)
         self.name = name
+        self.base_path = base_path
         self._reload_fn = reload_fn
 
     def get(self, key: str) -> "tuple[Any, bool]":
@@ -784,11 +334,15 @@ class FileSource(ConfigSource):
     def keys(self) -> "list[str]":
         return list(self._data.keys())
 
+    def replace(self, data: dict, base_path: "PathLike | None" = None) -> None:
+        self._data = dict(data or {})
+        self.base_path = base_path
+
     def reload(self) -> None:
         if self._reload_fn is None:
             return
-        data = self._reload_fn()
-        self._data = dict(data)
+        data, base_path = self._reload_fn()
+        self.replace(data, base_path=base_path)
 
 
 class DefaultSource(ConfigSource):
@@ -857,7 +411,7 @@ def _cast_json(value: "Any") -> "list | dict":
     raise TypeError("%s cannot be converted to json" % (type(value).__name__,))
 
 
-def _cast_value(cast: "ConfigType", value: "Any") -> "Any":
+def _cast_value(cast: "ConfigType", value: "Any", base_path: "PathLike | None" = None) -> "Any":
     """Apply a cast that may be a callable, ``bool``/``str``, or one of the
     string literals ``"path"``/``"json"``.
 
@@ -870,9 +424,18 @@ def _cast_value(cast: "ConfigType", value: "Any") -> "Any":
     the builtin, ``bool`` would silently misparse strings (see
     ``_cast_bool``) and ``str`` would produce non-JSON reprs for structured
     values (see ``_cast_str``).
+
+    A relative ``"path"`` value resolves against ``base_path`` (the
+    FileSource's directory, when the value came from one) rather than always
+    against the process CWD -- a local-file/global-file value written as
+    ``"./data"`` means "relative to that config file", not to wherever the
+    command happens to be invoked from.
     """
     if cast == "path":
-        return os.path.abspath(os.path.expanduser(str(value)))
+        expanded = os.path.expanduser(str(value))
+        if base_path is not None and not os.path.isabs(expanded):
+            return os.path.abspath(os.path.join(str(base_path), expanded))
+        return os.path.abspath(expanded)
     if cast == "json":
         return _cast_json(value)
     if cast is bool:
@@ -961,11 +524,11 @@ class ConfigResolver:
         persistent.set(field.name, value)
         return value, "persistent"
 
-    def _cast_validate(self, field: "ConfigField", raw: "Any") -> "Any":
+    def _cast_validate(self, field: "ConfigField", raw: "Any", base_path: "PathLike | None" = None) -> "Any":
         value = raw
         if field.cast is not None:
             try:
-                value = _cast_value(field.cast, raw)
+                value = _cast_value(field.cast, raw, base_path=base_path)
             except Exception as exc:
                 raise ConfigCastError("cannot cast %r for %s: %s" % (raw, field.name, exc))
         if field.validator is not None:
@@ -977,12 +540,12 @@ class ConfigResolver:
                 raise ConfigValidationError("value %r failed validation for %s" % (value, field.name))
         return value
 
-    def _first_present(self, field: "ConfigField") -> "tuple[str | None, Any, bool]":
+    def _first_present(self, field: "ConfigField") -> "tuple[ConfigSource | None, Any, bool]":
         for source in self._sources:
             for candidate in self._candidates(field):
                 raw, present = source.get(candidate)
                 if present:
-                    return (source.name, raw, True)
+                    return (source, raw, True)
         return (None, MISSING, False)
 
     def _first_present_raw(self, key: str) -> "tuple[str | None, Any, bool]":
@@ -992,7 +555,7 @@ class ConfigResolver:
                 return (source.name, raw, True)
         return (None, MISSING, False)
 
-    def _first_present_before_provider(self, field: "ConfigField") -> "tuple[str | None, Any, bool]":
+    def _first_present_before_provider(self, field: "ConfigField") -> "tuple[ConfigSource | None, Any, bool]":
         """Check every ``before_provider`` source (Environment, RuntimeOverride,
         Persistent, and now the local/global file sources) ahead of the
         field's provider.
@@ -1034,7 +597,7 @@ class ConfigResolver:
             for candidate in self._candidates(field):
                 raw, present = source.get(candidate)
                 if present:
-                    return (source.name, raw, True)
+                    return (source, raw, True)
         return (None, MISSING, False)
 
     def resolve(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
@@ -1107,7 +670,9 @@ class ConfigResolver:
         # their failure fallback.
         override_source, override_raw, override_present = self._first_present_before_provider(field)
         if override_present:
-            return ResolvedConfig(self._cast_validate(field, override_raw), field, override_source, override_raw)
+            base_path = override_source.base_path
+            return ResolvedConfig(self._cast_validate(field, override_raw, base_path=base_path),
+                                   field, override_source.name, override_raw)
 
         provider = field.provider
         if isinstance(provider, AliasProvider):
@@ -1122,9 +687,10 @@ class ConfigResolver:
         elif provider is not None:
             return self._resolve_leaf_provider(provider, field)
 
-        source_name, raw, present = self._first_present(field)
+        source, raw, present = self._first_present(field)
         if present:
-            return ResolvedConfig(self._cast_validate(field, raw), field, source_name, raw)
+            return ResolvedConfig(self._cast_validate(field, raw, base_path=source.base_path),
+                                   field, source.name, raw)
         if field.default is not MISSING:
             return ResolvedConfig(self._cast_validate(field, field.default), field, "default", field.default)
         if field.required:
@@ -1163,14 +729,13 @@ class ConfigResolver:
             for candidate in candidate_keys:
                 raw, present = source.get(candidate)
                 if present:
-                    candidates.append({"source": source.name, "key": candidate, "raw": raw})
+                    candidates.append({
+                        "source": source.name, "key": candidate,
+                        "raw": redact_config_value(field, raw),
+                    })
         secret = bool(field.secret) if field is not None else False
-        if secret:
-            shown_value = "***"
-            shown_raw = "***"
-        else:
-            shown_value = resolved.value
-            shown_raw = resolved.raw_value
+        shown_value = redact_config_value(field, resolved.value)
+        shown_raw = redact_config_value(field, resolved.raw_value)
         warnings: "list[str]" = []
         if unknown:
             warnings.append("key is not defined in schema")
@@ -1204,6 +769,10 @@ class Config:
 
     def define(self, field: "ConfigField") -> "Config":
         self._schema.define(field)
+        # A schema change can affect any resolution that depends on this
+        # field's aliases/provider/secret/cast, or on another field aliasing
+        # it -- clear the whole memo, not just field.key (spec §26).
+        self._resolver.clear_memo()
         return self
 
     def _find(self, source_class: type) -> "ConfigSource | None":
@@ -1271,33 +840,15 @@ class Config:
             if runtime:
                 runtime.clear()
         for source in self._sources:
-            reload_fn = getattr(source, "reload", None)
-            if callable(reload_fn):
-                reload_fn()
+            source.reload()
         self._resolver.clear_memo()
 
     def keys(self) -> "list[str]":
         known = set()
-        for name in self._schema._fields:
-            known.add(name)
+        for field in self._schema.fields():
+            known.add(field.name)
         for source in self._sources:
-            # Prefer a source-level keys() (PersistentSource knows its namespace
-            # prefix); fall back to introspecting _data/_ns for older sources.
-            keys_fn = getattr(source, "keys", None)
-            if callable(keys_fn):
-                try:
-                    known.update(keys_fn())
-                except Exception:
-                    pass
-            data = getattr(source, "_data", None)
-            if isinstance(data, dict):
-                known.update(data.keys())
-            ns = getattr(source, "_ns", None)
-            if ns is not None:
-                try:
-                    known.update(ns.keys())
-                except Exception:
-                    pass
+            known.update(source.keys())
         return sorted(known)
 
     def persisted_keys(self) -> "list[str]":
@@ -1332,6 +883,9 @@ class Config:
                 self._schema.define(ConfigField(name=key, provider=value))
             else:
                 self._schema.define(ConfigField(name=key, default=value))
+        # See Config.define -- any of the fields just (re)defined may change
+        # what an already-memoized resolution should have returned.
+        self._resolver.clear_memo()
         return self
 
     def cast(self, value: "Any", type: "Any" = None) -> "Any":

@@ -23,7 +23,7 @@ class RepoCommand(BaseCommandGroup):
 
     @subcommand("list", order=REPO_COMMAND_ORDER["list"], help="list repositories")
     def on_command_list(self):
-        repos = _shared.manager.repo_store.get_all()
+        repos = _shared.manager.repos.get_all()
         for key, value in repos.items():
             data = {key: value}
             self.logger.info(
@@ -44,17 +44,16 @@ class RepoCommand(BaseCommandGroup):
                     "Only add repositories you trust. Continue?",
                     default=False):
                 raise ContainerError("Canceled")
-        _shared.manager.repo_store.add(url, branch=branch, force=force)
+        _shared.manager.repos.add(url, branch=branch, force=force)
 
     @subcommand("status", order=REPO_COMMAND_ORDER["status"], help="show repository status (read-only)")
     def on_command_status(self):
-        repos = _shared.manager.repo_store.get_all()
+        repos = _shared.manager.repos.get_all()
         if not repos:
             self.logger.info("No repository found")
             return
-        from ..repo.status import describe_repository
         for url, meta in repos.items():
-            info = describe_repository(_shared.manager, url, meta)
+            info = _shared.manager.repos.describe(url, meta)
             self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
 
     @subcommand("validate", order=REPO_COMMAND_ORDER["validate"],
@@ -62,23 +61,11 @@ class RepoCommand(BaseCommandGroup):
     @subcommand_argument("url", nargs="?", help="repository url or local path; all repositories if omitted")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_validate(self, url: str = None, as_json: bool = False):
-        repos = _shared.manager.repo_store.get_all()
-        if url is not None:
-            if url not in repos:
-                raise ContainerError(f"Repository `{url}` not found.")
-            targets = {url: repos[url]}
-        else:
-            targets = repos
-
-        if not targets:
+        if not _shared.manager.repos.get_all():
             self.logger.info("No repository found")
             return
 
-        from ..repo.status import describe_repository
-        results = {
-            u: describe_repository(_shared.manager, u, m)
-            for u, m in targets.items()
-        }
+        results, incompatible = _shared.manager.repos.validate(url)
 
         if as_json:
             import json
@@ -89,7 +76,6 @@ class RepoCommand(BaseCommandGroup):
             for u, info in results.items():
                 self.logger.info(yaml.dump({u: info}, sort_keys=False).strip())
 
-        incompatible = sorted(u for u, info in results.items() if info.get("compatible") is False)
         if incompatible:
             raise ContainerError(f"Incompatible repositories: {', '.join(incompatible)}")
 
@@ -98,7 +84,7 @@ class RepoCommand(BaseCommandGroup):
     @subcommand_argument("-f", "--force", help="force update")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_update(self, branch: str = None, force: bool = False, as_json: bool = False):
-        results = _shared.manager.repo_store.update(branch=branch, reset=force)
+        results = _shared.manager.repos.update(branch=branch, reset=force)
 
         if as_json:
             import dataclasses
@@ -126,7 +112,7 @@ class RepoCommand(BaseCommandGroup):
     @subcommand("remove", order=REPO_COMMAND_ORDER["remove"], help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")
     def on_command_remove(self, url: str = None):
-        repos = list(_shared.manager.repo_store.get_all().keys())
+        repos = list(_shared.manager.repos.get_all().keys())
         if not repos:
             raise ContainerError("No repository found")
 
@@ -134,12 +120,12 @@ class RepoCommand(BaseCommandGroup):
             repo = choose("Choose repository you want to remove", repos)
             if not confirm(f"Remove repository `{repo}`?", default=False):
                 raise ContainerError("Canceled")
-            _shared.manager.repo_store.remove(repo)
+            _shared.manager.repos.remove(repo)
 
         elif url in repos:
             if not confirm(f"Remove repository `{url}`?", default=False):
                 raise ContainerError("Canceled")
-            _shared.manager.repo_store.remove(url)
+            _shared.manager.repos.remove(url)
 
         else:
             raise ContainerError(f"Repository `{url}` not found.")

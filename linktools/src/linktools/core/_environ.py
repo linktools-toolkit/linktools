@@ -48,7 +48,8 @@ if TYPE_CHECKING:
     from ._logging import LoggingManager
     from ._locks import LockManager
     from ..cache import CacheStore
-    from ._config import ConfigSchema, ConfigSource, ConfigStore
+    from ._config import ConfigSchema, ConfigSource
+    from ._config_store import ConfigStore
     from ._download import DownloadManager
     from ._file_config import ResolvedLinktoolsFileConfig
 
@@ -273,52 +274,10 @@ class BaseEnviron(abc.ABC):
         INSTALLED_CONTAINERS) that must NOT live in the cache. Distinct file and
         lifecycle from ``cache``; written atomically under a process lock.
         """
-        from ._config import ConfigStore
+        from ._config_store import ConfigStore
 
         self.paths.ensure_config()
-        store = ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
-        self._migrate_legacy_cfg(store)
-        return store
-
-    def _migrate_legacy_cfg(self, store: "ConfigStore") -> None:
-        """One-time migration of the original ConfigCacheParser ini file
-        (``<data>/.config/<name>.cfg``) into ``store``. Idempotent: a no-op once
-        the legacy file is gone. Never overwrites a key already in ``store``.
-
-        This is the only place core auto-migrates; sub-packages with their own
-        legacy sources (e.g. cntr's installed/repo state) hook their own
-        migration into their own first-use path.
-        """
-        cfg_path = self.get_data_path(".config", f"{self.name}.cfg")
-        if not os.path.isfile(cfg_path):
-            return
-        from ._config import ConfigMigration
-
-        mig = ConfigMigration(store, logger=self.get_logger("migrate"))
-        info = mig.inspect(cfg_path)
-        if info["count"] == 0:
-            try:
-                os.remove(cfg_path)
-            except OSError:
-                pass
-            return
-        try:
-            mig.backup(cfg_path)
-            report = mig.migrate(cfg_path)
-        except Exception as exc:
-            self.get_logger("migrate").warning(f"Failed to migrate legacy config {cfg_path}: {exc}")
-            return
-        if not mig.verify(report):
-            self.get_logger("migrate").warning(
-                f"Verification failed migrating legacy config {cfg_path}; left in place")
-            return
-        try:
-            os.remove(cfg_path)
-        except OSError:
-            pass
-        self.get_logger("migrate").warning(
-            f"Migrated {len(report['migrated']) + len(report['legacy'])} key(s) "
-            f"from legacy config {cfg_path}")
+        return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
 
     @cached_property(lock=True)
     def downloads(self) -> "DownloadManager":
@@ -518,24 +477,40 @@ class BaseEnviron(abc.ABC):
         Both sources reload atomically (spec §24): the local source's
         ``reload_fn`` re-reads *both* files as a single
         ``load_file_config()`` call and pushes the global half straight into
-        ``global_source`` before returning its own half, so either both move
-        to a freshly-read, mutually consistent pair, or -- if either file is
-        now missing/corrupt -- neither source's data changes at all (the
-        exception propagates out of ``reload_fn`` before either is touched).
+        ``global_source`` (via the public ``replace()``, never touching
+        ``_data`` directly) before returning its own half, so either both
+        move to a freshly-read, mutually consistent pair, or -- if either
+        file is now missing/corrupt -- neither source's data changes at all
+        (the exception propagates out of ``reload_fn`` before either is
+        touched).
+
+        Each source's ``base_path`` (spec §29) is the directory its backing
+        file lives in, so a ``cast="path"`` field's relative value resolves
+        against that config file's own directory, not the process CWD:
+        global-file -> ``~/.linktools/``; local-file -> ``local_root`` (or
+        the CWD when ``local_root`` is None, matching
+        ``LinktoolsFileConfigLoader.get_local_path``).
         """
         from ._config import FileSource
+        from ._file_config import LinktoolsFileConfigLoader
+
+        loader = LinktoolsFileConfigLoader()
+        global_base_path = os.path.dirname(loader.get_global_path())
+        local_base_path = str(local_root) if local_root is not None else os.getcwd()
 
         resolved = self.load_file_config(local_root=local_root)
-        local_source = FileSource(resolved.local_config.environment, name="local-file")
-        global_source = FileSource(resolved.global_config.environment, name="global-file")
+        local_source = FileSource(resolved.local_config.environment, name="local-file",
+                                  base_path=local_base_path)
+        global_source = FileSource(resolved.global_config.environment, name="global-file",
+                                   base_path=global_base_path)
 
-        def _reload_local() -> dict:
+        def _reload_local() -> "tuple[dict, str]":
             fresh = self.load_file_config(local_root=local_root)
-            global_source._data = dict(fresh.global_config.environment)
-            return fresh.local_config.environment
+            global_source.replace(fresh.global_config.environment, base_path=global_base_path)
+            return fresh.local_config.environment, local_base_path
 
         local_source._reload_fn = _reload_local
-        global_source._reload_fn = lambda: global_source._data
+        global_source._reload_fn = lambda: (global_source._data, global_source.base_path)
 
         return local_source, global_source
 

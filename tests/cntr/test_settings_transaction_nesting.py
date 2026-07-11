@@ -84,7 +84,7 @@ def test_cross_container_settings_access_during_docker_compose_does_not_nest(
 
     environ = Environ()
     manager = ContainerManager(environ, name="aio")
-    manager.repo_store.add(str(cross_ref_repo))
+    manager.repos.add(str(cross_ref_repo))
     manager.installed_state.add("a", "b")
 
     # Must not raise CacheTransactionError.

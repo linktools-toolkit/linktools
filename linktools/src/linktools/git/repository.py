@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Git repository wrapper backed by dulwich (spec §12).
+"""Git repository wrapper backed by dulwich.
 
-Pure-Python (dulwich) -- never shells out to system ``git`` (spec §12.1). The
-public surface (``GitRepository``/``GitHead``) is stable; cntr depends on it.
-New behaviour vs the legacy single file:
-
-* atomic clone (§12.2): clone to a staging dir, then rename, so an interrupted
-  clone never leaves a half-valid repository;
-* ``sync(policy=)`` (§12.3) replaces ``pull(reset=...)`` with an explicit
-  :class:`~linktools.git.sync.GitSyncPolicy`;
-* write operations are serialised per repository via the environment's
-  LockManager (§12.8 GIT-006).
+Pure-Python -- never shells out to system ``git``. Clone is atomic (clone to a
+staging dir, then rename) so an interrupted clone never leaves a half-valid
+repository. Write operations are serialised per repository via the
+environment's LockManager.
 """
 
 import contextlib
@@ -39,25 +33,6 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("git")
 
 
-class _GitProxy(object):
-    """Common git operations on a repo path via dulwich porcelain."""
-
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def stash(self, *args):
-        if args and args[0] == "pop":
-            porcelain.stash_pop(self._path)
-        else:
-            porcelain.stash_push(self._path)
-
-    def reset(self, hard=False, **kwargs):
-        porcelain.reset(self._path, mode="hard" if hard else "mixed")
-
-    def checkout(self, branch):
-        porcelain.switch(self._path, branch)
-
-
 class GitHead(object):
     """A local git branch that can be checked out."""
 
@@ -77,7 +52,17 @@ class GitRepository(object):
         self._environ = environ
         self._path = str(path)
         self._repo = DulwichRepo(self._path)  # raises NotGitRepository if invalid
-        self.git = _GitProxy(self._path)
+
+    @classmethod
+    def open_if_valid(cls, environ: "Any", path: "PathType") -> "GitRepository | None":
+        """Like the constructor, but returns ``None`` instead of raising when
+        ``path`` isn't a git repository -- keeps dulwich's ``NotGitRepository``
+        entirely inside this module so callers never need to import it."""
+        from dulwich.errors import NotGitRepository
+        try:
+            return cls(environ, path)
+        except NotGitRepository:
+            return None
 
     def close(self):
         """Release the underlying repository handle (open pack files, etc.)."""
@@ -159,6 +144,13 @@ class GitRepository(object):
             porcelain.branch_create(self._path, branch, target)
             return GitHead(self._path, branch)
 
+    def checkout_or_create(self, branch: str) -> None:
+        """Check out ``branch``, creating it from the remote if it doesn't exist locally."""
+        if branch in self.heads:
+            self._checkout(branch)
+        else:
+            self.create_head(branch).checkout()
+
     # -- sync ( ------------------------------------------------------
 
     def sync(self, policy: str = GitSyncPolicy.FAST_FORWARD_ONLY) -> None:
@@ -168,7 +160,7 @@ class GitRepository(object):
                 raise GitError("Working tree is dirty; refusing to sync.")
             stashed = False
             if policy == GitSyncPolicy.STASH_AND_RESTORE and self.is_dirty():
-                self.git.stash()
+                self._stash_push()
                 stashed = True
             try:
                 if policy == GitSyncPolicy.RESET_TO_REMOTE:
@@ -177,12 +169,21 @@ class GitRepository(object):
                     self._fast_forward()  # FAST_FORWARD_ONLY / default
             finally:
                 if stashed:
-                    self.git.stash("pop")
+                    self._stash_pop()
 
-    def pull(self, reset: bool = False) -> None:
-        """Legacy entry point; maps to :meth:`sync` with the equivalent policy."""
-        self.sync(policy=GitSyncPolicy.RESET_TO_REMOTE if reset
-                  else GitSyncPolicy.FAST_FORWARD_ONLY)
+    # -- low-level porcelain wrappers ---------------------------------------
+
+    def _stash_push(self):
+        porcelain.stash_push(self._path)
+
+    def _stash_pop(self):
+        porcelain.stash_pop(self._path)
+
+    def _reset_hard(self):
+        porcelain.reset(self._path, mode="hard")
+
+    def _checkout(self, branch):
+        porcelain.switch(self._path, branch)
 
     def _fast_forward(self):
         branch_ref = self._current_branch_ref()

@@ -88,12 +88,9 @@ class InstalledStateStore:
         container objects here (via manager.containers) would recurse back
         into the property this feeds.
         """
-        # A failed migration is not cached, so retry it on every access.
-        self.manager._migrated
         return list(self.manager._persistent_store.get(_INSTALLED_KEY, []) or [])
 
     def _dump_names(self, names: "Iterable[str]") -> None:
-        self.manager._migrated
         self.manager._persistent_store.set(_INSTALLED_KEY, list(names))
 
     def _load(self) -> "list[BaseContainer]":

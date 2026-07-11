@@ -13,8 +13,9 @@ through the schema's PersistentSource instead, so it Just Works.
 import pytest
 from linktools.types import MISSING
 
+from linktools.core._config_store import ConfigStore
 from linktools.core._config import (
-    ConfigField, ConfigResolver, ConfigSchema, ConfigStore, ConfigError, ConfigCastError,
+    ConfigField, ConfigResolver, ConfigSchema, ConfigError, ConfigCastError,
     LazyProvider, PromptProvider, ConfirmProvider,
     PersistentSource, RuntimeOverrideSource, EnvironmentSource,
 )

@@ -42,8 +42,9 @@ def test_host_still_resolves_via_provider_when_unset(fresh_manager):
 def test_cached_provider_still_reuses_after_first_compute(tmp_path):
     from linktools.core._config import (
         Config, ConfigSchema, EnvironmentSource, RuntimeOverrideSource,
-        PersistentSource, DefaultSource, ConfigStore,
+        PersistentSource, DefaultSource,
     )
+    from linktools.core._config_store import ConfigStore
     from linktools.core._locks import LockManager
 
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))

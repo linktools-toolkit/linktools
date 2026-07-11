@@ -37,7 +37,6 @@ from linktools.core import (
 )
 from linktools.decorator import cached_property
 
-from . import _migrate
 from .container import BaseContainer, ContainerError
 
 if TYPE_CHECKING:
@@ -54,7 +53,7 @@ if TYPE_CHECKING:
     from .lifecycle.hooks import HookListView, HookRegistry
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
-    from .repo.store import RepoStore
+    from .repo.service import RepoService
     from .artifacts.index import ArtifactIndex
     from .execution.planner import ExecutionPlanner
 
@@ -86,16 +85,6 @@ class ContainerManager:
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
-
-        # Trigger legacy -> ConfigStore migration now, before any config or
-        # setting is read/written. State/repo stores also touch self._migrated
-        # on every access, but "config set/list/edit" reach env_config
-        # directly without ever going through a state/repo store, so relying
-        # on that alone would let those commands run against pre-migration data.
-        try:
-            self._migrated
-        except Exception as exc:
-            self.logger.warning(f"Failed to run legacy settings migration: {exc}")
 
     @property
     def configs(self) -> "dict[str, Any]":
@@ -200,16 +189,6 @@ class ContainerManager:
         return self.environ.cache.namespace("cntr")
 
     @cached_property
-    def _migrated(self):
-        # See _migrate.py for what this consolidates and why. A failed
-        # migration is not cached, so later access (e.g. from a state/repo
-        # store) retries it.
-        _migrate.migrate_legacy_container_settings(
-            self._persistent_store, self.data_path, self.setting_path, self.logger,
-        )
-        return True
-
-    @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
         result = dict()
         for container in self.loader.load_all():
@@ -303,9 +282,9 @@ class ContainerManager:
         return InstalledStateStore(self)
 
     @cached_property
-    def repo_store(self) -> "RepoStore":
-        from .repo.store import RepoStore
-        return RepoStore(self)
+    def repos(self) -> "RepoService":
+        from .repo.service import RepoService
+        return RepoService(self)
 
     def _make_container_schema(self) -> "Any":
         from linktools.core import ConfigSchema

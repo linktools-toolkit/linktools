@@ -11,7 +11,7 @@ from linktools.core import (
     Config, ConfigField, ConfigSchema, DefaultSource, EnvironmentSource,
     FileSource, LazyProvider, PersistentSource, PromptProvider, RuntimeOverrideSource,
 )
-from linktools.core._config import ConfigStore
+from linktools.core._config_store import ConfigStore
 from linktools.core._locks import LockManager
 
 
@@ -115,7 +115,7 @@ def test_reload_replaces_file_source_data_via_reload_fn(tmp_path):
     state = {"data": {"KEY": "v1"}}
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
     schema = ConfigSchema(allow_unknown=True)
-    local_source = FileSource(state["data"], name="local-file", reload_fn=lambda: state["data"])
+    local_source = FileSource(state["data"], name="local-file", reload_fn=lambda: (state["data"], None))
     config = Config(None, schema, sources=[
         EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
         local_source, DefaultSource(schema),

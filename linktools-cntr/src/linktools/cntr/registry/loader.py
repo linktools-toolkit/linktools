@@ -52,7 +52,7 @@ class ContainerLoader:
         for container in containers:
             container.env_config.update_defaults(**container.configs)
 
-        for url, meta in manager.repo_store.get_all().items():
+        for url, meta in manager.repos.get_all().items():
             manager.logger.debug(f"Load containers from repository `{url}`")
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path) or not os.path.isdir(repo_path):

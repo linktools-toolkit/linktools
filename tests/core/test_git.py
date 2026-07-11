@@ -130,57 +130,57 @@ class TestGit(unittest.TestCase):
             remote_heads = remote_repo.refs.as_dict(b"refs/heads/")
         self.assertEqual(remote_heads[b"master"].decode(), sha)
 
-    def test_git_proxy_stash_and_pop(self):
-        GitRepository.clone(environ, self.remote_path, self.clone_path)
-        repo = GitRepository(environ, self.clone_path)
-        self.addCleanup(repo.close)
-
-        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
-            f.write("dirty change")
-
-        repo.git.stash()
-        self.assertFalse(repo.is_dirty())
-        self.assertEqual(self._read(self.clone_path, "a.txt"), "hello")
-
-        repo.git.stash("pop")
-        self.assertTrue(repo.is_dirty())
-        self.assertEqual(self._read(self.clone_path, "a.txt"), "dirty change")
-
-    def test_git_proxy_reset_hard(self):
-        GitRepository.clone(environ, self.remote_path, self.clone_path)
-        repo = GitRepository(environ, self.clone_path)
-        self.addCleanup(repo.close)
-
-        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
-            f.write("dirty change")
-
-        repo.git.reset(hard=True)
-        self.assertFalse(repo.is_dirty())
-        self.assertEqual(self._read(self.clone_path, "a.txt"), "hello")
-
-    def test_git_proxy_checkout(self):
+    def test_checkout_or_create_switches_existing_branch(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
         porcelain.branch_create(self.clone_path, "local-branch")
 
-        repo.git.checkout("local-branch")
+        repo.checkout_or_create("local-branch")
         self.assertEqual(porcelain.active_branch(self.clone_path), b"local-branch")
 
-        repo.git.checkout("master")
+        repo.checkout_or_create("master")
         self.assertEqual(porcelain.active_branch(self.clone_path), b"master")
 
-    def test_pull_fast_forward(self):
+    def test_checkout_or_create_creates_missing_branch_from_remote(self):
+        porcelain.branch_create(self.remote_path, "feature")
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        self.assertNotIn("feature", repo.heads)
+
+        repo.checkout_or_create("feature")
+
+        self.assertIn("feature", repo.heads)
+        self.assertEqual(porcelain.active_branch(self.clone_path), b"feature")
+
+    def test_sync_fast_forward_only(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
 
         self._commit(self.remote_path, "b.txt", "world", "second")
-        repo.pull()
+        repo.sync(policy=GitSyncPolicy.FAST_FORWARD_ONLY)
 
         self.assertEqual(self._read(self.clone_path, "b.txt"), "world")
 
-    def test_pull_diverged_raises(self):
+    def test_sync_stash_and_restore_policy(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+
+        self._commit(self.remote_path, "b.txt", "world", "second")
+        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
+            f.write("dirty change")
+
+        repo.sync(policy=GitSyncPolicy.STASH_AND_RESTORE)
+
+        # Fast-forwarded to the remote's new commit...
+        self.assertEqual(self._read(self.clone_path, "b.txt"), "world")
+        # ...and the dirty local change was restored afterwards.
+        self.assertEqual(self._read(self.clone_path, "a.txt"), "dirty change")
+
+    def test_sync_fast_forward_diverged_raises(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)
         self.addCleanup(repo.close)
@@ -189,20 +189,7 @@ class TestGit(unittest.TestCase):
         self._commit(self.clone_path, "c.txt", "local change", "local second")
 
         with self.assertRaises(GitError):
-            repo.pull(reset=False)
-
-    def test_pull_reset(self):
-        GitRepository.clone(environ, self.remote_path, self.clone_path)
-        repo = GitRepository(environ, self.clone_path)
-        self.addCleanup(repo.close)
-
-        self._commit(self.remote_path, "b.txt", "remote change", "remote second")
-        self._commit(self.clone_path, "c.txt", "local change", "local second")
-
-        repo.pull(reset=True)
-
-        self.assertEqual(self._read(self.clone_path, "b.txt"), "remote change")
-        self.assertFalse(os.path.exists(os.path.join(self.clone_path, "c.txt")))
+            repo.sync(policy=GitSyncPolicy.FAST_FORWARD_ONLY)
 
     def test_create_head_from_remote_branch(self):
         porcelain.branch_create(self.remote_path, "feature")

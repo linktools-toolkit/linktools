@@ -49,7 +49,7 @@ def _fresh_standalone_manager(tmp_path):
 def test_notify_remove_registers_configs_on_repo_container_own_config(tmp_path):
     repo_dir = _repo_with_field_only_container(tmp_path, name="repo_src")
     manager = _fresh_standalone_manager(tmp_path)
-    manager.repo_store.add(str(repo_dir))
+    manager.repos.add(str(repo_dir))
     # The loader derives the container's name from its containing repo
     # directory name (no explicit `name` given to BaseContainer, and no
     # nested numeric-prefixed subdirectory) -- "repo_src" here.

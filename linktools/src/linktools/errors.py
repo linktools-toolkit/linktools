@@ -46,7 +46,7 @@ __all__ = [
     # Specific exceptions.
     "ModuleError", "DownloadHttpError", "ExecError",
     "ToolNotFound", "ToolNotSupport", "ToolExecError",
-    "NoFreePortFoundError", "GitDivergedError",
+    "NoFreePortFoundError", "GitDivergedError", "GitUnavailableError",
     # Cache subtree (
     "CacheValueError", "CacheCodecError", "CacheTransactionError",
     "CacheBackendError", "CacheBusyError", "CacheCorruptedError",
@@ -337,3 +337,7 @@ class NoFreePortFoundError(SystemError):
 
 class GitDivergedError(GitError):
     """A local branch has diverged from its remote and cannot fast-forward."""
+
+
+class GitUnavailableError(GitError):
+    """Git support is unavailable in this runtime."""

@@ -233,7 +233,7 @@ def test_doctor_run_with_runtime_false_skips_compose_validation(fresh_manager, m
 
 def test_check_repos_reports_unsatisfied_requirement_as_warn(fresh_manager, tmp_path, monkeypatch):
     """An unsatisfied `requires.linktools-cntr` now fails closed, so
-    repo_store.add() itself would reject this repo -- inject it directly
+    repos.add() itself would reject this repo -- inject it directly
     into the repo store (simulating a repo that became incompatible after
     being installed) to exercise Doctor's reporting."""
     import json as json_module
@@ -247,9 +247,9 @@ def test_check_repos_reports_unsatisfied_requirement_as_warn(fresh_manager, tmp_
         "class Container(BaseContainer):\n    pass\n",
         encoding="utf-8",
     )
-    repos = dict(fresh_manager.repo_store.get_all())
+    repos = dict(fresh_manager.repos.get_all())
     repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
-    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(
@@ -273,9 +273,9 @@ def test_doctor_reports_invalid_local_config(fresh_manager, tmp_path, monkeypatc
         "class Container(BaseContainer):\n    pass\n",
         encoding="utf-8",
     )
-    repos = dict(fresh_manager.repo_store.get_all())
+    repos = dict(fresh_manager.repos.get_all())
     repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
-    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
@@ -293,9 +293,9 @@ def test_doctor_reports_invalid_requirement_specifier(fresh_manager, tmp_path, m
         "class Container(BaseContainer):\n    pass\n",
         encoding="utf-8",
     )
-    repos = dict(fresh_manager.repo_store.get_all())
+    repos = dict(fresh_manager.repos.get_all())
     repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
-    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
@@ -320,13 +320,13 @@ def test_doctor_and_loader_use_same_requirement_gate(fresh_manager, tmp_path, mo
     )
 
     with _pytest.raises(ContainerError):
-        fresh_manager.repo_store.add(str(repo_dir), force=True)
+        fresh_manager.repos.add(str(repo_dir), force=True)
 
     # Simulate the repo having been installed anyway (e.g. pre-existing
     # before this gate existed) to exercise Doctor's independent path.
-    repos = dict(fresh_manager.repo_store.get_all())
+    repos = dict(fresh_manager.repos.get_all())
     repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
-    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(f.code == "repo.incompatible" for f in findings)

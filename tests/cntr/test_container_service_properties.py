@@ -34,8 +34,8 @@ def test_container_lacks_global_manager_management_surface(fresh_manager):
     Container must not become a full proxy for it."""
     container = fresh_manager.containers["nginx"]
     for name in (
-        "loader", "resolver", "repo_store", "installed_state",
-        "_persistent_store", "_transient_ns", "_migrated",
+        "loader", "resolver", "repos", "installed_state",
+        "_persistent_store", "_transient_ns",
         "add_repo", "update_repos", "remove_repo",
         "add_installed_containers", "remove_installed_containers",
     ):
