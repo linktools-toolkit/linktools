@@ -240,6 +240,19 @@ class TestGit(unittest.TestCase):
                      if p.startswith("clone.staging-")]
         self.assertEqual(leftovers, [])
 
+    def test_clone_protocol_error_is_wrapped_as_git_error(self):
+        # A transport/protocol failure (bad URL, auth rejected, server
+        # error, ...) must surface as a plain GitError -- callers must
+        # never need to import dulwich just to catch its own exception type.
+        from unittest import mock
+        from dulwich.errors import GitProtocolError
+
+        with mock.patch("linktools.git.repository.porcelain.clone",
+                        side_effect=GitProtocolError("bad refs")):
+            with self.assertRaises(GitError):
+                GitRepository.clone(environ, self.remote_path, self.clone_path)
+        self.assertFalse(os.path.exists(self.clone_path))
+
     def test_sync_reset_policy(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)

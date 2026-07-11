@@ -4,8 +4,6 @@ import os
 from subprocess import SubprocessError
 from typing import TYPE_CHECKING
 
-from dulwich.errors import GitProtocolError
-
 from linktools.cli import (
     BaseCommandGroup, CommandGroupRef, CommandParser, SubCommandWrapper, subcommand, subcommand_argument,
 )
@@ -46,7 +44,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @property
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
-            ContainerError, ConfigError, GitError, SubprocessError, GitProtocolError, OSError, AssertionError,
+            ContainerError, ConfigError, GitError, SubprocessError, OSError, AssertionError,
         ]
 
     def init_arguments(self, parser: "CommandParser") -> None:

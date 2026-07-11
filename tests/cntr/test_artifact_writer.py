@@ -176,6 +176,10 @@ def test_repo_backed_container_records_repository_url_and_revision(fresh_manager
         def head_sha(self):
             return "cafef00d"
 
+        @classmethod
+        def open_if_valid(cls, environ, repo_path):
+            return cls(environ, repo_path)
+
     monkeypatch.setattr(git_module, "GitRepository", _FakeGitRepository)
 
     (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    image: x:1\n")

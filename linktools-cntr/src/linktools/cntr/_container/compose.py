@@ -122,12 +122,10 @@ def _record_artifact(container: "BaseContainer", destination, kind: str, content
 def _git_revision(manager: "ContainerManager", repo_path) -> "str | None":
     if not repo_path or not os.path.exists(str(repo_path)):
         return None
+    from linktools.git import GitRepository
     try:
-        from dulwich.errors import NotGitRepository
-        from linktools.git import GitRepository
-        return GitRepository(manager.environ, str(repo_path)).head_sha()
-    except NotGitRepository:
-        return None
+        repo = GitRepository.open_if_valid(manager.environ, str(repo_path))
+        return repo.head_sha() if repo is not None else None
     except Exception:  # noqa: BLE001 - artifact recording must never fail a real write
         return None
 

@@ -16,6 +16,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from dulwich import porcelain
+from dulwich.errors import GitProtocolError
 from dulwich.repo import Repo as DulwichRepo
 
 from linktools import utils
@@ -31,6 +32,17 @@ if TYPE_CHECKING:
     from linktools.types import PathType
 
 _logger = environ.get_logger("git")
+
+
+@contextlib.contextmanager
+def _wrap_protocol_errors():
+    """Turn a transport/protocol failure (bad URL, auth rejected, server
+    error, ...) into a plain ``GitError`` -- callers must never need to
+    import dulwich just to catch its own transport exception type."""
+    try:
+        yield
+    except GitProtocolError as exc:
+        raise GitError(str(exc)) from exc
 
 
 class GitHead(object):
@@ -128,7 +140,7 @@ class GitRepository(object):
             return sha.decode()
 
     def push(self, remote_location=None, branch=None, force=False):
-        with self._write_lock():
+        with self._write_lock(), _wrap_protocol_errors():
             refspecs = branch and self._branch_ref(branch).decode()
             porcelain.push(self._path, remote_location, refspecs, force=force)
 
@@ -137,7 +149,8 @@ class GitRepository(object):
             branch_ref = self._branch_ref(branch)
             target = self._remote_branch_target(branch)
             if target is None:
-                result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
+                with _wrap_protocol_errors():
+                    result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
                 target = result.refs.get(branch_ref)
             if target is None:
                 raise GitError("Remote branch `%s` not found." % branch)
@@ -189,11 +202,12 @@ class GitRepository(object):
         branch_ref = self._current_branch_ref()
         with create_progress("message") as progress:
             try:
-                porcelain.pull(
-                    self._path,
-                    refspecs=branch_ref,
-                    errstream=GitProgressStream(progress),
-                )
+                with _wrap_protocol_errors():
+                    porcelain.pull(
+                        self._path,
+                        refspecs=branch_ref,
+                        errstream=GitProgressStream(progress),
+                    )
             except porcelain.DivergedBranches:
                 raise GitDivergedError(
                     "Local branch has diverged from the remote and cannot be fast-forwarded."
@@ -203,7 +217,7 @@ class GitRepository(object):
         # These repos are shallow (depth=1) clones, so dulwich cannot merge or
         # rebase a diverged branch. Fetch remote objects and hard-reset.
         branch_ref = self._current_branch_ref()
-        with create_progress("message") as progress:
+        with create_progress("message") as progress, _wrap_protocol_errors():
             result = porcelain.fetch(
                 self._path,
                 errstream=GitProgressStream(progress),
@@ -249,7 +263,7 @@ class GitRepository(object):
         if branch:
             kwargs["branch"] = branch
         try:
-            with create_progress("message") as progress:
+            with create_progress("message") as progress, _wrap_protocol_errors():
                 porcelain.clone(
                     url,
                     staging,
