@@ -8,6 +8,10 @@ class LinktoolsAIError(Exception):
     """Base class for every error raised by linktools.ai."""
 
 
+class RuntimeInitializationError(LinktoolsAIError):
+    """The runtime cannot safely initialize a required component."""
+
+
 class ResourceError(LinktoolsAIError):
     """Base class for ResourceStore-related errors."""
 
@@ -60,6 +64,10 @@ class StorageLeaseNotSupportedError(StorageCapabilityError):
 
 class IdempotencyConflictError(LinktoolsAIError):
     """Same idempotency key reused with a different request hash."""
+
+
+class IdempotencyConfigurationError(LinktoolsAIError):
+    """An idempotent call lacks the context or trusted key needed for safety."""
 
 
 class RunError(LinktoolsAIError):
@@ -163,7 +171,17 @@ class ToolTimeoutError(ToolError):
     pass
 
 
-class ToolSchemaValidationError(ToolError):
+class ToolSchemaError(ToolError):
+    """Base for JSON-schema validation/definition errors. Downstream never sees
+    a bare jsonschema.ValidationError / SchemaError / ImportError."""
+
+
+class ToolSchemaDefinitionError(ToolSchemaError):
+    """A tool's parameters_json_schema is itself malformed. Detected at assembly
+    time (never deferred to first call). Never retried."""
+
+
+class ToolSchemaValidationError(ToolSchemaError):
     """A tool's arguments (or result) failed JSON-schema validation -- e.g. a
     pipeline MODIFY produced arguments the tool cannot accept, or the original
     call's arguments did not match the declared parameters_json_schema. Never
@@ -306,8 +324,24 @@ class MCPConnectionError(LinktoolsAIError):
     """An MCP server connection could not be established or was lost."""
 
 
+class MCPAuthenticationError(MCPConnectionError):
+    pass
+
+
+class MCPDiscoveryError(MCPConnectionError):
+    pass
+
+
+class MCPDiscoveryUnsupportedError(MCPDiscoveryError):
+    pass
+
+
 class MCPToolError(LinktoolsAIError):
     """An MCP tool invocation failed at the protocol/transport layer."""
+
+
+class ToolSecurityAuditError(ToolError):
+    """A security-critical audit event could not be persisted."""
 
 
 class PackageNotFoundError(CapabilityNotFoundError):

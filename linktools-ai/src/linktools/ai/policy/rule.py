@@ -52,6 +52,10 @@ class ToolPolicyMetadata:
     idempotent: bool = False
     timeout_seconds: "float | None" = None
     schema_version: str = "1"
+    enabled: bool = True
+    max_retries: "int | None" = None
+    idempotency_strategy: "str | None" = None
+    idempotency_key_field: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 

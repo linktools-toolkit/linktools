@@ -7,6 +7,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from ..utils.freeze import freeze_value
 
 
 class PipelineAction(str, Enum):
@@ -29,6 +30,9 @@ class PipelineDecision:
     reason: "str | None" = None
     modified_payload: Any = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
 # Event types passed to pipeline hooks.

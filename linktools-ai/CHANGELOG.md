@@ -80,3 +80,10 @@ runtime = Runtime.build(
     ),
 )
 ```
+# Unreleased
+
+- Hardened JSON Schema validation, MCP exposed-name handling, registry policy
+  mapping, idempotency, audit failure behavior, and recursive audit redaction.
+- MCP raw tool aliases are no longer registered as model-visible tools.
+- Invalid schemas, missing idempotency context, and security-audit failures now
+  fail closed by default.

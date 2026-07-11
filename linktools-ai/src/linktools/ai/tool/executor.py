@@ -23,7 +23,8 @@ import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..agent.approval import ApprovalStatus, build_approval_request
-from ..errors import IdempotencyInProgressError, RunPaused, ToolApprovalRequiredError, ToolDeniedError
+from ..errors import (IdempotencyInProgressError, RunPaused, ToolApprovalRequiredError,
+                      ToolDeniedError, ToolSecurityAuditError)
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 from .idempotency import IdempotencyStatus, IdempotencyStore, compute_request_hash
@@ -46,6 +47,7 @@ class ToolExecutor:
         pause_on_approval: bool = False,
         idempotency_store: "IdempotencyStore | None" = None,
         retry_policy: Any = None,
+        security_audit_failure_mode: Any = "fail_closed",
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
@@ -64,6 +66,7 @@ class ToolExecutor:
         # tool-execution stack to AgentRunner ( catch it). Default
         # False preserves today's behavior byte-for-byte.
         self._pause_on_approval = pause_on_approval
+        self._security_audit_failure_mode = getattr(security_audit_failure_mode, "value", security_audit_failure_mode)
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
@@ -199,12 +202,15 @@ class ToolExecutor:
                         reason=reason or "",
                     ),
                 )
-            except Exception as exc:  # noqa: BLE001 - best-effort audit
+            except Exception as exc:  # noqa: BLE001 - configurable audit posture
                 _LOGGER.warning(
                     "failed to append ApprovalRequested event for approval %s: %s",
                     approval.id,
                     exc,
                 )
+                if self._security_audit_failure_mode != "best_effort":
+                    raise ToolSecurityAuditError(
+                        "failed to persist approval security audit event") from exc
 
         return approval
 
@@ -220,6 +226,7 @@ class ToolExecutor:
         schema_version: str = "1",
         descriptor: Any = None,
         effective_policy: Any = None,
+        idempotency_scope: "str | None" = None,
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -275,7 +282,7 @@ class ToolExecutor:
             )
         use_idempotency = self._idempotency_store is not None and idempotency_key is not None
         if use_idempotency:
-            scope = context.run_id
+            scope = idempotency_scope or context.run_id
             request_hash = compute_request_hash(
                 request.tool_name, request.arguments, scope,
                 schema_version=schema_version,

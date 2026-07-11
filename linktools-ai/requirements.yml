@@ -7,6 +7,7 @@ requires-python: ">=3.10"
 dependencies:
   - pydantic-ai-slim[mcp,openai]>=1.107,<2
   - linktools>=0.9.0
+  - jsonschema>=4,<5
 
 dev-dependencies:
   - pytest-asyncio

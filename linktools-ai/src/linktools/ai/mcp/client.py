@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any, Mapping
 
-from ..errors import MCPConnectionError
+from ..errors import MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError
 from ..registry.mcp import MCPServerSpec
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,11 +126,17 @@ class MCPConnectionManager:
         MCPToolset resolves names lazily, so a live connection is needed; if the
         underlying API cannot enumerate here, returns () (governance then operates
         on an unknown set -- the documented live-MCP boundary)."""
+        result = await self.list_tools_result(server)
+        return tuple(item.name for item in result.tools)
+
+    async def list_tools_result(self, server: MCPServerSpec):
+        from .provider import MCPDiscoveryResult, MCPToolInfo
         try:
             toolset = await self.get_toolset(server)
             getter = getattr(toolset, "get_tools", None)
             if getter is None:
-                return ()
+                return MCPDiscoveryResult((), False, MCPDiscoveryUnsupportedError(
+                    f"MCP server {server.id!r} cannot enumerate tools"))
             # pydantic-ai toolsets yield ToolDefinition objects; read .name off each.
             import inspect
             result = getter()
@@ -138,14 +144,31 @@ class MCPConnectionManager:
                 tools = await result
             else:
                 tools = result
-            names: "list[str]" = []
+            tools: "list[MCPToolInfo]" = []
             for t in tools or ():
                 name = getattr(t, "name", None) or getattr(getattr(t, "function", None), "name", None)
                 if name:
-                    names.append(str(name))
-            return tuple(names)
-        except Exception:
-            return ()
+                    tools.append(MCPToolInfo(
+                        name=str(name),
+                        parameters_json_schema=getattr(t, "parameters_json_schema", {}) or {},
+                        description=getattr(t, "description", None),
+                        read_only=None,
+                        metadata=getattr(t, "metadata", {}) or {},
+                    ))
+            return MCPDiscoveryResult(tuple(tools), True, None)
+        except Exception as exc:
+            return MCPDiscoveryResult((), False, MCPDiscoveryError(str(exc)))
+
+    async def call_tool(self, *, server_id: str, tool_name: str,
+                        arguments: Mapping[str, Any]) -> Any:
+        matches = [key for key in self._toolsets if key[0] == server_id]
+        if not matches:
+            raise MCPConnectionError(f"MCP server {server_id!r} is not connected")
+        toolset = self._toolsets[matches[-1]]
+        caller = getattr(toolset, "direct_call_tool", None)
+        if caller is None:
+            raise MCPConnectionError(f"MCP server {server_id!r} has no direct tool caller")
+        return await caller(tool_name, dict(arguments))
 
     async def close_server(self, server_id: str) -> None:
         # Close every cached toolset for this server id (multiple config

@@ -22,6 +22,7 @@ from .parser import SpecLoader, parse_yaml_text
 class ToolSpec:
     name: str
     description: str = ""
+    enabled: bool = True
     permissions: "frozenset[Permission]" = field(
         default_factory=lambda: frozenset({Permission.READ})
     )
@@ -30,6 +31,9 @@ class ToolSpec:
     approval: ApprovalMode = ApprovalMode.NEVER
     idempotent: bool = False
     timeout_seconds: "float | None" = None
+    max_retries: "int | None" = None
+    idempotency_strategy: "str | None" = None
+    idempotency_key_field: "str | None" = None
     # bump when a tool's input contract changes shape so an idempotency
     # hash computed under the old schema is never mistaken for a match
     # against the new one (see tool/idempotency.py compute_request_hash).
@@ -62,6 +66,15 @@ def _parse_permissions(items: Any) -> "frozenset[Permission]":
 
 
 def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
+    allowed = {
+        "description", "enabled", "permissions", "risk", "side_effect",
+        "approval", "idempotent", "timeout_seconds", "max_retries",
+        "schema_version", "idempotency_strategy", "idempotency_key_field",
+        "metadata", "name",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise InvalidSpecError(f"unknown tool fields: {', '.join(unknown)}")
     risk_key = str(payload.get("risk", "LOW")).upper()
     if risk_key not in _RISK_LOOKUP:
         raise InvalidSpecError(f"unknown risk level: {payload.get('risk')!r}")
@@ -72,18 +85,38 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     if approval_key not in _APPROVAL_LOOKUP:
         raise InvalidSpecError(f"unknown approval mode: {approval_key!r}")
     timeout = payload.get("timeout_seconds")
+    if "enabled" in payload and not isinstance(payload["enabled"], bool):
+        raise InvalidSpecError("enabled must be a boolean")
     if timeout is not None and not isinstance(timeout, (int, float)):
         raise InvalidSpecError(f"timeout_seconds must be a number: {timeout!r}")
+    if timeout is not None and timeout <= 0:
+        raise InvalidSpecError("timeout_seconds must be > 0")
+    retries = payload.get("max_retries")
+    if retries is not None and (not isinstance(retries, int) or isinstance(retries, bool) or retries < 0):
+        raise InvalidSpecError("max_retries must be a non-negative integer")
+    schema_version = payload.get("schema_version", "1")
+    if schema_version is None or not str(schema_version).strip():
+        raise InvalidSpecError("schema_version must be non-empty")
+    strategy = payload.get("idempotency_strategy")
+    if strategy is not None and strategy not in ("exact_call", "business_key"):
+        raise InvalidSpecError("idempotency_strategy must be 'exact_call' or 'business_key'")
+    key_field = payload.get("idempotency_key_field")
+    if key_field is not None and not str(key_field).strip():
+        raise InvalidSpecError("idempotency_key_field must be non-empty")
     return ToolSpec(
         name=name,
         description=str(payload.get("description", "")),
+        enabled=bool(payload.get("enabled", True)),
         permissions=_parse_permissions(payload.get("permissions")),
         risk=_RISK_LOOKUP[risk_key],
         side_effect=_SIDE_EFFECT_LOOKUP[side_key],
         approval=_APPROVAL_LOOKUP[approval_key],
         idempotent=bool(payload.get("idempotent", False)),
         timeout_seconds=float(timeout) if timeout is not None else None,
-        schema_version=str(payload.get("schema_version", "1")),
+        max_retries=retries,
+        schema_version=str(schema_version),
+        idempotency_strategy=strategy,
+        idempotency_key_field=str(key_field) if key_field is not None else None,
         metadata=dict(payload.get("metadata") or {}),
     )
 
@@ -139,6 +172,10 @@ class ToolRegistry:
                 idempotent=spec.idempotent,
                 timeout_seconds=spec.timeout_seconds,
                 schema_version=spec.schema_version,
+                enabled=spec.enabled,
+                max_retries=spec.max_retries,
+                idempotency_strategy=spec.idempotency_strategy,
+                idempotency_key_field=spec.idempotency_key_field,
                 metadata=spec.metadata,
             )
         return result

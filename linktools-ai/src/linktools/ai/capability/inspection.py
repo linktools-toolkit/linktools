@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ..security.descriptor import ToolDescriptor
+from ..utils.freeze import freeze_value
 
 
 @dataclass(frozen=True)
@@ -37,5 +38,5 @@ class CapabilityInspection:
                 unique.append(d)
         return cls(
             tools=tuple(unique),
-            prompt_sections=dict(bundle.prompt_sections),
+            prompt_sections=freeze_value(dict(bundle.prompt_sections)),
         )

@@ -7,6 +7,7 @@ decisions based on category/risk, not name patterns."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from ..utils.freeze import freeze_value
 
 # Standard category -> default risk mapping. Unknown categories
 # default to "high" (conservative).
@@ -40,3 +41,6 @@ class ToolDescriptor:
     capability_kind: str = ""     # ToolRef kind that produced this tool
     capability_name: str = ""     # capability instance name
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))

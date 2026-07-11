@@ -178,10 +178,15 @@ class Runtime:
         # (options is None) a baseline-declared tool_exposure_policy is honored,
         # but only while the baseline is enabled -- baseline disabled means no
         # baseline-shipped exposure policy either (Runtime options still apply).
-        if (options is None and baseline.enabled
+        if (not getattr(resolved_options, "_tool_exposure_explicit", False)
+                and baseline.enabled
                 and baseline.tool_exposure_policy is not None):
             resolved_options = dataclasses.replace(
                 resolved_options, tool_exposure=baseline.tool_exposure_policy)
+        if resolved_options.tool_exposure is None:
+            from .capability.policy import CapabilityToolExposurePolicy
+            resolved_options = dataclasses.replace(
+                resolved_options, tool_exposure=CapabilityToolExposurePolicy())
 
         bundle = providers if providers is not None else ProviderBundle(
             agents=agents, skills=skills, mcp_servers=mcp_servers,
@@ -207,12 +212,14 @@ class Runtime:
             resolved_executor = ToolExecutor(
                 policy=PolicyEngine(rules=tuple(rules)),
                 approval_store=storage.approvals,
+                event_store=storage.events,
                 # Wire the IdempotencyStore so policy.idempotent tools actually
                 # persist + replay through ToolExecutor.execute -- without this,
                 # every idempotent tool fail-closes (StorageCapabilityError) even
                 # though the store is sitting unused in storage.idempotency.
                 idempotency_store=storage.idempotency,
                 pause_on_approval=pause_on_approval,
+                security_audit_failure_mode=getattr(baseline, "audit_failure_mode", "fail_closed"),
             )
         compiler = AgentCompiler(
             model_router=router,
@@ -272,6 +279,7 @@ class Runtime:
             baseline_policy=runner_baseline_policy,
             tool_policy_provider=runner_policy_provider,
             managed_tool_executor=resolved_executor,
+            security_audit_failure_mode=getattr(baseline, "audit_failure_mode", "fail_closed"),
         )
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,

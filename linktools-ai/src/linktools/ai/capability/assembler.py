@@ -185,6 +185,14 @@ class CapabilityAssembler:
                 # any consumer still reading them, but ``tools`` is canonical.
                 contributions[idx] = ToolContribution(tools=built)
 
+            # Assembly-time schema validation: every ManagedToolDefinition that
+            # declares a parameters_json_schema must have a well-formed schema.
+            # A malformed schema is rejected HERE, not deferred to first call.
+            from ..tool.schema_validate import validate_schema
+            for c in contributions:
+                for md in (c.tools or ()):
+                    validate_schema(md.parameters_json_schema)
+
             # Centralized ToolExposurePolicy gate -- the single place a
             # descriptor's category/mutating flag decides whether it reaches
             # the model, regardless of which Provider produced it. A denied

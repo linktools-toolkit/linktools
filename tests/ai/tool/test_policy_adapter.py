@@ -63,10 +63,8 @@ async def test_known_tool_leaves_max_retries_undeclared():
 
 
 @pytest.mark.asyncio
-async def test_schema_version_carried_into_namespaced_metadata_not_dropped():
-    """schema_version is carried through from ToolSpec -> ToolPolicyMetadata
-    -> ResolvedToolPolicy.metadata, never silently dropped. It folds into
-    idempotency hashing downstream."""
+async def test_schema_version_is_a_policy_field_not_metadata():
+    """The version is carried as the policy authority used by idempotency."""
     meta = ToolPolicyMetadata(
         permissions=frozenset({Permission.READ}),
         risk=RiskLevel.LOW,
@@ -77,7 +75,8 @@ async def test_schema_version_carried_into_namespaced_metadata_not_dropped():
     )
     provider = MetadataBackedPolicyProvider(_MetadataSource({"my_tool": meta}))
     policy = await provider.resolve(_descriptor(), context=None)
-    assert policy.metadata["schema_version"] == "7"
+    assert policy.schema_version == "7"
+    assert "schema_version" not in policy.metadata
     assert policy.metadata["source_metadata"] == {"team": "platform"}
     assert "permissions" in policy.metadata and "side_effect" in policy.metadata
 

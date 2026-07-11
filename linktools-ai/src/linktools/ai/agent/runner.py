@@ -154,6 +154,7 @@ class AgentRunner:
                  baseline_policy: Any = None,
                  tool_policy_provider: Any = None,
                  managed_tool_executor: Any = None,
+                 security_audit_failure_mode: Any = "fail_closed",
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -210,6 +211,7 @@ class AgentRunner:
         # (Runtime.build passes the compiler's executor) so the runner is fully
         # wired at construction -- no post-build private-field mutation.
         self._tool_executor_for_managed = managed_tool_executor
+        self._security_audit_failure_mode = security_audit_failure_mode
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -513,6 +515,7 @@ class AgentRunner:
                             baseline_policy=self._baseline_policy,
                             run_context=context,
                             event_store=self._event_store,
+                            security_audit_failure_mode=self._security_audit_failure_mode,
                         )
                         for contrib in cap_bundle.tool_contributions:
                             if contrib.tools:

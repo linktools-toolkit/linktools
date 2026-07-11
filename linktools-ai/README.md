@@ -212,4 +212,14 @@ extra; accessing `SqlAlchemyStorage` then raises an `ImportError` with the
 install hint. Storage can be reused as-is, composed store-by-store, or fully
 reimplemented behind the Store Protocols + contract tests
 (`tests/ai/contracts/`, `tests/ai/storage/contract/`).
+# Security and tool-contract hardening
 
+Tool definitions use the core `jsonschema` dependency and reject invalid
+schemas or arguments before execution. MCP tools are exposed under one stable
+name; `raw_name` is used only for the server call. Registry policies support
+`enabled`, `max_retries`, and explicit `schema_version` values.
+
+Idempotent tools default to `exact_call`. `business_key` requires a configured
+trusted key field and fails closed when the key or persistent idempotency store
+is unavailable. Security-critical audit events fail closed by default;
+`SecurityAuditFailureMode.BEST_EFFORT` is an explicit opt-out.

@@ -28,6 +28,7 @@ final_tool_name) is unit-tested with a fake manager that yields canned tool
 names."""
 
 from dataclasses import dataclass, field
+from typing import Mapping
 from typing import Any, ClassVar
 
 from ..capability.bundle import CapabilityBundle
@@ -48,6 +49,31 @@ class MCPExposedTool:
     server_id: str
     raw_name: str
     exposed_name: str
+    parameters_json_schema: Mapping[str, Any] = field(default_factory=dict)
+    description: str | None = None
+    read_only: bool | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        from ..utils.freeze import freeze_value
+        object.__setattr__(self, "parameters_json_schema", freeze_value(dict(self.parameters_json_schema)))
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
+
+
+@dataclass(frozen=True)
+class MCPToolInfo:
+    name: str
+    parameters_json_schema: Mapping[str, Any] = field(default_factory=dict)
+    description: str | None = None
+    read_only: bool | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MCPDiscoveryResult:
+    tools: tuple[MCPToolInfo, ...] = ()
+    verified: bool = False
+    error: BaseException | None = None
 
 
 @dataclass
@@ -75,7 +101,9 @@ class MCPProvider:
         for server_id in ids:
             spec = await self._spec(server_id)
             # Governance: enumerate -> filter -> prefix -> cap.
-            raw = await self._list_tools(spec)
+            discovery = await self._discover(spec)
+            raw_infos = discovery.tools
+            raw = tuple(info.name for info in raw_infos)
             # Strict discovery (the default): a connected server whose tools
             # cannot be enumerated fails closed, full stop -- not only when
             # enabled_tools/disabled_tools/tool_prefix happen to be declared.
@@ -85,12 +113,23 @@ class MCPProvider:
             # of them. ``connection_manager is None`` is a distinct, explicit
             # "MCP declared but not wired" no-op mode, not a discovery failure.
             discovery_mode = getattr(spec, "discovery_mode", "strict")
-            if not raw and self.connection_manager is not None and discovery_mode == "strict":
+            if not discovery.verified and self.connection_manager is not None and discovery_mode == "strict":
                 raise CapabilityResolutionError(
                     f"mcp server {server_id!r}: strict discovery mode cannot verify "
                     f"tool governance without live enumeration (list_tools "
                     f"returned no tools) -- set discovery_mode='best_effort' to opt out"
                 )
+            if (not discovery.verified and self.connection_manager is not None
+                    and discovery_mode == "best_effort"):
+                from ..capability.provider import make_event_emitter
+                from ..events.payloads import SecurityDegraded
+                try:
+                    await make_event_emitter(context)(SecurityDegraded(
+                        run_id=context.run_id, component="mcp-discovery",
+                        reason=str(discovery.error or "tool enumeration unavailable"),
+                    ))
+                except Exception:
+                    pass
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
             if max_per_cap and len(final) > max_per_cap:
@@ -129,25 +168,37 @@ class MCPProvider:
                 # is carried in descriptor metadata for audit so the MCP call
                 # (which uses the raw name) is traceable to the descriptor.
                 from ..security.descriptor import ToolDescriptor
-                from ..tool.contribution import ToolContribution
+                from ..tool.contribution import ToolContribution, ManagedToolDefinition
                 kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
                 # The explicit raw->exposed mapping (one MCPExposedTool per
                 # surviving tool) drives descriptor naming so the contract is
                 # centralized, not inferred from two parallel name lists.
-                exposed_tools = [
-                    MCPExposedTool(server_id=server_id, raw_name=r, exposed_name=e)
-                    for r, e in zip(filtered, final)
-                ]
+                info_by_name = {info.name: info for info in raw_infos}
+                exposed_tools = [MCPExposedTool(
+                    server_id=server_id, raw_name=r, exposed_name=e,
+                    parameters_json_schema=info_by_name.get(r, MCPToolInfo(r)).parameters_json_schema,
+                    description=info_by_name.get(r, MCPToolInfo(r)).description,
+                    read_only=info_by_name.get(r, MCPToolInfo(r)).read_only,
+                    metadata=info_by_name.get(r, MCPToolInfo(r)).metadata,
+                ) for r, e in zip(filtered, final)]
                 # Conservative: unknown MCP tools are treated as write/high/mutating
                 # (default conservative when mutation unknown).
                 descs = tuple(
                     ToolDescriptor(
                         name=et.exposed_name, category="mcp-write", risk="high",
-                        mutating=True, metadata={"raw_name": et.raw_name}, **kw,
+                        mutating=not bool(et.read_only), metadata={"raw_name": et.raw_name, **dict(et.metadata)}, **kw,
                     )
                     for et in exposed_tools
                 )
-                contributions.append(ToolContribution(toolset=filtered_toolset, descriptors=descs))
+                if hasattr(self.connection_manager, "call_tool"):
+                    definitions = tuple(ManagedToolDefinition(
+                        descriptor=d,
+                        handler=self._handler(et),
+                        parameters_json_schema=et.parameters_json_schema,
+                    ) for d, et in zip(descs, exposed_tools))
+                    contributions.append(ToolContribution(tools=definitions))
+                else:
+                    contributions.append(ToolContribution(toolset=filtered_toolset, descriptors=descs))
         detect_mcp_conflicts(final_names_by_server)
         return CapabilityBundle(
             toolsets=tuple(toolsets),
@@ -183,6 +234,24 @@ class MCPProvider:
         except Exception:
             return ()
 
+    async def _discover(self, spec) -> MCPDiscoveryResult:
+        if self.connection_manager is None:
+            return MCPDiscoveryResult((), True, None)
+        result_getter = getattr(self.connection_manager, "list_tools_result", None)
+        if result_getter is not None:
+            return await result_getter(spec)
+        try:
+            names = tuple(MCPToolInfo(name=n) for n in await self._list_tools(spec))
+            return MCPDiscoveryResult(names, bool(names), None)
+        except Exception as exc:
+            return MCPDiscoveryResult((), False, exc)
+
+    def _handler(self, exposed: MCPExposedTool):
+        async def call(**arguments: Any) -> Any:
+            return await self.connection_manager.call_tool(
+                server_id=exposed.server_id, tool_name=exposed.raw_name,
+                arguments=arguments)
+        return call
     async def _toolset(self, spec) -> Any:
         if self.connection_manager is None:
             return None

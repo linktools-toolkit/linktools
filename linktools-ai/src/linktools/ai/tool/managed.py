@@ -18,9 +18,9 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
-from ..errors import RunPaused, ToolDeniedError, ToolTimeoutError, TransientToolError
+from ..errors import RunPaused, ToolDeniedError, ToolTimeoutError, TransientToolError, ToolSecurityAuditError
 from ..security.descriptor import ToolDescriptor
-from ..security.redact import redact_for_audit
+from ..security.redact import redact_for_audit, redact_exception
 from ..tool.schema_validate import validate_arguments
 from ..security.pipeline import (
     PipelineAction,
@@ -60,6 +60,7 @@ class ManagedToolAdapter:
         baseline_policy: "ResolvedToolPolicy | None" = None,
         run_context: "RunContext | None" = None,
         event_store: Any = None,
+        security_audit_failure_mode: Any = "fail_closed",
     ) -> None:
         self._descriptor = descriptor
         self._handler = handler
@@ -69,6 +70,7 @@ class ManagedToolAdapter:
         self._baseline = baseline_policy
         self._run_context = run_context
         self._event_store = event_store
+        self._security_audit_failure_mode = getattr(security_audit_failure_mode, "value", security_audit_failure_mode)
 
     async def _emit_degraded(self, component: str, reason: str) -> None:
         """Best-effort SecurityDegraded event when a security component fails
@@ -95,8 +97,13 @@ class ManagedToolAdapter:
                 runnable_id=getattr(ctx, "runnable_id", None) if ctx else None,
                 payload=payload,
             )
-        except Exception:  # noqa: BLE001 - best-effort observability
+        except Exception as exc:  # noqa: BLE001 - security events can fail closed
             _LOGGER.debug("failed to emit %r for %r", type(payload).__name__, self._descriptor.name)
+            security_events = {"SecurityDegraded", "ToolPolicyResolved", "ToolPipelineDecision"}
+            if (type(payload).__name__ in security_events
+                    and self._security_audit_failure_mode != "best_effort"):
+                raise ToolSecurityAuditError(
+                    f"failed to persist security audit event {type(payload).__name__}") from exc
 
     def _run_id_for_events(self) -> "str | None":
         ctx = self._run_context
@@ -206,8 +213,8 @@ class ManagedToolAdapter:
                     # so masking secrets here never affects execution.
                     arguments=redact_for_audit(arguments),
                 )
-            if decision.action == PipelineAction.MODIFY and decision.modified_payload:
-                arguments = dict(decision.modified_payload)
+            if decision.action == PipelineAction.MODIFY:
+                arguments = dict(decision.modified_payload or {})
                 # Re-validate the MODIFY'd arguments against the tool's parameter
                 # schema so a pipeline cannot inject a payload the tool cannot
                 # safely accept. Fails closed (deny) on a mismatch.
@@ -234,6 +241,10 @@ class ManagedToolAdapter:
         # a mutating, non-idempotent tool is never retried even if a positive
         # max_retries was declared upstream.
         from ..events.payloads import ToolCompleted, ToolFailed, ToolStarted
+        if policy.idempotent and self._tool_executor is None:
+            from ..errors import IdempotencyConfigurationError
+            raise IdempotencyConfigurationError(
+                f"tool {self._descriptor.name!r} is idempotent but has no persistent executor")
         await self._emit(ToolStarted(
             tool_name=self._descriptor.name, tool_call_id=call_id))
         can_retry = not (self._descriptor.mutating and not policy.idempotent)
@@ -265,7 +276,8 @@ class ManagedToolAdapter:
                     from .idempotency_key import DefaultIdempotencyKeyBuilder
                     idempotency_key = DefaultIdempotencyKeyBuilder().build(
                         descriptor=self._descriptor, arguments=arguments,
-                        run_context=ctx, schema_version=policy.schema_version)
+                        run_context=ctx, schema_version=policy.schema_version,
+                        policy=policy)
                 try:
                     result = await self._tool_executor.execute(
                         request, tc, self._handler,
@@ -275,6 +287,12 @@ class ManagedToolAdapter:
                         effective_policy=policy,
                         idempotency_key=idempotency_key,
                         schema_version=policy.schema_version,
+                        idempotency_scope=(
+                            f"{getattr(ctx, 'tenant_id', '')}|{getattr(ctx, 'workspace', '')}|"
+                            f"{self._descriptor.name}|{policy.schema_version}"
+                            if getattr(policy, "idempotency_strategy", None).value == "business_key"
+                            else None
+                        ),
                     )
                 except asyncio.TimeoutError:
                     raise ToolTimeoutError(
@@ -315,7 +333,7 @@ class ManagedToolAdapter:
             # sees the stable error.
             await self._emit(ToolFailed(
                 tool_name=self._descriptor.name, tool_call_id=call_id,
-                error_message=f"{type(exec_exc).__name__}: {exec_exc}"))
+                error_message=f"{type(exec_exc).__name__}: {redact_exception(exec_exc)}"))
             raise
         await self._emit(ToolCompleted(
             tool_name=self._descriptor.name, tool_call_id=call_id, success=True))

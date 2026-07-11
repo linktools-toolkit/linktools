@@ -17,6 +17,8 @@ model passed it."""
 import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
+from .policy import IdempotencyStrategy
+from ..errors import IdempotencyConfigurationError
 
 if TYPE_CHECKING:
     from ..run.context import RunContext
@@ -36,6 +38,7 @@ class IdempotencyKeyBuilder(Protocol):
         arguments: "Mapping[str, Any]",
         run_context: "RunContext | None",
         schema_version: str,
+        policy: Any = None,
     ) -> "str | None":
         ...
 
@@ -52,11 +55,21 @@ class DefaultIdempotencyKeyBuilder:
         arguments: "Mapping[str, Any]",
         run_context: "RunContext | None",
         schema_version: str,
+        policy: Any = None,
     ) -> "str | None":
         run_id = getattr(run_context, "run_id", None) if run_context else None
+        strategy = getattr(policy, "idempotency_strategy", IdempotencyStrategy.EXACT_CALL)
         if not run_id:
-            return None
-        payload = "|".join([
-            run_id, descriptor.name, _canonical_json(dict(arguments)), schema_version,
-        ]).encode("utf-8")
+            raise IdempotencyConfigurationError("idempotent tool calls require run_id")
+        if strategy == IdempotencyStrategy.BUSINESS_KEY:
+            field = getattr(policy, "idempotency_key_field", None)
+            if not field or field not in arguments:
+                raise IdempotencyConfigurationError(
+                    "business-key idempotency requires a configured key field")
+            tenant = getattr(run_context, "tenant_id", None) or ""
+            workspace = getattr(run_context, "workspace", None) or ""
+            identity = [tenant, workspace, descriptor.name, str(arguments[field]), schema_version]
+        else:
+            identity = [run_id, descriptor.name, _canonical_json(dict(arguments)), schema_version]
+        payload = "|".join(identity).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()

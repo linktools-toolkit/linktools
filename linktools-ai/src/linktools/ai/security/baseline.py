@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..policy.command import DEFAULT_DENIED_COMMAND_PATTERNS
+from enum import Enum
 
 if TYPE_CHECKING:
     from ..capability.policy import CapabilityToolExposurePolicy
@@ -24,6 +25,11 @@ class CommandPolicy:
     denied_patterns: "tuple[str, ...]" = DEFAULT_DENIED_COMMAND_PATTERNS
 
 
+class SecurityAuditFailureMode(str, Enum):
+    FAIL_CLOSED = "fail_closed"
+    BEST_EFFORT = "best_effort"
+
+
 @dataclass(frozen=True)
 class SecurityBaseline:
     """Default safety baseline. Enabled by default; closable/overridable."""
@@ -31,3 +37,4 @@ class SecurityBaseline:
     command_policy: "CommandPolicy | None" = field(default_factory=CommandPolicy)
     tool_exposure_policy: "CapabilityToolExposurePolicy | None" = None
     pipeline: "SecurityPipeline | None" = None
+    audit_failure_mode: SecurityAuditFailureMode = SecurityAuditFailureMode.FAIL_CLOSED

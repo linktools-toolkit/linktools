@@ -11,9 +11,16 @@ a descriptor + run context into a (tri-state) policy layer.
 ToolInvocationContext carries everything the governance chain needs."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from ..security.descriptor import ToolDescriptor
+from ..utils.freeze import freeze_value
+
+
+class IdempotencyStrategy(str, Enum):
+    EXACT_CALL = "exact_call"
+    BUSINESS_KEY = "business_key"
 
 if TYPE_CHECKING:
     from ..run.context import RunContext
@@ -32,7 +39,12 @@ class ResolvedToolPolicy:
     require_approval: "bool | None" = None
     risk: "str | None" = None
     schema_version: "str | None" = None
+    idempotency_strategy: "IdempotencyStrategy | None" = None
+    idempotency_key_field: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
@@ -53,7 +65,12 @@ class EffectiveToolPolicy:
     require_approval: bool = False
     risk: str = "medium"
     schema_version: str = "1"
+    idempotency_strategy: IdempotencyStrategy = IdempotencyStrategy.EXACT_CALL
+    idempotency_key_field: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,10 +152,15 @@ def merge_policies(
     risks = [l.risk for l in layers if l.risk]
     risk = max(risks, key=lambda r: risk_order.get(r, 2)) if risks else None
 
-    # schema_version: the highest declared version wins (a newer schema version
-    # is the most specific statement of the tool's current input contract).
-    versions = [l.schema_version for l in layers if l.schema_version]
-    schema_version = max(versions) if versions else None
+    # schema_version: explicit priority, NOT string sort. Layers are ordered
+    # (descriptor, baseline, provider) -- the most specific layer (provider,
+    # last) wins. Only the provider layer should set schema_version; baseline
+    # never does. No max()/min() -- that would do lexicographic string sort
+    # ("10" < "2") which is semantically wrong for versions.
+    schema_version = None
+    for l in layers:
+        if l.schema_version:
+            schema_version = l.schema_version
 
     metadata: "dict[str, Any]" = {}
     for l in layers:
@@ -153,6 +175,10 @@ def merge_policies(
         require_approval=require_approval,
         risk=risk,
         schema_version=schema_version,
+        idempotency_strategy=next((l.idempotency_strategy for l in reversed(layers)
+                                   if l.idempotency_strategy is not None), None),
+        idempotency_key_field=next((l.idempotency_key_field for l in reversed(layers)
+                                    if l.idempotency_key_field is not None), None),
         metadata=metadata,
     )
 
@@ -174,5 +200,7 @@ def finalize_policy(resolved: "ResolvedToolPolicy | None") -> EffectiveToolPolic
         require_approval=bool(resolved.require_approval),
         risk=resolved.risk or "medium",
         schema_version=resolved.schema_version or "1",
+        idempotency_strategy=resolved.idempotency_strategy or IdempotencyStrategy.EXACT_CALL,
+        idempotency_key_field=resolved.idempotency_key_field,
         metadata=resolved.metadata,
     )

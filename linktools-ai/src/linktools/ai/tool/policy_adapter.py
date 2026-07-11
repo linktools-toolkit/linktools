@@ -64,21 +64,18 @@ class MetadataBackedPolicyProvider:
         namespaced: "dict[str, Any]" = {
             "permissions": [str(p) for p in getattr(meta, "permissions", frozenset())],
             "side_effect": str(side_effect) if side_effect is not None else "read_only",
-            "schema_version": str(getattr(meta, "schema_version", "1")),
         }
         if meta_extra:
             namespaced["source_metadata"] = meta_extra
         return ResolvedToolPolicy(
-            enabled=True,
+            enabled=getattr(meta, "enabled", True),
             timeout_seconds=float(timeout) if timeout is not None else None,
-            # ToolSpec has no max_retries concept at all -- this layer has no
-            # opinion on it. Declaring 0 here (a concrete value) would clamp
-            # every tool's retries to 0 via merge_policies' min-of-declared
-            # rule, silently defeating any baseline/descriptor layer that
-            # wants to allow retries. None correctly means "not declared".
-            max_retries=None,
+            max_retries=getattr(meta, "max_retries", None),
             idempotent=idempotent,
             require_approval=require_approval,
             risk=risk,
+            schema_version=str(getattr(meta, "schema_version", "1")) or None,
+            idempotency_strategy=getattr(meta, "idempotency_strategy", None),
+            idempotency_key_field=getattr(meta, "idempotency_key_field", None),
             metadata=namespaced,
         )
