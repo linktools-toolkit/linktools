@@ -273,7 +273,7 @@ def test_incompatible_repo_container_py_is_not_imported(fresh_manager, tmp_path,
 
 # -- RepoStore.update() re-validates the manifest (Spec section 26) ----------
 
-def test_update_warns_when_manifest_becomes_incompatible(fresh_manager, tmp_path, monkeypatch):
+def test_update_reports_incompatible_when_manifest_becomes_incompatible(fresh_manager, tmp_path, monkeypatch):
     repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
     fresh_manager.repo_store.add(str(repo_dir), force=True)
 
@@ -282,42 +282,131 @@ def test_update_warns_when_manifest_becomes_incompatible(fresh_manager, tmp_path
         json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
     monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
 
-    warnings = []
-    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: warnings.append(msg))
+    results = fresh_manager.repo_store.update()
 
-    fresh_manager.repo_store.update()
+    assert len(results) == 1
+    assert results[0].updated is True
+    assert results[0].compatible is False
+    assert "incompatible" in results[0].error
 
-    assert any("incompatible" in w for w in warnings)
 
-
-def test_update_does_not_warn_when_manifest_stays_compatible(fresh_manager, tmp_path, monkeypatch):
+def test_update_reports_compatible_when_manifest_stays_compatible(fresh_manager, tmp_path, monkeypatch):
     repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
     fresh_manager.repo_store.add(str(repo_dir), force=True)
     monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
 
-    warnings = []
-    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: warnings.append(msg))
+    results = fresh_manager.repo_store.update()
 
-    fresh_manager.repo_store.update()
-
-    assert warnings == []
+    assert len(results) == 1
+    assert results[0].updated is True
+    assert results[0].compatible is True
+    assert results[0].error is None
 
 
 def test_update_does_not_perform_git_rollback(fresh_manager, tmp_path, monkeypatch):
-    """Spec section 26: update explicitly does not implement automatic Git
-    rollback -- an incompatible manifest after update is only reported."""
+    """update explicitly does not implement automatic Git rollback -- an
+    incompatible manifest after update is only reported."""
     repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
     fresh_manager.repo_store.add(str(repo_dir), force=True)
     (repo_dir / ".linktools.json").write_text(
         json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
     monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
-    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: None)
 
     fresh_manager.repo_store.update()  # must not raise or revert the file
 
     with open(repo_dir / ".linktools.json") as f:
         data = json.load(f)
     assert data["requires"]["linktools-cntr"] == ">=9999.0.0"
+
+
+def test_update_reports_corrupt_manifest_json_as_incompatible(fresh_manager, tmp_path, monkeypatch):
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    (repo_dir / ".linktools.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    results = fresh_manager.repo_store.update()
+
+    assert len(results) == 1
+    assert results[0].compatible is False
+    assert "invalid" in results[0].error
+
+
+def test_update_aggregates_multiple_repos_without_stopping_at_first_failure(fresh_manager, tmp_path, monkeypatch):
+    (tmp_path / "good").mkdir()
+    (tmp_path / "bad").mkdir()
+    good_dir = _make_local_repo(tmp_path / "good", manifest_data=_VALID)
+    bad_dir = _make_local_repo(tmp_path / "bad", manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(good_dir), force=True)
+    fresh_manager.repo_store.add(str(bad_dir), force=True)
+    # Simulate the update pulling in a manifest that is now incompatible --
+    # add() itself would reject an already-incompatible manifest, so this
+    # must happen after add() succeeds.
+    (bad_dir / ".linktools.json").write_text(
+        json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    results = fresh_manager.repo_store.update()
+
+    by_url = {r.url: r for r in results}
+    assert len(results) == 2
+    assert by_url[str(good_dir)].compatible is True
+    assert by_url[str(bad_dir)].compatible is False
+
+
+def test_update_command_exits_non_zero_when_any_repo_incompatible(fresh_manager, tmp_path, monkeypatch):
+    from linktools.cntr.commands.repo import RepoCommand
+    from linktools.cntr.container import ContainerError
+    import linktools.cntr.commands._shared as cntr_shared
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    (repo_dir / ".linktools.json").write_text(
+        json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    with pytest.raises(ContainerError):
+        RepoCommand().on_command_update()
+
+
+def test_update_command_succeeds_when_all_repos_compatible(fresh_manager, tmp_path, monkeypatch):
+    from linktools.cntr.commands.repo import RepoCommand
+    import linktools.cntr.commands._shared as cntr_shared
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    RepoCommand().on_command_update()  # must not raise
+
+
+def test_update_reports_sync_failure_without_stopping_other_repos(fresh_manager, tmp_path, monkeypatch):
+    from linktools.cntr.container import ContainerError
+
+    (tmp_path / "good").mkdir()
+    (tmp_path / "broken").mkdir()
+    good_dir = _make_local_repo(tmp_path / "good", manifest_data=_VALID)
+    broken_dir = _make_local_repo(tmp_path / "broken", manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(good_dir), force=True)
+    fresh_manager.repo_store.add(str(broken_dir), force=True)
+
+    real_sync = fresh_manager.repo_store.sync.sync
+
+    def flaky_sync(url, meta, branch=None, reset=False):
+        if url == str(broken_dir):
+            raise ContainerError("network unreachable")
+        return real_sync(url, meta, branch=branch, reset=reset)
+
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", flaky_sync)
+
+    results = fresh_manager.repo_store.update()
+    by_url = {r.url: r for r in results}
+    assert len(results) == 2
+    assert by_url[str(good_dir)].updated is True
+    assert by_url[str(broken_dir)].updated is False
+    assert "network unreachable" in by_url[str(broken_dir)].error
 
 
 # -- describe_repository() field completeness (Spec section 28) -------------

@@ -7,6 +7,7 @@ clone/symlink layout. Git sync is delegated to RepoSync.
 """
 import os
 import shutil
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -21,6 +22,15 @@ if TYPE_CHECKING:
 
 _REPO_KEY = "INSTALLED_REPOS"
 _GIT_PREFIXES = ("http://", "https://", "ssh://", "git@")
+
+
+@dataclass(frozen=True)
+class RepoUpdateResult:
+    url: str
+    updated: bool
+    revision: "str | None"
+    compatible: bool
+    error: "str | None"
 
 
 class RepoStore:
@@ -91,30 +101,61 @@ class RepoStore:
 
             self._dump(repos)
 
-    def update(self, branch: str = None, reset: bool = False) -> None:
-        for url, meta in self.get_all().items():
-            self.sync.sync(url, meta, branch=branch, reset=reset)
-            self._warn_if_manifest_incompatible_after_update(url, meta)
+    def update(self, branch: str = None, reset: bool = False) -> "list[RepoUpdateResult]":
+        """Sync every repository, then re-validate each one's manifest.
 
-    def _warn_if_manifest_incompatible_after_update(self, url: str, meta: "dict[str, str]") -> None:
-        # Spec section 26: re-read and validate the manifest after update
-        # completes. No automatic Git rollback / transactional replace is
-        # implemented here (explicitly deferred) -- this only informs.
+        Never stops at the first failure or incompatibility -- every
+        repository is synced and reported, so one repo's problem can never
+        hide the state of the rest. Does not attempt a Git rollback on
+        incompatibility: the repo is left updated (and, per
+        ``ContainerLoader``, simply not loaded again until it's compatible);
+        the caller decides whether any result should make the command exit
+        non-zero.
+        """
+        results = []
+        for url, meta in self.get_all().items():
+            try:
+                self.sync.sync(url, meta, branch=branch, reset=reset)
+            except Exception as exc:  # noqa: BLE001 - one repo's sync failure must not hide the rest
+                results.append(RepoUpdateResult(url=url, updated=False, revision=None,
+                                                compatible=False, error=str(exc)))
+                continue
+            revision, compatible, error = self._revalidate_after_update(meta)
+            results.append(RepoUpdateResult(
+                url=url, updated=True, revision=revision, compatible=compatible, error=error,
+            ))
+        return results
+
+    def _revalidate_after_update(self, meta: "dict[str, str]") -> "tuple[str | None, bool, str | None]":
         from .manifest import RepositoryManifestError
         repo_path = meta.get("repo_path")
+
+        revision = None
+        if repo_path and os.path.exists(repo_path):
+            try:
+                from dulwich.errors import NotGitRepository
+                from linktools.git import GitRepository
+                revision = GitRepository(self.manager.environ, repo_path).head_sha()
+            except NotGitRepository:
+                pass
+            except Exception:  # noqa: BLE001 - revision is best-effort, never fails the update
+                pass
+
         if not repo_path or not os.path.exists(repo_path):
-            return
+            return revision, True, None
+
         try:
             manifest = self.manager.repo_manifest.load(repo_path)
         except RepositoryManifestError as exc:
-            self.logger.warning(f"Repository `{url}` manifest is invalid after update: {exc}")
-            return
+            return revision, False, f"manifest is invalid after update: {exc}"
         if manifest is None:
-            return
+            return revision, True, None
+
         issues = self.manager.repo_manifest.check_host_requirements(manifest)
         if issues:
             details = "; ".join(issue.message for issue in issues)
-            self.logger.warning(f"Repository `{url}` is incompatible with this host after update: {details}")
+            return revision, False, f"incompatible with this host after update: {details}"
+        return revision, True, None
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):

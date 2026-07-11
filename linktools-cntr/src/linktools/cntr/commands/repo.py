@@ -95,8 +95,32 @@ class RepoCommand(BaseCommandGroup):
     @subcommand("update", help="update repositories")
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force update")
-    def on_command_update(self, branch: str = None, force: bool = False):
-        _shared.manager.repo_store.update(branch=branch, reset=force)
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
+    def on_command_update(self, branch: str = None, force: bool = False, as_json: bool = False):
+        results = _shared.manager.repo_store.update(branch=branch, reset=force)
+
+        if as_json:
+            import dataclasses
+            import json
+            print(json.dumps([dataclasses.asdict(r) for r in results], indent=2, sort_keys=True))
+        else:
+            for result in results:
+                if not result.updated:
+                    self.logger.warning(f"Repository `{result.url}` update failed: {result.error}")
+                elif not result.compatible:
+                    self.logger.warning(
+                        f"Repository `{result.url}` updated to revision {result.revision}, "
+                        f"but {result.error}"
+                    )
+                else:
+                    self.logger.info(f"Repository `{result.url}` updated to revision {result.revision}")
+
+        # Every repository is synced/reported regardless of another one's
+        # outcome; only after all of them are done does an unmet/failed one
+        # make the whole command exit non-zero.
+        failed = sorted(r.url for r in results if not r.updated or not r.compatible)
+        if failed:
+            raise ContainerError(f"Repository update failed or incompatible: {', '.join(failed)}")
 
     @subcommand("remove", help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")
