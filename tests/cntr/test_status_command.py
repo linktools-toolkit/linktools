@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``ct-cntr status`` / ``ct-cntr compose status`` (Spec section 18): status
-is read-only, defaults to non-interactive sudo, and root/compose share one
-implementation."""
+"""``ct-cntr status``: read-only, defaults to non-interactive sudo."""
 import json
 
 import pytest
 
-import linktools.cntr.__main__ as cntr_main
-import linktools.cntr.commands._shared as cntr_shared
-from linktools.cntr.commands.compose.group import ComposeCommand
 from linktools.cntr.commands.status import collect_status
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
@@ -140,20 +135,3 @@ def test_json_schema_version_is_stable(fresh_manager, monkeypatch, with_nginx_se
     payload = collect_status(fresh_manager)
     assert payload["schema_version"] == 1
     json.dumps(payload)  # must be JSON-serializable as-is
-
-
-def test_root_and_compose_status_dispatch_identically(fresh_manager, monkeypatch):
-    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    calls = []
-    monkeypatch.setattr(
-        "linktools.cntr.commands.status.collect_status",
-        lambda manager, **kw: (calls.append(kw), {
-            "schema_version": 1, "project": "aio", "queryable": True,
-            "containers": [], "orphan_services": [],
-        })[1],
-    )
-
-    cntr_main.command.on_command_status(names=["nginx"], as_json=False, sudo_prompt=True, all_services=True)
-    ComposeCommand().on_command_status(names=["nginx"], as_json=False, sudo_prompt=True, all_services=True)
-
-    assert calls[0] == calls[1]

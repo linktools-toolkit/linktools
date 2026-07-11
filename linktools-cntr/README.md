@@ -117,7 +117,7 @@ ct-cntr down
 # 配置管理
 #######################
 
-# 查看当前 docker compose 配置
+# 查看 linktools-cntr 自身配置的帮助（Docker Compose 配置见下方 ct-cntr compose）
 ct-cntr config
 
 # 列出所有配置变量
@@ -140,12 +140,12 @@ ct-cntr config reload
 
 ```bash
 #######################
-# compose 命名空间（与根命令 up/restart/down/status 行为完全一致，共用同一实现）
+# 输出最终解析后的 Docker Compose 模型（只读；不涉及生命周期）
 #######################
 
-ct-cntr compose up
-ct-cntr compose config nginx --format json
-ct-cntr compose validate nginx --with-dependencies
+ct-cntr compose                        # 完整已安装项目
+ct-cntr compose nginx --format json    # 只筛选 nginx 对应的 service
+ct-cntr compose --check                # 只校验，不输出内容
 
 #######################
 # 实际运行状态（只读，默认不弹 sudo 密码）

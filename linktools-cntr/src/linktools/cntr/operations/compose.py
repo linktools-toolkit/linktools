@@ -186,26 +186,20 @@ class ComposeOperations:
         if report:
             render_report(manager.logger, get_records(context))
 
-    def config(
+    def render(
             self,
             names: "Sequence[str] | None" = None,
             with_dependencies: bool = False,
             output_format: "str | None" = None,
+            check: bool = False,
     ) -> "int | None":
+        """``ct-cntr compose``: the final resolved Docker Compose model for
+        the installed project (or ``--check`` to only validate it)."""
         selection = self.select(names, with_dependencies=with_dependencies)
-        context = self._make_context("config", selection)
+        context = self._make_context("compose", selection)
         return self.manager.compose_runner.config(
-            context, selection.services, output_format=output_format,
+            context, selection.services, output_format=output_format, quiet=check,
         )
-
-    def validate(
-            self,
-            names: "Sequence[str] | None" = None,
-            with_dependencies: bool = False,
-    ) -> "int | None":
-        selection = self.select(names, with_dependencies=with_dependencies)
-        context = self._make_context("config", selection)
-        return self.manager.compose_runner.config(context, selection.services, quiet=True)
 
     def status(self, sudo_prompt: bool = False):
         """Full-project actual status (Spec section 18): always queries every

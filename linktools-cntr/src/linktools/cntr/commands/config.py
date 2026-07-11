@@ -36,10 +36,10 @@ class ConfigCommand(BaseCommand):
         # polluted by the notice.
         print(
             "`ct-cntr config` without a subcommand is deprecated. "
-            "Use `ct-cntr compose config`.",
+            "Use `ct-cntr compose`.",
             file=sys.stderr,
         )
-        return _shared.manager.compose_operations.config()
+        return _shared.manager.compose_operations.render()
 
     @subcommand("set", help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
