@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 import yaml
 
-from linktools.cli import BaseCommandGroup, subcommand, subcommand_argument
+from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
 from linktools.rich import choose, confirm, is_no_input
 from ..container import ContainerError
 from . import _shared
+from ._order import REPO_COMMAND_ORDER
 
 
 class RepoCommand(BaseCommandGroup):
@@ -17,7 +18,10 @@ class RepoCommand(BaseCommandGroup):
     def name(self):
         return "repo"
 
-    @subcommand("list", help="list repositories")
+    def init_arguments(self, parser: "CommandParser") -> None:
+        self.add_subcommands(parser=parser, sort=True)
+
+    @subcommand("list", order=REPO_COMMAND_ORDER["list"], help="list repositories")
     def on_command_list(self):
         repos = _shared.manager.repo_store.get_all()
         for key, value in repos.items():
@@ -26,7 +30,7 @@ class RepoCommand(BaseCommandGroup):
                 yaml.dump(data, sort_keys=False).strip()
             )
 
-    @subcommand("add", help="add repository")
+    @subcommand("add", order=REPO_COMMAND_ORDER["add"], help="add repository")
     @subcommand_argument("url", help="repository url")
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force add (skip trust prompt)")
@@ -42,7 +46,7 @@ class RepoCommand(BaseCommandGroup):
                 raise ContainerError("Canceled")
         _shared.manager.repo_store.add(url, branch=branch, force=force)
 
-    @subcommand("status", help="show repository status (read-only)")
+    @subcommand("status", order=REPO_COMMAND_ORDER["status"], help="show repository status (read-only)")
     @subcommand_argument("--runtime", action="store_true", default=False,
                          help="also check docker-engine/docker-compose requirements")
     def on_command_status(self, runtime: bool = False):
@@ -55,7 +59,8 @@ class RepoCommand(BaseCommandGroup):
             info = describe_repository(_shared.manager, url, meta, check_runtime=runtime)
             self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
 
-    @subcommand("validate", help="validate repository manifest and compatibility (read-only)")
+    @subcommand("validate", order=REPO_COMMAND_ORDER["validate"],
+               help="validate repository manifest and compatibility (read-only)")
     @subcommand_argument("url", nargs="?", help="repository url or local path; all repositories if omitted")
     @subcommand_argument("--runtime", action="store_true", default=False,
                          help="also check docker-engine/docker-compose requirements")
@@ -92,7 +97,7 @@ class RepoCommand(BaseCommandGroup):
         if incompatible:
             raise ContainerError(f"Incompatible repositories: {', '.join(incompatible)}")
 
-    @subcommand("update", help="update repositories")
+    @subcommand("update", order=REPO_COMMAND_ORDER["update"], help="update repositories")
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force update")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
@@ -122,7 +127,7 @@ class RepoCommand(BaseCommandGroup):
         if failed:
             raise ContainerError(f"Repository update failed or incompatible: {', '.join(failed)}")
 
-    @subcommand("remove", help="remove repository")
+    @subcommand("remove", order=REPO_COMMAND_ORDER["remove"], help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")
     def on_command_remove(self, url: str = None):
         repos = list(_shared.manager.repo_store.get_all().keys())

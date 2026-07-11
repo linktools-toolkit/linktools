@@ -15,6 +15,7 @@ from linktools.cli.argparse import LazyChoices
 from ..container import ContainerError
 from ..runtime.inspect import RuntimeInspectionUnavailable
 from . import _shared
+from ._order import ROOT_COMMAND_ORDER
 
 if TYPE_CHECKING:
     from typing import Any
@@ -146,7 +147,7 @@ def render_status(logger, payload: "dict[str, Any]") -> None:
 class StatusCommands:
     """Mixin providing the root ``status`` command."""
 
-    @subcommand("status", help="show actual Docker Compose status (read-only)")
+    @subcommand("status", order=ROOT_COMMAND_ORDER["status"], help="show actual Docker Compose status (read-only)")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")

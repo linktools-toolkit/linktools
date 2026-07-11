@@ -4,11 +4,13 @@
 the final resolved Docker Compose model; the old compose up/restart/down/
 status/config/validate subcommands are gone -- those live only at the root
 and under ``ct-cntr compose``'s own --check/--format flags."""
+import subprocess
+import sys
+
 import pytest
 
 from linktools.cli import BaseCommand, BaseCommandGroup
 from linktools.cntr.commands.compose import ComposeCommand
-from linktools.cntr.commands.config import ConfigCommand
 from linktools.cntr.container import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
@@ -130,15 +132,15 @@ def test_compose_check_and_format_are_mutually_exclusive(fresh_manager, monkeypa
         ComposeCommand().run(_Args(check=True, output_format="json"))
 
 
-def test_legacy_bare_config_warns_and_points_to_compose(monkeypatch, fresh_manager, capsys):
-    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-    command = ConfigCommand()
-    monkeypatch.setattr(command, "parse_subcommand", lambda args: None)
-    monkeypatch.setattr(fresh_manager.compose_operations, "render", lambda *a, **k: 0)
-
-    command.run(args=None)
-
-    captured = capsys.readouterr()
-    assert "deprecated" in captured.err
-    assert "ct-cntr compose" in captured.err
-    assert "deprecated" not in captured.out
+def test_bare_config_shows_help_and_never_executes_compose():
+    """Bare ``ct-cntr config`` is a real command group now: no bare-command
+    fallback to Compose rendering, no deprecation warning, and no Compose
+    YAML on stdout (a fresh interpreter, so a rendered YAML document
+    would prove Compose actually ran)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "linktools.cntr", "config"],
+        capture_output=True, text=True,
+    )
+    assert "deprecated" not in result.stderr
+    assert "deprecated" not in result.stdout
+    assert "services:" not in result.stdout

@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING
 from dulwich.errors import GitProtocolError
 
 from linktools.cli import (
-    BaseCommandGroup, CommandGroupRef, SubCommandWrapper, subcommand, subcommand_argument,
+    BaseCommandGroup, CommandGroupRef, CommandParser, SubCommandWrapper, subcommand, subcommand_argument,
 )
 from linktools.cli.argparse import BooleanOptionalAction, LazyChoices
 from linktools.errors import ConfigError, GitError
 from ..container import ContainerError
 from ..doctor import ERROR, WARN, Doctor
 from . import _shared
+from ._order import ROOT_COMMAND_ORDER
 from .compose import ComposeCommand
 from .config import ConfigCommand
 from .exec_ import ExecCommand
@@ -49,19 +50,22 @@ class Command(StatusCommands, BaseCommandGroup):
             ContainerError, ConfigError, GitError, SubprocessError, GitProtocolError, OSError, AssertionError,
         ]
 
+    def init_arguments(self, parser: "CommandParser") -> None:
+        self.add_subcommands(parser=parser, target=self.init_subcommands(), sort=True)
+
     def init_subcommands(self) -> "Any":
         return [
             self,
-            SubCommandWrapper(ExecCommand()),
-            SubCommandWrapper(ConfigCommand()),
-            SubCommandWrapper(RepoCommand()),
-            SubCommandWrapper(ComposeCommand()),
-            SubCommandWrapper(PlanCommand()),
+            SubCommandWrapper(ExecCommand(), order=ROOT_COMMAND_ORDER["exec"]),
+            SubCommandWrapper(ComposeCommand(), order=ROOT_COMMAND_ORDER["compose"]),
+            SubCommandWrapper(PlanCommand(), order=ROOT_COMMAND_ORDER["plan"]),
+            SubCommandWrapper(ConfigCommand(), order=ROOT_COMMAND_ORDER["config"]),
+            SubCommandWrapper(RepoCommand(), order=ROOT_COMMAND_ORDER["repo"]),
             SubCommandWrapper(LockCommand()),
             SubCommandWrapper(DiffCommand()),
         ]
 
-    @subcommand("list", help="list all containers")
+    @subcommand("list", order=ROOT_COMMAND_ORDER["list"], help="list all containers")
     @subcommand_argument("--detail", action="store_true", help="show container detail info")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
@@ -108,7 +112,7 @@ class Command(StatusCommands, BaseCommandGroup):
                 message += f"{os.linesep}    [dim]Configs: \\[{', '.join(container.configs.keys())}][/]"
             self.logger.info(message, extra={"markup": True})
 
-    @subcommand("add", help="add containers to installed list")
+    @subcommand("add", order=ROOT_COMMAND_ORDER["add"], help="add containers to installed list")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_add(self, names: "list[str]"):
@@ -117,7 +121,7 @@ class Command(StatusCommands, BaseCommandGroup):
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Add {', '.join(result)} success")
 
-    @subcommand("remove", help="remove containers from installed list")
+    @subcommand("remove", order=ROOT_COMMAND_ORDER["remove"], help="remove containers from installed list")
     @subcommand_argument("-f", "--force", help="Force remove")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
@@ -127,7 +131,7 @@ class Command(StatusCommands, BaseCommandGroup):
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Remove {', '.join(result)} success")
 
-    @subcommand("up", help="deploy installed containers")
+    @subcommand("up", order=ROOT_COMMAND_ORDER["up"], help="deploy installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
@@ -145,7 +149,7 @@ class Command(StatusCommands, BaseCommandGroup):
         # so they cannot drift from each other.
         _shared.manager.compose_operations.up(names=names, build=build, pull=pull, report=report)
 
-    @subcommand("restart", help="restart installed containers")
+    @subcommand("restart", order=ROOT_COMMAND_ORDER["restart"], help="restart installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
@@ -162,7 +166,7 @@ class Command(StatusCommands, BaseCommandGroup):
             return
         _shared.manager.compose_operations.restart(names=names, build=build, pull=pull, report=report)
 
-    @subcommand("down", help="stop installed containers")
+    @subcommand("down", order=ROOT_COMMAND_ORDER["down"], help="stop installed containers")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
     @subcommand_argument("--report", action="store_true", default=False,
@@ -174,7 +178,8 @@ class Command(StatusCommands, BaseCommandGroup):
             return
         _shared.manager.compose_operations.down(names=names, report=report)
 
-    @subcommand("doctor", help="read-only environment and security checks (changes nothing)")
+    @subcommand("doctor", order=ROOT_COMMAND_ORDER["doctor"],
+               help="read-only environment and security checks (changes nothing)")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     @subcommand_argument("--check", action="store_true", default=False,
                          help="exit non-zero if any WARN-or-worse finding is present")

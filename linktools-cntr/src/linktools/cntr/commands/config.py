@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import sys
-from typing import TYPE_CHECKING
-
-from linktools.cli import BaseCommand, CommandParser, subcommand, subcommand_argument
+from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
 from linktools.cli.argparse import KeyValueAction, LazyChoices
 from linktools.core import ConfigField
 from ..container import ContainerError
 from . import _shared
-
-if TYPE_CHECKING:
-    from argparse import Namespace
+from ._order import CONFIG_COMMAND_ORDER
 
 
-class ConfigCommand(BaseCommand):
+class ConfigCommand(BaseCommandGroup):
     """
     manage container configs
     """
@@ -23,25 +18,9 @@ class ConfigCommand(BaseCommand):
         return "config"
 
     def init_arguments(self, parser: "CommandParser") -> None:
-        self.add_subcommands(parser)
+        self.add_subcommands(parser=parser, sort=True)
 
-    def run(self, args: "Namespace") -> "int | None":
-        subcommand = self.parse_subcommand(args)
-        if subcommand:
-            return subcommand.run(args)
-        # Compatibility-period fallback: bare `ct-cntr config` used to mean
-        # `docker compose config`. Written directly to stderr (not through
-        # the logger, whose destination depends on TTY/rich state) so stdout
-        # -- which may be piped into `docker compose` tooling -- never gets
-        # polluted by the notice.
-        print(
-            "`ct-cntr config` without a subcommand is deprecated. "
-            "Use `ct-cntr compose`.",
-            file=sys.stderr,
-        )
-        return _shared.manager.compose_operations.render()
-
-    @subcommand("set", help="set container configs")
+    @subcommand("set", order=CONFIG_COMMAND_ORDER["set"], help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
     def on_command_set(self, configs: "dict[str, str]"):
         for key, value in configs.items():
@@ -50,14 +29,14 @@ class ConfigCommand(BaseCommand):
             value = _shared.manager.env_config.get(key)
             self.logger.info(f"{key}: {value}")
 
-    @subcommand("unset", help="remove container configs")
+    @subcommand("unset", order=CONFIG_COMMAND_ORDER["unset"], help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
     def on_command_remove(self, configs: "dict[str, str]"):
         for key in configs.keys():
             _shared.manager.env_config.remove(key)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
-    @subcommand("list", help="list container configs")
+    @subcommand("list", order=CONFIG_COMMAND_ORDER["list"], help="list container configs")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     @subcommand_argument("-d", "--with-dependencies", action="store_true", default=False,
@@ -95,7 +74,7 @@ class ConfigCommand(BaseCommand):
             else:
                 self.logger.info(f"{key}={value}")
 
-    @subcommand("get", help="read one or more resolved config values")
+    @subcommand("get", order=CONFIG_COMMAND_ORDER["get"], help="read one or more resolved config values")
     @subcommand_argument("keys", metavar="KEY", nargs="+", help="config key(s)")
     @subcommand_argument("--show-secret", action="store_true", default=False,
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
@@ -107,7 +86,8 @@ class ConfigCommand(BaseCommand):
             else:
                 self.logger.info(f"{key}={value}")
 
-    @subcommand("explain", help="show a value's resolved source, default, persisted state and sensitivity")
+    @subcommand("explain", order=CONFIG_COMMAND_ORDER["explain"],
+               help="show a value's resolved source, default, persisted state and sensitivity")
     @subcommand_argument("key", help="config key")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_explain(self, key: str, as_json: bool = False):
@@ -119,7 +99,8 @@ class ConfigCommand(BaseCommand):
             for field_name in sorted(info.keys()):
                 self.logger.info(f"{field_name}: {info[field_name]}")
 
-    @subcommand("validate", help="validate persisted config values' types (never runs docker compose config)")
+    @subcommand("validate", order=CONFIG_COMMAND_ORDER["validate"],
+               help="validate persisted config values' types (never runs docker compose config)")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_validate(self, as_json: bool = False):
         # Only re-validates already-persisted values (persisted_keys()), the
@@ -146,14 +127,14 @@ class ConfigCommand(BaseCommand):
         if errors:
             raise ContainerError(f"{len(errors)} persisted config value(s) failed validation")
 
-    @subcommand("edit", help="edit the config file in an editor")
+    @subcommand("edit", order=CONFIG_COMMAND_ORDER["edit"], help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
     def on_command_edit(self, editor: str):
         return _shared.manager.runtime.create_process(
             editor, str(_shared.manager.environ.paths.config / "settings.json")
         ).call()
 
-    @subcommand("reload", help="reload container configs")
+    @subcommand("reload", order=CONFIG_COMMAND_ORDER["reload"], help="reload container configs")
     def on_command_reload(self):
         _shared.manager.env_config.reload()
         _shared.manager.prepare_installed_containers()
