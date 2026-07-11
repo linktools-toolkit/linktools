@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 from linktools.runtime import import_module_file
 
 from ..container import BaseContainer, SimpleContainer
-from ..repo.manifest import ContainerRepositoryContext, RepositoryManifestError
+from ..repo.context import ContainerRepositoryContext
+from ..repo.manifest import ContainerManifestError
 from ...capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -47,14 +48,17 @@ class ContainerLoader:
                 manager.logger.warning(f"Repository `{url}` not found, skip.")
                 continue
 
-            # Manifest schema/kind/cntr/Python compatibility is validated
-            # before this repository's container.py is ever imported (Spec
-            # section 27). A legacy repository (no .linktools.json) loads
-            # exactly as before -- no warning, no migration required.
+            # Manifest schema/kind/components.cntr/host-requirement
+            # compatibility is validated before this repository's
+            # container.py is ever imported. A legacy repository (no
+            # .linktools.json) loads exactly as before -- no warning, no
+            # migration required. A manifest present but missing (or not
+            # opted into) the cntr component is skipped the same way: it
+            # simply hasn't declared cntr capability for this project.
             try:
-                manifest = manager.repo_manifest.load(repo_path)
-                manager.repo_manifest.ensure_loadable(manifest)
-            except RepositoryManifestError as exc:
+                manifest = manager.manifest_policy.load(repo_path)
+                manager.manifest_policy.ensure_loadable(manifest)
+            except ContainerManifestError as exc:
                 manager.logger.warning(f"Repository `{url}` failed manifest validation, skip: {exc}")
                 continue
 

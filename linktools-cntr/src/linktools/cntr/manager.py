@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
     from .repo.store import RepoStore
-    from .repo.manifest import RepositoryManifestService
+    from .repo.manifest import ContainerManifestPolicy
     from .artifacts.index import ArtifactIndex
     from .execution.planner import ExecutionPlanner
 
@@ -300,9 +300,9 @@ class ContainerManager:
         return RepoStore(self)
 
     @cached_property
-    def repo_manifest(self) -> "RepositoryManifestService":
-        from .repo.manifest import RepositoryManifestService
-        return RepositoryManifestService(self)
+    def manifest_policy(self) -> "ContainerManifestPolicy":
+        from .repo.manifest import ContainerManifestPolicy
+        return ContainerManifestPolicy(self)
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型

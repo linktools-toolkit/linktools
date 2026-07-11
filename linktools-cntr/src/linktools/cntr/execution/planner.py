@@ -112,7 +112,7 @@ class ExecutionPlanner:
             for container in selection.target_containers:
                 repository = getattr(container, "_repository", None)
                 if repository is not None and repository.manifest is not None:
-                    for issue in manager.repo_manifest.check_runtime_requirements(repository.manifest):
+                    for issue in manager.manifest_policy.check_runtime_requirements(repository.manifest):
                         warnings.append(f"{container.name}: {issue.message}")
 
         preflight = "skipped"

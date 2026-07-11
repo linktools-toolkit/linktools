@@ -54,7 +54,7 @@ class RepoCommand(BaseCommandGroup):
         if not repos:
             self.logger.info("No repository found")
             return
-        from ..repo.manifest import describe_repository
+        from ..repo.status import describe_repository
         for url, meta in repos.items():
             info = describe_repository(_shared.manager, url, meta, check_runtime=runtime)
             self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
@@ -78,7 +78,7 @@ class RepoCommand(BaseCommandGroup):
             self.logger.info("No repository found")
             return
 
-        from ..repo.manifest import describe_repository
+        from ..repo.status import describe_repository
         results = {
             u: describe_repository(_shared.manager, u, m, check_runtime=runtime)
             for u, m in targets.items()

@@ -127,7 +127,7 @@ class RepoStore:
         return results
 
     def _revalidate_after_update(self, meta: "dict[str, str]") -> "tuple[str | None, bool, str | None]":
-        from .manifest import RepositoryManifestError
+        from .manifest import ContainerIncompatible, ContainerManifestError
         repo_path = meta.get("repo_path")
 
         revision = None
@@ -145,16 +145,12 @@ class RepoStore:
             return revision, True, None
 
         try:
-            manifest = self.manager.repo_manifest.load(repo_path)
-        except RepositoryManifestError as exc:
+            manifest = self.manager.manifest_policy.load(repo_path)
+            self.manager.manifest_policy.ensure_loadable(manifest)
+        except ContainerIncompatible as exc:
+            return revision, False, f"incompatible with this host after update: {exc}"
+        except ContainerManifestError as exc:
             return revision, False, f"manifest is invalid after update: {exc}"
-        if manifest is None:
-            return revision, True, None
-
-        issues = self.manager.repo_manifest.check_host_requirements(manifest)
-        if issues:
-            details = "; ".join(issue.message for issue in issues)
-            return revision, False, f"incompatible with this host after update: {details}"
         return revision, True, None
 
     def remove(self, url: str) -> None:
@@ -174,8 +170,8 @@ class RepoStore:
         # INSTALLED_REPOS itself, to avoid stale metadata drifting from the
         # on-disk .linktools.json.
         try:
-            manifest = self.manager.repo_manifest.load(repo_path)
-            self.manager.repo_manifest.ensure_loadable(manifest)
+            manifest = self.manager.manifest_policy.load(repo_path)
+            self.manager.manifest_policy.ensure_loadable(manifest)
         except Exception:
             self._remove_repo_file(dict(repo_path=repo_path))
             raise

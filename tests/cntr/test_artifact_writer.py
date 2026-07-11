@@ -167,7 +167,7 @@ def test_repo_backed_container_records_repository_url_and_revision(fresh_manager
     and repository_revision for a git-backed container -- only the former
     was ever actually recorded."""
     from linktools.cntr.container import BaseContainer
-    from linktools.cntr.repo.manifest import ContainerRepositoryContext
+    from linktools.cntr.repo.context import ContainerRepositoryContext
     import linktools.git as git_module
 
     class _FakeGitRepository:
@@ -194,7 +194,7 @@ def test_repo_backed_container_records_repository_url_and_revision(fresh_manager
 
 def test_non_git_local_repo_container_has_no_repository_revision(fresh_manager, tmp_path):
     from linktools.cntr.container import BaseContainer
-    from linktools.cntr.repo.manifest import ContainerRepositoryContext
+    from linktools.cntr.repo.context import ContainerRepositoryContext
 
     (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    image: x:1\n")
     container = BaseContainer(fresh_manager, tmp_path, name="999-local-repo")

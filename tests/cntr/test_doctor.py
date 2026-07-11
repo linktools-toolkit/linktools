@@ -6,7 +6,7 @@ scan_compose is a pure function over a rendered compose dict; Doctor.run ties th
 checks together and must never modify the config store.
 """
 from linktools.cntr.doctor import (
-    ARTIFACT_STALE, COMPOSE_VALIDATION_FAILED, INFO, SECURITY_DOCKER_SOCKET_MOUNT, SECURITY_LATEST_IMAGE,
+    ARTIFACT_STALE, COMPOSE_VALIDATION_FAILED, SECURITY_DOCKER_SOCKET_MOUNT, SECURITY_LATEST_IMAGE,
     SECURITY_TLS_DISABLED, Doctor, Finding, WARN, scan_compose,
 )
 
@@ -292,27 +292,40 @@ def test_doctor_cli_exposes_sudo_prompt_flag(fresh_manager, monkeypatch):
     assert captured["sudo_prompt"] is True
 
 
-# -- Repo manifest unknown-requirement-key reporting ------------------------
+# -- Repo manifest unrecognized-requirement-key reporting -------------------
 
-def test_check_repos_reports_unknown_manifest_requirement_as_info(fresh_manager, tmp_path):
+def test_check_repos_reports_unrecognized_manifest_requirement_as_warn(fresh_manager, tmp_path, monkeypatch):
+    """An unrecognized requirement key now fails closed (see
+    test_repo_manifest.py::test_unrecognized_requirement_key_now_blocks_fail_closed),
+    so repo_store.add() itself would reject this manifest -- inject it
+    directly into the repo store (simulating a repo that became
+    incompatible after being installed) to exercise Doctor's reporting."""
     import json as json_module
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(json_module.dumps({
         "schema_version": 1,
-        "kind": "linktools-cntr-repository",
-        "requires": {"some-other-tool": ">=1.0"},
+        "kind": "linktools-project",
+        "components": {
+            "cntr": {
+                "schema_version": 1,
+                "requires": {"some-other-tool": ">=1.0"},
+                "config": {}, "metadata": {}, "extensions": {},
+            },
+        },
     }), encoding="utf-8")
     (repo_dir / "container.py").write_text(
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n    pass\n",
         encoding="utf-8",
     )
-    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    repos = dict(fresh_manager.repo_store.get_all())
+    repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
+    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(
-        f.severity == INFO and "some-other-tool" in f.message
+        f.severity == WARN and "some-other-tool" in f.message
         for f in findings
     )
 

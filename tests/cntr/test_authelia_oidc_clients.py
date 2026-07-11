@@ -41,7 +41,7 @@ def test_oidc_clients_reloaded_from_store_is_a_set_again(fresh_manager):
     # A fresh authelia container instance (simulating the next CLI invocation)
     # must restore RedirectURLs to a set, not leave it as the persisted list.
     from linktools.cntr.registry.loader import ContainerLoader
-    from linktools.cntr.repo.manifest import ContainerRepositoryContext
+    from linktools.cntr.repo.context import ContainerRepositoryContext
     builtin_context = ContainerRepositoryContext(url=None, root_path=None, manifest=None, builtin=True)
     fresh_containers = list(ContainerLoader(fresh_manager)._load_one(authelia.root_path, builtin_context))
     reloaded = fresh_containers[0]

@@ -14,7 +14,7 @@ import os
 import textwrap
 
 from linktools.cntr.registry.loader import ContainerLoader
-from linktools.cntr.repo.manifest import ContainerRepositoryContext
+from linktools.cntr.repo.context import ContainerRepositoryContext
 
 
 def _write_container_importing_a_shared_concrete_base(tmp_path):

@@ -218,7 +218,7 @@ class Doctor:
     def check_repos(self, runtime: bool = False) -> "list[Finding]":
         findings: "list[Finding]" = []
         from linktools.git import GitRepository
-        from .repo.manifest import RepositoryManifestError
+        from .repo.manifest import ContainerManifestError
         for url, meta in self.manager.repo_store.get_all().items():
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path):
@@ -226,24 +226,22 @@ class Doctor:
 
             manifest = None
             try:
-                manifest = self.manager.repo_manifest.load(repo_path)
-            except RepositoryManifestError as exc:
+                manifest = self.manager.manifest_policy.load(repo_path)
+            except ContainerManifestError as exc:
                 findings.append(Finding(
                     WARN, f"repo `{url}` has an invalid manifest: {exc}",
                     code=REPO_MANIFEST_INVALID, component=url))
 
             if manifest is not None:
-                for key in self.manager.repo_manifest.unknown_requirement_keys(manifest):
-                    findings.append(Finding(
-                        INFO, f"repo `{url}` manifest declares an unrecognized requirement `{key}` "
-                              f"(kept, not enforced by this version).",
-                        component=url))
-                for issue in self.manager.repo_manifest.check_host_requirements(manifest):
+                # A requirement key with no registered resolver ("unrecognized")
+                # is reported here the same as an unmet version -- both mean
+                # this cntr version can't verify what the manifest declared.
+                for issue in self.manager.manifest_policy.check_host_requirements(manifest):
                     findings.append(Finding(
                         WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
                         code=REPO_INCOMPATIBLE, component=url))
                 if runtime:
-                    for issue in self.manager.repo_manifest.check_runtime_requirements(manifest):
+                    for issue in self.manager.manifest_policy.check_runtime_requirements(manifest):
                         findings.append(Finding(
                             WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
                             code=REPO_INCOMPATIBLE, component=url))

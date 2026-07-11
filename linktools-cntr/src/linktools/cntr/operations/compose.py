@@ -115,7 +115,7 @@ class ComposeOperations:
             if url in seen_urls:
                 continue
             seen_urls.add(url)
-            for issue in manager.repo_manifest.check_runtime_requirements(repository.manifest):
+            for issue in manager.manifest_policy.check_runtime_requirements(repository.manifest):
                 problems.append(f"Repository `{url}` requires {issue.key}{issue.required}: {issue.message}")
         if problems:
             raise ContainerError(
