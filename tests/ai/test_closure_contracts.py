@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Contract tests for the Phase 2A final-closure remediation: the new behaviors
-that didn't have direct coverage — ToolContribution partial filtering (§5),
-retry policy (§10), Runtime.inspect + resolve_agent error type (§16), and the
-MCP raw/exposed name contract (§13)."""
+"""Contract tests for the security execution final-closure remediation: the new behaviors
+that didn't have direct coverage — ToolContribution partial filtering (contract),
+retry policy (contract), Runtime.inspect + resolve_agent error type (contract), and the
+MCP raw/exposed name contract (contract)."""
 
 import asyncio
 
@@ -25,7 +25,7 @@ from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.tool.retry import DefaultRetryPolicy
 
 
-# --- §5: tools-only ToolContribution partial/full filtering ---
+# --- contract: tools-only ToolContribution partial/full filtering ---
 
 def _md(name, category="discovery", mutating=False):
     async def _handler(**_kw):
@@ -64,7 +64,7 @@ async def test_tools_only_contribution_fully_filtered_returns_none():
     assert set(dropped) == {"a", "b"}
 
 
-# --- §10: RetryPolicy (mutating non-idempotent never retries) ---
+# --- contract: RetryPolicy (mutating non-idempotent never retries) ---
 
 def test_retry_policy_mutating_non_idempotent_never_retries():
     pol = DefaultRetryPolicy()
@@ -96,7 +96,7 @@ def test_retry_policy_permanent_error_not_retried():
                             policy=eff, descriptor=desc) is False
 
 
-# --- §16: resolve_agent error type + inspect immutability ---
+# --- contract: resolve_agent error type + inspect immutability ---
 
 @pytest.mark.asyncio
 async def test_resolve_agent_raises_capability_error_not_swarm(tmp_path):
@@ -124,7 +124,7 @@ async def test_inspect_returns_immutable_capability_inspection(tmp_path):
         inspection.tools = ()  # type: ignore[misc]
 
 
-# --- §6.4 / §13: schema validation error type + MCP raw_name audit ---
+# --- contract / contract: schema validation error type + MCP raw_name audit ---
 
 @pytest.mark.asyncio
 async def test_schema_validation_raises_dedicated_error():
@@ -143,7 +143,7 @@ async def test_schema_validation_raises_dedicated_error():
 
 @pytest.mark.asyncio
 async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
-    """§9 acceptance: a managed builtin tool's PolicyEngine rules run EXACTLY
+    """contract acceptance: a managed builtin tool's PolicyEngine rules run EXACTLY
     once per call (ManagedToolAdapter -> ToolExecutor.execute), not twice.
     PolicyCapability must skip managed tools (they're in the descriptor lookup)
     so the rule isn't re-evaluated."""
@@ -197,8 +197,8 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
 async def test_mcp_descriptor_carries_raw_name_for_audit():
     """The MCP descriptor's exposed name is what the model sees; the raw server
     name is carried in metadata for audit (the MCP call itself uses raw_name)."""
+    from linktools.ai.mcp import LegacyMCPConnectionManagerAdapter
     from linktools.ai.mcp.provider import MCPProvider
-    from linktools.ai.providers.mcp import MCPServerSpecProvider
     from linktools.ai.registry.mcp import parse_mcp_spec
 
     class _Src:
@@ -216,17 +216,18 @@ async def test_mcp_descriptor_carries_raw_name_for_audit():
             ts.add_function(query_user, name="risk.query_user")
             return ts
 
-    provider = MCPProvider(_Src(), _Mgr())
+    provider = MCPProvider(_Src(), LegacyMCPConnectionManagerAdapter(
+        _Mgr(), empty_is_verified=True))
     bundle = await provider.resolve(CapabilityRef("mcp", "risk"), CapabilityContext(
         agent_id="a", exposure_policy=CapabilityToolExposurePolicy()))
-    desc = bundle.tool_contributions[0].descriptors[0]
+    desc = bundle.tool_contributions[0].tools[0].descriptor
     assert desc.name == "risk.query_user"  # exposed name
     assert desc.metadata.get("raw_name") == "query_user"  # raw name for the MCP call
 
 
 @pytest.mark.asyncio
 async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
-    """§19.2 completion scenario: an idempotent tool driven through Runtime.run
+    """contract completion scenario: an idempotent tool driven through Runtime.run
     must actually use the wired IdempotencyStore -- the call completes (no
     StorageCapabilityError) and a COMPLETED record is persisted, so a replay
     would return the cached result. Regression: before wiring
@@ -279,7 +280,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     )
     # The run must complete. Before storage.idempotency was wired into the
     # managed executor, policy.idempotent + ManagedToolAdapter raised
-    # StorageCapabilityError here (no store = fail closed per §7.7) -- so
+    # StorageCapabilityError here (no store = fail closed per contract) -- so
     # reaching "done" is itself proof the IdempotencyStore is wired and the
     # idempotent write persisted (a replay of the same call would return cached).
     from linktools.ai.errors import StorageCapabilityError

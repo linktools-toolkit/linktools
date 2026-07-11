@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Argument-safety redaction for audit copies (spec §16.3 minimum): secret
+"""Argument-safety redaction for audit copies (contract minimum): secret
 masking + size limits on tool arguments persisted to the approval store / log."""
 
 from linktools.ai.security.redact import redact_for_audit

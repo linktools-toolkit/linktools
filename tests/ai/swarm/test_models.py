@@ -84,7 +84,7 @@ def test_allowed_swarm_transitions_paused():
 
 def test_allowed_swarm_transitions_cancelling():
     """CANCELLING distinguishes "cancel requested" from "actually cancelled"
-    (mirrors RunStatus.CANCELLING) -- actionable-fix-spec §5.4.5."""
+    (mirrors RunStatus.CANCELLING) -- actionable-fix-contract."""
     assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.CANCELLING] == frozenset({
         SwarmStatus.CANCELLED,
         SwarmStatus.FAILED,

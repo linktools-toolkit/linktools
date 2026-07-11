@@ -8,6 +8,7 @@ import pytest
 from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
 from linktools.ai.capability.ref import CapabilityRef
 from linktools.ai.errors import CapabilityConflictError
+from linktools.ai.mcp import LegacyMCPConnectionManagerAdapter
 from linktools.ai.mcp.provider import MCPProvider
 from linktools.ai.registry.mcp import MCPServerSpec
 
@@ -43,21 +44,25 @@ def _ctx():
     return CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy())
 
 
+def _legacy(manager):
+    return LegacyMCPConnectionManagerAdapter(manager, empty_is_verified=True)
+
+
 @pytest.mark.asyncio
 async def test_enabled_tools_filters():
     spec = _spec("risk", enabled_tools=("query_user",))
     mgr = _FakeMgr({"risk": ("query_user", "query_device", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
+    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
     bundle = await p.resolve(CapabilityRef("mcp", "risk"), _ctx())
     # No conflict -> resolves; governance applied (query_user kept, others dropped).
-    assert len(bundle.toolsets) == 1
+    assert len(bundle.tool_contributions) == 1
 
 
 @pytest.mark.asyncio
 async def test_disabled_tools_filters():
     spec = _spec("risk", disabled_tools=("secret",))
     mgr = _FakeMgr({"risk": ("query_user", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
+    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
     await p.resolve(CapabilityRef("mcp", "risk"), _ctx())  # no raise
 
 
@@ -67,7 +72,7 @@ async def test_max_tools_per_capability_enforced():
     mgr = _FakeMgr({"risk": tuple(f"t{i}" for i in range(20))})
     ctx = CapabilityContext(agent_id="a1",
                             exposure_policy=CapabilityToolExposurePolicy(max_tools_per_capability=5))
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
+    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
     with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
         await p.resolve(CapabilityRef("mcp", "risk"), ctx)
 
@@ -79,7 +84,7 @@ async def test_cross_server_conflict_detected():
     s1 = _spec("a", tool_prefix=False)
     s2 = _spec("b", tool_prefix=False)
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
+    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), _legacy(mgr), allow_mcp_wildcard=True)
     with pytest.raises(CapabilityConflictError, match="exposed by both"):
         await p.resolve(CapabilityRef("mcp", "*"), _ctx())
 
@@ -90,9 +95,9 @@ async def test_tool_prefix_default_avoids_conflict():
     s1 = _spec("a")
     s2 = _spec("b")
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
+    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), _legacy(mgr), allow_mcp_wildcard=True)
     bundle = await p.resolve(CapabilityRef("mcp", "*"), _ctx())
-    assert len(bundle.toolsets) == 2
+    assert len(bundle.tool_contributions) == 2
 
 
 class _FakeSrc:

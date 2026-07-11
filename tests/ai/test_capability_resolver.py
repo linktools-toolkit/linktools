@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CapabilityAssembler (spec §10): resolves AgentSpec.tools into one merged
+"""CapabilityAssembler (contract): resolves AgentSpec.tools into one merged
 bundle, enforcing resolution rules (unknown kind, conflicts, exposure caps) and
 merging prompt sections in stable order."""
 
@@ -74,7 +74,7 @@ async def test_assemble_builtin_file_execution_tools_allowed_exposes_writes(tmp_
 @pytest.mark.asyncio
 async def test_assemble_kindname_string_resolves(tmp_path):
     """builtin:terminal is mutating -- only reachable when execution tools
-    are explicitly allowed by policy (spec §6.5: explicit builtin:terminal
+    are explicitly allowed by policy (contract: explicit builtin:terminal
     works when allowed, not unconditionally)."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
@@ -112,7 +112,7 @@ async def test_unknown_kind_raises_resolution_error(tmp_path):
 
 @pytest.mark.asyncio
 async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(tmp_path):
-    """spec §15.1: validity is entirely provider-registration-driven -- there
+    """contract: validity is entirely provider-registration-driven -- there
     is no separate hardcoded kind allowlist. A completely made-up kind like
     "bogus" fails exactly like a recognized-but-unwired kind (e.g. "skill"
     with no SkillProvider registered): CapabilityResolutionError, not a
@@ -149,7 +149,7 @@ async def test_register_accepts_a_new_kind():
 
 def test_provider_kinds_reads_supported_kinds():
     """A provider declaring supported_kinds is recognized for every kind it
-    owns -- no manual alias registration needed (the §15.3 multi-kind model)."""
+    owns -- no manual alias registration needed (the contract multi-kind model)."""
     from linktools.ai.capability.provider import provider_kinds
     from linktools.ai.package.capability_provider import PackageProvider
 
@@ -207,7 +207,7 @@ async def test_descriptor_without_matching_handler_fails_at_assembly(tmp_path):
 async def test_introspectable_contribution_populates_per_tool_definitions(tmp_path):
     """An introspectable toolset contribution is upgraded to the per-tool
     ManagedToolDefinition form at assembly -- each tool carries its own explicit
-    descriptor + extractable handler (the §9.2 per-tool model, exercised)."""
+    descriptor + extractable handler (the contract per-tool model, exercised)."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     bundle = await asm.assemble(_spec((ToolRef(name="file-read"),)), _ctx(backend))

@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_idempotency_store_contract.py — runs the
 same IdempotencyStore contract against both FileIdempotencyStore and
-SqlAlchemyIdempotencyStore (review doc §11 backend parity). The
+SqlAlchemyIdempotencyStore (design note contract backend parity). The
 parametrized ``store_factory`` fixture mirrors test_approval_store_contract.py
 / test_memory_store_contract.py (file + sqlalchemy branches, including
 ``_run_in_new_loop`` to bootstrap the SQL engine off the test loop).
 
-The contract covers (per §11.2):
+The contract covers (per contract):
 1. reserve -> complete -> get returns COMPLETED with cached result.
 2. reserve same (scope, key) with a different request_hash -> IdempotencyConflictError.
 3. Two fresh reservations with different (scope, key) coexist independently.

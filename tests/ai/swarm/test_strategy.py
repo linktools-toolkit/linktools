@@ -676,7 +676,7 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
 
 # --- 7. Phase-5A: task.id != child RunRecord.id (active_run_id decoupling) ---
 #
-# review doc §19.1: "禁止 SwarmTask.id == child_run_id". Each execution mints a
+# design note contract: "禁止 SwarmTask.id == child_run_id". Each execution mints a
 # fresh run_id and stores it on task.active_run_id via SwarmStore.set_active_run.
 
 
@@ -843,7 +843,7 @@ def test_set_active_run_missing_task_raises_not_found():
 
 
 # ---------------------------------------------------------------------------
-# SwarmTaskAttempt recording (Phase-5B / review doc §19.2)
+# SwarmTaskAttempt recording (Phase-5B / design note contract)
 # ---------------------------------------------------------------------------
 
 

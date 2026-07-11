@@ -409,7 +409,7 @@ def test_path_traversal_in_task_id_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. SwarmTaskAttempt: record -> list round-trip (review doc §19.2)
+# 8. SwarmTaskAttempt: record -> list round-trip (design note contract)
 # ---------------------------------------------------------------------------
 
 
@@ -518,7 +518,7 @@ def test_record_attempt_round_trips_error_field(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 9. renew_lease (review doc §19.4)
+# 9. renew_lease (design note contract)
 # ---------------------------------------------------------------------------
 
 

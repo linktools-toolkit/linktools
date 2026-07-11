@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CompositeSecurityPipeline: decision precedence and sequential MODIFY
-threading (spec §12)."""
+threading (contract)."""
 
 import pytest
 
@@ -56,7 +56,7 @@ async def test_require_approval_survives_when_no_later_deny():
 
 @pytest.mark.asyncio
 async def test_sequential_modify_second_pipeline_sees_first_pipelines_edit():
-    """The core §12.2 requirement: pipeline B's before_tool must observe
+    """The core contract requirement: pipeline B's before_tool must observe
     pipeline A's modified arguments, not the original call."""
     seen_by_b = {}
 

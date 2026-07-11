@@ -2,7 +2,7 @@ requires-python: ">=3.10"
 
 # Core dependencies stay lightweight: FileStorage, Store Protocols, Provider
 # Protocols, and the Capability Runtime need only pydantic-ai + the linktools
-# core. SQLAlchemy/aiosqlite are optional (spec §21) -- install via the
+# core. SQLAlchemy/aiosqlite are optional -- install via the
 # sqlite/sqlalchemy/postgres/mysql extras when using SqlAlchemyStorage.
 dependencies:
   - pydantic-ai-slim[mcp,openai]>=1.107,<2

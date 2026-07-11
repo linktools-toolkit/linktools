@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/agent/test_compiler_tools.py — verifies the §17 contract: the
+"""tests/ai/agent/test_compiler_tools.py — verifies the contract contract: the
 AgentCompiler NO LONGER wires builtin file/terminal tools into the compiled
 pydantic-ai Agent. Those tools are constructed at EXECUTION TIME from
 ``AgentDependencies.execution`` (set by AgentRunner from its ``execution``
@@ -17,7 +17,7 @@ Three angles:
    read_file tool call land on the backend -- the file content shows up as
    a tool-return in the run history. This is the positive-path replacement
    for the old "compiled agent has builtin tools" test, now driven through
-   the runner per §17's execution-time construction."""
+   the runner per contract's execution-time construction."""
 import asyncio
 
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -92,7 +92,7 @@ def _run_context() -> RunContext:
 
 
 def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
-    # §17: the compiler produces an Agent with NO builtin file/terminal tools.
+    # contract: the compiler produces an Agent with NO builtin file/terminal tools.
     # Those tools are constructed at execution time, not compile time.
     compiler = AgentCompiler(
         model_router=ModelRouter(registry=_registry(
@@ -157,7 +157,7 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
     # fires a successful "end" event AND the file content shows up in the
     # checkpointed message history (which the runner saves from
     # ``run.all_messages()`` -- this is where the tool-return payload lives).
-    # This is the §17 replacement for the old "compiled agent has builtin
+    # This is the contract replacement for the old "compiled agent has builtin
     # tools" test, now driven through the runner per the execution-time
     # construction.
     (tmp_path / "sample.txt").write_text(

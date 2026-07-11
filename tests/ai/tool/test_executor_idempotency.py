@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tool-level idempotency tests for ToolExecutor.execute (review doc §11).
+"""Tool-level idempotency tests for ToolExecutor.execute (design note contract).
 
 ToolExecutor now consults a persistent IdempotencyStore instead of an
 in-process dict. Same (scope, key) + same request hash -> handler runs
@@ -59,7 +59,7 @@ def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_p
 # ---------------------------------------------------------------------------
 # 2. Same idempotency_key + DIFFERENT arguments -> IdempotencyConflictError
 #    (request_hash includes the arguments, so the second reserve sees a hash
-#    mismatch). Spec §11.3 -- the hash covers tool_name + normalized args +
+#    mismatch). contract -- the hash covers tool_name + normalized args +
 #    scope.
 # ---------------------------------------------------------------------------
 
@@ -220,7 +220,7 @@ def test_same_key_under_different_run_id_does_not_collide(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 6. Failed handler -> record is FAILED with the error string; a retry with
-#    the same key proceeds (FAILED allows retry per §11.2) and on success the
+#    the same key proceeds (FAILED allows retry per contract) and on success the
 #    record is overwritten with COMPLETED.
 # ---------------------------------------------------------------------------
 
@@ -309,7 +309,7 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 8. IdempotencyStore survives "process restart": a fresh ToolExecutor wired
-#    to the same on-disk store sees the previously-completed record. (§11.1:
+#    to the same on-disk store sees the previously-completed record. (contract:
 #    "禁止仅使用进程内字典" -- the whole point of persistence.)
 # ---------------------------------------------------------------------------
 

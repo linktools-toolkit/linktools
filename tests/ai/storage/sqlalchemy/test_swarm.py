@@ -412,7 +412,7 @@ def test_fail_task_with_fencing_token_requires_claimed_status(tmp_path):
 
 
 def test_complete_task_requires_expected_version_argument(tmp_path):
-    """Package 4 (actionable-fix-spec §7): expected_version is now mandatory
+    """scenario (actionable-fix-contract): expected_version is now mandatory
     -- there is no more expected_version=None legacy bypass."""
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
@@ -436,7 +436,7 @@ def test_fail_task_requires_expected_version_argument(tmp_path):
 
 
 def test_complete_task_conflicts_on_wrong_active_run_id(tmp_path):
-    """Package 4 (§7.2): a worker driving a since-superseded child Run (a
+    """scenario (contract): a worker driving a since-superseded child Run (a
     stale active_run_id) must not complete the task even if it somehow still
     holds a matching version/status."""
     async def _run_case():
@@ -473,7 +473,7 @@ def test_fail_task_conflicts_on_wrong_active_run_id(tmp_path):
 
 
 def test_complete_and_fail_concurrent_only_one_wins(tmp_path):
-    """Package 4 (§7.9): complete_task and fail_task racing on the SAME
+    """scenario (contract): complete_task and fail_task racing on the SAME
     CLAIMED task must both target the same fencing token -- only one can
     win; the loser observes a conflict, never a corrupted mixed state."""
     async def _run_case():
@@ -567,7 +567,7 @@ def test_reclaim_expired_tasks_returns_empty_when_none_stale(tmp_path):
 
 
 def test_reclaim_expired_tasks_skips_non_expired_lease(tmp_path):
-    """A CLAIMED task whose lease is still live is NOT reclaimed -- §19.4
+    """A CLAIMED task whose lease is still live is NOT reclaimed -- contract
     guard against blindly re-running side-effecting tasks."""
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
@@ -582,7 +582,7 @@ def test_reclaim_expired_tasks_skips_non_expired_lease(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. SwarmTaskAttempt: record -> list round-trip (review doc §19.2)
+# 8. SwarmTaskAttempt: record -> list round-trip (design note contract)
 # ---------------------------------------------------------------------------
 
 
@@ -685,7 +685,7 @@ def test_record_attempt_round_trips_error_field(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 9. renew_lease (review doc §19.4)
+# 9. renew_lease (design note contract)
 # ---------------------------------------------------------------------------
 
 

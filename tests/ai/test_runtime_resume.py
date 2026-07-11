@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for Runtime.resume -- the pause/approve/resume round trip (Task 8).
+"""Tests for Runtime.resume -- the pause/approve/resume round trip (scenario).
 
 Runtime.resume(run_id, spec) loads a paused run, deserializes its checkpoint's
 message history, transitions WAITING_APPROVAL -> RUNNING, and re-enters

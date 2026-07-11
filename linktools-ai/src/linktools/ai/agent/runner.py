@@ -447,12 +447,17 @@ class AgentRunner:
                         if self._capability_options is not None
                         else CapabilityToolExposurePolicy()
                     )
+                    from ..security.emitter import EventStoreSecurityEventEmitter
                     cap_ctx = CapabilityContext(
                         agent_id=agent.spec.id, exposure_policy=exposure,
                         execution=deps.execution, run_id=context.run_id,
                         root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
                         session_id=context.session_id,
                         event_store=self._event_store,
+                        security_event_emitter=EventStoreSecurityEventEmitter(
+                            self._event_store, context=context,
+                            failure_mode=self._security_audit_failure_mode,
+                        ),
                         user_id=context.user_id, tenant_id=context.tenant_id,
                         workspace=context.workspace,
                     )
@@ -516,6 +521,7 @@ class AgentRunner:
                             run_context=context,
                             event_store=self._event_store,
                             security_audit_failure_mode=self._security_audit_failure_mode,
+                            security_event_emitter=cap_ctx.security_event_emitter,
                         )
                         for contrib in cap_bundle.tool_contributions:
                             if contrib.tools:

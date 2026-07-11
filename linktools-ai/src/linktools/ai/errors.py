@@ -157,6 +157,10 @@ class ToolDeniedError(ToolError):
     pass
 
 
+class ToolResultDeniedError(ToolDeniedError):
+    """The tool ran, but its result was rejected by after-tool policy."""
+
+
 class ToolApprovalRequiredError(ToolError):
     pass
 
@@ -322,6 +326,10 @@ class MCPServerNotFoundError(CapabilityNotFoundError):
 
 class MCPConnectionError(LinktoolsAIError):
     """An MCP server connection could not be established or was lost."""
+
+
+class MCPConnectionUnavailableError(MCPConnectionError):
+    pass
 
 
 class MCPAuthenticationError(MCPConnectionError):

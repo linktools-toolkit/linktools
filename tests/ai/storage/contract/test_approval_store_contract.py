@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_approval_store_contract.py — runs the same
 ApprovalStore contract against both FileApprovalStore and
-SqlAlchemyApprovalStore (spec §28 backend parity). The parametrized
+SqlAlchemyApprovalStore (contract backend parity). The parametrized
 ``store_factory`` fixture is copied verbatim from
 ``test_memory_store_contract.py`` (file + sqlalchemy branches, including the
 ``_run_in_new_loop`` helper that bootstraps the SQL engine off the test loop);

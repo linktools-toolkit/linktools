@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DirectoryPackageResourceProvider (spec §13.6/§13.11): path sandbox,
+"""DirectoryPackageResourceProvider (contract/contract): path sandbox,
 pagination, and max_bytes read clamp."""
 
 import pytest

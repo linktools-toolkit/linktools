@@ -18,7 +18,8 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
-from ..errors import RunPaused, ToolDeniedError, ToolTimeoutError, TransientToolError, ToolSecurityAuditError
+from ..errors import (RunPaused, ToolDeniedError, ToolTimeoutError,
+                      TransientToolError, ToolSecurityAuditError, ToolResultDeniedError)
 from ..security.descriptor import ToolDescriptor
 from ..security.redact import redact_for_audit, redact_exception
 from ..tool.schema_validate import validate_arguments
@@ -61,6 +62,7 @@ class ManagedToolAdapter:
         run_context: "RunContext | None" = None,
         event_store: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
+        security_event_emitter: Any = None,
     ) -> None:
         self._descriptor = descriptor
         self._handler = handler
@@ -71,6 +73,13 @@ class ManagedToolAdapter:
         self._run_context = run_context
         self._event_store = event_store
         self._security_audit_failure_mode = getattr(security_audit_failure_mode, "value", security_audit_failure_mode)
+        if security_event_emitter is None and event_store is not None:
+            from ..security.emitter import EventStoreSecurityEventEmitter
+            security_event_emitter = EventStoreSecurityEventEmitter(
+                event_store, context=run_context,
+                failure_mode=security_audit_failure_mode,
+            )
+        self._security_event_emitter = security_event_emitter
 
     async def _emit_degraded(self, component: str, reason: str) -> None:
         """Best-effort SecurityDegraded event when a security component fails
@@ -84,6 +93,16 @@ class ManagedToolAdapter:
         """Best-effort governance-event append when an event_store is wired.
         Observability only -- a failure here is logged and swallowed so it
         never masks the tool decision being audited."""
+        security_events = {
+            "SecurityDegraded", "ToolPolicyResolved", "ToolPipelineDecision",
+            "ToolDenied", "ToolApprovalRequired", "ToolResultDenied",
+        }
+        if self._security_event_emitter is not None:
+            if type(payload).__name__ in security_events:
+                await self._security_event_emitter.emit_security(payload)
+            else:
+                await self._security_event_emitter.emit_observability(payload)
+            return
         if self._event_store is None:
             return
         ctx = self._run_context
@@ -99,7 +118,6 @@ class ManagedToolAdapter:
             )
         except Exception as exc:  # noqa: BLE001 - security events can fail closed
             _LOGGER.debug("failed to emit %r for %r", type(payload).__name__, self._descriptor.name)
-            security_events = {"SecurityDegraded", "ToolPolicyResolved", "ToolPipelineDecision"}
             if (type(payload).__name__ in security_events
                     and self._security_audit_failure_mode != "best_effort"):
                 raise ToolSecurityAuditError(
@@ -198,7 +216,7 @@ class ManagedToolAdapter:
                     f"pipeline before_tool failed for {self._descriptor.name!r}")
             await self._emit(ToolPipelineDecision(
                 run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
-                action=decision.action.value, reason=decision.reason or ""))
+                action=decision.action.value, reason=decision.reason or "", stage="before"))
             if decision.action == PipelineAction.DENY:
                 raise ToolDeniedError(
                     decision.reason or f"tool {self._descriptor.name!r} denied by pipeline")
@@ -335,10 +353,8 @@ class ManagedToolAdapter:
                 tool_name=self._descriptor.name, tool_call_id=call_id,
                 error_message=f"{type(exec_exc).__name__}: {redact_exception(exec_exc)}"))
             raise
-        await self._emit(ToolCompleted(
-            tool_name=self._descriptor.name, tool_call_id=call_id, success=True))
-
         # 5. Pipeline after_tool.
+        result_action = "returned"
         if self._pipeline is not None:
             result_event = ToolResultEvent(
                 tool_name=self._descriptor.name, result=result,
@@ -346,24 +362,45 @@ class ManagedToolAdapter:
                 run_id=run_id, call_id=call_id,
             )
             from ..events.payloads import ToolPipelineAfter
-            await self._emit(ToolPipelineAfter(
-                run_id=run_id, tool_name=self._descriptor.name,
-                call_id=call_id, success=True))
             try:
                 after_decision = await self._pipeline.after_tool(result_event)
             except Exception:
                 _LOGGER.warning("after_tool pipeline error for %r (fail closed)",
                                 self._descriptor.name)
-                raise ToolDeniedError(
+                await self._emit(ToolPipelineDecision(
+                    run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
+                    action=PipelineAction.DENY_RESULT.value,
+                    reason="after_tool pipeline failed", stage="after"))
+                await self._emit(ToolCompleted(
+                    tool_name=self._descriptor.name, tool_call_id=call_id,
+                    success=True, execution_success=True, result_action="denied"))
+                raise ToolResultDeniedError(
                     f"after_tool pipeline failed for {self._descriptor.name!r}")
+            await self._emit(ToolPipelineDecision(
+                run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
+                action=after_decision.action.value, reason=after_decision.reason or "",
+                stage="after"))
+            from ..events.payloads import ToolPipelineAfter
+            await self._emit(ToolPipelineAfter(
+                run_id=run_id, tool_name=self._descriptor.name,
+                call_id=call_id, success=True))
             # after_tool distinct actions: DENY_RESULT (or legacy DENY) discards
             # the result; MODIFY_RESULT (or legacy MODIFY) replaces it. The
             # result-level decision is never confused with a before_tool
             # call-level DENY/MODIFY.
             if after_decision.action in (PipelineAction.DENY, PipelineAction.DENY_RESULT):
-                raise ToolDeniedError(
+                result_action = "denied"
+                await self._emit(ToolCompleted(
+                    tool_name=self._descriptor.name, tool_call_id=call_id,
+                    success=True, execution_success=True, result_action=result_action))
+                raise ToolResultDeniedError(
                     f"tool {self._descriptor.name!r} result denied by after_tool pipeline")
             if after_decision.action in (PipelineAction.MODIFY, PipelineAction.MODIFY_RESULT):
                 result = after_decision.modified_payload
+                result_action = "modified"
+
+        await self._emit(ToolCompleted(
+            tool_name=self._descriptor.name, tool_call_id=call_id, success=True,
+            execution_success=True, result_action=result_action))
 
         return result

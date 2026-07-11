@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 3A (review doc §7): AgentRunner + RunController integration. When a
+"""Phase 3A (design note contract): AgentRunner + RunController integration. When a
 RunController is wired into AgentRunner, cancelling a run via the controller
 (token set + task.cancel()) must drive the lifecycle through CANCELLING then
 CANCELLED -- the CANCELLING state is the observable signal that "cancel

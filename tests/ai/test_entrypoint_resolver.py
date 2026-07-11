@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DirectoryEntrypointResolver (spec §13.8/§13.9/§13.11): list entrypoints,
+"""DirectoryEntrypointResolver (contract/contract/contract): list entrypoints,
 resolve scoped agents, and namespace isolation across packages."""
 
 import pytest

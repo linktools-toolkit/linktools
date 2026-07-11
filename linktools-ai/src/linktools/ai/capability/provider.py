@@ -35,6 +35,7 @@ class CapabilityContext:
     parent_run_id: "str | None" = None
     session_id: "str | None" = None
     event_store: "EventStore | None" = None
+    security_event_emitter: Any = None
     # Identity fields propagated to subagent child runs.
     user_id: "str | None" = None
     tenant_id: "str | None" = None
@@ -99,6 +100,8 @@ def make_event_emitter(context: "CapabilityContext | None"):
     this to fire per-operation events (skill.list, package.resource.read, ...)."""
     if context is None or context.event_store is None or context.run_id is None:
         return _noop_emit
+    if context.security_event_emitter is not None:
+        return context.security_event_emitter.emit_observability
     store = context.event_store
     run_id = context.run_id
     root_run_id = context.root_run_id or run_id

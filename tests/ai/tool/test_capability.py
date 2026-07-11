@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """tests/ai/tool/test_capability.py — drives a real pydantic-ai Agent, matching
 the FunctionModel-based pattern already used in tests/ai/security/test_hook.py.
-Tool name is "terminal" (not "bash") because CommandRule (Task 4) checks
+Tool name is "terminal" (not "bash") because CommandRule (scenario) checks
 `request.tool_name != "terminal"` to decide whether to inspect the command at
 all -- using any other tool name would never reach the denied-pattern check.
 
-Phase 1 review-doc refactoring: the per-Run ToolContext reaches the capability
+Phase 1 design note refactoring: the per-Run ToolContext reaches the capability
 via pydantic-ai dependency injection -- ``deps=AgentDependencies(tool_context=...)``
 on ``agent.run()`` becomes ``ctx.deps.tool_context`` inside the hook. No mutable
 ``current_context`` field is set on the capability anymore."""

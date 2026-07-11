@@ -102,7 +102,7 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
 
 @pytest.mark.asyncio
 async def test_default_baseline_denies_dangerous_command_without_pause_on_approval(tmp_path):
-    """Regression for the §7 fix: Runtime.build's default SecurityBaseline
+    """Regression for the contract fix: Runtime.build's default SecurityBaseline
     (enabled=True) must reach the compiler's ToolExecutor even when
     pause_on_approval=False (the default) -- previously AgentCompiler silently
     built its OWN default denylist in that case, independent of ``security=``.
@@ -145,7 +145,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
 
 @pytest.mark.asyncio
 async def test_disabled_baseline_actually_disables_denylist_without_pause_on_approval(tmp_path):
-    """The exact bug §7 closes: SecurityBaseline(enabled=False) passed to
+    """The exact bug contract closes: SecurityBaseline(enabled=False) passed to
     Runtime.build (pause_on_approval at its False default) must genuinely
     produce zero command rules -- not have AgentCompiler reinstate its own
     default denylist underneath. Verified end-to-end: a real model bash("echo
@@ -204,7 +204,7 @@ async def test_pipeline_attached_to_runtime(tmp_path):
     """A SecurityPipeline on the SecurityBaseline is wired into the runner and
     actually fires on a real tool call -- verified by behavior (the pipeline's
     before_tool hook runs and denies the call), not by inspecting a private
-    runner field. spec §17.2 forbids the latter."""
+    runner field. contract forbids the latter."""
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
     from linktools.ai.agent.spec import PromptSpec, ToolRef
@@ -266,7 +266,7 @@ def _tool_calling_model_fn(tool_name, args, final_text="COMPLETED"):
 
 @pytest.mark.asyncio
 async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
-    """The §22 managed-approval closed loop: a managed tool whose approval
+    """The contract managed-approval closed loop: a managed tool whose approval
     originates from the pipeline (not the PolicyEngine) must (1) actually
     PAUSE the run -- not be swallowed into a skip-result by pydantic-ai's
     on_tool_execute_error -- and (2) complete on resume after approval without
@@ -340,7 +340,7 @@ class _ModifyPathPipeline:
 
 @pytest.mark.asyncio
 async def test_pipeline_modify_arguments_e2e(tmp_path):
-    """§17.1 #9 e2e: a pipeline MODIFY actually changes the arguments the tool
+    """contract #9 e2e: a pipeline MODIFY actually changes the arguments the tool
     handler receives. The model calls read_file(path='wrong'); the pipeline
     rewrites path to a real file whose content the model then echoes back."""
     from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -389,7 +389,7 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
 
 @pytest.mark.asyncio
 async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
-    """§17.1 #4 e2e: under the default Exposure Policy (expose_execution_tools=
+    """contract #4 e2e: under the default Exposure Policy (expose_execution_tools=
     False) the mutating builtin tools never reach the model -- the assembled
     toolset carries only the read-only file tools."""
     from linktools.ai.agent.spec import PromptSpec, ToolRef

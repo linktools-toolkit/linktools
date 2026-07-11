@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Business (custom) Provider examples satisfy the same Provider contracts as the
-default registries -- no agent.md/SKILL.md/mcp.yaml required (spec §18.7)."""
+default registries -- no agent.md/SKILL.md/mcp.yaml required (contract)."""
 
 import pytest
 

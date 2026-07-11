@@ -395,7 +395,7 @@ async def test_propfind_cursor_monotonic_progress(backend_factory):
 
 @pytest.mark.asyncio
 async def test_propfind_multi_overlay_merge_is_stable_and_non_duplicate(backend_factory):
-    """Package 7 (actionable-fix-spec §10.3.3): primary + TWO overlays, small
+    """scenario (actionable-fix-contract): primary + TWO overlays, small
     limit forcing many pages -- the merged listing must be stable (every
     path appears in the final result) and non-duplicate (no path appears
     twice across pages) regardless of which backend it came from."""

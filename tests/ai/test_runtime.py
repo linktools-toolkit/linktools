@@ -37,7 +37,7 @@ def test_runtime_build_assembles_storage_compiler_runner(tmp_path):
 
 
 def test_runtime_build_no_longer_accepts_workdir(tmp_path):
-    """Package 8 (actionable-fix-spec §11): Runtime.build() must not depend
+    """scenario (actionable-fix-contract): Runtime.build() must not depend
     on a bare `workdir: Path` param -- the caller builds its own
     ExecutionBackend and passes it via `execution=`."""
     from linktools.ai.model.router import ModelRouter
@@ -50,7 +50,7 @@ def test_runtime_build_no_longer_accepts_workdir(tmp_path):
 
 
 def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
-    """`execution=` (Package 8's replacement for `workdir=`) gives the
+    """`execution=` (scenario's replacement for `workdir=`) gives the
     compiled agent builtin file/terminal tools via the SAME ExecutionBackend
     machinery `workdir=` used to construct internally."""
     from linktools.ai.execution.local import LocalExecutionBackend
@@ -271,7 +271,7 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
 
 def test_runtime_applies_session_window_policy(tmp_path):
     """CapabilityRuntimeOptions.session_window_policy is applied to session
-    history before the prompt is built (spec §19)."""
+    history before the prompt is built (contract)."""
     from linktools.ai.capability import CapabilityRuntimeOptions
     from linktools.ai.model.router import ModelRouter
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 4A tests (review doc §13, §15.1, §15.2):
+"""Phase 4A tests (design note contract, contract, contract):
 
 1. Atomic Resource MOVE -- SqlAlchemy raw_move executes in ONE transaction.
    Observable proof: the revision counter bumps exactly once. A decomposed
@@ -108,12 +108,12 @@ async def _make_sqlalchemy_store(tmp_path, db_name: str = "phase4a.db"):
 
 
 # ----------------------------------------------------------------------
-# Test 1: Atomic MOVE in ONE transaction (spec §13)
+# Test 1: Atomic MOVE in ONE transaction (contract)
 # ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
-    """§13.2 atomic-MOVE guard: a MOVE on a primary-resident source must bump
+    """contract atomic-MOVE guard: a MOVE on a primary-resident source must bump
     the revision counter exactly once. A decomposed put+delete (the pre-fix
     orchestration) would bump twice -- once for raw_put, once for raw_delete.
     A delta of exactly 1 is observable proof that all mutations committed
@@ -148,7 +148,7 @@ async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
 
 @pytest.mark.asyncio
 async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
-    """§13.3 overlay-source MOVE: an overlay-only source cannot use the atomic
+    """contract overlay-source MOVE: an overlay-only source cannot use the atomic
     raw_move (the source lives in a different backend). ResourceStore must
     detect this and fall back to the legacy cross-backend copy path. This is
     a regression guard: the initial raw_move delegation broke this case by
@@ -175,12 +175,12 @@ async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Test 2: stat() is metadata-only (spec §15.1)
+# Test 2: stat() is metadata-only (contract)
 # ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_stat_returns_metadata_without_content_field(backend_factory):
-    """§15.1 behavioral guard: stat() returns a ResourceLookupInfo (= alias of
+    """contract behavioral guard: stat() returns a ResourceLookupInfo (= alias of
     ResourceInfo), which has no content field. ResourceStore.stat() must NOT
     internally call get() (which would load the content blob) when the backend
     exposes raw_stat -- the result type itself proves content was not pulled
@@ -202,7 +202,7 @@ async def test_stat_returns_metadata_without_content_field(backend_factory):
 
 @pytest.mark.asyncio
 async def test_stat_on_sqlalchemy_does_not_select_content_column(tmp_path):
-    """§15.1 structural guard: raw_stat on SqlAlchemy must SELECT only metadata
+    """contract structural guard: raw_stat on SqlAlchemy must SELECT only metadata
     columns, NOT the content column. Captures every SQL statement issued
     during a stat() call and asserts none of them reference the content column
     (word-boundary match so 'content_type' does not satisfy 'content')."""
@@ -235,12 +235,12 @@ async def test_stat_on_sqlalchemy_does_not_select_content_column(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Test 3: Cursor pagination covers every item exactly once (spec §15.2)
+# Test 3: Cursor pagination covers every item exactly once (contract)
 # ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
-    """§15.2 cursor-pagination guard: propfind with a small limit must page
+    """contract cursor-pagination guard: propfind with a small limit must page
     through every matching resource exactly once, via successive cursors,
     terminating with cursor=None. Catches the regression where cursor was
     accepted but ignored (the Phase-1 stub always returned cursor=None after
@@ -274,7 +274,7 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
 
 @pytest.mark.asyncio
 async def test_propfind_cursor_none_when_results_fit_one_page(backend_factory):
-    """§15.2 sanity: when the result fits in one page (fewer items than limit),
+    """contract sanity: when the result fits in one page (fewer items than limit),
     next_cursor must be None -- callers must not loop forever thinking more
     pages remain."""
     store = ResourceStore(primary=backend_factory())

@@ -118,7 +118,7 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
 
 
 def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
-    # Phase 1 review-doc refactoring: PolicyCapability / MiddlewareCapability
+    # Phase 1 design note refactoring: PolicyCapability / MiddlewareCapability
     # carry no mutable per-Run field at all -- the per-Run ToolContext reaches
     # them via pydantic-ai DI (ctx.deps.tool_context). A run leaves the
     # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 3A (review doc §7.1): RunController behavior. The controller is the
+"""Phase 3A (design note contract): RunController behavior. The controller is the
 bridge between Runtime.cancel and the in-flight asyncio.Task -- it sets the
 CancellationToken (observed at execution points) and cancels the task
 (observed at any suspended await). These tests cover register/cancel/

@@ -11,11 +11,16 @@ intentionally NOT part of the public surface until a live connection can yield
 the tool list -- advertising it would promise capability that is not wired in."""
 
 from ..registry.mcp import MCPServerSpec, parse_mcp_spec
-from .client import MCPConnectionManager, build_mcp_server
-from .provider import MCPProvider
+from .client import (
+    MCPConnectionManager, MCPConnectionRef, MCPToolsetHandle,
+    LegacyMCPConnectionManagerAdapter, build_mcp_server,
+)
+from .provider import MCPProvider, MCPDiscoveryResult, MCPToolInfo, MCPExposedTool
 
 __all__ = [
     "MCPServerSpec", "parse_mcp_spec",
-    "MCPConnectionManager", "build_mcp_server",
+    "MCPConnectionManager", "MCPConnectionRef", "MCPToolsetHandle",
+    "LegacyMCPConnectionManagerAdapter", "build_mcp_server",
     "MCPProvider",
+    "MCPDiscoveryResult", "MCPToolInfo", "MCPExposedTool",
 ]

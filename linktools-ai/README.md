@@ -223,3 +223,8 @@ Idempotent tools default to `exact_call`. `business_key` requires a configured
 trusted key field and fails closed when the key or persistent idempotency store
 is unavailable. Security-critical audit events fail closed by default;
 `SecurityAuditFailureMode.BEST_EFFORT` is an explicit opt-out.
+
+MCP handlers bind to a `server_id` plus configuration fingerprint. MCP public
+capabilities contain only per-tool managed definitions; raw server names are
+used solely for the final server call. Registry `business_key` values must be
+strings, integers, or UUIDs.

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_memory_store_contract.py — runs the same
 MemoryStore contract against both FileMemoryStore and SqlAlchemyMemoryStore
-(spec §38.50 backend parity). The parametrized ``store_factory`` fixture is
+(contract backend parity). The parametrized ``store_factory`` fixture is
 copied verbatim from ``test_swarm_store_contract.py`` (file + sqlalchemy
 branches, including the ``_run_in_new_loop`` helper that bootstraps the SQL
 engine off the test loop); ``Base.metadata.create_all`` already covers

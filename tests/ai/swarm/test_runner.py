@@ -139,7 +139,7 @@ def _spec(
 class _Stores:
     """Wires the five file-backed stores under tmp_path subdirs, plus one
     Runtime-style AgentRunner + RunController -- SwarmRunner no longer builds
-    its own AgentRunner (Package 1: it must reuse the one Runtime.build()
+    its own AgentRunner (scenario: it must reuse the one Runtime.build()
     assembles), so tests build it here exactly like Runtime.build() does."""
 
     def __init__(self, tmp_path: Path) -> None:
@@ -306,7 +306,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
 
 
 def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
-    """Package 2 (actionable-fix-spec §5): when the driving run AND the
+    """scenario (actionable-fix-contract): when the driving run AND the
     active child run are both registered with the SAME RunController (as
     Runtime.build() wires them), cancel() must go through CANCELLING first
     (not straight to CANCELLED) and must call run_controller.cancel() for
@@ -438,7 +438,7 @@ def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
 
 
 def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
-    """Package 1 (actionable-fix-spec §4): SwarmRunner must not construct its
+    """scenario (actionable-fix-contract): SwarmRunner must not construct its
     own AgentRunner -- it stores exactly the instance it was given, so Swarm
     worker Runs inherit the SAME Tool/Policy/Middleware/UoW/Cancellation
     wiring as top-level Agent runs."""
@@ -665,7 +665,7 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
 
 
 def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path):
-    """P1-1 (current-review-actionable-fix-spec §5): reproduces the exact
+    """P1-1 (current-review-actionable-fix-contract): reproduces the exact
     race Runtime.cancel(run_id) creates -- it transitions the driving Run to
     CANCELLING BEFORE calling run_controller.cancel(), which is what actually
     delivers the CancelledError into SwarmRunner.run(). Before the fix,
@@ -839,7 +839,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     """End-to-end through the real FileSwarmStore: after runner.run() completes,
     every SUCCEEDED task has active_run_id set, DIFFERENT from task.id, and
     matching a real child RunRecord id. This is the Phase-5A invariant the
-    review doc §19.1 mandates (禁止 SwarmTask.id == child_run_id)."""
+    design note contract mandates (禁止 SwarmTask.id == child_run_id)."""
     from linktools.ai.swarm.runner import SwarmRunner
 
     compiler = _build_compiler("coord-out", "alpha-out", "beta-out")
@@ -892,7 +892,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
         )
 
 
-# --- recover() (Phase-5B / review doc §19.5) --------------------------------
+# --- recover() (Phase-5B / design note contract) --------------------------------
 
 
 def _seed_recover_state(
@@ -955,7 +955,7 @@ def _make_runner(stores: _Stores):
 
 
 def test_recover_completes_task_when_child_run_succeeded(tmp_path):
-    """§19.5: a CLAIMED task whose lease lapsed but whose child Run already
+    """contract: a CLAIMED task whose lease lapsed but whose child Run already
     SUCCEEDED is reconciled to SUCCEEDED (the strategy crashed between the
     child's SUCCEEDED transition and its complete_task call)."""
     stores = _Stores(tmp_path)
@@ -978,7 +978,7 @@ def test_recover_completes_task_when_child_run_succeeded(tmp_path):
 
 
 def test_recover_fails_task_when_child_run_failed(tmp_path):
-    """§19.5: a CLAIMED task whose child Run already FAILED is reconciled to
+    """contract: a CLAIMED task whose child Run already FAILED is reconciled to
     FAILED (carrying the child Run's error forward)."""
     stores = _Stores(tmp_path)
     child_error = RunErrorInfo(error_type="ValueError", message="boom", detail={})
@@ -1000,7 +1000,7 @@ def test_recover_fails_task_when_child_run_failed(tmp_path):
 
 
 def test_recover_leaves_task_alone_when_child_run_still_running(tmp_path):
-    """§19.4 guard: even though the lease has lapsed, the child Run is still
+    """contract guard: even though the lease has lapsed, the child Run is still
     RUNNING -- the worker may yet finish. Leave the task CLAIMED (don't blindly
     re-run a side-effecting task)."""
     stores = _Stores(tmp_path)
@@ -1022,7 +1022,7 @@ def test_recover_leaves_task_alone_when_child_run_still_running(tmp_path):
 
 def test_recover_skips_task_with_unexpired_lease(tmp_path):
     """A task whose lease is still live is presumed being worked -- recover()
-    must not touch it (§19.4: don't blindly re-run)."""
+    must not touch it (contract: don't blindly re-run)."""
     from datetime import timedelta
     stores = _Stores(tmp_path)
     future = _NOW + timedelta(seconds=300)

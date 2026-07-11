@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 1 review-doc refactoring: the per-Run ToolContext reaches the
+"""Phase 1 design note refactoring: the per-Run ToolContext reaches the
 capability via pydantic-ai dependency injection (``deps=AgentDependencies(...)``
 on ``agent.run()`` -> ``ctx.deps.tool_context`` inside hooks). No mutable
 ``current_context`` field is set on the capability."""

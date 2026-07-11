@@ -161,32 +161,28 @@ class Runtime:
                 "pass either `providers=...` or the expanded provider params "
                 "(agents/skills/mcp_servers/...), not both"
             )
-        resolved_options = options or CapabilityRuntimeOptions()
+        base_options = options or CapabilityRuntimeOptions()
         # The build-level allow_mcp_wildcard flag is the documented mcp:* opt-in
         # Fold it into the options so MCPProvider honors it.
-        if allow_mcp_wildcard and not resolved_options.allow_mcp_wildcard:
-            resolved_options = dataclasses.replace(resolved_options, allow_mcp_wildcard=True)
+        from .security.baseline import SecurityBaseline
+        baseline = security if security is not None else SecurityBaseline()
+        from .capability.policy import CapabilityToolExposurePolicy
+        if options is not None and options.tool_exposure is not None:
+            effective_exposure = options.tool_exposure
+        elif baseline.enabled and baseline.tool_exposure_policy is not None:
+            effective_exposure = baseline.tool_exposure_policy
+        else:
+            effective_exposure = CapabilityToolExposurePolicy()
+        resolved_options = dataclasses.replace(
+            base_options,
+            tool_exposure=effective_exposure,
+            allow_mcp_wildcard=(base_options.allow_mcp_wildcard or allow_mcp_wildcard),
+        )
 
         # Resolve the effective SecurityBaseline once -- the single source every
         # consumer (compiler executor, runner policy/pipeline, exposure policy)
         # reads from. Resolved here, before any consumer, so SecurityBaseline
         # (enabled=False) genuinely reaches all of them.
-        from .security.baseline import SecurityBaseline
-        baseline = security if security is not None else SecurityBaseline()
-
-        # Exposure policy priority: an explicit ``options`` arg wins; otherwise
-        # (options is None) a baseline-declared tool_exposure_policy is honored,
-        # but only while the baseline is enabled -- baseline disabled means no
-        # baseline-shipped exposure policy either (Runtime options still apply).
-        if (not getattr(resolved_options, "_tool_exposure_explicit", False)
-                and baseline.enabled
-                and baseline.tool_exposure_policy is not None):
-            resolved_options = dataclasses.replace(
-                resolved_options, tool_exposure=baseline.tool_exposure_policy)
-        if resolved_options.tool_exposure is None:
-            from .capability.policy import CapabilityToolExposurePolicy
-            resolved_options = dataclasses.replace(
-                resolved_options, tool_exposure=CapabilityToolExposurePolicy())
 
         bundle = providers if providers is not None else ProviderBundle(
             agents=agents, skills=skills, mcp_servers=mcp_servers,

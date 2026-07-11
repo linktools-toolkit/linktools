@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCPProvider + toolset shaping + spec/client (spec §15). Deterministic policy
+"""MCPProvider + toolset shaping + spec/client (contract). Deterministic policy
 is unit-tested; live connection is environment-dependent and excluded."""
 
 import pytest
@@ -12,14 +12,15 @@ from linktools.ai.errors import (
     MCPServerNotFoundError,
 )
 from linktools.ai.mcp import (
-    MCPConnectionManager, MCPProvider, build_mcp_server, parse_mcp_spec,
+    MCPConnectionManager, MCPProvider, LegacyMCPConnectionManagerAdapter,
+    build_mcp_server, parse_mcp_spec,
 )
 from linktools.ai.mcp.toolset import (
     detect_mcp_conflicts, filter_tool_names, final_tool_name,
 )
 
 
-# --- toolset shaping (§15.6/§15.7) ----------------------------------------
+# --- toolset shaping (contract/contract) ----------------------------------------
 
 def test_final_tool_name_defaults_to_server_prefix():
     assert final_tool_name("risk", "query_user", None) == "risk.query_user"
@@ -52,7 +53,7 @@ def test_detect_conflicts_ok_when_distinct():
     detect_mcp_conflicts({"a": ("a.x",), "b": ("b.x",)})  # no raise
 
 
-# --- spec parsing / transport validation (§15.1/§15.5) --------------------
+# --- spec parsing / transport validation (contract/contract) --------------------
 
 def test_parse_stdio_spec_structured_fields():
     spec = parse_mcp_spec("s", {"transport": "stdio", "command": ["python", "-m", "x"], "cwd": "/a",
@@ -85,7 +86,7 @@ def test_parse_sse_with_url_and_headers():
     assert spec.command_or_url == "https://x/sse"
 
 
-# --- client construction (§15.3) ------------------------------------------
+# --- client construction (contract) ------------------------------------------
 
 def test_build_mcp_server_stdio_constructs_without_connecting():
     spec = parse_mcp_spec("s", {"transport": "stdio", "command": ["python", "-m", "x"]})
@@ -106,7 +107,7 @@ def test_build_mcp_server_rejects_misconfigured_transport():
         build_mcp_server(_Bare())
 
 
-# --- MCPProvider (§11.5/§15) ----------------------------------------------
+# --- MCPProvider (contract/contract) ----------------------------------------------
 
 class _FakeManager:
     """A well-behaved fake: cooperates with strict discovery by actually
@@ -154,17 +155,18 @@ def _ctx():
     return CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy())
 
 
+def _legacy(manager, *, empty_is_verified=True):
+    return LegacyMCPConnectionManagerAdapter(
+        manager, empty_is_verified=empty_is_verified)
+
+
 @pytest.mark.asyncio
 async def test_mcp_single_server_exposes_toolset():
     spec = parse_mcp_spec("risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
+    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_FakeManager()))
     bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
-    assert len(bundle.toolsets) == 1
-    # The exposed tool set is the post-filter surface -- verified through the
-    # FilteredToolset's get_tools (what the model actually sees), not the raw
-    # wrapped toolset's private .tools dict.
-    names = sorted((await _exposed_names(bundle.toolsets[0])).keys())
-    assert names == ["query_user"]
+    assert bundle.toolsets == ()
+    assert [d.descriptor.name for d in bundle.tool_contributions[0].tools] == ["risk.query_user"]
 
 
 async def _exposed_names(toolset):
@@ -184,22 +186,18 @@ async def _exposed_names(toolset):
 
 @pytest.mark.asyncio
 async def test_mcp_disabled_tools_removed_from_toolset_surface():
-    """spec §13.3/§13.8: enabled/disabled must shrink the ACTUAL toolset the
+    """contract/contract: enabled/disabled must shrink the ACTUAL toolset the
     model sees, not just the computed descriptor name list. A disabled tool
     must be absent from the filtered toolset's get_tools result."""
     spec = parse_mcp_spec("risk", {
         "transport": "stdio", "command": ["python", "-m", "r"],
         "disabled_tools": ["secret"],
     })
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager(("query_user", "secret")))
+    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_FakeManager(("query_user", "secret"))))
     bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
     contrib = bundle.tool_contributions[0]
     # Descriptors (the governance source of truth) exclude the disabled tool...
-    assert [d.name for d in contrib.descriptors] == ["risk.query_user"]
-    # ...AND the real toolset surface the model discovers excludes it too.
-    names = sorted((await _exposed_names(contrib.toolset)).keys())
-    assert "secret" not in names
-    assert names == ["query_user"]
+    assert [d.descriptor.name for d in contrib.tools] == ["risk.query_user"]
 
 
 @pytest.mark.asyncio
@@ -218,18 +216,18 @@ async def test_mcp_multi_server_disabled_tools_filter_independent_per_server():
     # alpha exposes (keep, secret); beta exposes a single unrelated tool.
     provider = MCPProvider(
         _FakeSpecProvider({"alpha": s1, "beta": s2}),
-        _FakeManager(("keep", "secret")),  # both servers share the fake's tool set
+        _legacy(_FakeManager(("keep", "secret"))),  # both servers share the fake's tool set
         allow_mcp_wildcard=True,
     )
     bundle = await provider.resolve(CapabilityRef("mcp", "*"), _ctx())
-    by_server = {c.descriptors[0].capability_name: c for c in bundle.tool_contributions}
-    alpha_names = sorted((await _exposed_names(by_server["alpha"].toolset)).keys())
-    beta_names = sorted((await _exposed_names(by_server["beta"].toolset)).keys())
+    by_server = {c.tools[0].descriptor.capability_name: c for c in bundle.tool_contributions}
+    alpha_names = [tool.descriptor.name for tool in by_server["alpha"].tools]
+    beta_names = [tool.descriptor.name for tool in by_server["beta"].tools]
     # alpha: "secret" disabled -> only "keep" survives (NOT the union, NOT beta's set).
     assert "secret" not in alpha_names, "disabled tool leaked across servers"
-    assert alpha_names == ["keep"]
+    assert alpha_names == ["alpha.keep"]
     # beta: nothing disabled -> both tools survive.
-    assert beta_names == ["keep", "secret"]
+    assert beta_names == ["beta.keep", "beta.secret"]
 
 
 @pytest.mark.asyncio
@@ -250,14 +248,14 @@ async def test_mcp_wildcard_denied_by_default():
 @pytest.mark.asyncio
 async def test_mcp_wildcard_allowed_via_flag():
     spec = parse_mcp_spec("risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager(), allow_mcp_wildcard=True)
+    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_FakeManager()), allow_mcp_wildcard=True)
     bundle = await provider.resolve(CapabilityRef("mcp", "*"), _ctx())
-    assert len(bundle.toolsets) == 1
+    assert len(bundle.tool_contributions) == 1
 
 
 @pytest.mark.asyncio
 async def test_mcp_wildcard_ref_config_cannot_self_grant():
-    # spec §11.5 #2: the Runtime gate is authoritative. A tool ref's own config
+    # contract #2: the Runtime gate is authoritative. A tool ref's own config
     # must NOT be able to self-grant the mcp:* wildcard.
     spec = parse_mcp_spec("risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
     provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
@@ -285,7 +283,7 @@ async def test_mcp_strict_discovery_fails_closed_without_explicit_governance():
     conflict detection, and ToolExposurePolicy all need the real tool set."""
     spec = parse_mcp_spec("risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
     assert spec.enabled_tools is None and not spec.disabled_tools and spec.tool_prefix is None
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _UnenumerableManager())
+    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_UnenumerableManager(), empty_is_verified=False))
     with pytest.raises(CapabilityResolutionError, match="strict discovery"):
         await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
 
@@ -296,10 +294,11 @@ async def test_mcp_best_effort_discovery_mode_opts_out_of_fail_closed():
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"],
                   "discovery_mode": "best_effort"},
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _UnenumerableManager())
+    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_UnenumerableManager(), empty_is_verified=False))
     bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
-    # Proceeds without raising; the (unenumerated) toolset is still attached.
-    assert len(bundle.toolsets) == 1
+    # Proceeds without raising, but exposes no unverified execution tools.
+    assert bundle.toolsets == ()
+    assert all(not contribution.tools for contribution in bundle.tool_contributions)
 
 
 @pytest.mark.asyncio

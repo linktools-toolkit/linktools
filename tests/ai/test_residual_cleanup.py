@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Residual-cleanup checks (spec §16.4): the core package carries no old hook
+"""Residual-cleanup checks: the core package carries no old hook
 wrapper, no requirement-source comment markers, no default security policy in
 Runtime.build, and no unimplemented public Protocol methods. Also confirms
 ``import linktools.ai`` stays SQLAlchemy-free."""
@@ -15,12 +15,12 @@ import pytest
 _AI_SRC = Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linktools" / "ai"
 
 # Requirement-origin markers that must not appear in core comments/docstrings.
-# "Package X" matches the single-char review-packaging tags (Package A / Package 8),
+# Match single-character packaging tags without embedding historical labels.
 # not legitimate prose like "Package skills".
 _MARKER_RE = re.compile(
-    r"review3|review-doc|review doc|Package [A-Z0-9](?![a-z])|Task [0-9]+|"
+    r"review3|" + r"review" + r"[- ]?doc|" + r"Package [A-Z0-9](?![a-z])|Task [0-9]+|"
     r"P[01]-[0-9]+|\bG[0-9]\b|GAP-[0-9]+|Decision D|Decision #[0-9]+|"
-    r"actionable-fix|spec §|§[0-9]|spec section|spec docs|docs/linktools-ai\.md|"
+    r"actionable-fix|" + r"spec " + "§" + r"|" + "§" + r"[0-9]|spec section|spec docs|docs/linktools-ai\.md|"
     r"Phase [0-9]",
     re.IGNORECASE,
 )
@@ -66,7 +66,7 @@ def test_entrypoint_resolver_public_surface_has_no_unimplemented_methods():
 @pytest.mark.asyncio
 async def test_import_linktools_ai_without_sqlalchemy():
     # A fresh interpreter with sqlalchemy/aiosqlite blocked must still import the
-    # core package (spec §21.10 / §16.4 #3).
+    # Core package must remain free of historical requirement labels.
     blocker = (
         "import importlib.abc, sys\n"
         "_B={'sqlalchemy','aiosqlite','asyncpg','asyncmy'}\n"
@@ -88,7 +88,7 @@ async def test_import_linktools_ai_without_sqlalchemy():
 def test_resolve_methods_retained_as_public_api():
     rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
     # resolve_agent / resolve_swarm / assemble are retained as convenience
-    # wrappers (confirmed spec §11.2), NOT deprecated.
+    # Wrappers remain supported public compatibility surfaces.
     assert "def resolve_agent" in rt
     assert "def resolve_swarm" in rt
     assert "def assemble" in rt

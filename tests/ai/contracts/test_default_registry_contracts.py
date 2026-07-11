@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Default file-backed registries satisfy the Provider contracts (spec §18.7).
+"""Default file-backed registries satisfy the Provider contracts (contract).
 Downstream may replace any of these with a business provider that returns the
 same standard Specs."""
 

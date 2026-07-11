@@ -155,7 +155,7 @@ def test_parse_tool_refs_rejects_invalid_item():
 
 
 def test_parse_tool_refs_none_is_unset():
-    # No tools key -> None (unset), distinct from tools: [] -> () (spec §10.7).
+    # No tools key -> None (unset), distinct from tools: [] -> () (contract).
     assert parse_tool_refs(None) is None
     assert parse_tool_refs([]) == ()
 

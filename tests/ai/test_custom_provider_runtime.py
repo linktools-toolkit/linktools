@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime capability wiring (spec §9/§17.9): ProviderBundle + options types,
+"""Runtime capability wiring (contract/contract): ProviderBundle + options types,
 provider/expanded-param mixing rejection, custom providers feed the assembler,
 and async-context close releases MCP connections."""
 
 import pytest
 
-from linktools.ai.capability import CapabilityRuntimeOptions, CapabilityToolExposurePolicy
+from linktools.ai.capability import CapabilityRuntimeOptions
 from linktools.ai.providers import ProviderBundle
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FileStorage
@@ -27,7 +27,7 @@ def test_provider_bundle_defaults_and_empty():
 
 def test_capability_runtime_options_defaults():
     o = CapabilityRuntimeOptions()
-    assert isinstance(o.tool_exposure, CapabilityToolExposurePolicy)
+    assert o.tool_exposure is None
     assert o.allow_mcp_wildcard is False
     assert o.session_window_policy is None
 
@@ -78,7 +78,7 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
         "---\nname: grader\nmodel:\n  primary: gpt-4o\n---\nGrade.\n", encoding="utf-8")
     rp = DirectoryPackageResourceProvider({"skill-creator": root})
     er = DirectoryEntrypointResolver({"skill-creator": root})
-    # entrypoints is bundle-only (spec §9.1 has no expanded entrypoints param).
+    # entrypoints is bundle-only (contract has no expanded entrypoints param).
     rt = Runtime.build(storage=FileStorage(root=tmp_path),
                        providers=ProviderBundle(package_resources=rp, entrypoints=er))
 
@@ -184,7 +184,7 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provider_bundle_from_resources_builds_registries(tmp_path):
-    # spec §17.5: ProviderBundle.from_resources constructs the default
+    # contract: ProviderBundle.from_resources constructs the default
     # Spec-backed registries from a resource store + prefixes.
     from linktools.ai.providers import ProviderBundle, ProviderPrefixes
 
@@ -214,7 +214,7 @@ async def test_provider_bundle_from_resources_builds_registries(tmp_path):
 
 @pytest.mark.asyncio
 async def test_runtime_resolve_agent_and_swarm_via_providers(tmp_path):
-    # spec §9.4 #4: bundle.agents / bundle.swarms are consumed by by-id lookups.
+    # contract #4: bundle.agents / bundle.swarms are consumed by by-id lookups.
     from linktools.ai.agent.spec import AgentSpec, PromptSpec
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.providers import ProviderBundle

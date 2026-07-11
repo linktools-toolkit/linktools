@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CapabilityToolExposurePolicy (spec §11.4): conservative defaults + immutability."""
+"""CapabilityToolExposurePolicy (contract): conservative defaults + immutability."""
 
 from linktools.ai.capability import CapabilityToolExposurePolicy
 

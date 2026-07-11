@@ -3,7 +3,7 @@
 """MetadataBackedPolicyProvider: the only real ToolPolicyProvider Runtime.build
 wires. Verifies it produces tri-state ResolvedToolPolicy layers (None for
 fields the source ToolSpec has no opinion on) so merge_policies can never be
-clamped by a phantom concrete default (spec §11.4/§11.6)."""
+clamped by a phantom concrete default (contract/contract)."""
 
 import pytest
 
@@ -49,7 +49,7 @@ async def test_known_tool_leaves_max_retries_undeclared():
     """Regression: ToolSpec has no max_retries concept. The provider MUST
     declare None (not 0) so merge_policies' min-of-declared rule does not
     clamp every tool's retries to 0 regardless of what a baseline/descriptor
-    layer wants. A concrete 0 here would silently defeat §11's tri-state fix
+    layer wants. A concrete 0 here would silently defeat contract's tri-state fix
     end-to-end on the one production path."""
     meta = ToolPolicyMetadata(
         permissions=frozenset({Permission.READ}),
@@ -96,7 +96,7 @@ async def test_unknown_tool_returns_all_undeclared_layer():
 @pytest.mark.asyncio
 async def test_provider_failure_raises_policy_resolution_error():
     """A metadata-source failure fails closed: the provider raises
-    ToolPolicyResolutionError (the §11.5 default) so the ManagedToolAdapter can
+    ToolPolicyResolutionError (the contract default) so the ManagedToolAdapter can
     emit a SecurityDegraded event and deny the call -- it never returns a
     silently-degraded policy."""
     from linktools.ai.errors import ToolPolicyResolutionError

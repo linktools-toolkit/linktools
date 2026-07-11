@@ -12,3 +12,9 @@
 - `business_key` idempotency requires a trusted configured field. Missing keys,
   run context, or persistent storage are errors rather than a non-idempotent
   fallback.
+- Custom MCP managers must implement the explicit discovery and
+  `call_tool(connection_ref=...)` protocol. Older managers can be wrapped with
+  `LegacyMCPConnectionManagerAdapter(..., empty_is_verified=...)`.
+- MCP raw toolsets are no longer returned from capability bundles. After-tool
+  audit events now precede the final `ToolCompleted` event and record whether a
+  result was returned, modified, or denied.

@@ -15,7 +15,7 @@ def _record(session_id="session-1") -> SessionRecord:
 
 
 def _message(role=MessageRole.USER, content="hi") -> NewSessionMessage:
-    # G6/review3 §6.2: the input shape carries no id/sequence/created_at --
+    # G6/review3 contract: the input shape carries no id/sequence/created_at --
     # the SessionStore is the sole authority for assigning those.
     return NewSessionMessage(role=role, content=content, run_id=None)
 

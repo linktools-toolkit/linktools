@@ -72,6 +72,8 @@ class ToolCompleted:
     tool_name: str
     tool_call_id: str
     success: bool
+    execution_success: "bool | None" = None
+    result_action: str = "returned"
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +329,7 @@ class ToolPipelineDecision:
     call_id: "str | None" = None
     action: str = "allow"
     reason: str = ""
+    stage: str = "before"
 
 
 @dataclass(frozen=True, slots=True)

@@ -82,7 +82,7 @@ class _StubApprovalStore:
 
 class _StubEventStore:
     """List-backed EventStore: records every appended envelope. Assigns the
-    sequence itself (mirrors the real Protocol -- review doc §8.1)."""
+    sequence itself (mirrors the real Protocol -- design note contract)."""
 
     def __init__(self):
         self.events: "list[EventEnvelope]" = []

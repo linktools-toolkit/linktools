@@ -153,7 +153,7 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
 
 
 def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):
-    """Package 6 (actionable-fix-spec §9.3): normal (non-UoW) SessionStore
+    """scenario (actionable-fix-contract): normal (non-UoW) SessionStore
     mode supports concurrent appenders to the SAME session -- the
     unique-(session_id, sequence) retry loop in append_messages resolves the
     race, so N concurrent appends each get a distinct, gapless sequence."""
@@ -175,7 +175,7 @@ def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):
 
 
 def test_sqlalchemy_session_append_in_uow_single_writer(tmp_path):
-    """Package 6 (§9.3): a SINGLE writer appending to a session inside an
+    """scenario (contract): a SINGLE writer appending to a session inside an
     explicit UnitOfWork works normally (the documented boundary is multiple
     CONCURRENT UoW-mode writers to the same session, not UoW-mode append
     itself)."""

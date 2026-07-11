@@ -7,7 +7,7 @@ Maps ALL fields from the existing ToolSpec that have runtime consumers."""
 from typing import TYPE_CHECKING, Any
 
 from ..errors import ToolPolicyResolutionError
-from .policy import ResolvedToolPolicy
+from .policy import ResolvedToolPolicy, parse_idempotency_strategy
 
 if TYPE_CHECKING:
     from ..security.descriptor import ToolDescriptor
@@ -55,7 +55,7 @@ class MetadataBackedPolicyProvider:
         from ..policy.rule import ApprovalMode
         require_approval = approval not in (None, ApprovalMode.NEVER)
         side_effect = getattr(meta, "side_effect", None)
-        idempotent = bool(getattr(meta, "idempotent", False))
+        idempotent = getattr(meta, "idempotent", None)
         timeout = getattr(meta, "timeout_seconds", None)
         # Carry every ToolSpec field with a runtime consumer into namespaced
         # metadata so none is silently dropped. schema_version folds into
@@ -75,7 +75,8 @@ class MetadataBackedPolicyProvider:
             require_approval=require_approval,
             risk=risk,
             schema_version=str(getattr(meta, "schema_version", "1")) or None,
-            idempotency_strategy=getattr(meta, "idempotency_strategy", None),
+            idempotency_strategy=parse_idempotency_strategy(
+                getattr(meta, "idempotency_strategy", None)),
             idempotency_key_field=getattr(meta, "idempotency_key_field", None),
             metadata=namespaced,
         )

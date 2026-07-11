@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability-lifecycle event emission (spec §40 Middleware/EventStore): the
+"""Capability-lifecycle event emission (contract Middleware/EventStore): the
 EventStore wired on a CapabilityContext receives capability.resolve + skill +
 package-resource + entrypoint events."""
 

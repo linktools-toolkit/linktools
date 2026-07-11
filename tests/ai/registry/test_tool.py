@@ -197,5 +197,5 @@ def test_get_applies_defaults_when_only_description(tmp_path):
     assert spec.risk is RiskLevel.LOW
     assert spec.side_effect is SideEffectKind.READ_ONLY
     assert spec.approval is ApprovalMode.NEVER
-    assert spec.idempotent is False
+    assert spec.idempotent is None
     assert spec.timeout_seconds is None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Spec §19.6: base_url literal pass-through. The legacy auto-append /v1 is
+"""contract: base_url literal pass-through. The legacy auto-append /v1 is
 opt-in via base_url_mode=append_v1_if_missing; custom gateway paths and an
 explicit /v1 are never corrupted."""
 

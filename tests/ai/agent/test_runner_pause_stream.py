@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for AgentRunner.run_stream pause path (Task 6).
+"""Tests for AgentRunner.run_stream pause path (scenario).
 
 When ``ToolExecutor.pause_on_approval=True`` and policy returns
 REQUIRE_APPROVAL, the executor raises ``RunPaused``. PolicyCapability lets it

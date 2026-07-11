@@ -16,6 +16,7 @@ model passed it."""
 
 import hashlib
 import json
+from uuid import UUID
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 from .policy import IdempotencyStrategy
 from ..errors import IdempotencyConfigurationError
@@ -27,6 +28,18 @@ if TYPE_CHECKING:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def encode_business_key(value: Any) -> str:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    from ..errors import IdempotencyConfigurationError
+    raise IdempotencyConfigurationError(
+        "business key must be a string, integer, or UUID")
 
 
 @runtime_checkable
@@ -68,7 +81,8 @@ class DefaultIdempotencyKeyBuilder:
                     "business-key idempotency requires a configured key field")
             tenant = getattr(run_context, "tenant_id", None) or ""
             workspace = getattr(run_context, "workspace", None) or ""
-            identity = [tenant, workspace, descriptor.name, str(arguments[field]), schema_version]
+            identity = [tenant, workspace, descriptor.name,
+                        encode_business_key(arguments[field]), schema_version]
         else:
             identity = [run_id, descriptor.name, _canonical_json(dict(arguments)), schema_version]
         payload = "|".join(identity).encode("utf-8")

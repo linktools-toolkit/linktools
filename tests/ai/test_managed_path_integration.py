@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Integration test: the full compat chain from CapabilityAssembler through
 auto-generated ToolContributions to ManagedToolAdapter governance. Proves the
-execution path is wired (spec §19.1 core loop)."""
+execution path is wired (contract core loop)."""
 
 import pytest
 
@@ -32,7 +32,7 @@ class _DenyAllPipeline:
 @pytest.mark.asyncio
 async def test_assembler_auto_wraps_toolsets_into_contributions(tmp_path):
     """The assembler auto-generates ToolContributions with conservative
-    descriptors from raw toolsets (compat layer, spec §15.1)."""
+    descriptors from raw toolsets (compat layer, contract)."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     spec = AgentSpec(

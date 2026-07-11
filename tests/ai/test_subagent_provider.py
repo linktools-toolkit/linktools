@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SubagentProvider (spec §16): call_subagent authorization, depth limit,
+"""SubagentProvider (contract): call_subagent authorization, depth limit,
 global + package-scoped resolution, structured error on failure."""
 
 import pytest

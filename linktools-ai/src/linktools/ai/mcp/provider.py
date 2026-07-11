@@ -37,6 +37,7 @@ from ..capability.ref import CapabilityRef
 from ..errors import CapabilityConflictError, CapabilityResolutionError, MCPServerNotFoundError
 from ..providers.mcp import MCPServerSpecProvider
 from .client import MCPConnectionManager
+from .client import MCPConnectionRef
 from .toolset import detect_mcp_conflicts, filter_tool_names, final_tool_name
 
 
@@ -74,6 +75,7 @@ class MCPDiscoveryResult:
     tools: tuple[MCPToolInfo, ...] = ()
     verified: bool = False
     error: BaseException | None = None
+    connection_ref: MCPConnectionRef | None = None
 
 
 @dataclass
@@ -94,7 +96,6 @@ class MCPProvider:
         context: CapabilityContext,
     ) -> CapabilityBundle:
         ids = await self._target_ids(ref, context)
-        toolsets: "list[Any]" = []
         contributions: "list[Any]" = []
         final_names_by_server: "dict[str, tuple[str, ...]]" = {}
         max_per_cap = context.exposure_policy.max_tools_per_capability
@@ -121,15 +122,12 @@ class MCPProvider:
                 )
             if (not discovery.verified and self.connection_manager is not None
                     and discovery_mode == "best_effort"):
-                from ..capability.provider import make_event_emitter
                 from ..events.payloads import SecurityDegraded
-                try:
-                    await make_event_emitter(context)(SecurityDegraded(
+                if context.security_event_emitter is not None:
+                    await context.security_event_emitter.emit_security(SecurityDegraded(
                         run_id=context.run_id, component="mcp-discovery",
                         reason=str(discovery.error or "tool enumeration unavailable"),
                     ))
-                except Exception:
-                    pass
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
             if max_per_cap and len(final) > max_per_cap:
@@ -138,70 +136,36 @@ class MCPProvider:
                     f"(max_tools_per_capability={max_per_cap})"
                 )
             final_names_by_server[server_id] = final
-            toolset = await self._toolset(spec)
-            if toolset is not None:
-                # Filter the ACTUAL toolset, not just the computed name list --
-                # enabled/disabled must shrink the tool surface the model sees,
-                # not merely the descriptor name list.
-                # A tool is kept iff its exposed name is one of the surviving
-                # names. The surviving set is the union of the final (prefixed)
-                # names and the raw filtered names: the real MCPToolset exposes
-                # prefixed names (prefix is applied at MCPServer construction),
-                # while a plain FunctionToolset exposes raw names -- the union
-                # covers both without ever letting a disabled name through.
-                allowed = set(final) | set(filtered)
-                if allowed:
-                    # Default-arg capture binds ``allowed`` by value at each
-                    # iteration. FilteredToolset.get_tools() runs lazily at
-                    # agent-run time (after this loop completes), so a plain
-                    # closure over ``allowed`` would see only the LAST server's
-                    # set for every server -- leaking disabled tools / dropping
-                    # legitimate ones whenever 2+ MCP servers are configured.
-                    filtered_toolset = toolset.filtered(
-                        lambda _ctx, tool_def, _allowed=allowed: tool_def.name in _allowed)
-                else:
-                    filtered_toolset = toolset.filtered(
-                        lambda _ctx, tool_def: False)
-                toolsets.append(filtered_toolset)
-                # Build ToolContribution with conservative MCP descriptors. The
-                # model only ever sees the EXPOSED (prefixed) name; the raw name
-                # is carried in descriptor metadata for audit so the MCP call
-                # (which uses the raw name) is traceable to the descriptor.
-                from ..security.descriptor import ToolDescriptor
-                from ..tool.contribution import ToolContribution, ManagedToolDefinition
-                kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
-                # The explicit raw->exposed mapping (one MCPExposedTool per
-                # surviving tool) drives descriptor naming so the contract is
-                # centralized, not inferred from two parallel name lists.
-                info_by_name = {info.name: info for info in raw_infos}
-                exposed_tools = [MCPExposedTool(
-                    server_id=server_id, raw_name=r, exposed_name=e,
-                    parameters_json_schema=info_by_name.get(r, MCPToolInfo(r)).parameters_json_schema,
-                    description=info_by_name.get(r, MCPToolInfo(r)).description,
-                    read_only=info_by_name.get(r, MCPToolInfo(r)).read_only,
-                    metadata=info_by_name.get(r, MCPToolInfo(r)).metadata,
-                ) for r, e in zip(filtered, final)]
-                # Conservative: unknown MCP tools are treated as write/high/mutating
-                # (default conservative when mutation unknown).
-                descs = tuple(
-                    ToolDescriptor(
-                        name=et.exposed_name, category="mcp-write", risk="high",
-                        mutating=not bool(et.read_only), metadata={"raw_name": et.raw_name, **dict(et.metadata)}, **kw,
-                    )
-                    for et in exposed_tools
+            if self.connection_manager is not None and not hasattr(self.connection_manager, "call_tool"):
+                raise CapabilityResolutionError(
+                    "MCP connection manager must implement call_tool(connection_ref=...)")
+            from ..security.descriptor import ToolDescriptor
+            from ..tool.contribution import ToolContribution, ManagedToolDefinition
+            kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
+            info_by_name = {info.name: info for info in raw_infos}
+            exposed_tools = [MCPExposedTool(
+                server_id=server_id, raw_name=r, exposed_name=e,
+                parameters_json_schema=info_by_name.get(r, MCPToolInfo(r)).parameters_json_schema,
+                description=info_by_name.get(r, MCPToolInfo(r)).description,
+                read_only=info_by_name.get(r, MCPToolInfo(r)).read_only,
+                metadata=info_by_name.get(r, MCPToolInfo(r)).metadata,
+            ) for r, e in zip(filtered, final)]
+            descs = tuple(
+                ToolDescriptor(
+                    name=et.exposed_name, category="mcp-write", risk="high",
+                    mutating=not bool(et.read_only),
+                    metadata={"raw_name": et.raw_name, **dict(et.metadata)}, **kw,
                 )
-                if hasattr(self.connection_manager, "call_tool"):
-                    definitions = tuple(ManagedToolDefinition(
-                        descriptor=d,
-                        handler=self._handler(et),
-                        parameters_json_schema=et.parameters_json_schema,
-                    ) for d, et in zip(descs, exposed_tools))
-                    contributions.append(ToolContribution(tools=definitions))
-                else:
-                    contributions.append(ToolContribution(toolset=filtered_toolset, descriptors=descs))
+                for et in exposed_tools
+            )
+            definitions = tuple(ManagedToolDefinition(
+                descriptor=d,
+                handler=self._handler(et, discovery.connection_ref),
+                parameters_json_schema=et.parameters_json_schema,
+            ) for d, et in zip(descs, exposed_tools))
+            contributions.append(ToolContribution(tools=definitions))
         detect_mcp_conflicts(final_names_by_server)
         return CapabilityBundle(
-            toolsets=tuple(toolsets),
             tool_contributions=tuple(contributions),
         )
 
@@ -223,36 +187,22 @@ class MCPProvider:
         except (KeyError, LookupError):
             raise MCPServerNotFoundError(f"mcp server not found: {server_id}") from None
 
-    async def _list_tools(self, spec) -> "tuple[str, ...]":
-        if self.connection_manager is None:
-            return ()
-        lister = getattr(self.connection_manager, "list_tools", None)
-        if lister is None:
-            return ()
-        try:
-            return await lister(spec)
-        except Exception:
-            return ()
-
     async def _discover(self, spec) -> MCPDiscoveryResult:
         if self.connection_manager is None:
             return MCPDiscoveryResult((), True, None)
         result_getter = getattr(self.connection_manager, "list_tools_result", None)
-        if result_getter is not None:
-            return await result_getter(spec)
-        try:
-            names = tuple(MCPToolInfo(name=n) for n in await self._list_tools(spec))
-            return MCPDiscoveryResult(names, bool(names), None)
-        except Exception as exc:
-            return MCPDiscoveryResult((), False, exc)
+        if result_getter is None:
+            from ..errors import MCPDiscoveryUnsupportedError
+            return MCPDiscoveryResult(
+                (), False, MCPDiscoveryUnsupportedError(
+                    "MCP manager must implement list_tools_result"))
+        return await result_getter(spec)
 
-    def _handler(self, exposed: MCPExposedTool):
+    def _handler(self, exposed: MCPExposedTool, connection_ref: MCPConnectionRef | None):
         async def call(**arguments: Any) -> Any:
+            if connection_ref is None:
+                raise CapabilityResolutionError("MCP discovery did not return a connection reference")
             return await self.connection_manager.call_tool(
-                server_id=exposed.server_id, tool_name=exposed.raw_name,
+                connection_ref=connection_ref, tool_name=exposed.raw_name,
                 arguments=arguments)
         return call
-    async def _toolset(self, spec) -> Any:
-        if self.connection_manager is None:
-            return None
-        return await self.connection_manager.get_toolset(spec)

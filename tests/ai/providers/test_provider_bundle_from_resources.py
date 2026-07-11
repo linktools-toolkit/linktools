@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ProviderBundle.from_resources over a real ResourceStore (spec §4.6)."""
+"""ProviderBundle.from_resources over a real ResourceStore (contract)."""
 
 import pytest
 

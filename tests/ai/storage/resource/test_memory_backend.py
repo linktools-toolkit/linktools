@@ -31,7 +31,7 @@ async def test_get_missing_returns_missing():
 @pytest.mark.asyncio
 async def test_put_same_content_and_metadata_bumps_version_each_call():
     # NOTE: idempotency (no-version-bump-on-identical-PUT) is a ResourceStore-level
-    # concern (Task 7), not a backend concern -- the raw backend always applies the write.
+    # concern (scenario), not a backend concern -- the raw backend always applies the write.
     backend = MemoryResourceBackend()
     first = await backend.raw_put(ResourcePath("/a/b.txt"), b"hello", content_type=None, metadata={})
     second = await backend.raw_put(ResourcePath("/a/b.txt"), b"hello", content_type=None, metadata={})

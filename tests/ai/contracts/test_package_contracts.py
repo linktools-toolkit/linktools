@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Package resource provider + entrypoint resolver contracts (spec §18.8),
+"""scenario provider + entrypoint resolver contracts (contract),
 exercised against the default DirectoryPackageResourceProvider /
 DirectoryEntrypointResolver and reusable for business backends."""
 

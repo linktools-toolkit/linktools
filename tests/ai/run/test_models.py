@@ -20,7 +20,7 @@ def test_run_status_values():
     assert RunStatus.WAITING_APPROVAL == "waiting_approval"
     assert RunStatus.PAUSED == "paused"
     # Phase 3A: CANCELLING distinguishes "cancel requested" from "actually
-    # cancelled" (review doc §6.1).
+    # cancelled" (design note contract).
     assert RunStatus.CANCELLING == "cancelling"
     assert RunStatus.SUCCEEDED == "succeeded"
     assert RunStatus.FAILED == "failed"
@@ -28,7 +28,7 @@ def test_run_status_values():
 
 
 def test_allowed_transitions_match_spec():
-    # Review doc §6.2. CANCELLING is the canonical route to CANCELLED for
+    # design note contract. CANCELLING is the canonical route to CANCELLED for
     # in-flight runs (RUNNING/WAITING_APPROVAL/PAUSED -> CANCELLING ->
     # CANCELLED or FAILED). The direct -> CANCELLED edges are RETAINED as a
     # fallback for the no-task path (Runtime.cancel on a stale record or a

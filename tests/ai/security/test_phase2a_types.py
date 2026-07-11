@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 2A security execution: data model, policy merge, and ManagedToolAdapter
+"""security execution security execution: data model, policy merge, and ManagedToolAdapter
 governance tests."""
 
 import asyncio

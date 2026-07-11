@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Reusable Provider/Package contract assertions (spec §18). Both the default
+"""Reusable Provider/scenario assertions (contract). Both the default
 file-backed registries and any business Provider/Store implementation must
 satisfy these. Downstream systems import these helpers to validate their own
 custom providers."""

@@ -8,12 +8,25 @@ opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..errors import MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError
 from ..registry.mcp import MCPServerSpec
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class MCPConnectionRef:
+    server_id: str
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class MCPToolsetHandle:
+    connection_ref: MCPConnectionRef
+    toolset: Any
 
 
 def _digest_mapping(values: "Mapping[str, str]") -> str:
@@ -109,16 +122,16 @@ class MCPConnectionManager:
         # does NOT return a stale cached toolset.
         self._toolsets: "dict[tuple[str, str], Any]" = {}
 
-    async def get_toolset(self, server: MCPServerSpec) -> Any:
+    async def get_toolset(self, server: MCPServerSpec) -> MCPToolsetHandle:
         key = (server.id, _config_fingerprint(server))
         cached = self._toolsets.get(key)
         if cached is not None:
-            return cached
+            return MCPToolsetHandle(MCPConnectionRef(*key), cached)
         from pydantic_ai.mcp import MCPToolset
         mcp_server = build_mcp_server(server)
         toolset = MCPToolset(mcp_server)
         self._toolsets[key] = toolset
-        return toolset
+        return MCPToolsetHandle(MCPConnectionRef(*key), toolset)
 
     async def list_tools(self, server: MCPServerSpec) -> "tuple[str, ...]":
         """Enumerate a server's live tool names for governance (enabled/disabled
@@ -132,7 +145,8 @@ class MCPConnectionManager:
     async def list_tools_result(self, server: MCPServerSpec):
         from .provider import MCPDiscoveryResult, MCPToolInfo
         try:
-            toolset = await self.get_toolset(server)
+            handle = await self.get_toolset(server)
+            toolset = handle.toolset
             getter = getattr(toolset, "get_tools", None)
             if getter is None:
                 return MCPDiscoveryResult((), False, MCPDiscoveryUnsupportedError(
@@ -155,25 +169,26 @@ class MCPConnectionManager:
                         read_only=None,
                         metadata=getattr(t, "metadata", {}) or {},
                     ))
-            return MCPDiscoveryResult(tuple(tools), True, None)
+            return MCPDiscoveryResult(tuple(tools), True, None, handle.connection_ref)
         except Exception as exc:
             return MCPDiscoveryResult((), False, MCPDiscoveryError(str(exc)))
 
-    async def call_tool(self, *, server_id: str, tool_name: str,
+    async def call_tool(self, *, connection_ref: MCPConnectionRef, tool_name: str,
                         arguments: Mapping[str, Any]) -> Any:
-        matches = [key for key in self._toolsets if key[0] == server_id]
-        if not matches:
-            raise MCPConnectionError(f"MCP server {server_id!r} is not connected")
-        toolset = self._toolsets[matches[-1]]
+        key = (connection_ref.server_id, connection_ref.fingerprint)
+        toolset = self._toolsets.get(key)
+        if toolset is None:
+            from ..errors import MCPConnectionUnavailableError
+            raise MCPConnectionUnavailableError(
+                f"MCP connection {key!r} is not available")
         caller = getattr(toolset, "direct_call_tool", None)
         if caller is None:
-            raise MCPConnectionError(f"MCP server {server_id!r} has no direct tool caller")
+            raise MCPConnectionError(
+                f"MCP server {connection_ref.server_id!r} has no direct tool caller")
         return await caller(tool_name, dict(arguments))
 
     async def close_server(self, server_id: str) -> None:
-        # Close every cached toolset for this server id (multiple config
-        # fingerprints may exist). Errors are surfaced, not swallowed.
-        keys = [k for k in self._toolsets if k[0] == server_id]
+        keys = [key for key in self._toolsets if key[0] == server_id]
         for key in keys:
             toolset = self._toolsets.pop(key, None)
             if toolset is None:
@@ -185,10 +200,8 @@ class MCPConnectionManager:
                     await result
 
     async def close(self) -> None:
-        # Close ALL connections, aggregating errors so one failing close does
-        # not leak the remaining connections.
-        keys = list(self._toolsets.keys())
-        errors: "list[Exception]" = []
+        keys = list(self._toolsets)
+        errors: list[Exception] = []
         for key in keys:
             toolset = self._toolsets.pop(key, None)
             if toolset is None:
@@ -200,10 +213,43 @@ class MCPConnectionManager:
                 result = closer()
                 if hasattr(result, "__await__"):
                     await result
-            except Exception as exc:  # noqa: BLE001 - aggregate, don't abort
+            except Exception as exc:
                 errors.append(exc)
         if errors:
-            _LOGGER.warning(
-                "MCPConnectionManager.close: %d connection(s) failed to close: %s",
-                len(errors), errors[0],
-            )
+            _LOGGER.warning("MCP connection close failures: %d", len(errors))
+
+
+class LegacyMCPConnectionManagerAdapter:
+    """Explicit adapter for pre-ConnectionRef managers."""
+
+    def __init__(self, manager: Any, *, empty_is_verified: bool) -> None:
+        self._manager = manager
+        self._empty_is_verified = empty_is_verified
+        self._handles: dict[MCPConnectionRef, Any] = {}
+
+    async def list_tools_result(self, spec: MCPServerSpec):
+        from .provider import MCPDiscoveryResult, MCPToolInfo
+        names = await self._manager.list_tools(spec)
+        handle = await self.get_toolset(spec)
+        return MCPDiscoveryResult(
+            tuple(MCPToolInfo(name=name) for name in names),
+            bool(names) or self._empty_is_verified, None,
+            handle.connection_ref)
+
+    async def get_toolset(self, spec: MCPServerSpec) -> MCPToolsetHandle:
+        fingerprint = _config_fingerprint(spec)
+        ref = MCPConnectionRef(spec.id, fingerprint)
+        toolset = await self._manager.get_toolset(spec)
+        self._handles[ref] = toolset
+        return MCPToolsetHandle(ref, toolset)
+
+    async def call_tool(self, *, connection_ref: MCPConnectionRef,
+                        tool_name: str, arguments: Mapping[str, Any]) -> Any:
+        toolset = self._handles.get(connection_ref)
+        if toolset is None:
+            from ..errors import MCPConnectionUnavailableError
+            raise MCPConnectionUnavailableError(f"legacy MCP connection {connection_ref!r} is closed")
+        caller = getattr(toolset, "direct_call_tool", None)
+        if caller is None:
+            raise MCPConnectionError("legacy MCP toolset has no direct caller")
+        return await caller(tool_name, dict(arguments))

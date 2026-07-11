@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""PackageProvider (capability integration) + PackageRegistry (spec §8.4/§13):
+"""PackageProvider (capability integration) + PackageRegistry (contract/contract):
 catalog-only for `package:`, read tools for `package-resource:`, list tool for
 `package-entrypoint:`; call stays opt-in; PackageRegistry lists packages."""
 
@@ -115,7 +115,7 @@ def test_directory_package_registry_alias():
 
 @pytest.mark.asyncio
 async def test_package_registry_implements_resource_provider(tmp_path):
-    # spec §8.1: PackageRegistry satisfies BOTH PackageSpecProvider and
+    # contract: PackageRegistry satisfies BOTH PackageSpecProvider and
     # PackageResourceProvider.
     from linktools.ai.providers import PackageResourceProvider, PackageSpecProvider
     from linktools.ai.package.resolver import PackageRegistry

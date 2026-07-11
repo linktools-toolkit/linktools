@@ -7,7 +7,10 @@ from linktools.ai.mcp.provider import MCPExposedTool
 from linktools.ai.security.descriptor import ToolDescriptor
 from linktools.ai.security.redact import redact_for_audit, redact_exception
 from linktools.ai.tool.idempotency_key import DefaultIdempotencyKeyBuilder
-from linktools.ai.tool.policy import EffectiveToolPolicy, IdempotencyStrategy
+from linktools.ai.tool.idempotency_key import encode_business_key
+from linktools.ai.tool.policy import (
+    EffectiveToolPolicy, IdempotencyStrategy, ResolvedToolPolicy,
+)
 
 
 def test_public_snapshots_freeze_nested_values_and_copy_inputs():
@@ -49,3 +52,15 @@ def test_mcp_exposed_tool_is_deeply_immutable():
     tool = MCPExposedTool("server", "raw", "server.raw", metadata={"x": {"y": 1}})
     with pytest.raises(TypeError):
         tool.metadata["x"]["y"] = 2
+
+
+def test_policy_strategy_is_normalized_at_the_domain_boundary():
+    policy = ResolvedToolPolicy(idempotent=True, idempotency_strategy="business_key",
+                                idempotency_key_field="external_id")
+    assert policy.idempotency_strategy is IdempotencyStrategy.BUSINESS_KEY
+
+
+@pytest.mark.parametrize("value", [True, {}, []])
+def test_business_key_rejects_unstable_values(value):
+    with pytest.raises(IdempotencyConfigurationError):
+        encode_business_key(value)

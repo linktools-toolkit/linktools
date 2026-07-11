@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """PackageProvider works against any PackageResourceProvider / EntrypointResolver
-implementation, not just the Directory defaults (spec §7)."""
+implementation, not just the Directory defaults (contract)."""
 
 import pytest
 

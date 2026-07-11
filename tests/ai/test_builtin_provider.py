@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""BuiltinProvider (spec §12): resolves builtin:file/terminal into the file/
+"""BuiltinProvider (contract): resolves builtin:file/terminal into the file/
 terminal FunctionToolset, and rejects resolution without an execution backend."""
 
 import pytest

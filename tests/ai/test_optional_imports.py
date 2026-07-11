@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Spec §21.10: the core package imports cleanly without the optional
+"""contract: the core scenario cleanly without the optional
 SQLAlchemy/aiosqlite dependencies, and accessing SqlAlchemyStorage yields a
 clear install hint instead of a raw ModuleNotFoundError.
 

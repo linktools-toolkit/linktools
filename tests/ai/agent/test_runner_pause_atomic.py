@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 2D: approval-pause atomicity (review doc §10.2).
+"""Phase 2D: approval-pause atomicity (design note contract).
 
 When ``AgentRunner`` is wired with a ``uow_factory`` (SqlAlchemy mode), the
 ``RunPaused`` handler wraps checkpoint-save + Run-transition(WAITING_APPROVAL)
 + event-append in ONE UnitOfWork so they commit/rollback together. File mode
-(``uow_factory=None``) keeps the non-atomic best-effort shape (§10.3).
+(``uow_factory=None``) keeps the non-atomic best-effort shape (contract).
 
 These tests prove the contrast:
 
@@ -13,7 +13,7 @@ These tests prove the contrast:
 2. SqlAlchemy rollback: a failure in the event append rolls back the
    checkpoint AND the WAITING_APPROVAL transition (atomicity guarantee).
 3. File mode: a failure in the (best-effort) event append does NOT roll back
-   the checkpoint or the transition -- the non-atomic shape §10.3 documents.
+   the checkpoint or the transition -- the non-atomic shape contract documents.
 """
 import asyncio
 import json
@@ -179,7 +179,7 @@ def test_sqla_pause_writes_all_three_operations_atomically_on_success(tmp_path):
 
 
 def test_sqla_pause_persists_approval_request_atomically(tmp_path):
-    """P0-6/G1 (review3 §5): the ApprovalRequest itself now commits through
+    """P0-6/G1 (review3 contract): the ApprovalRequest itself now commits through
     the SAME UoW as checkpoint/transition/event -- ToolExecutor no longer
     persists it directly. Verifies the approval is actually queryable through
     storage.approvals after the pause completes."""
@@ -230,7 +230,7 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
 
 
 def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
-    """Package 3 (§6.4.3): the SAME dedupe key (run_id, tool_call_id) reused
+    """scenario (contract): the SAME dedupe key (run_id, tool_call_id) reused
     with DIFFERENT tool_name/arguments is a conflict, not a replay -- it must
     raise rather than silently handing back the first call's request."""
     from linktools.ai.agent.approval import build_approval_request
@@ -252,7 +252,7 @@ def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
 
 
 def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_path):
-    """Package 3 (§6): the ai_approvals.uq_approval_run_tool_call UNIQUE
+    """scenario (contract): the ai_approvals.uq_approval_run_tool_call UNIQUE
     constraint is the real backstop -- N concurrent create_or_get_pending
     calls for the SAME (run_id, tool_call_id) must all resolve to the SAME
     persisted row, not each create their own."""
@@ -284,7 +284,7 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     """Atomicity guarantee: when the event append fails INSIDE the UoW, the
     checkpoint-save and WAITING_APPROVAL transition roll back too -- the run
     ends up FAILED (via the outer generic-except handler), with NO checkpoint
-    and NO RunPaused event persisted. This is the §10.2 contract: any one of
+    and NO RunPaused event persisted. This is the contract contract: any one of
     the three operations failing undoes all of them.
 
     The failure is injected on the RunPaused payload append ONLY, so the
@@ -308,7 +308,7 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     # The UoW failure surfaces out of run_stream. pydantic-ai's iter()
     # TaskGroup stores the original RunPaused and may re-raise it during
     # __aexit__ cleanup (masking the inner RuntimeError), so the exact
-    # exception type is an implementation detail -- what matters for §10.2
+    # exception type is an implementation detail -- what matters for contract
     # is the resulting STATE (asserted below), not the exception type.
     raised: "BaseException | None" = None
     try:
@@ -350,14 +350,14 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     assert pending == (), "ApprovalRequest leaked past UoW rollback"
 
 
-# -- Tests: File mode stays non-atomic (§10.3) ------------------------------
+# -- Tests: File mode stays non-atomic (contract) ------------------------------
 
 
 def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     """File mode (``uow_factory=None``): cross-store transactions are
     unavailable, so a failure in the best-effort RunPaused event append does
     NOT undo the checkpoint or the WAITING_APPROVAL transition. This is the
-    non-atomic shape §10.3 documents -- the inverse of the SqlAlchemy test
+    non-atomic shape contract documents -- the inverse of the SqlAlchemy test
     above, and the reason the File path keeps its best-effort try/except."""
     approval_store = FileApprovalStore(root=tmp_path / "approvals")
 

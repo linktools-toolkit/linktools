@@ -4,9 +4,9 @@
 
 The atomic ``raw_put_checked`` (spec section 16) folds precondition-check +
 idempotency-reservation + mutate into ONE transaction. The conditional UPDATE
-WHERE version=expected (spec §12.2) and If-Match in the UPDATE WHERE (spec
-§12.3) make lost updates impossible at the DB level. The atomic revision
-increment UPDATE...RETURNING (spec §12.1) makes revision lost-update impossible
+WHERE version=expected (contract) and If-Match in the UPDATE WHERE (spec
+contract) make lost updates impossible at the DB level. The atomic revision
+increment UPDATE...RETURNING (contract) makes revision lost-update impossible
 too. These tests prove each guarantee by firing concurrent writes that, under
 the pre-fix Python read-then-write code, would have produced duplicate versions,
 duplicate revisions, or both-pass-a-precondition.
@@ -77,7 +77,7 @@ async def test_concurrent_put_if_none_match_exactly_one_succeeds(tmp_path):
 
 @pytest.mark.asyncio
 async def test_concurrent_unconditional_puts_produce_distinct_versions(tmp_path):
-    """§12.2 lost-update guard: two concurrent UNCONDITIONAL puts on the same
+    """contract lost-update guard: two concurrent UNCONDITIONAL puts on the same
     existing path must produce distinct, monotonic versions.
 
     Under the pre-fix Python read-then-write, both writers would SELECT the same
@@ -115,7 +115,7 @@ async def test_concurrent_unconditional_puts_produce_distinct_versions(tmp_path)
 
 @pytest.mark.asyncio
 async def test_concurrent_put_with_same_if_match_exactly_one_succeeds(tmp_path):
-    """§12.3 If-Match-in-WHERE guard: two concurrent puts carrying the SAME
+    """contract If-Match-in-WHERE guard: two concurrent puts carrying the SAME
     If-Match (etag of the current resource) on an EXISTING resource -- exactly
     one succeeds, the other raises ResourcePreconditionFailedError.
 
@@ -166,7 +166,7 @@ async def test_concurrent_put_with_same_if_match_exactly_one_succeeds(tmp_path):
 
 @pytest.mark.asyncio
 async def test_concurrent_puts_produce_distinct_revisions(tmp_path):
-    """§12.1 atomic-revision guard: N concurrent puts to N distinct paths must
+    """contract atomic-revision guard: N concurrent puts to N distinct paths must
     produce exactly N revision increments -- no lost updates on the counter.
 
     Under the pre-fix Python read-then-write (``row.value += 1``), N concurrent
@@ -208,7 +208,7 @@ async def test_concurrent_puts_produce_distinct_revisions(tmp_path):
 
 @pytest.mark.asyncio
 async def test_revision_increments_monotonically_under_sequential_puts(tmp_path):
-    """§12.1 sanity: a sequence of puts (no concurrency) bumps the revision
+    """contract sanity: a sequence of puts (no concurrency) bumps the revision
     counter by exactly one per put. Catches regressions where the atomic
     UPDATE...RETURNING seeds id=1 with value=1 on the first call (which would
     read as revision=1 BEFORE any put, breaking monotonicity vs. the
@@ -220,7 +220,7 @@ async def test_revision_increments_monotonically_under_sequential_puts(tmp_path)
     assert await backend.revision() == 1
     await store.put(ResourcePath("/b.txt"), b"b")
     assert await backend.revision() == 2
-    # Update an existing resource -- still bumps the revision (§12.4: a real
+    # Update an existing resource -- still bumps the revision (contract: a real
     # change is a change).
     await store.put(ResourcePath("/a.txt"), b"a2")
     assert await backend.revision() == 3
@@ -230,7 +230,7 @@ async def test_revision_increments_monotonically_under_sequential_puts(tmp_path)
 
 @pytest.mark.asyncio
 async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_path):
-    """§12.3 If-Match guard on DELETE: two concurrent deletes of the same live
+    """contract If-Match guard on DELETE: two concurrent deletes of the same live
     resource, both with the same If-Match -- exactly one wins. The loser's
     conditional UPDATE...WHERE etag=:if_match AND deleted_at IS NULL misses
     (the row is now masked) and raises ResourcePreconditionFailedError."""
@@ -266,7 +266,7 @@ async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_pat
 
 @pytest.mark.asyncio
 async def test_revision_bump_uses_atomic_update_returning(tmp_path):
-    """§12.1 structural guard: the revision counter bump must emit a single
+    """contract structural guard: the revision counter bump must emit a single
     server-side ``UPDATE ... SET value = value + 1 ... RETURNING value`` --
     NOT a Python read-then-write (``row.value += 1`` then flush an unconditional
     ``UPDATE ... SET value = ?``).
@@ -310,7 +310,7 @@ async def test_revision_bump_uses_atomic_update_returning(tmp_path):
 
 @pytest.mark.asyncio
 async def test_resource_update_uses_conditional_where_on_version(tmp_path):
-    """§12.2 structural guard: an update-existing PUT must emit a single
+    """contract structural guard: an update-existing PUT must emit a single
     ``UPDATE ai_resources SET ... WHERE path = :path AND version = :expected``
     -- NOT an unconditional ``UPDATE ... SET version = ?`` computed in Python.
 

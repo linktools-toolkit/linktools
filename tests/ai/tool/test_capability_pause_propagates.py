@@ -14,7 +14,7 @@ directly: if ``RunPaused`` reaches the caller of ``before_tool_execute``,
 propagation holds; if it gets translated to ``SkipToolExecution``, the pause
 signal is lost (the bug this test guards against).
 
-Phase 1 review-doc refactoring: the per-Run ToolContext now arrives via
+Phase 1 design note refactoring: the per-Run ToolContext now arrives via
 ``ctx.deps.tool_context`` (pydantic-ai dependency injection), not a mutable
 ``current_context`` field. The RunContext stub below carries a real
 ``AgentDependencies(tool_context=...)`` on its ``.deps``."""

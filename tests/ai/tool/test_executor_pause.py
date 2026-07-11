@@ -3,7 +3,7 @@
 """Pause-mode contract for ToolExecutor: when ``pause_on_approval=True`` and
 policy says REQUIRE_APPROVAL, ``check()`` raises ``RunPaused`` carrying every
 field AgentRunner's suspension handler needs to persist the ApprovalRequest
-ITSELF -- the executor no longer persists anything (review3 §5/Package A,
+ITSELF -- the executor no longer persists anything (review3 contract/scenario,
 P0-6/G1). This is the key behavior change from the pre-Package-A contract:
 previously the executor called ``_record_approval`` (persisting a PENDING
 request) BEFORE raising; now persistence is deferred entirely to

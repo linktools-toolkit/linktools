@@ -29,7 +29,7 @@ class ToolSpec:
     risk: RiskLevel = RiskLevel.LOW
     side_effect: SideEffectKind = SideEffectKind.READ_ONLY
     approval: ApprovalMode = ApprovalMode.NEVER
-    idempotent: bool = False
+    idempotent: "bool | None" = None
     timeout_seconds: "float | None" = None
     max_retries: "int | None" = None
     idempotency_strategy: "str | None" = None
@@ -87,6 +87,11 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     timeout = payload.get("timeout_seconds")
     if "enabled" in payload and not isinstance(payload["enabled"], bool):
         raise InvalidSpecError("enabled must be a boolean")
+    for field_name in ("idempotent",):
+        if field_name in payload and not isinstance(payload[field_name], bool):
+            raise InvalidSpecError(f"{field_name} must be a boolean")
+    if timeout is not None and isinstance(timeout, bool):
+        raise InvalidSpecError("timeout_seconds must be a number")
     if timeout is not None and not isinstance(timeout, (int, float)):
         raise InvalidSpecError(f"timeout_seconds must be a number: {timeout!r}")
     if timeout is not None and timeout <= 0:
@@ -103,6 +108,13 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     key_field = payload.get("idempotency_key_field")
     if key_field is not None and not str(key_field).strip():
         raise InvalidSpecError("idempotency_key_field must be non-empty")
+    idempotent = payload.get("idempotent")
+    if strategy == "business_key" and idempotent is not True:
+        raise InvalidSpecError("business_key requires idempotent=true")
+    if key_field is not None and strategy != "business_key":
+        raise InvalidSpecError("idempotency_key_field requires business_key")
+    if idempotent is False and strategy is not None:
+        raise InvalidSpecError("idempotency_strategy requires idempotent=true")
     return ToolSpec(
         name=name,
         description=str(payload.get("description", "")),
@@ -111,7 +123,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         risk=_RISK_LOOKUP[risk_key],
         side_effect=_SIDE_EFFECT_LOOKUP[side_key],
         approval=_APPROVAL_LOOKUP[approval_key],
-        idempotent=bool(payload.get("idempotent", False)),
+        idempotent=idempotent,
         timeout_seconds=float(timeout) if timeout is not None else None,
         max_retries=retries,
         schema_version=str(schema_version),

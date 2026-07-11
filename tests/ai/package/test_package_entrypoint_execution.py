@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """call_package_entrypoint must execute or raise -- never return a fake-success
-'reserved' marker (spec §9)."""
+'reserved' marker (contract)."""
 
 import pytest
 
@@ -88,7 +88,7 @@ async def test_call_package_entrypoint_forwards_parent_identity_unmodified():
                 agent_id=agent_spec.id, session_id="cs", run_id="cr", status="succeeded",
             )
 
-    # Simulates: run A -> subagent B -> (nested) package entrypoint call, so
+    # Simulates: run A -> subagent B -> (nested) scenario call, so
     # the immediate parent is B (run_id="B") but the true root is A ("A-root").
     parent_identity = ParentRunIdentity(
         run_id="B", root_run_id="A-root", session_id="session-B",

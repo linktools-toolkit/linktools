@@ -29,7 +29,7 @@ def test_public_api_exports_swarm_spec():
 
 
 def test_public_api_exports_model_hot_types():
-    # spec §20.3: ModelPolicy / ModelRouter / RuntimeModelConfig are root exports.
+    # contract: ModelPolicy / ModelRouter / RuntimeModelConfig are root exports.
     from linktools.ai.model import ModelPolicy, ModelRouter, RuntimeModelConfig
     assert ai.ModelPolicy is ModelPolicy
     assert ai.ModelRouter is ModelRouter
@@ -44,12 +44,12 @@ def test_public_api_exports_prompt_and_refs():
 
 
 def test_root_does_not_re_export_sqlalchemy_storage():
-    # spec §21.7: SqlAlchemyStorage is NOT a root export (optional dependency).
+    # contract: SqlAlchemyStorage is NOT a root export (optional dependency).
     assert not hasattr(ai, "SqlAlchemyStorage")
 
 
 def test_sqlalchemy_storage_accessible_lazily_from_storage_package():
-    # spec §21.4: lazy __getattr__ keeps the short import working on demand.
+    # contract: lazy __getattr__ keeps the short import working on demand.
     from linktools.ai.storage import SqlAlchemyStorage
     from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage as _Real
     assert SqlAlchemyStorage is _Real

@@ -44,6 +44,7 @@ class ManagedToolsetWrapper(WrapperToolset):
         run_context: "RunContext | None" = None,
         event_store: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
+        security_event_emitter: Any = None,
     ) -> None:
         super().__init__(wrapped)
         self._descriptors = dict(descriptors)
@@ -54,6 +55,7 @@ class ManagedToolsetWrapper(WrapperToolset):
         self._run_context = run_context
         self._event_store = event_store
         self._security_audit_failure_mode = security_audit_failure_mode
+        self._security_event_emitter = security_event_emitter
 
     async def call_tool(self, name, tool_args, ctx, tool):
         descriptor = self._descriptors.get(name)
@@ -78,6 +80,7 @@ class ManagedToolsetWrapper(WrapperToolset):
             run_context=self._run_context,
             event_store=self._event_store,
             security_audit_failure_mode=self._security_audit_failure_mode,
+            security_event_emitter=self._security_event_emitter,
         )
         # Thread the REAL pydantic-ai tool_call_id (on ctx) through to the
         # adapter so a pause it raises keys the ApprovalRequest on the same id

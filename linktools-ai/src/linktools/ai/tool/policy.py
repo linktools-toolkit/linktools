@@ -22,6 +22,17 @@ class IdempotencyStrategy(str, Enum):
     EXACT_CALL = "exact_call"
     BUSINESS_KEY = "business_key"
 
+
+def parse_idempotency_strategy(value: "str | IdempotencyStrategy | None") -> "IdempotencyStrategy | None":
+    if value is None or isinstance(value, IdempotencyStrategy):
+        return value
+    try:
+        return IdempotencyStrategy(value)
+    except (TypeError, ValueError) as exc:
+        from ..errors import ToolPolicyResolutionError
+        raise ToolPolicyResolutionError(
+            f"invalid idempotency strategy: {value!r}") from exc
+
 if TYPE_CHECKING:
     from ..run.context import RunContext
 
@@ -44,13 +55,24 @@ class ResolvedToolPolicy:
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
-
-    def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be > 0 or None, got {self.timeout_seconds}")
         if self.max_retries is not None and self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
+        strategy = parse_idempotency_strategy(self.idempotency_strategy)
+        object.__setattr__(self, "idempotency_strategy", strategy)
+        if self.schema_version is not None:
+            version = self.schema_version.strip()
+            if not version:
+                raise ValueError("schema_version must be non-empty")
+            object.__setattr__(self, "schema_version", version)
+        if strategy == IdempotencyStrategy.BUSINESS_KEY and self.idempotent is False:
+            raise ValueError("business_key requires idempotent=True")
+        if strategy == IdempotencyStrategy.EXACT_CALL and self.idempotency_key_field is not None:
+            raise ValueError("idempotency_key_field requires business_key")
+        if self.idempotent is False and (strategy is not None or self.idempotency_key_field is not None):
+            raise ValueError("idempotency configuration requires idempotent=True")
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +92,18 @@ class EffectiveToolPolicy:
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        strategy = parse_idempotency_strategy(self.idempotency_strategy)
+        if strategy is None:
+            strategy = IdempotencyStrategy.EXACT_CALL
+        if self.idempotent is False and strategy != IdempotencyStrategy.EXACT_CALL:
+            raise ValueError("non-idempotent policy cannot select business_key")
+        if strategy == IdempotencyStrategy.EXACT_CALL and self.idempotency_key_field is not None:
+            raise ValueError("idempotency_key_field requires business_key")
+        version = self.schema_version.strip()
+        if not version:
+            raise ValueError("schema_version must be non-empty")
+        object.__setattr__(self, "schema_version", version)
+        object.__setattr__(self, "idempotency_strategy", strategy)
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 

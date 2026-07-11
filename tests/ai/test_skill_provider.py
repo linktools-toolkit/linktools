@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SkillProvider (spec §14): prompt catalog for skill:*, list/read tools, and an
+"""SkillProvider (contract): prompt catalog for skill:*, list/read tools, and an
 authorization boundary that never leaks unauthorized skill content."""
 
 import pytest

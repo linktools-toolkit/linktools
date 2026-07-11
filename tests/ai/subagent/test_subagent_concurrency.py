@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Subagent max_concurrency enforces a per-ref semaphore (spec §8)."""
+"""Subagent max_concurrency enforces a per-ref semaphore (contract)."""
 
 import asyncio
 import pytest

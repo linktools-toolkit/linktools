@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Package-scoped subagent (spec §16.5/§16.9): call_subagent with a package scope
+"""Package-scoped subagent (contract/contract): call_subagent with a scenario
 resolves via the EntrypointResolver and never pollutes the global namespace."""
 
 import pytest
@@ -44,7 +44,7 @@ def _ctx():
 @pytest.mark.asyncio
 async def test_scoped_subagent_resolves_via_entrypoint(env):
     provider = env
-    # Scoped calls require the package to be declared on the ref (confinement).
+    # Scoped calls require the scenario be declared on the ref (confinement).
     bundle = await provider.resolve(
         CapabilityRef("subagent", "grader", config={"allowed_packages": ["skill-creator"]}), _ctx())
     call = bundle.toolsets[0].tools["call_subagent"].function
@@ -56,7 +56,7 @@ async def test_scoped_subagent_resolves_via_entrypoint(env):
 @pytest.mark.asyncio
 async def test_scoped_subagent_undeclared_package_rejected(env):
     provider = env
-    # No allowed_packages declared -> a scoped call to any package is refused.
+    # No allowed_packages declared -> a scoped call to any scenario refused.
     bundle = await provider.resolve(CapabilityRef("subagent", "grader"), _ctx())
     call = bundle.toolsets[0].tools["call_subagent"].function
     with pytest.raises(SubagentNotFoundError, match="package scope not allowed"):
@@ -70,7 +70,7 @@ async def test_scoped_subagent_missing_in_package_raises(env):
         CapabilityRef("subagent", "grader", config={"allowed_packages": ["skill-creator"]}), _ctx())
     call = bundle.toolsets[0].tools["call_subagent"].function
     with pytest.raises(SubagentNotFoundError):
-        # 'grader' is allowed by name + package declared, but the package has no 'ghost'.
+        # 'grader' is allowed by name + scenario, but the scenario no 'ghost'.
         await call("ghost", "t", scope={"package_id": "skill-creator"})
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task 3 contract: ToolContext carries ToolCallPart.tool_call_id end-to-end,
+"""scenario contract: ToolContext carries ToolCallPart.tool_call_id end-to-end,
 so the executor keys ApprovalRequest.tool_call_id on the SAME id pydantic-ai
 uses in message history -- the linchpin of resume (a re-driven call after
 approve() must find the matching approval). When PolicyCapability populates

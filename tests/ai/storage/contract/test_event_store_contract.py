@@ -3,7 +3,7 @@
 """tests/ai/storage/contract/test_event_store_contract.py
 
 EventStore contract: append() takes the payload + run/stream context kwargs
-and assigns the sequence itself (review doc §8.1) -- callers never construct
+and assigns the sequence itself (design note contract) -- callers never construct
 an EventEnvelope with a sequence. These tests verify the store-side sequence
 assignment, isolation, and round-tripping for both the file and sqlalchemy
 backends."""
@@ -158,7 +158,7 @@ async def test_list_respects_limit(store_factory):
 @pytest.mark.asyncio
 async def test_concurrent_appends_get_distinct_sequences(store_factory):
     # Fire several appends concurrently; the store's per-stream sequence
-    # assignment must hand each one a unique sequence (review doc §8.1/§8.4).
+    # assignment must hand each one a unique sequence (design note contract/contract).
     store = store_factory()
     envelopes = await asyncio.gather(*(_append(store) for _ in range(6)))
     seqs = sorted(e.sequence for e in envelopes)
@@ -207,7 +207,7 @@ async def test_append_routing_fields_roundtrip(store_factory):
 
 @pytest.mark.asyncio
 async def test_event_envelope_has_stream_id(store_factory):
-    """G3/review3 §8.2: stream_id is a first-class EventEnvelope field."""
+    """G3/review3 contract: stream_id is a first-class EventEnvelope field."""
     store = store_factory()
     envelope = await _append(store)
     assert envelope.stream_id == "run-1"
@@ -215,7 +215,7 @@ async def test_event_envelope_has_stream_id(store_factory):
 
 @pytest.mark.asyncio
 async def test_different_streams_can_share_sequence_number(store_factory):
-    """G3/review3 §8.4: the uniqueness boundary is (stream_id, sequence), not
+    """G3/review3 contract: the uniqueness boundary is (stream_id, sequence), not
     (run_id, sequence) -- two DIFFERENT streams that happen to share a run_id
     prefix (or, once a future caller mints stream_id != run_id, genuinely
     different streams for the SAME run) must each independently start
@@ -272,7 +272,7 @@ async def test_path_traversal_in_run_id_is_rejected(tmp_path):
 
 @pytest.mark.asyncio
 async def test_file_event_store_migrates_legacy_files_without_stream_id(tmp_path):
-    """G3/review3 §8.5: a FileEventStore event file written before stream_id
+    """G3/review3 contract: a FileEventStore event file written before stream_id
     became a first-class field (no "stream_id" key in the JSON) must still
     load, with stream_id defaulting to run_id -- exact, not a guess, since
     every caller has always passed stream_id == run_id."""

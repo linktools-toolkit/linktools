@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prompt window policies (spec §19): noop passthrough, recent-N trimming, and
+"""Prompt window policies (contract): noop passthrough, recent-N trimming, and
 the reserved token-budget slot."""
 
 from dataclasses import dataclass
