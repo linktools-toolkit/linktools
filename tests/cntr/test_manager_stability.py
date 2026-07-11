@@ -85,7 +85,6 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
 MANAGER_API = (
     "containers",
     "debug", "prepare_installed_containers", "create_event_context",
-    "get_running_containers",
     "project_name", "hooks", "start_hooks", "stop_hooks",
     "user", "uid", "gid", "system", "machine", "host",
     "container_type", "container_host",
@@ -97,9 +96,9 @@ MANAGER_API = (
     "lifecycle", "running_state", "installed_state", "repo_store",
 )
 
-# Manager forwarding wrappers deliberately removed (Spec section 68): a
-# breaking change with no compatibility alias. Each has a formal service
-# entry point instead -- see test_manager_wrapper_forwarding_methods_removed.
+# Manager forwarding wrappers deliberately removed: a breaking change with
+# no compatibility alias. Each has a formal service entry point instead --
+# see test_manager_wrapper_forwarding_methods_removed.
 _REMOVED_MANAGER_WRAPPERS = (
     "create_process", "create_docker_process", "create_docker_compose_process",
     "change_file_owner", "change_file_mode",
@@ -107,6 +106,7 @@ _REMOVED_MANAGER_WRAPPERS = (
     "get_installed_containers", "resolve_depend_containers",
     "add_installed_containers", "remove_installed_containers",
     "get_all_repos", "add_repo", "update_repos", "remove_repo",
+    "get_running_containers", "_load_running_containers", "_dump_running_containers",
     "_callback",
 )
 
@@ -269,8 +269,7 @@ def test_running_containers_route_through_transient_namespace(fresh_manager, mon
         fresh_manager._transient_ns, "get",
         lambda key, default=None: (calls.append(key), default)[1],
     )
-    with fresh_manager.environ.locks.process_lock("cntr:settings"):
-        fresh_manager._load_running_containers()
+    fresh_manager.running_state.get_persisted()
     assert "RUNNING_CONTAINERS" in calls
 
 

@@ -86,17 +86,17 @@ class LifecycleDispatcher:
         yield
 
         if context.is_full_containers:
-            with self.manager.environ.locks.process_lock("cntr:settings"):
-                running_containers = self.manager._load_running_containers()
-                all_containers = {*context.containers, *running_containers}
-                for container in running_containers:
-                    if container not in context.containers:
-                        # A removed container is no longer in the installed list, so its
-                        # `configs` defaults were never registered in env_config. Register
-                        # them here so on_removed can read its own configs without failing.
-                        self.manager.env_config.update_defaults(**container.configs)
-                        self._invoke_callback(container.on_removed, context)
-                        container.hooks.call(HookPhase.AFTER_REMOVE, context)
-                        all_containers.remove(container)
-                self.manager._dump_running_containers(all_containers)
-                self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)
+            running_names = self.manager.running_state.get_persisted()
+            running_containers = [
+                self.manager.containers[name] for name in running_names if name in self.manager.containers
+            ]
+            removed = [container for container in running_containers if container not in context.containers]
+            for container in removed:
+                # A removed container is no longer in the installed list, so its
+                # `configs` defaults were never registered in env_config. Register
+                # them here so on_removed can read its own configs without failing.
+                self.manager.env_config.update_defaults(**container.configs)
+                self._invoke_callback(container.on_removed, context)
+                container.hooks.call(HookPhase.AFTER_REMOVE, context)
+            self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)
+            self.manager.running_state.remove([container.name for container in removed])

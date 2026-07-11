@@ -156,3 +156,46 @@ def test_cli_failed_up_does_not_mark_running(monkeypatch, fresh_manager):
     with pytest.raises(RuntimeError):
         cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False)
     assert fresh_manager.running_state.get_persisted() == []
+
+
+# -- RunningStateStore.remove() (Spec Part VII) -------------------------------
+
+def test_remove_drops_only_the_given_names(fresh_manager):
+    fresh_manager.running_state._set(["nginx", "portainer", "stale"])
+    fresh_manager.running_state.remove(["stale"])
+    assert set(fresh_manager.running_state.get_persisted()) == {"nginx", "portainer"}
+
+
+def test_remove_is_a_noop_for_names_not_present(fresh_manager):
+    fresh_manager.running_state._set(["nginx"])
+    fresh_manager.running_state.remove(["does-not-exist"])
+    assert fresh_manager.running_state.get_persisted() == ["nginx"]
+
+
+def test_manager_get_running_containers_and_load_dump_wrappers_are_gone(fresh_manager):
+    assert not hasattr(fresh_manager, "get_running_containers")
+    assert not hasattr(fresh_manager, "_load_running_containers")
+    assert not hasattr(fresh_manager, "_dump_running_containers")
+
+
+def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_manager, monkeypatch):
+    """A container that's known (still registered/loadable) but no longer
+    in the installed/full-project set must be dropped from the persisted
+    running set once notify_remove sees a full-project context, via
+    RunningStateStore.remove() -- not the deleted Manager wrapper."""
+    from linktools.cntr.context import EventContext
+    fresh_manager.running_state._set(["nginx", "flare"])
+
+    ctx = EventContext()
+    ctx.commands = ["up"]
+    # "flare" is still a known container (fresh_manager.containers), but is
+    # no longer part of the current full-project set being installed.
+    ctx.containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
+    ctx.target_containers = ctx.containers
+    ctx.is_full_containers = True
+
+    with fresh_manager.lifecycle.notify_remove(ctx):
+        pass
+
+    assert "flare" not in fresh_manager.running_state.get_persisted()
+    assert "nginx" in fresh_manager.running_state.get_persisted()

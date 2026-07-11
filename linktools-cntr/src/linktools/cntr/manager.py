@@ -348,21 +348,4 @@ class ContainerManager:
             context.is_full_containers = False
         return context
 
-    def get_running_containers(self):
-        with self.environ.locks.process_lock("cntr:settings"):
-            return self._load_running_containers()
-
-    def _load_running_containers(self):
-        # A failed migration is not cached, so retry it on every access.
-        self._migrated
-        result = set()
-        for name in self._transient_ns.get("RUNNING_CONTAINERS", []) or []:
-            if name in self.containers:
-                result.add(self.containers[name])
-        return list(result)
-
-    def _dump_running_containers(self, containers: "Iterable[BaseContainer]") -> None:
-        self._migrated
-        self._transient_ns.set(
-            "RUNNING_CONTAINERS", list({container.name for container in containers}))
 

@@ -86,3 +86,11 @@ class RunningStateStore:
             self._set([])
         else:
             self._set(set(self._get()) - targets)
+
+    def remove(self, container_names: "Iterable[str]") -> None:
+        """Drop ``container_names`` from the persisted running set -- used
+        when a container has been fully removed from the installed set (not
+        merely stopped). Holds the transient-state lock itself; callers must
+        not also hold it."""
+        with self.manager.environ.locks.process_lock("cntr:settings"):
+            self._set(set(self._get()) - set(container_names))
