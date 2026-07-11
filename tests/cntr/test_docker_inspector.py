@@ -10,7 +10,7 @@ import pytest
 from linktools.cntr.runtime.inspect import (
     DockerInspector, RuntimeInspectionOutputError, RuntimeInspectionUnavailable,
 )
-from linktools.cntr.runtime.structured import CommandResult, StructuredCommandError
+from linktools.cntr.runtime.structured import CommandResult, StructuredCommandError, StructuredCommandOutputError
 
 
 def _service_container(fresh_manager, name, services):
@@ -187,6 +187,121 @@ def test_empty_inspect_array_for_known_ids_raises_output_error(inspector, fresh_
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
     _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
     _stub_inspect(monkeypatch, fresh_manager, [])
+    with pytest.raises(RuntimeInspectionOutputError):
+        inspector.get_project_state([nginx])
+
+
+# -- output corruption must never be mistaken for a disappearance race ------
+
+def test_bulk_invalid_json_raises_output_error_not_recovery(inspector, fresh_manager, monkeypatch):
+    """A batch inspect that returns unparsable JSON is a corrupted
+    response, not a signal that a container disappeared -- it must fail
+    closed, never fall through to the per-id recovery path."""
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndead0000dead\n")
+
+    recovery_called = []
+
+    def fake_create_docker_process(*args, **kwargs):
+        return _FakeProcess(args)
+
+    def fake_execute_json(process, timeout=None, check=True):
+        ids = [a for a in process.args if a not in ("inspect", "--type", "container")]
+        if len(ids) > 1:
+            raise StructuredCommandOutputError("Command produced invalid JSON")
+        recovery_called.append(ids)
+        return [_item()]
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fake_create_docker_process)
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_json", fake_execute_json)
+
+    with pytest.raises(RuntimeInspectionOutputError):
+        inspector.get_project_state([nginx])
+    assert recovery_called == []  # never entered per-id recovery
+
+
+def test_batch_oserror_raises_unavailable_not_recovery(inspector, fresh_manager, monkeypatch):
+    """The inspect process failing to even start (OSError) is never a
+    disappearance signal either -- it must fail as unavailable, not
+    trigger per-id recovery."""
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndead0000dead\n")
+
+    recovery_called = []
+
+    def fake_create_docker_process(*args, **kwargs):
+        return _FakeProcess(args)
+
+    def fake_execute_json(process, timeout=None, check=True):
+        ids = [a for a in process.args if a not in ("inspect", "--type", "container")]
+        if len(ids) > 1:
+            raise OSError("docker binary not found")
+        recovery_called.append(ids)
+        return [_item()]
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fake_create_docker_process)
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_json", fake_execute_json)
+
+    with pytest.raises(RuntimeInspectionUnavailable):
+        inspector.get_project_state([nginx])
+    assert recovery_called == []
+
+
+def test_recovery_invalid_json_raises_output_error(inspector, fresh_manager, monkeypatch):
+    """Invalid JSON from a per-id recovery inspect must also fail closed,
+    not be swallowed as a "not found" disappearance."""
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+
+    def dispatch(ids):
+        if len(ids) > 1:
+            raise StructuredCommandError("bulk inspect failed")
+        raise StructuredCommandOutputError("Command produced invalid JSON")
+
+    _stub_dispatched(monkeypatch, fresh_manager, "dead0000dead\nabc123abc123\n", dispatch)
+    with pytest.raises(RuntimeInspectionOutputError):
+        inspector.get_project_state([nginx])
+
+
+def test_recovery_successful_empty_array_raises_output_error(inspector, fresh_manager, monkeypatch):
+    """A per-id inspect that *succeeds* (no error) but returns an empty
+    array is corrupted output, not a legitimate "not found" -- a real
+    disappearance is always a non-zero exit."""
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+
+    def dispatch(ids):
+        if len(ids) > 1:
+            raise StructuredCommandError("bulk inspect failed")
+        return []
+
+    _stub_dispatched(monkeypatch, fresh_manager, "dead0000dead\nabc123abc123\n", dispatch)
+    with pytest.raises(RuntimeInspectionOutputError):
+        inspector.get_project_state([nginx])
+
+
+def test_recovery_dict_root_raises_output_error(inspector, fresh_manager, monkeypatch):
+    """A per-id inspect returning a bare object (not a one-item array) is
+    no longer accepted -- both paths share the same strict validator."""
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+
+    def dispatch(ids):
+        if len(ids) > 1:
+            raise StructuredCommandError("bulk inspect failed")
+        return _item()  # bare dict, not wrapped in a list
+
+    _stub_dispatched(monkeypatch, fresh_manager, "dead0000dead\nabc123abc123\n", dispatch)
+    with pytest.raises(RuntimeInspectionOutputError):
+        inspector.get_project_state([nginx])
+
+
+def test_recovery_non_object_item_raises_output_error(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+
+    def dispatch(ids):
+        if len(ids) > 1:
+            raise StructuredCommandError("bulk inspect failed")
+        return ["not-an-object"]
+
+    _stub_dispatched(monkeypatch, fresh_manager, "dead0000dead\nabc123abc123\n", dispatch)
     with pytest.raises(RuntimeInspectionOutputError):
         inspector.get_project_state([nginx])
 

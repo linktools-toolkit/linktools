@@ -1,0 +1,50 @@
+name: Python 3.6 compatibility
+
+# Enforces the project's Python 3.6 floor for every package except
+# linktools-ai (which requires >=3.10): static syntax scan, real 3.6
+# compileall, an import/CLI smoke test, and the Core Config / cntr test
+# suites. linktools-ai and tests/ai are never installed or collected here.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  python36:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.6
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.6'
+
+      - name: Static Python 3.6 syntax scan
+        run: python scripts/check_python36_compat.py
+
+      - name: Install linktools + linktools-cntr (editable, no AI extra)
+        run: |
+          python -m pip install --upgrade pip
+          python manage.py install --editable linktools linktools-cntr
+
+      - name: compileall (non-AI packages)
+        run: |
+          python -m compileall -q \
+            linktools/src \
+            linktools-common/src \
+            linktools-mobile/src \
+            linktools-cntr/src
+
+      - name: Import / CLI smoke test
+        run: |
+          python -c "from linktools.core import LinktoolsFileConfig, LinktoolsFileConfigLoader"
+          python -m linktools --help
+          python -m linktools.cntr --help
+
+      - name: Core Config / file-config tests
+        run: python -m pytest tests/core -q
+
+      - name: cntr tests
+        run: python -m pytest tests/cntr -q

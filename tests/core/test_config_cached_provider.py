@@ -11,9 +11,10 @@ the "<namespace>.<FIELD_NAME>" key format themselves. cached=True routes
 through the schema's PersistentSource instead, so it Just Works.
 """
 import pytest
+from linktools.types import MISSING
 
 from linktools.core._config import (
-    ConfigField, ConfigResolver, ConfigSchema, ConfigStore, ConfigError,
+    ConfigField, ConfigResolver, ConfigSchema, ConfigStore, ConfigError, ConfigCastError,
     LazyProvider, PromptProvider, ConfirmProvider,
     PersistentSource, RuntimeOverrideSource, EnvironmentSource,
 )
@@ -102,6 +103,19 @@ def test_cached_provider_without_persistent_source_raises(tmp_path):
 
     with pytest.raises(ConfigError, match="PersistentSource"):
         resolver.resolve("SECRET")
+
+
+def test_cached_provider_does_not_persist_value_that_fails_cast(tmp_path):
+    schema = ConfigSchema(allow_unknown=True)
+    schema.define(ConfigField(
+        name="PORT", cast=int,
+        provider=LazyProvider(lambda r: "not-a-port", cached=True),
+    ))
+    resolver, store = _make_resolver(tmp_path, schema)
+
+    with pytest.raises(ConfigCastError):
+        resolver.resolve("PORT")
+    assert store.get("test.PORT") is MISSING
 
 
 def test_cached_lazy_inside_chain_provider(tmp_path):

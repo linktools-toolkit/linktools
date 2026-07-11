@@ -38,7 +38,13 @@ class _FakeEnviron:
     def get_logger(self, _name):
         return _FakeLogger()
 
-    def wrap_config(self, namespace=None, env_prefix=None):
+    def wrap_config(self, namespace=None, env_prefix=None, local_root=None):
+        return _FakeEnvConfig()
+
+    def shared_config_sources(self, namespace, env_prefix=""):
+        return (None, None, None)
+
+    def build_config(self, schema, shared_sources, local_root=None):
         return _FakeEnvConfig()
 
     def get_data_path(self, *parts):

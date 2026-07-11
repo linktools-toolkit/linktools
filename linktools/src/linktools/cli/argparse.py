@@ -135,7 +135,7 @@ class ConfigLoader:
 
 class ConfigAction(argparse.Action):
 
-    """Argparse action that binds an option to a ConfigProperty."""
+    """Argparse action that binds an option to a configuration field."""
     def __init__(self,
                  option_strings,
                  dest,

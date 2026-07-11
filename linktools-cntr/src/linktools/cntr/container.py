@@ -50,6 +50,11 @@ class AbstractMetaClass(type):
 class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     __abstract__ = True
 
+    # Set by ContainerLoader after construction. None for a container built
+    # directly (e.g. in a test) without going through the loader --
+    # env_config then falls back to the manager's own Config.
+    _repository_context = None
+
     def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
         name = name or self.__module__
         index = name.rfind(".")
@@ -117,8 +122,16 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self.manager.environ
 
     @property
+    def repository_context(self):
+        """Where this container came from, and the Config it resolves
+        fields through -- ``None`` if never attached by ContainerLoader
+        (e.g. a container built directly in a test)."""
+        return self._repository_context
+
+    @property
     def env_config(self):
-        return self.manager.env_config
+        context = self._repository_context
+        return context.config if context is not None else self.manager.env_config
 
     @property
     def runtime(self):

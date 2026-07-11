@@ -53,6 +53,12 @@ def test_choose_receives_default(monkeypatch):
     assert calls[0][3]["default"] == "docker"
 
 
+def test_field_default_is_used_when_prompt_has_no_default(monkeypatch):
+    field = ConfigField(name="APP_PATH", default="/srv/app", provider=PromptProvider())
+    _, calls = _resolve(monkeypatch, field, prompt_return="/srv/custom")
+    assert calls[0][2]["default"] == "/srv/app"
+
+
 # --------------------------------------------------------------------------- #
 # The field's cast must be forwarded as prompt()'s type= hint. Without this,
 # an int/bool field always got a bare string prompt: a real user's answer only

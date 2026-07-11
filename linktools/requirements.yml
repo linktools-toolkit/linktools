@@ -2,9 +2,10 @@ dependencies:
   - filelock>=3.4.0
   - importlib-metadata; python_version < '3.8'
   - psutil
-  # Project manifest (.linktools.json) requirement comparison (PEP 440).
-  # packaging>=22 dropped Python 3.6/3.7 support, so this stays split by
-  # python_version rather than raising this package's own >=3.6 floor.
+  # PEP 440 version/specifier parsing for the layered file config's
+  # `requires` field. packaging>=22 dropped Python 3.6/3.7 support, so this
+  # stays split by python_version rather than raising this package's own
+  # >=3.6 floor.
   - packaging<22; python_version < '3.8'
   - packaging; python_version >= '3.8'
 

@@ -49,21 +49,33 @@ class ConfigCommand(BaseCommandGroup):
         if with_dependencies and names:
             target_containers = _shared.manager.resolver.resolve_dependencies(target_containers)
 
-        keys = set()
+        entries = []
+        seen_entries = set()
+
+        def add_entries(config, keys):
+            for key in keys:
+                entry = (id(config), key)
+                if entry not in seen_entries:
+                    seen_entries.add(entry)
+                    entries.append((key, config))
+
         for container in target_containers:
-            keys.update(container.configs.keys())
+            add_entries(container.env_config, container.configs.keys())
         for container in target_containers:
-            keys.update(container.extend_configs.keys())
+            add_entries(container.env_config, container.extend_configs.keys())
         if not names:
-            keys.update([key for key, value in _shared.manager.configs.items() if not isinstance(value, ConfigField)])
+            add_entries(
+                _shared.manager.env_config,
+                [key for key, value in _shared.manager.configs.items() if not isinstance(value, ConfigField)],
+            )
             # Only keys someone has actually set (persisted_keys()), not every
             # schema-declared field name (keys()) -- otherwise a manager-level
             # field that's never actually been configured (e.g.
             # DOCKER_DOWNLOAD_PATH) gets force-resolved just because it's
             # *possible* to set, prompting for it even though nothing needs it.
-            keys.update(_shared.manager.env_config.persisted_keys())
-        for key in sorted(keys):
-            value = _shared.manager.env_config.get(key)
+            add_entries(_shared.manager.env_config, _shared.manager.env_config.persisted_keys())
+        for key, config in sorted(entries, key=lambda entry: (entry[0], id(entry[1]))):
+            value = config.get(key)
             if show_secret:
                 # self.logger.info goes through the logging redaction filter,
                 # which masks anything that looks like a secret/password/token

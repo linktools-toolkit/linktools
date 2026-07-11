@@ -9,7 +9,7 @@ import pytest
 
 from linktools.core import (
     Config, ConfigField, ConfigSchema, ConfigResolver,
-    EnvironmentSource, RuntimeOverrideSource, DefaultSource,
+    EnvironmentSource, RuntimeOverrideSource, DefaultSource, LazyProvider,
 )
 from linktools.errors import ConfigCastError, ConfigValidationError, ConfigNotFoundError, ConfigCycleError
 from linktools.types import MISSING
@@ -85,6 +85,24 @@ def test_aliases_resolve(monkeypatch):
     schema = ConfigSchema().define(ConfigField(name="NEW", aliases=("OLD",), default="d"))
     r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
     assert r.resolve("NEW").value == "v"  # found via alias OLD
+
+
+def test_redefining_field_removes_stale_aliases():
+    schema = ConfigSchema().define(ConfigField(name="NEW", aliases=("OLD",), default="first"))
+    schema.define(ConfigField(name="NEW", aliases=("CURRENT",), default="second"))
+    r = ConfigResolver(schema, sources=[DefaultSource(schema)])
+
+    with pytest.raises(ConfigNotFoundError):
+        r.resolve("OLD")
+    assert r.resolve("CURRENT").value == "second"
+
+
+def test_resolver_get_does_not_swallow_provider_errors():
+    schema = ConfigSchema().define(ConfigField(name="BROKEN", provider=LazyProvider(lambda r: 1 / 0)))
+    r = ConfigResolver(schema, sources=[DefaultSource(schema)])
+
+    with pytest.raises(ZeroDivisionError):
+        r.get("BROKEN")
 
 
 # --------------------------------------------------------------------------- #

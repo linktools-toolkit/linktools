@@ -39,6 +39,7 @@ from linktools import utils, metadata
 from linktools.system import get_machine, get_system
 from linktools.decorator import cached_property, cached_classproperty
 from linktools.types import MISSING
+from ..errors import ConfigValidationError
 
 if TYPE_CHECKING:
     from typing import Any
@@ -47,8 +48,51 @@ if TYPE_CHECKING:
     from ._logging import LoggingManager
     from ._locks import LockManager
     from ..cache import CacheStore
-    from ._config import ConfigStore
+    from ._config import ConfigSchema, ConfigSource, ConfigStore
     from ._download import DownloadManager
+    from ._file_config import ResolvedLinktoolsFileConfig
+
+# STORAGE_PATH/DATA_PATH/TEMP_PATH (spec Part IV): everything else
+# (ConfigStore, cache, logs, downloads) is derived from these, so once any of
+# them has actually been used to fix a path, changing the underlying value
+# out from under an already-running Environ instance would leave stale
+# derived paths. They are never stored in Config at all (see get_config()/
+# set_config()/_bootstrap_path()) -- reads go straight to self.paths/
+# data_path/temp_path, and writes are always rejected.
+_BOOTSTRAP_KEYS = frozenset({"STORAGE_PATH", "DATA_PATH", "TEMP_PATH"})
+
+
+def _normalize_path(value: "Any") -> str:
+    return os.path.abspath(os.path.expanduser(str(value)))
+
+
+def _resolve_bootstrap_paths(file_environment: dict) -> "tuple[str, str, str]":
+    """Resolve STORAGE_PATH/DATA_PATH/TEMP_PATH (spec Part IV §26).
+
+    Priority: OS environment variable > local ``.linktools.json`` (cwd) >
+    user ``~/.linktools/linktools.json`` > builtin default. All three are
+    normalized to an absolute path regardless of source -- a relative
+    STORAGE_PATH (e.g. the spec's own third-party-repo example, "./storage")
+    must resolve to the same absolute path every downstream consumer
+    (EnvironmentPaths, ConfigStore, get_data_path) assumes, or the first
+    ConfigStore access crashes on a relative/absolute path mismatch.
+    """
+    prefix = metadata.__name__.upper()
+
+    storage_path = (
+        os.environ.get(f"{prefix}_PATH")
+        or os.environ.get(f"{prefix}_STORAGE_PATH")
+        or file_environment.get("STORAGE_PATH")
+        or os.path.join(Path.home(), f".{metadata.__name__}")
+    )
+    storage_path = _normalize_path(storage_path)
+
+    data_path = os.environ.get(f"{prefix}_DATA_PATH") or file_environment.get("DATA_PATH") \
+        or os.path.join(storage_path, "data")
+    temp_path = os.environ.get(f"{prefix}_TEMP_PATH") or file_environment.get("TEMP_PATH") \
+        or os.path.join(storage_path, "temp")
+
+    return storage_path, _normalize_path(data_path), _normalize_path(temp_path)
 
 
 class ConfigDict(dict):
@@ -151,8 +195,12 @@ class BaseEnviron(abc.ABC):
 
         Returns:
             Path: The operation result.
+
+        A projection of ``self.paths.data`` -- ``paths`` is the single
+        accessor that fixes the bootstrap filesystem layout, so accessing
+        this necessarily fixes ``paths`` too.
         """
-        return Path(self.global_config["DATA_PATH"])
+        return self.paths.data
 
     @cached_property
     def temp_path(self) -> "Path":
@@ -160,8 +208,10 @@ class BaseEnviron(abc.ABC):
 
         Returns:
             Path: The operation result.
+
+        A projection of ``self.paths.temp`` -- see ``data_path``.
         """
-        return Path(self.global_config["TEMP_PATH"])
+        return self.paths.temp
 
     @cached_property(lock=True)
     def paths(self) -> "EnvironmentPaths":
@@ -429,26 +479,20 @@ class BaseEnviron(abc.ABC):
 
         Returns:
             ConfigDict: The operation result.
+
+        Bootstrap priority (spec Part IV §26): OS environment variable >
+        local ``.linktools.json`` (cwd) > user ``~/.linktools/linktools.json``
+        > builtin default. Deliberately excludes PersistentSource (its own
+        path depends on STORAGE_PATH -- reading it here would be circular)
+        and any Prompt/Lazy provider. A corrupt/oversized bootstrap file
+        raises (via LinktoolsFileConfigLoader) rather than being silently
+        treated as absent -- see spec §18.
         """
         # ConfigDict is defined above (inlined)
+        from ._file_config import LinktoolsFileConfigLoader
 
-        prefix = f"{metadata.__name__}".upper()
-
-        data_path = os.environ.get(f"{prefix}_DATA_PATH", None)
-        temp_path = os.environ.get(f"{prefix}_TEMP_PATH", None)
-        # Storage root is always resolved so EnvironmentPaths can derive the
-        # cache/config/logs/downloads directories under it even when both
-        # DATA_PATH and TEMP_PATH are supplied explicitly via env.
-        storage_path = (
-            os.environ.get(f"{prefix}_PATH", None)
-            or os.environ.get(f"{prefix}_STORAGE_PATH", None)
-        )
-        if not storage_path:
-            storage_path = os.path.join(Path.home(), f".{metadata.__name__}")
-        if not data_path:
-            data_path = os.path.join(storage_path, "data")
-        if not temp_path:
-            temp_path = os.path.join(storage_path, "temp")
+        file_environment = LinktoolsFileConfigLoader().load().environment
+        storage_path, data_path, temp_path = _resolve_bootstrap_paths(file_environment)
 
         return ConfigDict(
             DEBUG=False,
@@ -457,12 +501,70 @@ class BaseEnviron(abc.ABC):
             TEMP_PATH=temp_path,
         )
 
+    def load_file_config(self, local_root: "PathType | None" = None) -> "ResolvedLinktoolsFileConfig":
+        """Load and merge the user-level and local-level linktools.json
+        (spec Part I-II). ``local_root`` defaults to the current working
+        directory; a third-party repository context (spec Part V) passes its
+        own root instead.
+        """
+        from ._file_config import LinktoolsFileConfigLoader
+
+        return LinktoolsFileConfigLoader().load(local_root=local_root)
+
+    def _build_file_sources(self, local_root: "PathType | None" = None) -> "tuple[ConfigSource, ConfigSource]":
+        """Build the local-file/global-file FileSource pair for a Config's
+        source chain (spec §21).
+
+        Both sources reload atomically (spec §24): the local source's
+        ``reload_fn`` re-reads *both* files as a single
+        ``load_file_config()`` call and pushes the global half straight into
+        ``global_source`` before returning its own half, so either both move
+        to a freshly-read, mutually consistent pair, or -- if either file is
+        now missing/corrupt -- neither source's data changes at all (the
+        exception propagates out of ``reload_fn`` before either is touched).
+        """
+        from ._config import FileSource
+
+        resolved = self.load_file_config(local_root=local_root)
+        local_source = FileSource(resolved.local_config.environment, name="local-file")
+        global_source = FileSource(resolved.global_config.environment, name="global-file")
+
+        def _reload_local() -> dict:
+            fresh = self.load_file_config(local_root=local_root)
+            global_source._data = dict(fresh.global_config.environment)
+            return fresh.local_config.environment
+
+        local_source._reload_fn = _reload_local
+        global_source._reload_fn = lambda: global_source._data
+
+        return local_source, global_source
+
+    def _bootstrap_path(self, key: str) -> str:
+        """Return the already-fixed value of a bootstrap key (spec §26-27).
+
+        STORAGE_PATH/DATA_PATH/TEMP_PATH are deliberately NOT stored in
+        ``Config`` at all (no field, no source ever resolves them) -- they
+        live solely on ``self.paths``/``self.data_path``/``self.temp_path``,
+        computed once from ``global_config`` (env var / linktools.json /
+        builtin default). This is what makes them immune to Config-level
+        state by construction: a stale value in PersistentSource, a runtime
+        override, or a reload() picking up a changed file can never disagree
+        with ``self.paths.storage`` -- nothing ever asks Config's opinion of
+        them in the first place, so there is no drift to detect.
+        """
+        return str({
+            "STORAGE_PATH": self.paths.storage,
+            "DATA_PATH": self.data_path,
+            "TEMP_PATH": self.temp_path,
+        }[key])
+
     def _create_config(self) -> "Config":
         """Build the new Config (ConfigSchema-backed, v2 §3 main path).
 
-        Sources (§8.2 precedence):
-        EnvironmentSource > RuntimeOverrideSource > PersistentSource >
-        DefaultSource (schema defaults).
+        Sources (spec §19 precedence): EnvironmentSource > RuntimeOverrideSource
+        > PersistentSource > local-file > global-file > DefaultSource.
+        STORAGE_PATH/DATA_PATH/TEMP_PATH are intentionally absent from this
+        schema -- see ``_bootstrap_path``/``get_config``/``set_config``.
         """
         from ._config import (
             Config as NewConfig, ConfigSchema,
@@ -472,6 +574,7 @@ class BaseEnviron(abc.ABC):
 
         schema = ConfigSchema(allow_unknown=True)  # dynamic keys (DEBUG etc.)
         prefix = self.name.upper() + "_"
+        local_source, global_source = self._build_file_sources()
         config = NewConfig(
             self,
             schema,
@@ -479,13 +582,12 @@ class BaseEnviron(abc.ABC):
                 EnvironmentSource(prefix),
                 RuntimeOverrideSource(),
                 PersistentSource(self.config_store, "main"),
+                local_source,
+                global_source,
                 DefaultSource(schema),
             ],
         )
-        # Register known core fields with defaults.
-        config.update_defaults(
-            DEBUG=False,
-        )
+        config.update_defaults(DEBUG=False)
         return config
 
     @cached_property(lock=True)
@@ -493,28 +595,66 @@ class BaseEnviron(abc.ABC):
         """Config (v2 §3: new ConfigSchema-backed main path)."""
         return self._create_config()
 
-    def wrap_config(self, namespace=MISSING, env_prefix=MISSING):
+    def wrap_config(self, namespace=MISSING, env_prefix=MISSING, local_root: "PathType | None" = None):
         """Return a scoped Config (v2 §3: new Config, not ConfigWrapper).
 
-        Each call returns a fresh Config with its own schema + sources, so
-        sub-managers (cntr) can define their own fields independently.
+        Each call returns a fresh Config with its own schema AND its own
+        fresh Environment/RuntimeOverride/Persistent sources, so sub-managers
+        (cntr) can define their own fields independently. ``local_root``
+        (spec Part V) lets a caller point the local-file layer at a
+        third-party repository root instead of the current working
+        directory -- the default used for the process-wide ``config``/cwd
+        case.
+
+        A caller that needs *multiple sibling* Config objects to share the
+        same Environment/RuntimeOverride/Persistent state (so a runtime
+        override or a persisted value uniformly overrides every sibling,
+        spec §33/§71) must not call this repeatedly -- use
+        ``shared_config_sources()`` + ``build_config()`` instead, each with
+        its own ``local_root``.
         """
-        from ._config import (
-            Config as NewConfig, ConfigSchema,
-            EnvironmentSource, RuntimeOverrideSource,
-            PersistentSource, DefaultSource,
-        )
+        from ._config import ConfigSchema
 
         schema = ConfigSchema(allow_unknown=True)  # Tools/cntr dynamic keys
         prefix = (env_prefix if env_prefix is not MISSING else "")
         ns = namespace if namespace is not MISSING else "main"
+        return self.build_config(schema, self.shared_config_sources(ns, prefix), local_root=local_root)
+
+    def shared_config_sources(self, namespace: str, env_prefix: str = "") -> "tuple[ConfigSource, ConfigSource, ConfigSource]":
+        """Build one (Environment, RuntimeOverride, Persistent) source triple
+        for ``namespace`` (spec §33). Pass the SAME returned tuple to
+        multiple ``build_config()`` calls (varying only ``local_root``) so
+        every sibling Config shares one process-wide runtime-override state
+        and reads/writes the same persisted namespace -- only the local-file
+        layer is allowed to differ per sibling.
+        """
+        from ._config import EnvironmentSource, RuntimeOverrideSource, PersistentSource
+
+        return (
+            EnvironmentSource(env_prefix),
+            RuntimeOverrideSource(),
+            PersistentSource(self.config_store, namespace),
+        )
+
+    def build_config(self, schema: "ConfigSchema", shared_sources: "tuple[ConfigSource, ConfigSource, ConfigSource]",
+                      local_root: "PathType | None" = None) -> "Config":
+        """Build a Config from ``schema``, a ``shared_config_sources()``
+        triple, and this instance's own fresh local-file/global-file
+        FileSource pair for ``local_root``.
+        """
+        from ._config import Config as NewConfig, DefaultSource
+
+        env_source, runtime_source, persistent_source = shared_sources
+        local_source, global_source = self._build_file_sources(local_root=local_root)
         return NewConfig(
             self,
             schema,
             sources=[
-                EnvironmentSource(prefix),
-                RuntimeOverrideSource(),
-                PersistentSource(self.config_store, ns),
+                env_source,
+                runtime_source,
+                persistent_source,
+                local_source,
+                global_source,
                 DefaultSource(schema),
             ],
         )
@@ -529,11 +669,20 @@ class BaseEnviron(abc.ABC):
 
         Returns:
             T: The operation result.
+
+        STORAGE_PATH/DATA_PATH/TEMP_PATH bypass ``self.config`` entirely (see
+        ``_bootstrap_path``) -- they are always present, so ``default`` is
+        never used for them.
         """
+        if key in _BOOTSTRAP_KEYS:
+            value = self._bootstrap_path(key)
+            return type(value) if type is not None else value
         return self.config.get(key=key, type=type, default=default)
 
     def require_config(self, key: str, type: "type[T]" = None) -> "T":
         """Return a must-exist configuration value; raise if it is missing."""
+        if key in _BOOTSTRAP_KEYS:
+            return self.get_config(key, type=type)
         return self.config.require(key=key, type=type)
 
     def set_config(self, key: str, value: "Any") -> None:
@@ -542,7 +691,16 @@ class BaseEnviron(abc.ABC):
         Args:
             key (str): Configuration or item key.
             value (Any): Value to store or process.
+
+        STORAGE_PATH/DATA_PATH/TEMP_PATH are fixed at bootstrap and are never
+        settable at runtime (spec §29) -- edit the linktools.json file(s) or
+        the OS environment variable and restart instead.
         """
+        if key in _BOOTSTRAP_KEYS:
+            raise ConfigValidationError(
+                "%r cannot be changed at runtime; edit the linktools.json "
+                "file(s) or the OS environment variable and restart instead" % (key,)
+            )
         self.config.set(key, value)
 
     def close(self):

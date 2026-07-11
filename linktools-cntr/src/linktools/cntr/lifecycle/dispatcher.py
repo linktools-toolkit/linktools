@@ -92,9 +92,13 @@ class LifecycleDispatcher:
             removed = [container for container in running_containers if container not in context.containers]
             for container in removed:
                 # A removed container is no longer in the installed list, so its
-                # `configs` defaults were never registered in env_config. Register
-                # them here so on_removed can read its own configs without failing.
-                self.manager.env_config.update_defaults(**container.configs)
+                # `configs` defaults were never registered. Register them on its
+                # OWN env_config (the manager's shared Config for a builtin
+                # container, or its repository's own Config for a third-party
+                # one) so on_removed can read its own configs without failing --
+                # registering them on the manager's Config here would silently
+                # miss a third-party-repo container's fields entirely.
+                container.env_config.update_defaults(**container.configs)
                 self._invoke_callback(container.on_removed, context)
                 container.hooks.call(HookPhase.AFTER_REMOVE, context)
             self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)

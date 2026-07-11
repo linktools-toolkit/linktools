@@ -229,27 +229,18 @@ def test_doctor_run_with_runtime_false_skips_compose_validation(fresh_manager, m
     assert called == []
 
 
-# -- Repo manifest unrecognized-requirement-key reporting -------------------
+# -- Repo .linktools.json requirement/validity reporting --------------------
 
-def test_check_repos_reports_unrecognized_manifest_requirement_as_warn(fresh_manager, tmp_path, monkeypatch):
-    """An unrecognized requirement key now fails closed (see
-    test_repo_manifest.py::test_unrecognized_requirement_key_now_blocks_fail_closed),
-    so repo_store.add() itself would reject this manifest -- inject it
-    directly into the repo store (simulating a repo that became
-    incompatible after being installed) to exercise Doctor's reporting."""
+def test_check_repos_reports_unsatisfied_requirement_as_warn(fresh_manager, tmp_path, monkeypatch):
+    """An unsatisfied `requires.linktools-cntr` now fails closed, so
+    repo_store.add() itself would reject this repo -- inject it directly
+    into the repo store (simulating a repo that became incompatible after
+    being installed) to exercise Doctor's reporting."""
     import json as json_module
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(json_module.dumps({
-        "schema_version": 1,
-        "kind": "linktools-project",
-        "components": {
-            "cntr": {
-                "schema_version": 1,
-                "requires": {"vendor:some-other-tool": ">=1.0"},
-                "config": {}, "metadata": {}, "extensions": {},
-            },
-        },
+        "requires": {"linktools-cntr": ">=999.0"},
     }), encoding="utf-8")
     (repo_dir / "container.py").write_text(
         "from linktools.cntr.container import BaseContainer\n\n\n"
@@ -262,26 +253,20 @@ def test_check_repos_reports_unrecognized_manifest_requirement_as_warn(fresh_man
 
     findings = Doctor(fresh_manager).check_repos()
     assert any(
-        f.severity == WARN and "vendor:some-other-tool" in f.message
+        f.severity == WARN and f.code == "repo.incompatible" and "linktools-cntr" in f.message
         for f in findings
     )
 
 
-# -- Doctor and the loader must use the same cntr component gate -----------
-
-def test_doctor_reports_manifest_without_cntr_component(fresh_manager, tmp_path, monkeypatch):
-    """A manifest present but missing `components.cntr` is rejected by
-    ContainerLoader/RepoStore.add (ContainerManifestInvalid) -- Doctor must
-    report it too, not silently treat it as having nothing to check."""
+def test_doctor_reports_invalid_local_config(fresh_manager, tmp_path, monkeypatch):
+    """A `.linktools.json` that fails static validation (here: a
+    non-object `requires`) is reported, not silently treated as having
+    nothing to check."""
     import json as json_module
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(json_module.dumps({
-        "schema_version": 1,
-        "kind": "linktools-project",
-        "components": {
-            "ai": {"schema_version": 1, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
-        },
+        "requires": "not-an-object",
     }), encoding="utf-8")
     (repo_dir / "container.py").write_text(
         "from linktools.cntr.container import BaseContainer\n\n\n"
@@ -293,19 +278,15 @@ def test_doctor_reports_manifest_without_cntr_component(fresh_manager, tmp_path,
     monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
-    assert any(f.code == "repo.manifest_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+    assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
 
 
-def test_doctor_reports_unsupported_cntr_component_schema(fresh_manager, tmp_path, monkeypatch):
+def test_doctor_reports_invalid_requirement_specifier(fresh_manager, tmp_path, monkeypatch):
     import json as json_module
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(json_module.dumps({
-        "schema_version": 1,
-        "kind": "linktools-project",
-        "components": {
-            "cntr": {"schema_version": 999, "requires": {}, "config": {}, "metadata": {}, "extensions": {}},
-        },
+        "requires": {"linktools-cntr": "not a valid specifier!!"},
     }), encoding="utf-8")
     (repo_dir / "container.py").write_text(
         "from linktools.cntr.container import BaseContainer\n\n\n"
@@ -317,10 +298,10 @@ def test_doctor_reports_unsupported_cntr_component_schema(fresh_manager, tmp_pat
     monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
-    assert any(f.code == "repo.manifest_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+    assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
 
 
-def test_doctor_and_loader_use_same_component_gate(fresh_manager, tmp_path, monkeypatch):
+def test_doctor_and_loader_use_same_requirement_gate(fresh_manager, tmp_path, monkeypatch):
     """Whatever ContainerLoader/RepoStore.add reject as incompatible at
     load-time, Doctor must also flag on an already-installed repo -- proving
     they share one gate instead of silently disagreeing."""
@@ -328,7 +309,7 @@ def test_doctor_and_loader_use_same_component_gate(fresh_manager, tmp_path, monk
     from linktools.cntr.container import ContainerError
     import pytest as _pytest
 
-    data = {"schema_version": 1, "kind": "linktools-project", "components": {}}
+    data = {"requires": {"linktools-cntr": ">=999.0"}}
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(json_module.dumps(data), encoding="utf-8")
@@ -348,7 +329,7 @@ def test_doctor_and_loader_use_same_component_gate(fresh_manager, tmp_path, monk
     monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
-    assert any(f.code == "repo.manifest_invalid" for f in findings)
+    assert any(f.code == "repo.incompatible" for f in findings)
 
 
 def test_doctor_check_raises_when_warn_finding_present(fresh_manager, monkeypatch):

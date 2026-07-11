@@ -14,6 +14,7 @@ from ._config import (
     PersistentSource,
     FileSource,
     DefaultSource,
+    ConfigProvider,
     AliasProvider,
     LazyProvider,
     PromptProvider,
@@ -40,25 +41,24 @@ from ._download import (
 )
 from ._environ import BaseEnviron, Environ, environ
 from ._capability import Updater, DevelopUpdater, GitUpdater, PypiUpdater, BaseCapability, Capability
-from ._manifest import (
-    LinktoolsManifest,
-    ManifestComponent,
-    ManifestLoader,
-    RequirementResolverRegistry,
-    RequirementResult,
-    RequirementStatus,
+from ._file_config import (
+    LinktoolsFileConfig,
+    ResolvedLinktoolsFileConfig,
+    LinktoolsFileConfigLoader,
+    merge_file_config,
+    ensure_requirement,
 )
 
 __all__ = [
     # environ
     "BaseEnviron", "Environ", "environ",
-    # manifest
-    "LinktoolsManifest", "ManifestComponent", "ManifestLoader",
-    "RequirementResolverRegistry", "RequirementResult", "RequirementStatus",
+    # file config
+    "LinktoolsFileConfig", "ResolvedLinktoolsFileConfig", "LinktoolsFileConfigLoader",
+    "merge_file_config", "ensure_requirement",
     # config
     "Config", "ConfigField", "ConfigSchema", "ConfigResolver", "ConfigSource",
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource",
-    "DefaultSource", "AliasProvider", "LazyProvider", "PromptProvider",
+    "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
     "ConfigStore", "ConfigMigration",
     # download

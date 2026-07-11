@@ -69,7 +69,10 @@ def test_get_config_accepts_configfield_and_uses_its_default(tmp_path, field_key
 def test_get_config_field_is_readable_via_its_name_afterwards(tmp_path, field_key_repo):
     manager, c = _install_single(tmp_path, field_key_repo, "c")
     c.resolved_default  # defines "ONE_OFF" into the schema as a side effect
-    assert manager.env_config.get("ONE_OFF") == "fallback"
+    # "c" is loaded from a third-party repo, so its env_config is that
+    # repo's own Config, not the manager's shared one -- read it back off
+    # the same Config the field was defined into.
+    assert c.env_config.get("ONE_OFF") == "fallback"
 
 
 def test_repeated_field_definition_is_idempotent(tmp_path, field_key_repo):
@@ -95,3 +98,28 @@ def test_get_nginx_domain_provider_via_configfield_key(fresh_manager):
     field = ConfigField(name="SOME_DOMAIN", provider=portainer.get_nginx_domain("x"))
     assert isinstance(field.provider, LazyProvider)
     assert portainer.get_config(field) == "_"  # NGINX_ROOT_DOMAIN falls back to "_" in tests
+
+
+def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "container.py").write_text(
+        "from linktools.cntr import BaseContainer\n"
+        "class Container(BaseContainer):\n"
+        "    @property\n"
+        "    def configs(self):\n"
+        "        return {'AIONUI_DOMAIN': self.get_nginx_domain()}\n",
+        encoding="utf-8",
+    )
+    manager, container = _install_single(tmp_path, repo, "repo")
+    manager.installed_state.add("nginx")
+
+    manager.prepare_installed_containers()
+
+    assert container.env_config.get("AIONUI_DOMAIN") == "_"
+
+    import linktools.cntr.commands._shared as shared
+    from linktools.cntr.commands.config import ConfigCommand
+    monkeypatch.setattr(shared, "manager", manager)
+    ConfigCommand().on_command_list(names=["repo"], show_secret=True)
+    assert "AIONUI_DOMAIN=_" in capsys.readouterr().out

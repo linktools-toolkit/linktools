@@ -186,45 +186,30 @@ ct-cntr up --dry-run
 
 ct-cntr doctor --json
 ct-cntr doctor --check        # 存在 WARN 级别 finding 时非零退出
-ct-cntr doctor --runtime      # 额外校验 compose config 及仓库声明的运行时版本要求
+ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 compose config
 ```
 
-### 项目清单（`.linktools.json`）
+### 本地文件配置（`.linktools.json`）
 
-`.linktools.json` 是通用的 Linktools 项目清单（`linktools.core.ManifestLoader` 提供解析和校验），不是 cntr 专属格式：一个项目可以同时声明 `cntr`、（未来的）`ai` 等多个能力组件，各能力只解释自己的 `components.<name>` 块。容器仓库可以在根目录放置这个文件，声明项目名称/版本、以及 cntr 组件自身的 `linktools-cntr`/Python/Docker 版本要求。缺失该文件的仓库按“遗留仓库”处理，行为不变；清单存在但没有 `components.cntr` 块的项目，视为未声明 cntr 能力，不会被扫描。
+`.linktools.json`/`linktools.json` 是通用的 Linktools 文件配置源（`linktools.core.LinktoolsFileConfigLoader` 负责读取与合并），不是 cntr 专属格式，也不是独立的配置系统——它只是接入现有 ConfigResolver 的两个轻量文件层：用户级 `~/.linktools/linktools.json` 与本地级 `<root>/.linktools.json`。不要求 `version`/`kind`/`schema_version`/`components`。容器仓库可以在根目录放置本地文件，声明该仓库对 `linktools-cntr` 的版本要求（`requires`），以及仓库内容器的本地默认环境值（`environment`）。缺失该文件的仓库正常可用，行为不变。
 
 ```json
 {
-  "schema_version": 1,
-  "kind": "linktools-project",
-  "name": "linktools-homelab",
-  "version": "1.2.0",
   "requires": {
-    "python": ">=3.6"
+    "linktools-cntr": ">=0.10.0,<1.0"
   },
-  "components": {
-    "cntr": {
-      "schema_version": 1,
-      "requires": {
-        "package:linktools-cntr": ">=0.10.0,<1.0",
-        "runtime:docker-compose": ">=2.20"
-      },
-      "config": {},
-      "metadata": {},
-      "extensions": {}
-    }
+  "environment": {
+    "STORAGE_PATH": "./storage"
   }
 }
 ```
 
-Requirement key 分三类：`python`（项目级 Python 版本，顶层 `requires`）、`package:<distribution>`（已安装 Python 包版本，如 `package:linktools-cntr`）、`runtime:<name>`（领域自定义运行时，cntr 提供 `runtime:docker-engine`/`runtime:docker-compose`）。顶层 `requires` 与 `components.cntr.requires` 中，任何一个 cntr/Python 无法识别或不满足的 key 都会在 `repo add`/加载前被拒绝，其中的 `container.py` 不会被执行——清单声明了当前 cntr 版本无法校验的要求时，不能假定其兼容。
+cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如未来的 `linktools-ai`）cntr 完全忽略。
 
-`runtime:docker-engine`/`runtime:docker-compose` 版本要求在实际运行时校验：不满足时会阻断 `up`/`restart`/`compose`/`compose --check`/`plan up`/`plan restart`（聚合报告所有涉及的仓库后一次性失败），但不阻断 `down`/`status`/`doctor`/`plan down`——版本约束不应妨碍停止或诊断已运行的容器。
-
-旧格式（`kind: linktools-cntr-repository`，`requires` 直接使用 `linktools-cntr`/`docker-engine`/`docker-compose`）不再被接受，也没有自动转换；仓库作者需要按上表手动迁移到新格式。
+不再有 Docker/Compose 运行时版本门禁：`up`/`restart`/`compose`/`plan` 不再因为仓库声明的运行时版本要求被阻断；`doctor --runtime`/`ct-cntr up` 等仍然会对实际 docker/compose 运行时做只读校验，但那与 `.linktools.json` 的 `requires` 无关。
 
 ```bash
-ct-cntr repo status --runtime
+ct-cntr repo status
 ct-cntr repo validate --json
 ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意仓库更新失败或不兼容都会让命令非零退出
 ```

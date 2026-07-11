@@ -110,7 +110,7 @@ def _record_artifact(container: "BaseContainer", destination, kind: str, content
             source = str(candidate)
             break
     entry = dict(kind=kind, container=container.name, sha256=sha256_of(content), source=source)
-    repository = getattr(container, "_repository", None)
+    repository = getattr(container, "_repository_context", None)
     if repository is not None and not repository.builtin and repository.url:
         entry["repository_url"] = repository.url
         revision = _git_revision(manager, repository.root_path)

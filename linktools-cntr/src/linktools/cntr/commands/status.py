@@ -6,6 +6,15 @@ display.
 Read-only: never writes persisted state, never runs a lifecycle hook, never
 triggers build/up/down. If the configured docker type needs sudo, this
 blocks on the password prompt like any other docker call.
+
+User-supplied container names are validated against the installed set
+BEFORE any Docker query runs (select_status_containers) -- an unknown name
+must never trigger a Docker inspect round-trip first. A logical container's
+displayed state is computed from its full *expected* service set (declared
+by the container, spec-wise: container.services), not just whatever Docker
+happened to return -- a declared-but-unobserved service becomes a synthetic
+``ServiceStatus(observed=False, state="missing")`` entry that exists only in
+this display layer, never written to persisted/runtime state.
 """
 import json
 from typing import TYPE_CHECKING
@@ -19,24 +28,104 @@ from ._order import ROOT_COMMAND_ORDER
 
 if TYPE_CHECKING:
     from typing import Any
+    from ..container import BaseContainer
     from ..manager import ContainerManager
 
 STATUS_SCHEMA_VERSION = 1
 _RUNNING_STATES = ("running", "restarting")
+_EXITED_STATES = ("exited", "dead")
 
 
-def _aggregate(services: "list[Any]") -> str:
-    if not services:
+def select_status_containers(
+        containers: "list[BaseContainer]", names: "list[str] | None",
+) -> "tuple[BaseContainer, ...]":
+    """Validate every user-supplied name against the installed set before
+    any Docker query runs. Reports every unknown name in one error, not
+    just the first. Duplicate names collapse to a single entry, in
+    first-seen order. Empty/None ``names`` selects the full project.
+    """
+    by_name = {container.name: container for container in containers}
+
+    if not names:
+        return tuple(containers)
+
+    missing = []
+    selected = []
+    seen = set()
+
+    for name in names:
+        if name not in by_name:
+            missing.append(name)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        selected.append(by_name[name])
+
+    if missing:
+        raise ContainerError("Containers are not installed: %s" % ", ".join(missing))
+
+    return tuple(selected)
+
+
+class ServiceStatus(object):
+    """One service's display-layer status for ``ct-cntr status`` -- a
+    thin, Status-only projection over the real ``ServiceRuntimeState``
+    (when observed) or a synthetic "declared but not observed" entry.
+    Never written to ``ProjectRuntimeState``/``RunningStateStore``/
+    ``DockerInspector`` -- it only ever exists inside this module's
+    aggregation and text/JSON rendering.
+    """
+
+    def __init__(
+            self,
+            logical_container: "str | None",
+            service: "str | None",
+            state: str,
+            observed: bool,
+            runtime_name: "str | None" = None,
+            health: "str | None" = None,
+            image: "str | None" = None,
+            exit_code: "int | None" = None,
+    ):
+        self.logical_container = logical_container
+        self.service = service
+        self.state = state
+        self.observed = observed
+        self.runtime_name = runtime_name
+        self.health = health
+        self.image = image
+        self.exit_code = exit_code
+
+
+def _aggregate_container_state(service_statuses: "list[ServiceStatus]") -> str:
+    """Logical-container state from its full expected service set.
+
+    - missing: no expected service was observed.
+    - running: every expected service observed, all running/restarting, none unhealthy.
+    - exited: every expected service observed, all exited/dead.
+    - degraded: everything else (partial missing, mixed running/exited,
+      paused/created/removing/unrecognized state, any unhealthy).
+
+    "unknown" is never returned here -- it is reserved for a wholly
+    unqueryable runtime, decided by the caller before this is even called.
+    """
+    observed = [s for s in service_statuses if s.observed]
+    if not observed:
         return "missing"
-    states = [s.state.lower() for s in services]
-    any_running = any(s in _RUNNING_STATES for s in states)
+    if len(observed) < len(service_statuses):
+        return "degraded"
+
+    states = [s.state.lower() for s in observed]
+    any_unhealthy = any((s.health or "").lower() == "unhealthy" for s in observed)
     all_running = all(s in _RUNNING_STATES for s in states)
-    any_unhealthy = any((s.health or "").lower() == "unhealthy" for s in services)
+    all_exited = all(s in _EXITED_STATES for s in states)
+
     if all_running and not any_unhealthy:
         return "running"
-    if any_running:
-        return "degraded"
-    return "exited"
+    if all_exited:
+        return "exited"
+    return "degraded"
 
 
 def collect_status(
@@ -46,29 +135,23 @@ def collect_status(
 ) -> "dict[str, Any]":
     """Build the JSON-shaped status payload; ``render_status`` formats it.
 
-    Only ``RuntimeInspectionUnavailable`` (runtime unqueryable) is caught
-    here and turned into ``queryable=false``/an ``error`` field with a
-    default-zero exit code. ``RuntimeInspectionOutputError`` (a structurally
-    invalid response) is left to propagate -- a corrupted response must
-    never masquerade as "every container is missing"."""
+    Names are validated (select_status_containers) before the Docker query
+    runs. Only ``RuntimeInspectionUnavailable`` (runtime unqueryable) is
+    caught here and turned into ``queryable=false``/an ``error`` field with
+    a default-zero exit code. ``RuntimeInspectionOutputError`` (a
+    structurally invalid response) is left to propagate -- a corrupted
+    response must never masquerade as "every container is missing"."""
+    project_containers = tuple(manager.prepare_installed_containers())
+    target = select_status_containers(list(project_containers), names)
+
     error = None
     try:
-        project_containers, state = manager.compose_operations.status()
+        state = manager.docker_inspector.get_project_state(project_containers)
         queryable = True
     except RuntimeInspectionUnavailable as exc:
-        project_containers = tuple(manager.prepare_installed_containers())
         state = None
         queryable = False
         error = str(exc)
-
-    if names:
-        installed_names = {c.name for c in project_containers}
-        unknown = [n for n in names if n not in installed_names]
-        if unknown:
-            raise ContainerError(f"Container(s) not installed: {', '.join(unknown)}")
-        target = [c for c in project_containers if c.name in names]
-    else:
-        target = list(project_containers)
 
     services_by_container: "dict[str, list[Any]]" = {}
     if state is not None:
@@ -78,17 +161,35 @@ def collect_status(
 
     containers_payload = []
     for container in target:
-        if not container.services:
+        expected = list(container.services.keys())
+        if not expected:
             continue
-        found = services_by_container.get(container.name, [])
-        status = "unknown" if not queryable else _aggregate(found)
+        observed_by_service = {svc.service: svc for svc in services_by_container.get(container.name, [])}
+
+        service_statuses = []
+        for service_name in expected:
+            observed_svc = observed_by_service.get(service_name)
+            if observed_svc is not None:
+                service_statuses.append(ServiceStatus(
+                    logical_container=container.name, service=service_name,
+                    state=observed_svc.state, observed=True,
+                    runtime_name=observed_svc.runtime_name, health=observed_svc.health,
+                    image=observed_svc.image, exit_code=observed_svc.exit_code,
+                ))
+            else:
+                service_statuses.append(ServiceStatus(
+                    logical_container=container.name, service=service_name,
+                    state="missing", observed=False,
+                ))
+
+        status = "unknown" if not queryable else _aggregate_container_state(service_statuses)
         containers_payload.append(dict(
             container=container.name,
             status=status,
             services=[
-                dict(service=svc.service, runtime_name=svc.runtime_name,
-                     state=svc.state, health=svc.health)
-                for svc in found
+                dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
+                     health=s.health, observed=s.observed)
+                for s in service_statuses
             ],
         ))
 
@@ -97,7 +198,7 @@ def collect_status(
         for svc in state.services:
             if svc.logical_container is None:
                 orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
-                                    state=svc.state, health=svc.health))
+                                    state=svc.state, health=svc.health, observed=True))
 
     payload = dict(
         schema_version=STATUS_SCHEMA_VERSION,

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..container import ContainerError
-from .structured import StructuredCommandError
+from .structured import StructuredCommandError, StructuredCommandOutputError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -115,6 +115,27 @@ def _looks_like_not_found(message: str) -> bool:
     disappearance or a real error that must still propagate."""
     lowered = (message or "").lower()
     return "no such" in lowered and ("container" in lowered or "object" in lowered)
+
+
+def validate_inspect_payload(payload, expected_non_empty: bool = False) -> "list[dict]":
+    """Shared shape validator for both the batch and per-ID ``docker
+    inspect`` paths: root must be a JSON array, every item must be a JSON
+    object. ``expected_non_empty=True`` additionally rejects a
+    structurally-valid-but-empty array -- a successful (non-error) inspect
+    of a known, non-empty id list/single id returning ``[]`` is corrupted
+    output, not a legitimate "nothing here" (a genuine disappearance is
+    only ever signalled by the command itself failing, handled separately
+    by the recovery path)."""
+    if not isinstance(payload, list):
+        raise RuntimeInspectionOutputError("`docker inspect` output must be a JSON array")
+    result = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise RuntimeInspectionOutputError("`docker inspect` item %d must be an object" % index)
+        result.append(item)
+    if expected_non_empty and not result:
+        raise RuntimeInspectionOutputError("`docker inspect` returned no objects")
+    return result
 
 
 def _normalize_state(state_data: dict) -> str:
@@ -233,13 +254,17 @@ class DockerInspector:
             "inspect", "--type", "container", *container_ids,
             capture_output=True,
         )
-        data = self.manager.structured_runner.execute_json(process, check=True)
-        if not isinstance(data, list):
-            raise RuntimeInspectionOutputError("`docker inspect` output root is not a JSON array")
-        for item in data:
-            if not isinstance(item, dict):
-                raise RuntimeInspectionOutputError("`docker inspect` item is not a JSON object")
-        return data
+        try:
+            payload = self.manager.structured_runner.execute_json(process, check=True)
+        except StructuredCommandOutputError as exc:
+            # The command ran but produced unparsable JSON -- this is a
+            # corrupted response, never a signal that a container
+            # disappeared. Translating it to RuntimeInspectionOutputError
+            # here (instead of letting the StructuredCommandError subclass
+            # propagate) keeps it out of get_project_state's
+            # StructuredCommandError recovery branch below.
+            raise RuntimeInspectionOutputError(str(exc)) from exc
+        return validate_inspect_payload(payload, expected_non_empty=False)
 
     def _inspect_containers_recovering(self, container_ids: "Iterable[str]") -> "list[dict]":
         """One container may have disappeared between listing ids and
@@ -253,17 +278,20 @@ class DockerInspector:
                 capture_output=True,
             )
             try:
-                result = self.manager.structured_runner.execute_json(process, check=True)
+                payload = self.manager.structured_runner.execute_json(process, check=True)
+            except StructuredCommandOutputError as exc:
+                raise RuntimeInspectionOutputError(str(exc)) from exc
             except StructuredCommandError as exc:
                 if _looks_like_not_found(str(exc)):
                     continue
                 raise RuntimeInspectionUnavailable(str(exc)) from exc
             except OSError as exc:
                 raise RuntimeInspectionUnavailable(str(exc)) from exc
-            if isinstance(result, list):
-                items.extend(item for item in result if isinstance(item, dict))
-            elif isinstance(result, dict):
-                items.append(result)
+            # A successful (non-error) single-id inspect that returns an
+            # empty array is NOT a legitimate "not found" signal -- a real
+            # disappearance is always a non-zero exit, caught above. An
+            # empty-but-successful result here is corrupted output.
+            items.extend(validate_inspect_payload(payload, expected_non_empty=True))
         return items
 
     def get_project_state(self, containers: "Iterable[BaseContainer]") -> "ProjectRuntimeState":
@@ -295,10 +323,18 @@ class DockerInspector:
 
         try:
             items = self._inspect_containers(container_ids)
-        except (StructuredCommandError, OSError):
-            # Every id just came from `compose ps`, so an empty recovery
-            # result here means every one of them disappeared in the
-            # meantime -- a legitimate empty project state, not an error.
+        except OSError as exc:
+            # The process itself couldn't even run -- never a signal that a
+            # container disappeared, so this never enters recovery.
+            raise RuntimeInspectionUnavailable(str(exc)) from exc
+        except StructuredCommandError:
+            # A real command failure (non-zero exit; _inspect_containers
+            # already turned an invalid-JSON response into
+            # RuntimeInspectionOutputError before it could reach here, so
+            # this branch is never entered for corrupted output). Every id
+            # just came from `compose ps`, so an empty recovery result here
+            # means every one of them disappeared in the meantime -- a
+            # legitimate empty project state, not an error.
             items = self._inspect_containers_recovering(container_ids)
         else:
             if not items:

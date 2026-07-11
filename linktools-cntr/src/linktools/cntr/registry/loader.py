@@ -9,11 +9,12 @@ back to a SimpleContainer for a compose file.
 import os
 from typing import TYPE_CHECKING
 
+from linktools.core import ensure_requirement
+from linktools.errors import ConfigError, ConfigValidationError
 from linktools.runtime import import_module_file
 
 from ..container import BaseContainer, SimpleContainer
-from ..repo.context import ContainerRepositoryContext
-from ..repo.manifest import ContainerManifestError
+from ..repo.context import RepositoryConfigContext
 from ...capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -35,11 +36,21 @@ class ContainerLoader:
 
         manager.logger.debug("Load containers from assets")
         asset_path = __cap_cntr__.get_asset_path("containers")
-        builtin_context = ContainerRepositoryContext(
-            url=None, root_path=asset_path, manifest=None, builtin=True,
+        # Builtin containers share the manager's own Config (cwd-scoped
+        # local file + global file) -- same as before this repository
+        # config-context split existed.
+        builtin_context = RepositoryConfigContext(
+            root_path=asset_path, file_config=None, config=manager.env_config, url=None, builtin=True,
         )
         for container in self._walk(asset_path, max_level=1, repository=builtin_context):
             containers.append(container)
+
+        # Builtin container fields form the manager's base schema. Register
+        # them before constructing any third-party repository Config so repo
+        # providers (for example get_nginx_domain()) can resolve shared
+        # builtin fields such as NGINX_ROOT_DOMAIN.
+        for container in containers:
+            container.env_config.update_defaults(**container.configs)
 
         for url, meta in manager.repo_store.get_all().items():
             manager.logger.debug(f"Load containers from repository `{url}`")
@@ -48,23 +59,21 @@ class ContainerLoader:
                 manager.logger.warning(f"Repository `{url}` not found, skip.")
                 continue
 
-            # Manifest schema/kind/components.cntr/host-requirement
-            # compatibility is validated before this repository's
-            # container.py is ever imported. A repository without a
-            # .linktools.json (a project without a manifest) loads exactly
-            # as before -- no warning, no migration required. A manifest
-            # present but missing (or not opted into) the cntr component is
-            # skipped the same way: it simply hasn't declared cntr
-            # capability for this project.
+            # requires.linktools-cntr compatibility is checked before this
+            # repository's container.py is ever imported. A repository
+            # without a .linktools.json loads exactly as before -- no
+            # warning required. A repository whose local requirement isn't
+            # satisfied is skipped: warned, not imported.
             try:
-                manifest = manager.manifest_policy.load(repo_path)
-                manager.manifest_policy.ensure_loadable(manifest)
-            except ContainerManifestError as exc:
-                manager.logger.warning(f"Repository `{url}` failed manifest validation, skip: {exc}")
+                file_config = manager.environ.load_file_config(local_root=repo_path)
+                ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+            except (ConfigError, ConfigValidationError) as exc:
+                manager.logger.warning(f"Repository `{url}` failed compatibility check, skip: {exc}")
                 continue
 
-            repo_context = ContainerRepositoryContext(
-                url=url, root_path=repo_path, manifest=manifest, builtin=False,
+            repo_context = RepositoryConfigContext(
+                root_path=repo_path, file_config=file_config,
+                config=manager.build_repository_config(repo_path), url=url, builtin=False,
             )
             for container in self._walk(repo_path, max_level=2, repository=repo_context):
                 containers.append(container)
@@ -72,7 +81,7 @@ class ContainerLoader:
         return containers
 
     def _walk(
-            self, path: "PathType", max_level: int, repository: "ContainerRepositoryContext",
+            self, path: "PathType", max_level: int, repository: "RepositoryConfigContext",
     ) -> "Iterator[BaseContainer]":
         if not os.path.isdir(path):
             return
@@ -83,7 +92,7 @@ class ContainerLoader:
             yield from self._walk(os.path.join(path, name), max_level - 1, repository)
 
     def _load_one(
-            self, path: "PathType", repository: "ContainerRepositoryContext",
+            self, path: "PathType", repository: "RepositoryConfigContext",
     ) -> "Iterator[BaseContainer]":
         manager = self.manager
         container_path = os.path.join(path, manager.docker_container_name)
@@ -101,7 +110,7 @@ class ContainerLoader:
                         # would otherwise be found first.
                         if not value.__abstract__ and value.__module__ == module.__name__:
                             container = value(manager, path)
-                            container._repository = repository
+                            container._repository_context = repository
                             manager.logger.debug(f"Load container {container.name} in {path}")
                             container.on_init()
                             yield container
@@ -114,7 +123,7 @@ class ContainerLoader:
             compose_path = os.path.join(path, compose_name)
             if os.path.exists(compose_path):
                 container = SimpleContainer(manager, path)
-                container._repository = repository
+                container._repository_context = repository
                 manager.logger.debug(f"Load container {container.name} in {path}")
                 container.on_init()
                 yield container

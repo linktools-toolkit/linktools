@@ -47,25 +47,21 @@ class RepoCommand(BaseCommandGroup):
         _shared.manager.repo_store.add(url, branch=branch, force=force)
 
     @subcommand("status", order=REPO_COMMAND_ORDER["status"], help="show repository status (read-only)")
-    @subcommand_argument("--runtime", action="store_true", default=False,
-                         help="also check docker-engine/docker-compose requirements")
-    def on_command_status(self, runtime: bool = False):
+    def on_command_status(self):
         repos = _shared.manager.repo_store.get_all()
         if not repos:
             self.logger.info("No repository found")
             return
         from ..repo.status import describe_repository
         for url, meta in repos.items():
-            info = describe_repository(_shared.manager, url, meta, check_runtime=runtime)
+            info = describe_repository(_shared.manager, url, meta)
             self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
 
     @subcommand("validate", order=REPO_COMMAND_ORDER["validate"],
-               help="validate repository manifest and compatibility (read-only)")
+               help="validate repository local config and compatibility (read-only)")
     @subcommand_argument("url", nargs="?", help="repository url or local path; all repositories if omitted")
-    @subcommand_argument("--runtime", action="store_true", default=False,
-                         help="also check docker-engine/docker-compose requirements")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    def on_command_validate(self, url: str = None, runtime: bool = False, as_json: bool = False):
+    def on_command_validate(self, url: str = None, as_json: bool = False):
         repos = _shared.manager.repo_store.get_all()
         if url is not None:
             if url not in repos:
@@ -80,7 +76,7 @@ class RepoCommand(BaseCommandGroup):
 
         from ..repo.status import describe_repository
         results = {
-            u: describe_repository(_shared.manager, u, m, check_runtime=runtime)
+            u: describe_repository(_shared.manager, u, m)
             for u, m in targets.items()
         }
 

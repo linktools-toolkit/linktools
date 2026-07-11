@@ -11,9 +11,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from linktools import utils
+from linktools.core import ensure_requirement
 from linktools.decorator import cached_property
+from linktools.errors import ConfigError, ConfigValidationError
 
 from ..container import ContainerError
+from ...capabilities.cntr import __cap_cntr__
 from .sync import RepoSync
 
 if TYPE_CHECKING:
@@ -84,7 +87,7 @@ class RepoStore:
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
                 self.sync.clone_git(url, repo_path, branch)
-                self._validate_new_repo_manifest(repo_path)
+                self._validate_new_repo_requirement(repo_path)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
             else:
                 path = os.path.abspath(os.path.expanduser(url))
@@ -96,13 +99,13 @@ class RepoStore:
                 repo_name = utils.guess_file_name(path)
                 repo_path = self._choose_repo_path(repo_name)
                 self.sync.link_local(path, repo_path)
-                self._validate_new_repo_manifest(repo_path)
+                self._validate_new_repo_requirement(repo_path)
                 repos[path] = dict(type="local", repo_path=repo_path, repo_name=repo_name)
 
             self._dump(repos)
 
     def update(self, branch: str = None, reset: bool = False) -> "list[RepoUpdateResult]":
-        """Sync every repository, then re-validate each one's manifest.
+        """Sync every repository, then re-check each one's requires.linktools-cntr.
 
         Never stops at the first failure or incompatibility -- every
         repository is synced and reported, so one repo's problem can never
@@ -127,7 +130,6 @@ class RepoStore:
         return results
 
     def _revalidate_after_update(self, meta: "dict[str, str]") -> "tuple[str | None, bool, str | None]":
-        from .manifest import ContainerIncompatible, ContainerManifestError
         repo_path = meta.get("repo_path")
 
         revision = None
@@ -145,12 +147,12 @@ class RepoStore:
             return revision, True, None
 
         try:
-            manifest = self.manager.manifest_policy.load(repo_path)
-            self.manager.manifest_policy.ensure_loadable(manifest)
-        except ContainerIncompatible as exc:
+            file_config = self.manager.environ.load_file_config(local_root=repo_path)
+            ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+        except ConfigValidationError as exc:
             return revision, False, f"incompatible with this host after update: {exc}"
-        except ContainerManifestError as exc:
-            return revision, False, f"manifest is invalid after update: {exc}"
+        except ConfigError as exc:
+            return revision, False, f".linktools.json is invalid after update: {exc}"
         return revision, True, None
 
     def remove(self, url: str) -> None:
@@ -162,19 +164,19 @@ class RepoStore:
             self._remove_repo_file(repos.pop(url))
             self._dump(repos)
 
-    def _validate_new_repo_manifest(self, repo_path: str) -> None:
-        # Read .linktools.json (if any) and check host requirements before
-        # this repo is ever written to INSTALLED_REPOS; on failure, clean up
-        # the just-cloned/linked path rather than leaving a half-added repo.
-        # The full manifest is intentionally not persisted into
-        # INSTALLED_REPOS itself, to avoid stale metadata drifting from the
-        # on-disk .linktools.json.
+    def _validate_new_repo_requirement(self, repo_path: str) -> None:
+        # Read .linktools.json (if any) and check requires.linktools-cntr
+        # before this repo is ever written to INSTALLED_REPOS; on failure,
+        # clean up the just-cloned/linked path rather than leaving a
+        # half-added repo. The resolved file config is intentionally not
+        # persisted into INSTALLED_REPOS itself, to avoid stale metadata
+        # drifting from the on-disk .linktools.json.
         try:
-            manifest = self.manager.manifest_policy.load(repo_path)
-            self.manager.manifest_policy.ensure_loadable(manifest)
-        except Exception:
+            file_config = self.manager.environ.load_file_config(local_root=repo_path)
+            ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+        except Exception as exc:
             self._remove_repo_file(dict(repo_path=repo_path))
-            raise
+            raise ContainerError(f"Repository `{repo_path}` is not usable: {exc}") from exc
 
     def _choose_repo_path(self, name: str) -> str:
         index = 0

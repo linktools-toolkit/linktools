@@ -181,8 +181,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--check", action="store_true", default=False,
                          help="exit non-zero if any WARN-or-worse finding is present")
     @subcommand_argument("--runtime", action="store_true", default=False,
-                         help="also validate compose config and manifest-declared "
-                              "docker-engine/docker-compose requirements")
+                         help="also validate compose config against the actual docker/compose runtime")
     def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False):
         findings = Doctor(_shared.manager).run(runtime=runtime)
         if as_json:

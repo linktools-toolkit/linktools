@@ -3,6 +3,8 @@ dependencies:
   - pyyaml
   - dotenv
   - rsa
+  # dataclasses is stdlib from 3.7; backport needed for the 3.6 floor.
+  - dataclasses; python_version < '3.7'
 
 dev-dependencies: []
 

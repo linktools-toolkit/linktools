@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 from ..errors import (
     ConfigCastError,
@@ -23,7 +23,7 @@ from ..types import MISSING
 from ..utils import atomic_write, get_file_hash, remove_file
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Iterator, Literal, Sequence
+    from typing import Any, Callable, Iterator, Literal, Sequence, Union
 
     # The two string literals _cast_value special-cases (mirrors the old,
     # pre-v2 CONFIG_TYPES dispatch table): "path" expands/absolutizes a
@@ -33,11 +33,14 @@ if TYPE_CHECKING:
     ConfigLiteralType = Literal["path", "json"]
     ConfigType = Union[ConfigLiteralType, Callable[[Any], Any], None]
 
+    PathLike = Union[str, Path]
+
+
 __all__ = [
     "ConfigStore", "ConfigMigration", "Config", "ConfigField", "ConfigSchema",
     "ConfigResolver", "ConfigSource", "EnvironmentSource", "RuntimeOverrideSource",
     "PersistentSource", "FileSource", "DefaultSource", "AliasProvider",
-    "LazyProvider", "PromptProvider", "ConfirmProvider", "ErrorProvider",
+    "ConfigProvider", "LazyProvider", "PromptProvider", "ConfirmProvider", "ErrorProvider",
     "ChainProvider", "ResolvedConfig",
 ]
 
@@ -149,7 +152,6 @@ class ConfigStore(object):
         return "ConfigStore(path=%r, keys=%d)" % (str(self._path), len(self._data))
 
 
-PathLike = Union[str, Path]
 
 # Heuristic: keys whose name matches one of these are treated as secrets and
 # masked in migration reports (secret must not leak into reports).
@@ -182,7 +184,7 @@ class ConfigMigration(object):
                  config_dir: "PathLike | None" = None) -> None:
         self._store = config_store
         self._logger = logger
- # Where migration backups/reports live . Defaults to the
+        # Where migration backups/reports live . Defaults to the
         # directory holding the ConfigStore file.
         if config_dir is not None:
             self._config_dir = Path(str(config_dir))
@@ -514,14 +516,18 @@ class ConfigMigration(object):
         self._log("warning", "ConfigMigration.rollback: restored %s from %s" % (old_path, backup_path))
 
 
-class AliasProvider:
+class ConfigProvider:
+    """Base class for providers understood by ConfigResolver."""
+
+
+class AliasProvider(ConfigProvider):
     """Resolve a field's value from another field's value."""
 
     def __init__(self, target: str) -> None:
         self.target = target
 
 
-class LazyProvider:
+class LazyProvider(ConfigProvider):
     """Compute a value from a callable.
 
     ``cached=True`` persists the computed value (via the schema's
@@ -536,7 +542,7 @@ class LazyProvider:
         self.cached = cached
 
 
-class PromptProvider:
+class PromptProvider(ConfigProvider):
     """Prompt the user for a value.
 
     ``cached=True`` persists the answer (via the schema's PersistentSource,
@@ -556,7 +562,7 @@ class PromptProvider:
         self.allow_empty = allow_empty
 
 
-class ConfirmProvider:
+class ConfirmProvider(ConfigProvider):
     """Ask the user for a yes/no confirmation.
 
     ``cached=True`` persists the answer (via the schema's PersistentSource,
@@ -570,14 +576,14 @@ class ConfirmProvider:
         self.cached = cached
 
 
-class ErrorProvider:
+class ErrorProvider(ConfigProvider):
     """Always raise ConfigError when resolved."""
 
     def __init__(self, message: str) -> None:
         self.message = message
 
 
-class ChainProvider:
+class ChainProvider(ConfigProvider):
     """Try multiple providers in order until one yields a value."""
 
     def __init__(self, *providers: "Any") -> None:
@@ -634,6 +640,11 @@ class ConfigSchema:
         self.allow_unknown = allow_unknown
 
     def define(self, field: "ConfigField") -> "ConfigSchema":
+        previous = self._fields.get(field.name)
+        if previous is not None:
+            for alias in previous.aliases:
+                if self._alias_to_name.get(alias) == field.name:
+                    del self._alias_to_name[alias]
         self._fields[field.name] = field
         for alias in field.aliases:
             self._alias_to_name[alias] = field.name
@@ -650,9 +661,25 @@ class ConfigSchema:
     def __contains__(self, name: str) -> bool:
         return self.get(name) is not None
 
+    def fields(self) -> "list[ConfigField]":
+        """Every defined field, in definition order (insertion order of a
+        Python dict). Lets a caller copy a schema's fields verbatim (e.g. a
+        per-repository Config starting from the same base fields as its
+        manager's Config, spec §35) without re-deriving them from scratch.
+        """
+        return list(self._fields.values())
+
 
 class ConfigSource:
     name = "source"
+
+    # Whether this source is consulted ahead of a field's provider
+    # (Prompt/Lazy/Alias/Chain), not merely as its failure fallback -- see
+    # ConfigResolver._first_present_before_provider. Source *order* (not
+    # this flag) is the only thing that decides relative priority among
+    # before_provider sources; this flag only decides the provider/no-provider
+    # split.
+    before_provider = False
 
     def get(self, key: str) -> "tuple[Any, bool]":
         raise NotImplementedError
@@ -660,6 +687,7 @@ class ConfigSource:
 
 class EnvironmentSource(ConfigSource):
     name = "environment"
+    before_provider = True
 
     def __init__(self, prefix: str = "") -> None:
         self._prefix = prefix
@@ -673,6 +701,7 @@ class EnvironmentSource(ConfigSource):
 
 class RuntimeOverrideSource(ConfigSource):
     name = "runtime-override"
+    before_provider = True
 
     def __init__(self) -> None:
         self._data: "dict[str, Any]" = {}
@@ -696,6 +725,7 @@ class PersistentSource(ConfigSource):
     """Reads/writes from a ConfigStore, key-prefixed by namespace."""
 
     name = "persistent"
+    before_provider = True
 
     def __init__(self, store: "Any", namespace: str = "config") -> None:
         self._store = store
@@ -729,19 +759,41 @@ class PersistentSource(ConfigSource):
 
 
 class FileSource(ConfigSource):
-    name = "file"
+    """A read-only source backed by a plain dict, e.g. a
+    ``LinktoolsFileConfig.environment`` (spec §21).
 
-    def __init__(self, data: dict) -> None:
+    ``name`` lets two instances (local-file / global-file) report distinct
+    ``explain()`` source names instead of both showing up as ``"file"``.
+    ``reload_fn``, if given, is called by ``reload()`` to atomically replace
+    this source's data (e.g. from a fresh ``LinktoolsFileConfigLoader.load()``)
+    without ever leaving a half-updated state.
+    """
+
+    before_provider = True
+
+    def __init__(self, data: dict, name: str = "file", reload_fn: "Callable[[], dict] | None" = None) -> None:
         self._data = dict(data)
+        self.name = name
+        self._reload_fn = reload_fn
 
     def get(self, key: str) -> "tuple[Any, bool]":
         if key in self._data:
             return (self._data[key], True)
         return (MISSING, False)
 
+    def keys(self) -> "list[str]":
+        return list(self._data.keys())
+
+    def reload(self) -> None:
+        if self._reload_fn is None:
+            return
+        data = self._reload_fn()
+        self._data = dict(data)
+
 
 class DefaultSource(ConfigSource):
     name = "default"
+    before_provider = False
 
     def __init__(self, schema: "ConfigSchema") -> None:
         self._schema = schema
@@ -850,7 +902,7 @@ class ConfigResolver:
         try:
             result = self.resolve(key)
             value = result.value
-        except Exception:
+        except ConfigNotFoundError:
             return default
         if type is not None and value is not MISSING:
             try:
@@ -866,9 +918,10 @@ class ConfigResolver:
     @staticmethod
     def _prompt_value(provider: "PromptProvider", field: "ConfigField") -> "Any":
         message = provider.message or field.name
+        default = provider.default if provider.default is not MISSING else field.default
         if provider.choices:
             from ..rich import choose
-            return choose(message, provider.choices, default=provider.default)
+            return choose(message, provider.choices, default=default)
         from ..rich import prompt
         # Forward the field's cast as the prompt's target type (rich.prompt
         # only knows str/int/float/bool -- anything else, e.g. a custom
@@ -879,7 +932,7 @@ class ConfigResolver:
         # input) and any type-aware placeholder (e.g. in tests) had no way to
         # return a plausible value for the field it was actually asking about.
         type_hint = field.cast if field.cast in (str, int, float, bool) else str
-        return prompt(message, type=type_hint, default=provider.default,
+        return prompt(message, type=type_hint, default=default,
                       password=provider.password, allow_empty=provider.allow_empty)
 
     def _persistent_source(self) -> "PersistentSource | None":
@@ -904,7 +957,7 @@ class ConfigResolver:
         raw, present = persistent.get(field.name)
         if present:
             return raw, "persistent"
-        value = compute()
+        value = self._cast_validate(field, compute())
         persistent.set(field.name, value)
         return value, "persistent"
 
@@ -939,9 +992,10 @@ class ConfigResolver:
                 return (source.name, raw, True)
         return (None, MISSING, False)
 
-    def _first_present_override(self, field: "ConfigField") -> "tuple[str | None, Any, bool]":
-        """Check the three *already-answered* sources (Environment,
-        RuntimeOverride, Persistent) ahead of the field's provider.
+    def _first_present_before_provider(self, field: "ConfigField") -> "tuple[str | None, Any, bool]":
+        """Check every ``before_provider`` source (Environment, RuntimeOverride,
+        Persistent, and now the local/global file sources) ahead of the
+        field's provider.
 
         A field's ``provider`` must not silently outrank something already
         set: without this check, any field with a provider (nearly every
@@ -968,9 +1022,14 @@ class ConfigResolver:
         ignored once a cached=True provider had persisted an answer, since
         the provider ran (and "succeeded" from cache) before the environment
         was ever consulted.
+
+        Source *order* (not this ``before_provider`` flag) is the only thing
+        deciding relative priority among these sources -- this method never
+        hardcodes a source class beyond the flag check, so a new
+        ``before_provider`` source needs no change here (spec §22-23).
         """
         for source in self._sources:
-            if not isinstance(source, (EnvironmentSource, RuntimeOverrideSource, PersistentSource)):
+            if not source.before_provider:
                 continue
             for candidate in self._candidates(field):
                 raw, present = source.get(candidate)
@@ -1018,11 +1077,12 @@ class ConfigResolver:
 
         if isinstance(provider, ConfirmProvider):
             from ..rich import confirm
+            default = provider.default if provider.default is not MISSING else field.default
             if provider.cached:
                 value, source_name = self._resolve_cached(
-                    field, lambda: confirm(provider.message or field.name, default=provider.default))
+                    field, lambda: confirm(provider.message or field.name, default=default))
                 return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
-            value = confirm(provider.message or field.name, default=provider.default)
+            value = confirm(provider.message or field.name, default=default)
             return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
 
         if isinstance(provider, ErrorProvider):
@@ -1040,11 +1100,12 @@ class ConfigResolver:
                 raise ConfigNotFoundError("config %r is not set and has no default" % (key,))
             raise ConfigNotFoundError("unknown config key %r" % (key,))
 
-        # An explicit Environment/RuntimeOverride value always outranks the
-        # field's provider (see _first_present_override) -- checked ahead of
+        # An explicit before_provider-source value (Environment/RuntimeOverride/
+        # Persistent/local-file/global-file) always outranks the field's
+        # provider (see _first_present_before_provider) -- checked ahead of
         # AliasProvider/ChainProvider/leaf-provider resolution, not merely as
         # their failure fallback.
-        override_source, override_raw, override_present = self._first_present_override(field)
+        override_source, override_raw, override_present = self._first_present_before_provider(field)
         if override_present:
             return ResolvedConfig(self._cast_validate(field, override_raw), field, override_source, override_raw)
 
@@ -1267,15 +1328,8 @@ class Config:
                         description=value.description, deprecated=value.deprecated,
                         provider=value.provider)
                 self._schema.define(value)
-            elif hasattr(value, "providers") or hasattr(value, "target") or \
-                    hasattr(value, "func") or hasattr(value, "message"):
+            elif isinstance(value, ConfigProvider):
                 self._schema.define(ConfigField(name=key, provider=value))
-            elif hasattr(value, "get") and hasattr(value, "load") and \
-                    hasattr(value, "_default"):
-                default = getattr(value, "_default", MISSING)
-                if default is MISSING:
-                    default = None
-                self._schema.define(ConfigField(name=key, default=default))
             else:
                 self._schema.define(ConfigField(name=key, default=value))
         return self

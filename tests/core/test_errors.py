@@ -15,7 +15,6 @@ DOMAIN_ROOTS = [
     "EnvironmentError", "LoggingError", "CacheError", "ConfigError",
     "DownloadError", "ToolError", "CapabilityError", "GitError", "SSHError",
     "SystemError", "ProcessError", "EventError", "ReactorError", "CliError",
-    "ManifestError",
 ]
 
 # Names that existed before this refactor and MUST stay importable so that
@@ -41,17 +40,6 @@ def test_all_legacy_names_still_importable():
     for name in LEGACY_NAMES:
         assert hasattr(errs, name), "lost legacy error name: %s" % name
         assert issubclass(getattr(errs, name), errs.LinktoolsError), name
-
-
-def test_manifest_error_is_its_own_domain_root():
-    """ManifestError must be a direct LinktoolsError child, not nested under
-    ConfigError -- a manifest is a distinct core domain, not a config
-    concern, and must not accidentally become catchable only via
-    `except ConfigError`."""
-    assert errs.ManifestError.__bases__ == (errs.LinktoolsError,)
-    for name in ("ManifestLoadError", "ManifestValidationError", "ManifestRequirementError"):
-        assert issubclass(getattr(errs, name), errs.ManifestError), name
-    assert issubclass(errs.ManifestSchemaUnsupported, errs.ManifestValidationError)
 
 
 def test_specifics_are_grouped_under_their_domain():

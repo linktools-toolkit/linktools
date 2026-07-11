@@ -94,43 +94,6 @@ class ComposeOperations:
         context.is_full_containers = selection.full
         return context
 
-    def ensure_runtime_requirements(self, selection: ComposeSelection, action: str) -> None:
-        """Block ``action`` when a repository's manifest declares a
-        docker-engine/docker-compose requirement the actual runtime doesn't
-        satisfy (or that can't even be verified -- an unqueryable runtime
-        fails closed here, it never silently proceeds).
-
-        Checked against ``project_containers``, not ``target_containers``:
-        a partial ``up``/``restart``/``compose`` still passes the *entire*
-        project's ``--file`` set to Compose, so an unselected repository's
-        requirement must still gate the action. Deduplicated by stable
-        repository identity (url, falling back to root_path for a local/
-        path-only repository), and every repository's issues are collected
-        before raising once, so a multi-repo project never fails partway
-        through one repo only to leave the rest unreported.
-
-        Only called from up/restart/render (compose)/plan up/plan restart --
-        down/status/doctor/remove keep their own warning-only reporting
-        elsewhere, so a version bump can never block stopping or inspecting
-        what's already running."""
-        manager = self.manager
-        seen_repositories = set()
-        problems: "list[str]" = []
-        for container in selection.project_containers:
-            repository = getattr(container, "_repository", None)
-            if repository is None or repository.manifest is None:
-                continue
-            label = repository.url or str(repository.root_path)
-            if label in seen_repositories:
-                continue
-            seen_repositories.add(label)
-            for issue in manager.manifest_policy.check_runtime_requirements(repository.manifest):
-                problems.append(f"Repository `{label}` requires {issue.key}{issue.required}: {issue.message}")
-        if problems:
-            raise ContainerError(
-                f"Cannot {action}: runtime requirement(s) not satisfied.\n" + "\n".join(problems)
-            )
-
     def build_options(
             self, action: str, selection: ComposeSelection, build: bool, pull: bool,
     ) -> ComposeOptions:
@@ -155,7 +118,6 @@ class ComposeOperations:
           report: bool = False) -> None:
         manager = self.manager
         selection = self.select(names)
-        self.ensure_runtime_requirements(selection, "up")
         context = self._make_context(["up", pull and "pull", build and "build"], selection)
         options = self.build_options("up", selection, build, pull)
 
@@ -183,7 +145,6 @@ class ComposeOperations:
                report: bool = False) -> None:
         manager = self.manager
         selection = self.select(names)
-        self.ensure_runtime_requirements(selection, "restart")
         context = self._make_context(["restart", pull and "pull", build and "build"], selection)
         options = self.build_options("restart", selection, build, pull)
 
@@ -242,7 +203,6 @@ class ComposeOperations:
         """``ct-cntr compose``: the final resolved Docker Compose model for
         the installed project (or ``--check`` to only validate it)."""
         selection = self.select(names, with_dependencies=with_dependencies)
-        self.ensure_runtime_requirements(selection, "compose")
         context = self._make_context("compose", selection)
         return self.manager.compose_runner.config(
             context, selection.services, output_format=output_format, quiet=check,

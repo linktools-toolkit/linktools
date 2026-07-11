@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
     from .repo.store import RepoStore
-    from .repo.manifest import ContainerManifestPolicy
     from .artifacts.index import ArtifactIndex
     from .execution.planner import ExecutionPlanner
 
@@ -73,7 +72,16 @@ class ContainerManager:
         self.name = name or self.environ.name
         self.logger = environ.get_logger("container")
 
-        self.env_config = self.environ.wrap_config(namespace="container", env_prefix="")
+        # Shared (env, runtime-override, persistent) triple for the
+        # "container" namespace -- reused verbatim (not rebuilt) by every
+        # per-repository RepositoryConfigContext.config, so a
+        # `ct-cntr config set`/persisted value or a runtime override applies
+        # uniformly to every repository's containers, and only the
+        # local-file layer is allowed to differ per repository.
+        self.container_config_sources = self.environ.shared_config_sources("container", "")
+        self.env_config = self.environ.build_config(
+            self._make_container_schema(), self.container_config_sources, local_root=None,
+        )
         self.env_config.update_defaults(**self.configs)
 
         self.docker_container_name = "container.py"
@@ -299,10 +307,25 @@ class ContainerManager:
         from .repo.store import RepoStore
         return RepoStore(self)
 
-    @cached_property
-    def manifest_policy(self) -> "ContainerManifestPolicy":
-        from .repo.manifest import ContainerManifestPolicy
-        return ContainerManifestPolicy(self)
+    def _make_container_schema(self) -> "Any":
+        from linktools.core import ConfigSchema
+        return ConfigSchema(allow_unknown=True)
+
+    def build_repository_config(self, local_root: "Any") -> "Any":
+        """Build the Config a third-party repository's RepositoryConfigContext
+        holds: starts from a copy of this manager's own base
+        ConfigFields (HOST, DOCKER_APP_PATH, ...) so a repository's
+        container can still resolve them, then that repository's own
+        container.py module(s) add their own fields on top (via
+        ``container.env_config.update_defaults(**container.configs)`` in
+        ``prepare_installed_containers``). Shares this manager's
+        Environment/RuntimeOverride/Persistent state (``container_config_sources``)
+        -- only the local-file layer is unique to ``local_root``.
+        """
+        schema = self._make_container_schema()
+        for field in self.env_config.schema.fields():
+            schema.define(field)
+        return self.environ.build_config(schema, self.container_config_sources, local_root=local_root)
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
@@ -312,7 +335,7 @@ class ContainerManager:
         for container in self.containers.values():
             container.enable = container in containers
         for container in reversed(containers):
-            self.env_config.update_defaults(**container.configs)
+            container.env_config.update_defaults(**container.configs)
         for container in containers:
             container.on_prepare()
         for container in containers:

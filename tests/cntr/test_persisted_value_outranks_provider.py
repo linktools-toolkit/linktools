@@ -13,7 +13,7 @@ persistent_cache, field_descriptors, global_config)`: the persisted cache was
 checked, for EVERY field, before its Prompt/Lazy/Alias descriptor ever ran --
 regardless of that descriptor's own `cached=` flag (which only controlled
 whether a freshly-computed answer got saved back, not whether an existing one
-was read first). ConfigResolver._first_present_override now includes
+was read first). ConfigResolver._first_present_before_provider now includes
 PersistentSource for exactly this reason.
 """
 from linktools.core import ConfigField, LazyProvider, PromptProvider, ChainProvider

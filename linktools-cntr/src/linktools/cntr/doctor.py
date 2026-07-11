@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from dulwich.errors import NotGitRepository
 
+from ..capabilities.cntr import __cap_cntr__
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from .container import BaseContainer
@@ -29,7 +31,7 @@ RUNTIME_BINARY_MISSING = "runtime.binary_missing"
 RUNTIME_ENDPOINT_MISSING = "runtime.endpoint_missing"
 RUNTIME_ACCESS_DENIED = "runtime.access_denied"
 COMPOSE_VALIDATION_FAILED = "compose.validation_failed"
-REPO_MANIFEST_INVALID = "repo.manifest_invalid"
+REPO_CONFIG_INVALID = "repo.config_invalid"
 REPO_INCOMPATIBLE = "repo.incompatible"
 REPO_DIRTY = "repo.dirty"
 ARTIFACT_STALE = "artifact.stale"
@@ -211,41 +213,35 @@ class Doctor:
                 code=COMPOSE_VALIDATION_FAILED))
         return findings
 
-    def check_repos(self, runtime: bool = False) -> "list[Finding]":
+    def check_repos(self) -> "list[Finding]":
         findings: "list[Finding]" = []
         from linktools.git import GitRepository
-        from .repo.manifest import ContainerManifestError
+        from linktools.core import ensure_requirement
+        from linktools.errors import ConfigError, ConfigValidationError
         for url, meta in self.manager.repo_store.get_all().items():
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path):
                 continue
 
             # Same load+gate ContainerLoader/RepoStore.add use before
-            # accepting a repo: a manifest with no `components.cntr` block
-            # (or an unsupported one) is invalid, not silently skipped --
-            # Doctor must never report a repo as clean just because it has
-            # nothing to check.
-            manifest = None
+            # accepting a repo: an invalid .linktools.json is reported, not
+            # silently skipped -- Doctor must never report a repo as clean
+            # just because it has nothing to check.
+            file_config = None
             try:
-                manifest, _ = self.manager.manifest_policy.load_and_get_component(repo_path)
-            except ContainerManifestError as exc:
+                file_config = self.manager.environ.load_file_config(local_root=repo_path)
+            except ConfigError as exc:
                 findings.append(Finding(
-                    WARN, f"repo `{url}` has an invalid manifest: {exc}",
-                    code=REPO_MANIFEST_INVALID, component=url))
+                    WARN, f"repo `{url}` has an invalid .linktools.json: {exc}",
+                    code=REPO_CONFIG_INVALID, component=url))
 
-            if manifest is not None:
-                # A requirement key with no registered resolver ("unrecognized")
-                # is reported here the same as an unmet version -- both mean
-                # this cntr version can't verify what the manifest declared.
-                for issue in self.manager.manifest_policy.check_host_requirements(manifest):
+            if file_config is not None:
+                try:
+                    ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+                except ConfigValidationError as exc:
                     findings.append(Finding(
-                        WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
+                        WARN, f"repo `{url}` {exc}",
                         code=REPO_INCOMPATIBLE, component=url))
-                if runtime:
-                    for issue in self.manager.manifest_policy.check_runtime_requirements(manifest):
-                        findings.append(Finding(
-                            WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
-                            code=REPO_INCOMPATIBLE, component=url))
 
             if os.path.islink(repo_path):
                 findings.append(Finding(INFO, f"repo `{url}` is a local symlink ({repo_path}).", component=url))
@@ -283,7 +279,7 @@ class Doctor:
 
     def run(self, runtime: bool = False) -> "list[Finding]":
         findings = self.check_runtime()
-        findings.extend(self.check_repos(runtime=runtime))
+        findings.extend(self.check_repos())
         try:
             containers = self.manager.prepare_installed_containers()
             findings.extend(self.check_compose(containers))
