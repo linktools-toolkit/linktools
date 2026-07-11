@@ -19,7 +19,7 @@ class _FakeProcess:
 
 def _record(monkeypatch, manager):
     calls = []
-    monkeypatch.setattr(manager, "create_process", lambda *a, **k: (calls.append(a), _FakeProcess())[1])
+    monkeypatch.setattr(manager.runtime, "create_process", lambda *a, **k: (calls.append(a), _FakeProcess())[1])
     return calls
 
 

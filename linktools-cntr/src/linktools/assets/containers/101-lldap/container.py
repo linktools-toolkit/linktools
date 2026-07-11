@@ -84,17 +84,17 @@ class Container(BaseContainer):
 
         template_path = self.get_source_path("templates")
 
-        self.manager.change_file_owner(secret_path, self.manager.user, recursive=True)
-        self.manager.change_file_mode(secret_path, 0o700, recursive=True)
-        self.manager.change_file_owner(data_path, self.manager.user, recursive=True)
-        self.manager.change_file_mode(data_path, 0o700, recursive=True)
+        self.runtime.chown(secret_path, self.user, recursive=True)
+        self.runtime.chmod(secret_path, 0o700, recursive=True)
+        self.runtime.chown(data_path, self.user, recursive=True)
+        self.runtime.chmod(data_path, 0o700, recursive=True)
 
         self._create_secret_file(secret_path / "jwt_secret", length=64)
         utils.write_file(secret_path / "ldap_user_pass", self.get_config("LLDAP_ADMIN_PASSWORD"))
         self.render_template(template_path / "lldap_config.toml", data_path / "lldap_config.toml")
 
-        self.manager.change_file_owner(secret_path, "root", recursive=True)
-        self.manager.change_file_owner(data_path, "root", recursive=True)
+        self.runtime.chown(secret_path, "root", recursive=True)
+        self.runtime.chown(data_path, "root", recursive=True)
 
     @classmethod
     def _create_secret_file(cls, path, length=48):

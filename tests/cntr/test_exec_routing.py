@@ -7,6 +7,9 @@ create_docker_compose_process replaced by a recorder and lifecycle hooks
 neutralized, then asserts the recorded docker-compose args (no default
 --pull flags; pull=True uniform).
 """
+from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
+from linktools.cntr.lifecycle.hooks import HookRegistry
+
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 
@@ -23,8 +26,9 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(manager, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager, "_callback", lambda *a, **k: None)
+    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
+    monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     return recorded
 
 

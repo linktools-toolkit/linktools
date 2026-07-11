@@ -12,21 +12,23 @@ from linktools.cli import (
 from linktools.cli.argparse import BooleanOptionalAction, LazyChoices
 from linktools.errors import ConfigError, GitError
 from ..container import ContainerError
-from ..context import EventContext
-from ..doctor import Doctor
-from ..runtime.compose import ComposeOptions
+from ..doctor import WARN, Doctor
 from . import _shared
+from .compose import ComposeCommand
 from .config import ConfigCommand
 from .exec_ import ExecCommand
+from .lock import DiffCommand, LockCommand
+from .plan import PlanCommand, maybe_dry_run
 from .repo import RepoCommand
+from .status import StatusCommands
 
 if TYPE_CHECKING:
     from typing import Any
 
 
-class Command(BaseCommandGroup):
+class Command(StatusCommands, BaseCommandGroup):
     """
-    Deploy and manage Docker/Podman containers with ease
+    Deploy and manage Docker containers with ease
     """
 
     @property
@@ -53,6 +55,10 @@ class Command(BaseCommandGroup):
             SubCommandWrapper(ExecCommand()),
             SubCommandWrapper(ConfigCommand()),
             SubCommandWrapper(RepoCommand()),
+            SubCommandWrapper(ComposeCommand()),
+            SubCommandWrapper(PlanCommand()),
+            SubCommandWrapper(LockCommand()),
+            SubCommandWrapper(DiffCommand()),
         ]
 
     @subcommand("list", help="list all containers")
@@ -60,8 +66,8 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_list(self, names: "list[str]" = None, detail: bool = False):
-        install_containers = _shared.manager.get_installed_containers(resolve=False)
-        all_install_containers = _shared.manager.resolve_depend_containers(install_containers)
+        install_containers = _shared.manager.installed_state.get(resolve=False)
+        all_install_containers = _shared.manager.resolver.resolve_dependencies(install_containers)
         # Prefer live state, fall back to persisted when Docker is unavailable
         # so `list` never crashes.
         running_names = set(_shared.manager.running_state.get_effective(install_containers))
@@ -98,7 +104,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_add(self, names: "list[str]"):
-        containers = _shared.manager.add_installed_containers(*names)
+        containers = _shared.manager.installed_state.add(*names)
         assert containers, "No container added"
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Add {', '.join(result)} success")
@@ -108,7 +114,7 @@ class Command(BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_remove(self, names: "list[str]", force: bool = False):
-        containers = _shared.manager.remove_installed_containers(*names, force=force)
+        containers = _shared.manager.installed_state.remove(*names, force=force)
         assert containers, "No container removed"
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Remove {', '.join(result)} success")
@@ -117,96 +123,83 @@ class Command(BaseCommandGroup):
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
+    @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
+                         help="show what would happen, without doing it")
+    @subcommand_argument("--report", action="store_true", default=False,
+                         help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False):
-        context = self._make_context(["up", pull and "pull", build and "build"], names)
-        services = _shared.manager.compose_runner.collect_services(context)
-        options = ComposeOptions(
-            build=build,
-            pull=pull,
-            remove_orphans=context.is_full_containers,
-            services=services,
-            emit_default_pull=True,
-        )
-
-        with _shared.manager.notify_start(context):
-            if build:
-                _shared.manager.compose_runner.build(context, options)
-            _shared.manager.compose_runner.up(context, options)
-
-        with _shared.manager.notify_remove(context):
-            pass
-
-        # Record running state only after a successful up.
-        _shared.manager.running_state.mark_started(context)
+    def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False,
+                      dry_run: bool = False, report: bool = False):
+        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, build=build, pull=pull, dry_run=dry_run):
+            return
+        # Root `up` and `compose up` share one implementation (ComposeOperations)
+        # so they cannot drift from each other.
+        _shared.manager.compose_operations.up(names=names, build=build, pull=pull, report=report)
 
     @subcommand("restart", help="restart installed containers")
     @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
+    @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
+                         help="show what would happen, without doing it")
+    @subcommand_argument("--report", action="store_true", default=False,
+                         help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False):
-        context = self._make_context(["restart", pull and "pull", build and "build"], names)
-        services = _shared.manager.compose_runner.collect_services(context)
-        # restart omits the --pull=false / --pull missing defaults that `up`
-        # emits, and (unlike `up`/`exec up`/`exec restart`) never includes
-        # proxy --build-args.
-        options = ComposeOptions(
-            build=build,
-            pull=pull,
-            remove_orphans=context.is_full_containers,
-            services=services,
-            emit_default_pull=False,
-            include_proxy_build_args=False,
-        )
-
-        with _shared.manager.notify_stop(context):
-            _shared.manager.compose_runner.stop(context, services)
-
-        with _shared.manager.notify_start(context):
-            if build:
-                _shared.manager.compose_runner.build(context, options)
-            _shared.manager.compose_runner.up(context, options)
-
-        with _shared.manager.notify_remove(context):
-            pass
-
-        # restart ends with the targets running.
-        _shared.manager.running_state.mark_started(context)
+    def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False,
+                           dry_run: bool = False, report: bool = False):
+        if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, build=build, pull=pull,
+                         dry_run=dry_run):
+            return
+        _shared.manager.compose_operations.restart(names=names, build=build, pull=pull, report=report)
 
     @subcommand("down", help="stop installed containers")
+    @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
+                         help="show what would happen, without doing it")
+    @subcommand_argument("--report", action="store_true", default=False,
+                         help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_down(self, names: "list[str]" = None):
-        context = self._make_context("down", names)
-        services = _shared.manager.compose_runner.collect_services(context)
-
-        with _shared.manager.notify_stop(context):
-            _shared.manager.compose_runner.down(context, services)
-
-        with _shared.manager.notify_remove(context):
-            pass
-
-        # Record stopped state only after a successful down.
-        _shared.manager.running_state.mark_stopped(context)
+    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False):
+        if maybe_dry_run(_shared.manager, self.logger, "down", names=names, dry_run=dry_run):
+            return
+        _shared.manager.compose_operations.down(names=names, report=report)
 
     @subcommand("doctor", help="read-only environment and security checks (changes nothing)")
-    def on_command_doctor(self):
-        findings = Doctor(_shared.manager).run()
-        for finding in findings:
-            self.logger.info(f"[{finding.severity}] {finding.message}")
-        self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
+    @subcommand_argument("--check", action="store_true", default=False,
+                         help="exit non-zero if any WARN-or-worse finding is present")
+    @subcommand_argument("--runtime", action="store_true", default=False,
+                         help="also validate compose config and manifest-declared "
+                              "docker-engine/docker-compose requirements")
+    @subcommand_argument("--sudo-prompt", dest="sudo_prompt", action="store_true", default=False,
+                         help="allow an interactive sudo password prompt (default: never blocks on one)")
+    def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False,
+                          sudo_prompt: bool = False):
+        findings = Doctor(_shared.manager).run(runtime=runtime, sudo_prompt=sudo_prompt)
+        if as_json:
+            import json
+            payload = dict(
+                schema_version=1,
+                project=_shared.manager.project_name,
+                findings=[
+                    dict(severity=f.severity, code=f.code, component=f.component,
+                        message=f.message, details=f.details)
+                    for f in findings
+                ],
+            )
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for finding in findings:
+                self.logger.info(f"[{finding.severity}] {finding.message}")
+            self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
+        # Default `doctor` exit behavior is unchanged; only --check turns
+        # findings into a non-zero exit.
+        if check and any(f.severity == WARN for f in findings):
+            raise ContainerError("Doctor found WARN-level issues")
 
     def _make_context(self, commands, names):
-        context = EventContext()
-        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
-        context.containers = _shared.manager.prepare_installed_containers()
-        if not names:
-            context.target_containers = context.containers
-            context.is_full_containers = True
-        else:
-            context.target_containers = [c for c in context.containers if c.name in names]
-            context.is_full_containers = False
-        return context
+        # Kept as a thin wrapper over the manager facade so external
+        # subclasses/tests calling Command._make_context keep working.
+        return _shared.manager.create_event_context(commands, names=names)

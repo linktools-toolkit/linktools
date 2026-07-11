@@ -4,7 +4,7 @@
 
 Regression: DOCKER_HOST was registered as a config option (and shown by
 `ct-cntr config list`), but create_docker_process() never passed it to the
-docker/podman CLI in any form -- `ct-cntr config set DOCKER_HOST=tcp://...`
+docker CLI in any form -- `ct-cntr config set DOCKER_HOST=tcp://...`
 had no effect on which daemon commands actually ran against.
 
 The built-in default ("/var/run/docker.sock") is left unexpressed so
@@ -32,7 +32,6 @@ def test_default_docker_host_emits_no_explicit_host_arg(fresh_manager, monkeypat
 @pytest.mark.parametrize("container_type,flag", [
     ("docker", "-H"),
     ("docker-rootless", "-H"),
-    ("podman", "--url"),
 ])
 def test_custom_docker_host_is_passed_to_the_cli(fresh_manager, monkeypatch, container_type, flag):
     monkeypatch.setattr(fresh_manager, "container_type", container_type)
@@ -42,8 +41,7 @@ def test_custom_docker_host_is_passed_to_the_cli(fresh_manager, monkeypatch, con
 
     fresh_manager.runtime.create_docker_process("ps")
 
-    expected_bin = "podman" if container_type == "podman" else "docker"
-    assert calls == [(expected_bin, flag, "tcp://10.0.0.1:2376", "ps")]
+    assert calls == [("docker", flag, "tcp://10.0.0.1:2376", "ps")]
 
 
 def test_bare_socket_path_gets_a_unix_scheme(fresh_manager, monkeypatch):
@@ -55,3 +53,16 @@ def test_bare_socket_path_gets_a_unix_scheme(fresh_manager, monkeypatch):
     fresh_manager.runtime.create_docker_process("ps")
 
     assert calls == [("docker", "-H", "unix:///custom/docker.sock", "ps")]
+
+
+def test_podman_container_type_raises_explicit_error_not_silent_fallback(fresh_manager, monkeypatch):
+    """Spec section 48: a legacy DOCKER_TYPE=podman must fail loudly, never
+    silently resolve to docker."""
+    from linktools.cntr.container import ContainerError
+    monkeypatch.setattr(fresh_manager, "container_type", "podman")
+    calls = _record(monkeypatch, fresh_manager)
+
+    with pytest.raises(ContainerError, match="Podman is no longer supported"):
+        fresh_manager.runtime.create_docker_process("ps")
+
+    assert calls == []

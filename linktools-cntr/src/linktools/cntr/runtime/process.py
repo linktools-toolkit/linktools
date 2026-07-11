@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""docker / podman / docker-compose process creation, and host file
-permission operations (chown/chmod) for paths bind-mounted into containers."""
+"""docker / docker-compose process creation, and host file permission
+operations (chown/chmod) for paths bind-mounted into containers."""
 import os
 import shutil
 from typing import TYPE_CHECKING
@@ -30,23 +30,23 @@ def _is_chown_supported(system: str = None) -> bool:
 _DEFAULT_DOCKER_HOST = "/var/run/docker.sock"
 
 
-def _docker_host_args(container_type: str, host: "str | None") -> "list[str]":
+def _docker_host_args(host: "str | None") -> "list[str]":
     """Explicit connection args for a configured DOCKER_HOST.
 
     Only emitted when DOCKER_HOST was actually changed away from the built-in
-    default -- otherwise docker/podman's own default connection resolution
-    (e.g. docker-rootless's active `docker context`) is left alone, since the
+    default -- otherwise docker's own default connection resolution (e.g.
+    docker-rootless's active `docker context`) is left alone, since the
     built-in default string doesn't itself describe where that resolves to.
     """
     if not host or host == _DEFAULT_DOCKER_HOST:
         return []
     if "://" not in host:
         host = f"unix://{host}"
-    return ["--url", host] if container_type == "podman" else ["-H", host]
+    return ["-H", host]
 
 
 class RuntimeProcessFactory:
-    """Create docker/podman/compose subprocesses behind the facade."""
+    """Create docker/compose subprocesses behind the facade."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
@@ -57,12 +57,19 @@ class RuntimeProcessFactory:
             privilege: bool = None,
             **kwargs,
     ) -> "Process":
+        # Private kwarg, not part of the public facade signature: read-only
+        # background queries (list/status, doctor) pass sudo_non_interactive=True
+        # so a missing sudo policy fails fast instead of blocking on a
+        # password prompt; up/restart/down keep the interactive default.
+        sudo_non_interactive = kwargs.pop("sudo_non_interactive", False)
         if privilege:
             if self.manager.system in ("darwin", "linux") and self.manager.uid != 0:
                 proxy_keys = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
                 preserve_keys = [*[e.lower() for e in proxy_keys], *[e.upper() for e in proxy_keys]]
                 preserve_env = [key for key in preserve_keys if key in os.environ]
                 sudo_args = ["sudo"]
+                if sudo_non_interactive:
+                    sudo_args.append("-n")
                 if preserve_env:
                     sudo_args.append(f"--preserve-env={','.join(preserve_env)}")
                 sudo_args.extend(args)
@@ -79,12 +86,13 @@ class RuntimeProcessFactory:
         host = self.manager.env_config.get("DOCKER_HOST", type=str, default=None)
         if self.manager.container_type in ("docker", "docker-rootless"):
             commands.extend(["docker"])
-            commands.extend(_docker_host_args(self.manager.container_type, host))
+            commands.extend(_docker_host_args(host))
             if privilege is None:
                 privilege = self.manager.container_type == "docker"
         elif self.manager.container_type == "podman":
-            commands.extend(["podman"])
-            commands.extend(_docker_host_args(self.manager.container_type, host))
+            raise ContainerError(
+                "Podman is no longer supported. Use DOCKER_TYPE=docker or docker-rootless."
+            )
         else:
             raise ContainerError(f"Invalid container type: {self.manager.container_type}")
         return self.create_process(*commands, *args, privilege=privilege, **kwargs)
@@ -102,8 +110,8 @@ class RuntimeProcessFactory:
             if path and os.path.exists(path):
                 options.extend(["--file", path])
         if not options:
-            # Without any --file, docker/podman compose falls back to
-            # searching the current working directory for a compose file --
+            # Without any --file, docker compose falls back to searching
+            # the current working directory for a compose file --
             # if the targeted containers produced none, that search could hit
             # a completely unrelated project instead of failing loudly.
             raise ContainerError("No Docker Compose file was generated for the targeted containers")
@@ -128,9 +136,10 @@ class RuntimeProcessFactory:
         args.extend([f"{uid}:{gid}", str(path)])
         try:
             stat = os.stat(path)
-            # Route through manager.create_process (not self.create_process) so a
-            # ContainerManager subclass overriding it still governs privilege here.
-            manager.create_process(
+            # A RuntimeProcessFactory subclass overriding create_process still
+            # governs privilege here, since this calls back into `self`, not
+            # a separate manager-level wrapper.
+            self.create_process(
                 *args,
                 privilege=manager.uid != stat.st_uid or manager.uid != uid
             ).check_call()
@@ -155,7 +164,7 @@ class RuntimeProcessFactory:
         args.extend([oct(mode)[2:], str(path)])
         try:
             stat = os.stat(path)
-            manager.create_process(
+            self.create_process(
                 *args,
                 privilege=manager.uid != stat.st_uid
             ).check_call()

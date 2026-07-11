@@ -29,7 +29,7 @@ class ExecCommand(BaseCommand):
         parser = CommandParser()
 
         subcommands: "list[SubCommand]" = []
-        for container in _shared.manager.get_installed_containers():
+        for container in _shared.manager.installed_state.get():
             subcommand_group = SubCommandGroup(container.name, container.description)
             subcommands.append(subcommand_group)
             subcommands.extend(self.walk_subcommands(container, parent_id=subcommand_group.id))

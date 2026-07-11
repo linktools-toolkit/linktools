@@ -80,14 +80,14 @@ class Container(BaseContainer):
                 lambda r: self._get_default_index_url()
             )),
             NGINX_WAF_ENABLE=ConfigField.chain(
-                AliasProvider("WAF_ENABLE"), LazyProvider(lambda r: self.manager.containers["safeline"].enable),
+                AliasProvider("WAF_ENABLE"), LazyProvider(lambda r: self.containers["safeline"].enable),
                 cast=bool,
             ),
             NGINX_WAF_PORT=ConfigField(cast=int, default=0, provider=LazyProvider(
                 lambda r: 8000 if r.get("NGINX_WAF_ENABLE") else 0
             )),
             NGINX_AUTH_ENABLE=ConfigField.chain(
-                AliasProvider("AUTH_ENABLE"), LazyProvider(lambda r: self.manager.containers["authelia"].enable),
+                AliasProvider("AUTH_ENABLE"), LazyProvider(lambda r: self.containers["authelia"].enable),
                 cast=bool,
             ),
             ACME_DNS_API=ConfigField.chain(
@@ -165,9 +165,9 @@ class Container(BaseContainer):
     def on_check(self, context: "EventContext"):
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
-        if self.get_config("NGINX_WAF_ENABLE") and not self.manager.containers["safeline"].enable:
+        if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
-        if self.get_config("NGINX_AUTH_ENABLE") and not self.manager.containers["authelia"].enable:
+        if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
 
     def _update_files(self):
@@ -204,7 +204,7 @@ class Container(BaseContainer):
             )
 
         # 初始化conf.d
-        for container in self.manager.get_installed_containers():
+        for container in self.manager.installed_state.get():
             path = self.get_app_path("temporary", container.name)
             if os.path.isdir(path):
                 shutil.copytree(
@@ -224,14 +224,14 @@ class Container(BaseContainer):
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
             self.logger.info("Renew nginx certificates if necessary.")
-            self.manager.create_docker_process(
+            self.runtime.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --renew --issue "
                             f"{self.acme_ssl_domains_args} "
                             f"--dns {self.get_config('ACME_DNS_API')} "
                             f"1>/dev/null"
             ).call()
-            self.manager.create_docker_process(
+            self.runtime.create_docker_process(
                 "exec", "-it", self.get_service_name("nginx"),
                 "sh", "-c", f"acme.sh --install-cert "
                             f"{self.acme_ssl_domains_args} "
@@ -240,7 +240,7 @@ class Container(BaseContainer):
             ).call()
 
         # 重启nginx
-        self.manager.create_docker_process(
+        self.runtime.create_docker_process(
             "exec", "-it", self.get_service_name("nginx"),
             "sh", "-c", "killall nginx 1>/dev/null 2>&1"
         ).call()
@@ -322,7 +322,7 @@ class Container(BaseContainer):
                     **context,
                 )
             if auth_enable:
-                authelia = self.manager.containers["authelia"]
+                authelia = self.containers["authelia"]
                 authelia.write_nginx_conf(
                     domain=domain,
                     proxy_name="auth_location",

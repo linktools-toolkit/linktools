@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from typing import Any
     from pathlib import Path
     from ..container import BaseContainer
+    from ..manager import ContainerManager
 
 
 def _resolve_relative_path(container: "BaseContainer", value):
@@ -49,7 +50,7 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
             for name, service in data["services"].items():
                 if not isinstance(service, dict):
                     continue
-                service.setdefault("container_name", f"{container.manager.project_name}-{name}")
+                service.setdefault("container_name", f"{container.project_name}-{name}")
                 service.setdefault("restart", container.get_config("SERVICE_RESTART_POLICY"))
                 service.setdefault("logging", {
                     "driver": container.get_config("SERVICE_LOG_DRIVER"),
@@ -135,24 +136,59 @@ def get_services(container: "BaseContainer") -> "dict[str, dict[str, Any]]":
     return services
 
 
+def _record_artifact(container: "BaseContainer", destination, kind: str, content: str, source_names) -> None:
+    from ..artifacts.index import sha256_of
+    manager = container.manager
+    rel_path = os.path.relpath(str(destination), str(manager.data_path))
+    source = None
+    for name in source_names:
+        candidate = container.get_source_path(name)
+        if candidate and os.path.exists(candidate):
+            source = str(candidate)
+            break
+    entry = dict(kind=kind, container=container.name, sha256=sha256_of(content), source=source)
+    repository = getattr(container, "_repository", None)
+    if repository is not None and not repository.builtin and repository.url:
+        entry["repository_url"] = repository.url
+        revision = _git_revision(manager, repository.root_path)
+        if revision is not None:
+            entry["repository_revision"] = revision
+    manager.artifact_index.record({rel_path: entry})
+
+
+def _git_revision(manager: "ContainerManager", repo_path) -> "str | None":
+    if not repo_path or not os.path.exists(str(repo_path)):
+        return None
+    try:
+        from dulwich.errors import NotGitRepository
+        from linktools.git import GitRepository
+        return GitRepository(manager.environ, str(repo_path)).head_sha()
+    except NotGitRepository:
+        return None
+    except Exception:  # noqa: BLE001 - artifact recording must never fail a real write
+        return None
+
+
 def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
     destination = None
     if container.docker_compose:
+        from ..artifacts.writer import atomic_write_text_if_changed
         destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
         destination.parent.mkdir(parents=True, exist_ok=True)
         # safe_dump (not dump) so non-serializable values raise instead of
         # leaking a Python object tag into the written YAML.
-        utils.write_file(
-            destination,
-            yaml.safe_dump(container.docker_compose, sort_keys=True, allow_unicode=False),
-        )
+        content = yaml.safe_dump(container.docker_compose, sort_keys=True, allow_unicode=False)
+        atomic_write_text_if_changed(destination, content)
+        _record_artifact(container, destination, "compose", content, container.manager.docker_compose_names)
     return destination
 
 
 def write_docker_file(container: "BaseContainer") -> "Path | None":
     destination = None
     if container.docker_file:
+        from ..artifacts.writer import atomic_write_text_if_changed
         destination = utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        utils.write_file(destination, container.docker_file)
+        atomic_write_text_if_changed(destination, container.docker_file)
+        _record_artifact(container, destination, "dockerfile", container.docker_file, ("Dockerfile",))
     return destination

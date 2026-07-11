@@ -25,7 +25,7 @@ def _no_proxy_env(monkeypatch):
 def _ctx(manager, target_names=None, is_full=False):
     ctx = EventContext()
     ctx.commands = ["up"]
-    ctx.containers = manager.get_installed_containers(resolve=True)
+    ctx.containers = manager.installed_state.get(resolve=True)
     if is_full:
         ctx.target_containers = ctx.containers
         ctx.is_full_containers = True
@@ -128,7 +128,7 @@ def test_build_and_up_route_args_through_process(fresh_manager, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager, "create_docker_compose_process", fake_create)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake_create)
     runner = fresh_manager.compose_runner
     ctx = _ctx(fresh_manager, ["portainer"])
     opts = ComposeOptions(build=True, pull=False, emit_default_pull=True, services=["portainer"])

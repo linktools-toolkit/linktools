@@ -94,7 +94,7 @@ class Container(BaseContainer):
             if isinstance(value, ExposeCategory):
                 categories.setdefault(value, list())
 
-        for container in sorted(self.manager.get_installed_containers(), key=lambda o: o.order):
+        for container in sorted(self.manager.installed_state.get(), key=lambda o: o.order):
             for expose in container.exposes:
                 if isinstance(expose, ExposeLink) and expose.is_valid:
                     categories[expose.category].append(expose)

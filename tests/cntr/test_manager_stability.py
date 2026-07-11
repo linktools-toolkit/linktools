@@ -74,7 +74,7 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
     mgr.system = "linux"  # _is_chown_supported is linux-only
 
     with tempfile.NamedTemporaryFile() as fp:
-        mgr.change_file_mode(fp.name, mode=0o755)
+        mgr.runtime.chmod(fp.name, mode=0o755)
 
     assert "chmod" in calls
     assert "chown" not in calls
@@ -83,50 +83,39 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
 # -- ContainerManager public surface -----------------------------------------
 
 MANAGER_API = (
-    "change_file_owner", "change_file_mode", "containers",
-    "create_process", "create_docker_process", "create_docker_compose_process",
-    "debug", "get_installed_containers", "resolve_depend_containers",
-    "prepare_installed_containers", "add_installed_containers",
-    "remove_installed_containers", "get_running_containers",
-    "project_name", "start_hooks", "stop_hooks",
+    "containers",
+    "debug", "prepare_installed_containers", "create_event_context",
+    "get_running_containers",
+    "project_name", "hooks", "start_hooks", "stop_hooks",
     "user", "uid", "gid", "system", "machine", "host",
     "container_type", "container_host",
     "docker_container_name", "docker_compose_names",
     "root_path", "app_path", "app_data_path",
     "data_path", "temp_path", "setting_path",
-    "env_config", "compose_runner", "resolver", "loader", "runtime",
+    "env_config", "compose_runner", "compose_operations",
+    "resolver", "loader", "runtime",
     "lifecycle", "running_state", "installed_state", "repo_store",
+)
+
+# Manager forwarding wrappers deliberately removed (Spec section 68): a
+# breaking change with no compatibility alias. Each has a formal service
+# entry point instead -- see test_manager_wrapper_forwarding_methods_removed.
+_REMOVED_MANAGER_WRAPPERS = (
+    "create_process", "create_docker_process", "create_docker_compose_process",
+    "change_file_owner", "change_file_mode",
+    "notify_start", "notify_stop", "notify_remove",
+    "get_installed_containers", "resolve_depend_containers",
+    "add_installed_containers", "remove_installed_containers",
     "get_all_repos", "add_repo", "update_repos", "remove_repo",
+    "_callback",
 )
 
 # name -> (descriptor type, [(param name, kind, default)])
 _METHOD_SIGNATURES = {
-    "get_installed_containers": [("resolve", inspect.Parameter.POSITIONAL_OR_KEYWORD, True)],
-    "add_installed_containers": [("names", inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.empty)],
-    "remove_installed_containers": [
-        ("names", inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.empty),
-        ("force", inspect.Parameter.KEYWORD_ONLY, False),
+    "create_event_context": [
+        ("commands", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
+        ("names", inspect.Parameter.POSITIONAL_OR_KEYWORD, None),
     ],
-    "change_file_owner": [
-        ("path", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
-        ("user", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
-        ("recursive", inspect.Parameter.POSITIONAL_OR_KEYWORD, False),
-    ],
-    "change_file_mode": [
-        ("path", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
-        ("mode", inspect.Parameter.POSITIONAL_OR_KEYWORD, 0o755),
-        ("recursive", inspect.Parameter.POSITIONAL_OR_KEYWORD, False),
-    ],
-    "add_repo": [
-        ("url", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty),
-        ("branch", inspect.Parameter.POSITIONAL_OR_KEYWORD, None),
-        ("force", inspect.Parameter.POSITIONAL_OR_KEYWORD, False),
-    ],
-    "update_repos": [
-        ("branch", inspect.Parameter.POSITIONAL_OR_KEYWORD, None),
-        ("reset", inspect.Parameter.POSITIONAL_OR_KEYWORD, False),
-    ],
-    "remove_repo": [("url", inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.empty)],
 }
 
 # name -> expected class-level descriptor type
@@ -144,9 +133,11 @@ _DESCRIPTOR_TYPES = {
     "temp_path": _CachedProperty,
     "setting_path": _CachedProperty,
     "containers": _CachedProperty,
+    "hooks": _CachedProperty,
     "start_hooks": _CachedProperty,
     "stop_hooks": _CachedProperty,
     "compose_runner": _CachedProperty,
+    "compose_operations": _CachedProperty,
     "resolver": _CachedProperty,
     "loader": _CachedProperty,
     "runtime": _CachedProperty,
@@ -160,6 +151,15 @@ _DESCRIPTOR_TYPES = {
 def test_manager_api_surface_present(fresh_manager):
     for name in MANAGER_API:
         assert hasattr(fresh_manager, name), f"ContainerManager is missing {name}"
+
+
+def test_manager_wrapper_forwarding_methods_removed(fresh_manager):
+    """Spec section 68.4: these one-line delegating wrappers are deliberately
+    removed with no compatibility alias; downstream must call the formal
+    service instead (manager.runtime, manager.lifecycle, manager.resolver,
+    manager.installed_state, manager.repo_store)."""
+    for name in _REMOVED_MANAGER_WRAPPERS:
+        assert not hasattr(fresh_manager, name), f"{name} should have been removed from ContainerManager"
 
 
 def test_manager_method_signatures_unchanged():
@@ -249,7 +249,7 @@ def test_installed_containers_route_through_persistent_store(fresh_manager, monk
         fresh_manager._persistent_store, "set",
         lambda key, value: (calls.append(key), None)[1],
     )
-    fresh_manager.add_installed_containers(*list(fresh_manager.containers.keys())[:1])
+    fresh_manager.installed_state.add(*list(fresh_manager.containers.keys())[:1])
     assert "INSTALLED_CONTAINERS" in calls
 
 
@@ -259,7 +259,7 @@ def test_installed_repos_route_through_persistent_store(fresh_manager, monkeypat
         fresh_manager._persistent_store, "get",
         lambda key, default=None: (calls.append(key), default)[1],
     )
-    fresh_manager.get_all_repos()
+    fresh_manager.repo_store.get_all()
     assert "INSTALLED_REPOS" in calls
 
 

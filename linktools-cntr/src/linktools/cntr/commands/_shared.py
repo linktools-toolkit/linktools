@@ -14,4 +14,4 @@ def iter_container_names():
 
 
 def iter_installed_container_names():
-    return [container.name for container in manager.get_installed_containers()]
+    return [container.name for container in manager.installed_state.get()]

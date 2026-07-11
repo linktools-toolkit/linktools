@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .manager import ContainerManager
     from .context import EventContext
+    from .lifecycle.hooks import HookListView, HookRegistry
 
 
 class ContainerError(Error):
@@ -107,6 +108,50 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         """Return this container's operational cache namespace."""
         return self.manager.environ.cache.namespace("cntr:app:" + self.name)
 
+    # -- Direct access to shared manager services (Spec section 64) ---------
+    # Lightweight `@property`, not `@cached_property`: the instance itself is
+    # already cached on the manager, so these never construct a second copy.
+
+    @property
+    def environ(self):
+        return self.manager.environ
+
+    @property
+    def env_config(self):
+        return self.manager.env_config
+
+    @property
+    def runtime(self):
+        return self.manager.runtime
+
+    @property
+    def compose_runner(self):
+        return self.manager.compose_runner
+
+    @property
+    def lifecycle(self):
+        return self.manager.lifecycle
+
+    @property
+    def running_state(self):
+        return self.manager.running_state
+
+    @property
+    def project_name(self):
+        return self.manager.project_name
+
+    @property
+    def host(self):
+        return self.manager.host
+
+    @property
+    def user(self):
+        return self.manager.user
+
+    @property
+    def containers(self):
+        return self.manager.containers
+
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":
         return _compose.load_docker_compose(self)
@@ -120,27 +165,29 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return _compose.get_services(self)
 
     @cached_property
-    def start_hooks(self) -> "list[Callable[[], Any]]":
-        return []
+    def hooks(self) -> "HookRegistry":
+        from .lifecycle.hooks import HookRegistry
+        return HookRegistry(owner=self, scope="container")
 
     @cached_property
-    def stop_hooks(self) -> "list[Callable[[], Any]]":
-        return []
+    def start_hooks(self) -> "HookListView":
+        from .lifecycle.hooks import HookPhase
+        return self.hooks.legacy_view(HookPhase.BEFORE_START)
 
     @cached_property
-    def _rendered_hook_keys(self) -> "set[tuple]":
-        # Idempotency ledger for hook registration: tracks which (action,
-        # target, ...) keys have already produced a hook so re-rendering a
-        # template -- or rendering the same path in compose and Dockerfile --
-        # does not register duplicate start/stop hooks.
-        return set()
+    def stop_hooks(self) -> "HookListView":
+        from .lifecycle.hooks import HookPhase
+        return self.hooks.legacy_view(HookPhase.AFTER_STOP)
 
-    def add_start_hook(self, key: "tuple", hook: "Callable[[], Any]") -> None:
-        """Register a start hook once per key."""
-        if key in self._rendered_hook_keys:
-            return
-        self._rendered_hook_keys.add(key)
-        self.start_hooks.append(hook)
+    def add_start_hook(self, key: "tuple", hook: "Callable[[], Any]", **kwargs: "Any") -> None:
+        """Register a BEFORE_START hook once per key (idempotent re-render)."""
+        from .lifecycle.hooks import HookPhase
+        self.hooks.register(HookPhase.BEFORE_START, hook, key=key, **kwargs)
+
+    def add_stop_hook(self, key: "tuple", hook: "Callable[[], Any]", **kwargs: "Any") -> None:
+        """Register an AFTER_STOP hook once per key (idempotent re-render)."""
+        from .lifecycle.hooks import HookPhase
+        self.hooks.register(HookPhase.AFTER_STOP, hook, key=key, **kwargs)
 
     def on_init(self):
         pass
@@ -240,20 +287,20 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         if isinstance(key, ConfigField):
             if not key.name:
                 raise ValueError("ConfigField passed as a config key must have a name")
-            self.manager.env_config.define(key)
+            self.env_config.define(key)
             return key.name
         return key
 
     def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
-        return self.manager.env_config.get(self._resolve_config_key(key), type=type, default=default)
+        return self.env_config.get(self._resolve_config_key(key), type=type, default=default)
 
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
-        return lazy_load(self.manager.env_config.get, self._resolve_config_key(key), type=type, default=default)
+        return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
     def _make_exec_context(self, commands) -> "EventContext":
         from .context import EventContext
 
-        containers = self.manager.get_installed_containers(resolve=True)
+        containers = self.manager.installed_state.get(resolve=True)
         if self not in containers:
             raise ContainerError(f"{self} is not installed")
 
@@ -312,7 +359,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self.get_source_path()
 
     def get_service_name(self, key: str) -> str:
-        return f"{self.manager.project_name}-{key}"
+        return f"{self.project_name}-{key}"
 
     def is_depend_on(self, name: str):
         next_items = set(self.dependencies)
@@ -329,7 +376,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                 # as a dependency); skip it rather than crash, so `remove`
                 # stays usable as the way to recover from that state instead
                 # of being blocked by it.
-                next_container = self.manager.containers.get(next_name)
+                next_container = self.containers.get(next_name)
                 if next_container is None:
                     continue
                 for next_dependency in next_container.dependencies:
@@ -378,7 +425,10 @@ class SourceContainer(BaseContainer):
                     utils.remove_file(dest_path)
                     raise
 
-        self.start_hooks.append(init_source_code)
+        self.add_start_hook(
+            ("init_source_code", self.name), init_source_code,
+            name="init_source_code", order=50, source="builtin",
+        )
         return os.path.join(dest_path, self._source_path)
 
     def get_docker_context_path(self):

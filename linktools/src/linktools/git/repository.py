@@ -113,6 +113,18 @@ class GitRepository(object):
         status = self.status()
         return bool(any(status.staged.values()) or status.unstaged)
 
+    def head_sha(self) -> str:
+        """Current HEAD commit SHA (full hex string)."""
+        return self._repo.head().decode()
+
+    def current_branch(self) -> "str | None":
+        """Current branch name, or None if HEAD is detached."""
+        try:
+            branch_ref = self._current_branch_ref()
+        except GitError:
+            return None
+        return branch_ref[len(b"refs/heads/"):].decode()
+
     # -- writes (all serialised) ------------------------------------------
 
     def add(self, *paths):

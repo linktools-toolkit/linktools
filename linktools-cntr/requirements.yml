@@ -3,6 +3,11 @@ dependencies:
   - pyyaml
   - dotenv
   - rsa
+  # Repository Manifest requirement comparison (PEP 440). packaging>=22
+  # dropped Python 3.6/3.7 support, so this stays split by python_version
+  # rather than raising this package's own >=3.6 floor for one dependency.
+  - packaging<22; python_version < '3.8'
+  - packaging; python_version >= '3.8'
 
 dev-dependencies: []
 

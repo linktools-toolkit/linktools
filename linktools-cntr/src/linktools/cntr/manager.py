@@ -26,7 +26,6 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
-import inspect
 import os
 import pathlib
 from typing import TYPE_CHECKING
@@ -37,26 +36,31 @@ from linktools.core import (
     ConfigField, PromptProvider, LazyProvider, AliasProvider,
 )
 from linktools.decorator import cached_property
-from linktools.types import MISSING
 
 from . import _migrate
 from .container import BaseContainer, ContainerError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
     from typing import Any
     from linktools.core import Environ
-    from linktools.runtime import Process
-    from linktools.types import PathType
     from .context import EventContext
     from .registry.resolver import ContainerResolver
     from .registry.loader import ContainerLoader
+    from .operations.compose import ComposeOperations
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
+    from .runtime.structured import StructuredCommandRunner
+    from .runtime.inspect import DockerInspector
     from .lifecycle.dispatcher import LifecycleDispatcher
+    from .lifecycle.hooks import HookListView, HookRegistry
     from .state.running import RunningStateStore
     from .state.installed import InstalledStateStore
     from .repo.store import RepoStore
+    from .repo.manifest import RepositoryManifestService
+    from .artifacts.index import ArtifactIndex
+    from .execution.planner import ExecutionPlanner
+    from .lock.store import LockStore
 
 
 class ContainerManager:
@@ -215,12 +219,19 @@ class ContainerManager:
         return result
 
     @cached_property
-    def start_hooks(self) -> "list[Callable[[], Any]]":
-        return []
+    def hooks(self) -> "HookRegistry":
+        from .lifecycle.hooks import HookRegistry
+        return HookRegistry(owner=self, scope="manager")
 
     @cached_property
-    def stop_hooks(self) -> "list[Callable[[], Any]]":
-        return []
+    def start_hooks(self) -> "HookListView":
+        from .lifecycle.hooks import HookPhase
+        return self.hooks.legacy_view(HookPhase.BEFORE_START)
+
+    @cached_property
+    def stop_hooks(self) -> "HookListView":
+        from .lifecycle.hooks import HookPhase
+        return self.hooks.legacy_view(HookPhase.AFTER_STOP)
 
     @cached_property
     def compose_runner(self) -> "ComposeRunner":
@@ -228,6 +239,13 @@ class ContainerManager:
         # docker-compose argument builder.
         from .runtime.compose import ComposeRunner
         return ComposeRunner(self)
+
+    @cached_property
+    def compose_operations(self) -> "ComposeOperations":
+        # Root up/restart/down and the `compose` command namespace both
+        # dispatch through this so they can never drift from each other.
+        from .operations.compose import ComposeOperations
+        return ComposeOperations(self)
 
     @cached_property
     def resolver(self) -> "ContainerResolver":
@@ -243,6 +261,31 @@ class ContainerManager:
     def runtime(self) -> "RuntimeProcessFactory":
         from .runtime.process import RuntimeProcessFactory
         return RuntimeProcessFactory(self)
+
+    @cached_property
+    def structured_runner(self) -> "StructuredCommandRunner":
+        from .runtime.structured import StructuredCommandRunner
+        return StructuredCommandRunner(self)
+
+    @cached_property
+    def docker_inspector(self) -> "DockerInspector":
+        from .runtime.inspect import DockerInspector
+        return DockerInspector(self)
+
+    @cached_property
+    def artifact_index(self) -> "ArtifactIndex":
+        from .artifacts.index import ArtifactIndex
+        return ArtifactIndex(self)
+
+    @cached_property
+    def planner(self) -> "ExecutionPlanner":
+        from .execution.planner import ExecutionPlanner
+        return ExecutionPlanner(self)
+
+    @cached_property
+    def lock_store(self) -> "LockStore":
+        from .lock.store import LockStore
+        return LockStore(self)
 
     @cached_property
     def lifecycle(self) -> "LifecycleDispatcher":
@@ -264,15 +307,14 @@ class ContainerManager:
         from .repo.store import RepoStore
         return RepoStore(self)
 
-    def get_installed_containers(self, resolve: bool = True) -> "list[BaseContainer]":
-        return self.installed_state.get(resolve=resolve)
-
-    def resolve_depend_containers(self, containers: "Iterable[BaseContainer]") -> "list[BaseContainer]":
-        return self.resolver.resolve_dependencies(containers)
+    @cached_property
+    def repo_manifest(self) -> "RepositoryManifestService":
+        from .repo.manifest import RepositoryManifestService
+        return RepositoryManifestService(self)
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
-        containers = self.get_installed_containers(resolve=True)
+        containers = self.installed_state.get(resolve=True)
         if not containers:
             raise ContainerError("No container installed")
         for container in self.containers.values():
@@ -280,7 +322,7 @@ class ContainerManager:
         for container in reversed(containers):
             self.env_config.update_defaults(**container.configs)
         for container in containers:
-            self._callback(func=container.on_prepare)
+            container.on_prepare()
         for container in containers:
             if container.docker_file and self.debug:  # 加载每个容器的dockerfile
                 self.logger.debug(f"Generate Dockerfile for {container.name}")
@@ -290,11 +332,21 @@ class ContainerManager:
                 self.logger.debug(f"Load exposes for {container.name}")
         return containers
 
-    def add_installed_containers(self, *names: str) -> "list[BaseContainer]":
-        return self.installed_state.add(*names)
-
-    def remove_installed_containers(self, *names: str, force: bool = False) -> "list[BaseContainer]":
-        return self.installed_state.remove(*names, force=force)
+    def create_event_context(self, commands, names: "Iterable[str] | None" = None) -> "EventContext":
+        # Kept as the single place that builds a plain-filter EventContext (no
+        # ComposeSelection validation) so external subclasses/tests calling
+        # Command._make_context keep their exact prior behavior.
+        from .context import EventContext
+        context = EventContext()
+        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
+        context.containers = self.prepare_installed_containers()
+        if not names:
+            context.target_containers = context.containers
+            context.is_full_containers = True
+        else:
+            context.target_containers = [c for c in context.containers if c.name in names]
+            context.is_full_containers = False
+        return context
 
     def get_running_containers(self):
         with self.environ.locks.process_lock("cntr:settings"):
@@ -314,65 +366,3 @@ class ContainerManager:
         self._transient_ns.set(
             "RUNNING_CONTAINERS", list({container.name for container in containers}))
 
-    def notify_start(self, context: "EventContext"):
-        return self.lifecycle.notify_start(context)
-
-    def notify_stop(self, context: "EventContext"):
-        return self.lifecycle.notify_stop(context)
-
-    def notify_remove(self, context: "EventContext"):
-        return self.lifecycle.notify_remove(context)
-
-    def _callback(self, func, context: "EventContext" = MISSING):
-        if self.environ.debug:
-            self.logger.debug(f"Callback {func}")
-        if context is MISSING:
-            return func()
-        sig = inspect.signature(func)
-        if len(sig.parameters) == 0:
-            return func()
-        else:
-            return func(context)
-
-    def create_process(
-            self,
-            *args,
-            privilege: bool = None,
-            **kwargs
-    ) -> "Process":
-        return self.runtime.create_process(*args, privilege=privilege, **kwargs)
-
-    def create_docker_process(
-            self,
-            *args,
-            privilege: bool = None,
-            **kwargs
-    ) -> "Process":
-        return self.runtime.create_docker_process(*args, privilege=privilege, **kwargs)
-
-    def create_docker_compose_process(
-            self,
-            containers: "Iterable[BaseContainer]",
-            *args: str,
-            privilege: bool = None,
-            **kwargs: "Any"
-    ) -> "Process":
-        return self.runtime.create_docker_compose_process(containers, *args, privilege=privilege, **kwargs)
-
-    def change_file_owner(self, path: "PathType", user: str, recursive: bool = False) -> None:
-        return self.runtime.chown(path, user, recursive=recursive)
-
-    def change_file_mode(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
-        return self.runtime.chmod(path, mode, recursive=recursive)
-
-    def get_all_repos(self) -> "dict[str, dict[str, str]]":
-        return self.repo_store.get_all()
-
-    def add_repo(self, url: str, branch: str = None, force: bool = False):
-        return self.repo_store.add(url, branch=branch, force=force)
-
-    def update_repos(self, branch: str = None, reset: bool = False):
-        return self.repo_store.update(branch=branch, reset=reset)
-
-    def remove_repo(self, url: str):
-        return self.repo_store.remove(url)

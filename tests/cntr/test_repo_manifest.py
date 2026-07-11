@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Repository Manifest (Spec Part III): static validation, host compatibility,
+repo add cleanup-on-failure, and pre-import gating in ContainerLoader."""
+import json
+import os
+
+import pytest
+
+from linktools.cntr.repo.manifest import (
+    RepositoryIncompatible, RepositoryManifestInvalid, RepositoryManifestService, RepositorySchemaUnsupported,
+)
+
+_VALID = {
+    "schema_version": 1,
+    "kind": "linktools-cntr-repository",
+    "name": "example",
+    "version": "1.2.0",
+}
+
+
+def _write(tmp_path, data):
+    if isinstance(data, str):
+        (tmp_path / ".linktools.json").write_text(data, encoding="utf-8")
+    else:
+        (tmp_path / ".linktools.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+# -- load() / static validation ----------------------------------------------
+
+def test_missing_manifest_is_legacy_and_returns_none(fresh_manager, tmp_path):
+    assert fresh_manager.repo_manifest.load(tmp_path) is None
+
+
+def test_empty_file_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, "")
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_invalid_json_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, "{not json")
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_non_object_root_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, "[1, 2, 3]")
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_oversized_manifest_is_invalid(fresh_manager, tmp_path):
+    huge = dict(_VALID, description="x" * (1024 * 1024 + 1))
+    _write(tmp_path, huge)
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_missing_schema_version_is_invalid(fresh_manager, tmp_path):
+    data = dict(_VALID)
+    del data["schema_version"]
+    _write(tmp_path, data)
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_schema_version_1_is_supported(fresh_manager, tmp_path):
+    _write(tmp_path, _VALID)
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert manifest.schema_version == 1
+
+
+def test_unsupported_schema_version_rejected(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, schema_version=2))
+    with pytest.raises(RepositorySchemaUnsupported):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_missing_kind_is_invalid(fresh_manager, tmp_path):
+    data = dict(_VALID)
+    del data["kind"]
+    _write(tmp_path, data)
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_wrong_kind_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, kind="something-else"))
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_invalid_specifier_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, requires={"python": "not a specifier!!"}))
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_invalid_version_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, version="not-a-version!!"))
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_metadata_and_extensions_are_preserved_verbatim(fresh_manager, tmp_path):
+    data = dict(_VALID, metadata={"license": "Apache-2.0", "tags": ["a", "b"]},
+                extensions={"example.vendor": {"channel": "stable"}})
+    _write(tmp_path, data)
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert manifest.metadata == {"license": "Apache-2.0", "tags": ["a", "b"]}
+    assert manifest.extensions == {"example.vendor": {"channel": "stable"}}
+
+
+def test_unknown_top_level_field_is_invalid(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, unknown_field=123))
+    with pytest.raises(RepositoryManifestInvalid):
+        fresh_manager.repo_manifest.load(tmp_path)
+
+
+def test_dollar_schema_field_is_never_fetched(fresh_manager, tmp_path, monkeypatch):
+    def fail_on_network(*a, **k):
+        raise AssertionError("must never make a network request")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_on_network, raising=False)
+    _write(tmp_path, dict(_VALID, **{"$schema": "https://example.invalid/schema.json"}))
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert manifest is not None
+
+
+# -- host requirement compatibility ------------------------------------------
+
+def test_compatible_cntr_and_python_requirement(fresh_manager, tmp_path):
+    import platform
+    from linktools.capabilities.cntr import __cap_cntr__
+    data = dict(_VALID, requires={
+        "linktools-cntr": f">={__cap_cntr__.version}",
+        "python": f">={platform.python_version()}",
+    })
+    _write(tmp_path, data)
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert fresh_manager.repo_manifest.check_host_requirements(manifest) == []
+    fresh_manager.repo_manifest.ensure_loadable(manifest)  # must not raise
+
+
+def test_incompatible_cntr_requirement_blocks_loading(fresh_manager, tmp_path):
+    data = dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})
+    _write(tmp_path, data)
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    issues = fresh_manager.repo_manifest.check_host_requirements(manifest)
+    assert len(issues) == 1
+    assert issues[0].key == "linktools-cntr"
+    with pytest.raises(RepositoryIncompatible):
+        fresh_manager.repo_manifest.ensure_loadable(manifest)
+
+
+def test_incompatible_python_requirement_blocks_loading(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, requires={"python": ">=99.0"}))
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    with pytest.raises(RepositoryIncompatible):
+        fresh_manager.repo_manifest.ensure_loadable(manifest)
+
+
+def test_unknown_requirement_key_does_not_fail_v1(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, requires={"some-other-tool": ">=1.0"}))
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    fresh_manager.repo_manifest.ensure_loadable(manifest)  # must not raise
+    assert fresh_manager.repo_manifest.check_host_requirements(manifest) == []
+
+
+def test_unknown_requirement_keys_are_reported_kept_not_enforced(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, requires={
+        "some-other-tool": ">=1.0", "python": ">=3.6", "another-unknown": ">=2.0",
+    }))
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert fresh_manager.repo_manifest.unknown_requirement_keys(manifest) == [
+        "another-unknown", "some-other-tool",
+    ]
+
+
+def test_no_unknown_requirement_keys_when_only_standard_keys_used(fresh_manager, tmp_path):
+    _write(tmp_path, dict(_VALID, requires={"linktools-cntr": ">=0.1", "python": ">=3.6",
+                                            "docker-engine": ">=20.0", "docker-compose": ">=2.0"}))
+    manifest = fresh_manager.repo_manifest.load(tmp_path)
+    assert fresh_manager.repo_manifest.unknown_requirement_keys(manifest) == []
+
+
+def test_ensure_loadable_is_noop_for_legacy_repo(fresh_manager, tmp_path):
+    fresh_manager.repo_manifest.ensure_loadable(None)  # must not raise
+
+
+def test_service_constants():
+    assert RepositoryManifestService.file_name == ".linktools.json"
+    assert RepositoryManifestService.supported_schema_versions == (1,)
+
+
+# -- ContainerLoader pre-import gating ----------------------------------------
+
+def _make_local_repo(tmp_path, manifest_data=None, with_compose=True):
+    repo_dir = tmp_path / "repo_src"
+    repo_dir.mkdir()
+    if manifest_data is not None:
+        (repo_dir / ".linktools.json").write_text(json.dumps(manifest_data), encoding="utf-8")
+    if with_compose:
+        (repo_dir / "container.py").write_text(
+            "from linktools.cntr.container import BaseContainer\n\n\n"
+            "class Container(BaseContainer):\n    pass\n",
+            encoding="utf-8",
+        )
+    return repo_dir
+
+
+def test_repo_add_cleans_up_on_incompatible_manifest(fresh_manager, tmp_path):
+    from linktools.cntr.container import ContainerError
+    repo_dir = _make_local_repo(tmp_path, manifest_data=dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"}))
+
+    before = dict(fresh_manager.repo_store.get_all())
+    with pytest.raises(ContainerError):
+        fresh_manager.repo_store.add(str(repo_dir), force=True)
+
+    after = fresh_manager.repo_store.get_all()
+    assert after == before
+    # The symlink created for the new repo must have been removed again.
+    repo_root = fresh_manager.data_path / "repo"
+    if repo_root.exists():
+        assert not any(
+            os.path.realpath(str(repo_root / name)) == str(repo_dir.resolve())
+            for name in os.listdir(repo_root)
+        )
+
+
+def test_repo_add_succeeds_for_compatible_manifest(fresh_manager, tmp_path):
+    import platform
+    from linktools.capabilities.cntr import __cap_cntr__
+    repo_dir = _make_local_repo(tmp_path, manifest_data=dict(_VALID, requires={
+        "linktools-cntr": f">={__cap_cntr__.version}",
+        "python": f">={platform.python_version()}",
+    }))
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    assert str(repo_dir.resolve()) in fresh_manager.repo_store.get_all()
+
+
+def test_repo_add_succeeds_for_legacy_repo_without_manifest(fresh_manager, tmp_path):
+    repo_dir = _make_local_repo(tmp_path, manifest_data=None)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    assert str(repo_dir.resolve()) in fresh_manager.repo_store.get_all()
+
+
+def test_incompatible_repo_container_py_is_not_imported(fresh_manager, tmp_path, monkeypatch):
+    repo_dir = _make_local_repo(tmp_path, manifest_data=dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"}))
+    # Bypass RepoStore.add's own manifest gate (already covered above) to
+    # simulate a repo that became incompatible after being installed (e.g.
+    # this host's cntr was downgraded) -- the loader must still refuse it.
+    repos = dict(fresh_manager.repo_store.get_all())
+    repos[str(repo_dir)] = dict(type="local", repo_path=str(repo_dir), repo_name="repo_src")
+    monkeypatch.setattr(fresh_manager.repo_store, "get_all", lambda: repos)
+
+    import_calls = []
+    import linktools.cntr.registry.loader as loader_module
+    real_import = loader_module.import_module_file
+
+    def spy_import(name, path):
+        import_calls.append(path)
+        return real_import(name, path)
+
+    monkeypatch.setattr(loader_module, "import_module_file", spy_import)
+
+    fresh_manager.__dict__.pop("containers", None)
+    containers = fresh_manager.containers
+    assert str(repo_dir / "container.py") not in import_calls
+    assert "example" not in {c.name for c in containers.values()}
+
+
+# -- RepoStore.update() re-validates the manifest (Spec section 26) ----------
+
+def test_update_warns_when_manifest_becomes_incompatible(fresh_manager, tmp_path, monkeypatch):
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+
+    # Simulate the update pulling in a manifest that is now incompatible.
+    (repo_dir / ".linktools.json").write_text(
+        json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    warnings = []
+    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: warnings.append(msg))
+
+    fresh_manager.repo_store.update()
+
+    assert any("incompatible" in w for w in warnings)
+
+
+def test_update_does_not_warn_when_manifest_stays_compatible(fresh_manager, tmp_path, monkeypatch):
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+
+    warnings = []
+    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: warnings.append(msg))
+
+    fresh_manager.repo_store.update()
+
+    assert warnings == []
+
+
+def test_update_does_not_perform_git_rollback(fresh_manager, tmp_path, monkeypatch):
+    """Spec section 26: update explicitly does not implement automatic Git
+    rollback -- an incompatible manifest after update is only reported."""
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    fresh_manager.repo_store.add(str(repo_dir), force=True)
+    (repo_dir / ".linktools.json").write_text(
+        json.dumps(dict(_VALID, requires={"linktools-cntr": ">=9999.0.0"})), encoding="utf-8")
+    monkeypatch.setattr(fresh_manager.repo_store.sync, "sync", lambda *a, **k: None)
+    monkeypatch.setattr(fresh_manager.repo_store.logger, "warning", lambda msg: None)
+
+    fresh_manager.repo_store.update()  # must not raise or revert the file
+
+    with open(repo_dir / ".linktools.json") as f:
+        data = json.load(f)
+    assert data["requires"]["linktools-cntr"] == ">=9999.0.0"
+
+
+# -- describe_repository() field completeness (Spec section 28) -------------
+
+def test_describe_repository_reports_git_revision_and_dirty_state(fresh_manager, tmp_path, monkeypatch):
+    from linktools.cntr.repo.manifest import describe_repository
+    import linktools.git as git_module
+
+    class _FakeGitRepository:
+        def __init__(self, environ, repo_path):
+            pass
+
+        def head_sha(self):
+            return "deadbeef"
+
+        def is_dirty(self):
+            return True
+
+    monkeypatch.setattr(git_module, "GitRepository", _FakeGitRepository)
+
+    repo_dir = _make_local_repo(tmp_path, manifest_data=_VALID)
+    meta = {"type": "git", "repo_path": str(repo_dir)}
+    info = describe_repository(fresh_manager, "https://example.invalid/repo.git", meta)
+
+    assert info["revision"] == "deadbeef"
+    assert info["dirty"] is True

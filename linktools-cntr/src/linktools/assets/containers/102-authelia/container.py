@@ -128,8 +128,8 @@ class Container(BaseContainer):
                 auth_url = utils.make_url("https", domain, port)
 
                 client = dict()
-                client["ClientID"] = f"{self.manager.project_name}-web-client"
-                client["ClientName"] = f"Web Client ({self.manager.project_name})"
+                client["ClientID"] = f"{self.project_name}-web-client"
+                client["ClientName"] = f"Web Client ({self.project_name})"
                 client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
                 client["IssuerURL"] = auth_url
                 client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorization"
@@ -145,8 +145,8 @@ class Container(BaseContainer):
                 result[0]["RedirectURLs"] = set(result[0].get("RedirectURLs", ()))
 
             client = result[0]
-            client["ClientID"] = f"{self.manager.project_name}-web-client"
-            client["ClientName"] = f"Web Client ({self.manager.project_name})"
+            client["ClientID"] = f"{self.project_name}-web-client"
+            client["ClientName"] = f"Web Client ({self.project_name})"
             client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
             settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(result))
 
@@ -166,10 +166,10 @@ class Container(BaseContainer):
         config_path.mkdir(parents=True, exist_ok=True)
         template_path = self.get_source_path("templates")
 
-        self.manager.change_file_owner(secret_path, self.manager.user, recursive=True)
-        self.manager.change_file_mode(secret_path, 0o700, recursive=True)
-        self.manager.change_file_owner(config_path, self.manager.user, recursive=True)
-        self.manager.change_file_mode(config_path, 0o700, recursive=True)
+        self.runtime.chown(secret_path, self.user, recursive=True)
+        self.runtime.chmod(secret_path, 0o700, recursive=True)
+        self.runtime.chown(config_path, self.user, recursive=True)
+        self.runtime.chmod(config_path, 0o700, recursive=True)
 
         self._create_secret_file(secret_path / "jwt_secret")
         self._create_secret_file(secret_path / "session_secret")
@@ -183,8 +183,8 @@ class Container(BaseContainer):
         self.render_template(template_path / "configuration.2fa.yml", config_path / "configuration.2fa.yml")
         self.render_template(template_path / "configuration.oidc.yml", config_path / "configuration.oidc.yml")
 
-        self.manager.change_file_owner(secret_path, "root", recursive=True)
-        self.manager.change_file_owner(config_path, "root", recursive=True)
+        self.runtime.chown(secret_path, "root", recursive=True)
+        self.runtime.chown(config_path, "root", recursive=True)
 
         with self.settings.transaction() as settings:
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)

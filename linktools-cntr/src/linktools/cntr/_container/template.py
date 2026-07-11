@@ -18,25 +18,28 @@ if TYPE_CHECKING:
 
 
 def render_template(container: "BaseContainer", source: "PathType", destination: "PathType" = None, **kwargs: "Any"):
-    config = container.manager.env_config
+    config = container.env_config
 
     def mkdir(path: "PathType") -> str:
         path = config.cast(path, type="path")
         container.add_start_hook(("mkdir", str(path)),
-                                 lambda: os.makedirs(path, mode=0o755, exist_ok=True))
+                                 lambda: os.makedirs(path, mode=0o755, exist_ok=True),
+                                 name="mkdir", order=100, source="builtin")
         return path
 
     def chown(path: "PathType", user: str = None, recursive: bool = False) -> str:
         path = config.cast(path, type="path")
         if user:
             container.add_start_hook(("chown", str(path), str(user), bool(recursive)),
-                                     lambda: container.manager.change_file_owner(path, user, recursive=recursive))
+                                     lambda: container.runtime.chown(path, user, recursive=recursive),
+                                     name="chown", order=200, source="builtin")
         return path
 
     def chmod(path: "PathType", mode: int = 0o755, recursive: bool = False) -> str:
         path = config.cast(path, type="path")
         container.add_start_hook(("chmod", str(path), int(mode), bool(recursive)),
-                                 lambda: container.manager.change_file_mode(path, mode, recursive=recursive))
+                                 lambda: container.runtime.chmod(path, mode, recursive=recursive),
+                                 name="chmod", order=300, source="builtin")
         return path
 
     context = {
@@ -53,9 +56,9 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
 
         manager=container.manager,
         container=container,
-        containers=container.manager.containers,
+        containers=container.containers,
         config=config,
-        user=container.manager.user,
+        user=container.user,
         docker_user=container.get_config_later("DOCKER_USER"),
 
         utils=utils,

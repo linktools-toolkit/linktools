@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import copy
 import functools
+import math
+import operator
 import os
 import sys
 import typing as _t
@@ -84,6 +87,10 @@ class Proxy(object):
             object.__setattr__(self, _proxy_object, obj)
         return obj
 
+    def _set_current_object(self, obj):
+        object.__setattr__(self, _proxy_object, obj)
+        return self
+
     @property
     def __dict__(self):
         return self._get_current_object().__dict__
@@ -125,6 +132,12 @@ class Proxy(object):
     def __str__(self):
         return str(self._get_current_object())
 
+    def __bytes__(self):
+        return bytes(self._get_current_object())
+
+    def __format__(self, format_spec):
+        return format(self._get_current_object(), format_spec)
+
     def __lt__(self, other):
         return self._get_current_object() < other
 
@@ -152,11 +165,20 @@ class Proxy(object):
     def __len__(self):
         return len(self._get_current_object())
 
+    def __length_hint__(self):
+        return self._get_current_object().__length_hint__()
+
     def __getitem__(self, i):
         return self._get_current_object()[i]
 
     def __iter__(self):
         return iter(self._get_current_object())
+
+    def __next__(self):
+        return next(self._get_current_object())
+
+    def __reversed__(self):
+        return reversed(self._get_current_object())
 
     def __contains__(self, i):
         return i in self._get_current_object()
@@ -172,6 +194,9 @@ class Proxy(object):
 
     def __mul__(self, other):
         return self._get_current_object() * other
+
+    def __matmul__(self, other):
+        return self._get_current_object() @ other
 
     def __floordiv__(self, other):
         return self._get_current_object() // other
@@ -200,11 +225,92 @@ class Proxy(object):
     def __or__(self, other):
         return self._get_current_object() | other
 
+    def __radd__(self, other):
+        return other + self._get_current_object()
+
+    def __rsub__(self, other):
+        return other - self._get_current_object()
+
+    def __rmul__(self, other):
+        return other * self._get_current_object()
+
+    def __rmatmul__(self, other):
+        return other @ self._get_current_object()
+
+    def __rfloordiv__(self, other):
+        return other // self._get_current_object()
+
+    def __rmod__(self, other):
+        return other % self._get_current_object()
+
+    def __rdivmod__(self, other):
+        return divmod(other, self._get_current_object())
+
+    def __rpow__(self, other):
+        return other ** self._get_current_object()
+
+    def __rlshift__(self, other):
+        return other << self._get_current_object()
+
+    def __rrshift__(self, other):
+        return other >> self._get_current_object()
+
+    def __rand__(self, other):
+        return other & self._get_current_object()
+
+    def __rxor__(self, other):
+        return other ^ self._get_current_object()
+
+    def __ror__(self, other):
+        return other | self._get_current_object()
+
+    def __iadd__(self, other):
+        return self._set_current_object(operator.iadd(self._get_current_object(), other))
+
+    def __isub__(self, other):
+        return self._set_current_object(operator.isub(self._get_current_object(), other))
+
+    def __imul__(self, other):
+        return self._set_current_object(operator.imul(self._get_current_object(), other))
+
+    def __imatmul__(self, other):
+        return self._set_current_object(operator.imatmul(self._get_current_object(), other))
+
+    def __ifloordiv__(self, other):
+        return self._set_current_object(operator.ifloordiv(self._get_current_object(), other))
+
+    def __imod__(self, other):
+        return self._set_current_object(operator.imod(self._get_current_object(), other))
+
+    def __ipow__(self, other):
+        return self._set_current_object(operator.ipow(self._get_current_object(), other))
+
+    def __ilshift__(self, other):
+        return self._set_current_object(operator.ilshift(self._get_current_object(), other))
+
+    def __irshift__(self, other):
+        return self._set_current_object(operator.irshift(self._get_current_object(), other))
+
+    def __iand__(self, other):
+        return self._set_current_object(operator.iand(self._get_current_object(), other))
+
+    def __ixor__(self, other):
+        return self._set_current_object(operator.ixor(self._get_current_object(), other))
+
+    def __ior__(self, other):
+        return self._set_current_object(operator.ior(self._get_current_object(), other))
+
     def __div__(self, other):
         return self._get_current_object().__div__(other)
 
     def __truediv__(self, other):
         return self._get_current_object().__truediv__(other)
+
+    def __rtruediv__(self, other):
+        return other / self._get_current_object()
+
+    def __itruediv__(self, other):
+        return self._set_current_object(operator.itruediv(self._get_current_object(), other))
 
     def __neg__(self):
         return -(self._get_current_object())
@@ -236,6 +342,19 @@ class Proxy(object):
     def __index__(self):
         return self._get_current_object().__index__()
 
+    def __round__(self, ndigits=None):
+        obj = self._get_current_object()
+        return round(obj) if ndigits is None else round(obj, ndigits)
+
+    def __trunc__(self):
+        return math.trunc(self._get_current_object())
+
+    def __floor__(self):
+        return math.floor(self._get_current_object())
+
+    def __ceil__(self):
+        return math.ceil(self._get_current_object())
+
     def __coerce__(self, other):
         return self._get_current_object().__coerce__(other)
 
@@ -245,8 +364,32 @@ class Proxy(object):
     def __exit__(self, *a, **kw):
         return self._get_current_object().__exit__(*a, **kw)
 
+    def __await__(self):
+        return self._get_current_object().__await__()
+
+    def __aiter__(self):
+        return self._get_current_object().__aiter__()
+
+    def __anext__(self):
+        return self._get_current_object().__anext__()
+
+    def __aenter__(self):
+        return self._get_current_object().__aenter__()
+
+    def __aexit__(self, *a, **kw):
+        return self._get_current_object().__aexit__(*a, **kw)
+
+    def __copy__(self):
+        return copy.copy(self._get_current_object())
+
+    def __deepcopy__(self, memo):
+        return copy.deepcopy(self._get_current_object(), memo)
+
     def __reduce__(self):
         return self._get_current_object().__reduce__()
+
+    def __reduce_ex__(self, protocol):
+        return self._get_current_object().__reduce_ex__(protocol)
 
 
 class IterProxy(_t.Iterable):

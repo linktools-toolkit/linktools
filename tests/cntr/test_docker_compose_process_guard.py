@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""create_docker_compose_process must never invoke `docker/podman compose`
+"""create_docker_compose_process must never invoke `docker compose`
 with zero --file arguments.
 
 Regression: with no --file, compose falls back to searching the current

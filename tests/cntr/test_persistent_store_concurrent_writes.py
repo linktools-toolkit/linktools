@@ -40,8 +40,8 @@ def test_two_processes_adding_different_containers_both_persist(tmp_path, monkey
     manager_a, manager_b = _two_managers(tmp_path, monkeypatch)
     name_a, name_b = list(manager_a.containers.keys())[:2]
 
-    manager_a.add_installed_containers(name_a)
-    manager_b.add_installed_containers(name_b)  # manager_b's store was cached before A's write
+    manager_a.installed_state.add(name_a)
+    manager_b.installed_state.add(name_b)  # manager_b's store was cached before A's write
 
     # A third, freshly constructed manager reads the final on-disk state.
     from linktools.core._environ import Environ
@@ -59,12 +59,12 @@ def test_two_processes_adding_different_repos_both_persist(tmp_path, monkeypatch
     repo_b = tmp_path_factory.mktemp("repo_b")
     (repo_b / "container.py").write_text("# placeholder\n")
 
-    manager_a.add_repo(str(repo_a), force=True)
-    manager_b.add_repo(str(repo_b), force=True)  # manager_b's store was cached before A's write
+    manager_a.repo_store.add(str(repo_a), force=True)
+    manager_b.repo_store.add(str(repo_b), force=True)  # manager_b's store was cached before A's write
 
     from linktools.core._environ import Environ
     from linktools.cntr.manager import ContainerManager
     observer = ContainerManager(Environ(), name="aio")
-    repos = observer.get_all_repos()
+    repos = observer.repo_store.get_all()
     assert str(repo_a) in repos
     assert str(repo_b) in repos

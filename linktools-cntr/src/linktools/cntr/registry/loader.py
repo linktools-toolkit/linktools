@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from linktools.runtime import import_module_file
 
 from ..container import BaseContainer, SimpleContainer
+from ..repo.manifest import ContainerRepositoryContext, RepositoryManifestError
 from ...capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -33,30 +34,52 @@ class ContainerLoader:
 
         manager.logger.debug("Load containers from assets")
         asset_path = __cap_cntr__.get_asset_path("containers")
-        for container in self._walk(asset_path, max_level=1):
+        builtin_context = ContainerRepositoryContext(
+            url=None, root_path=asset_path, manifest=None, builtin=True,
+        )
+        for container in self._walk(asset_path, max_level=1, repository=builtin_context):
             containers.append(container)
 
-        for url, meta in manager.get_all_repos().items():
+        for url, meta in manager.repo_store.get_all().items():
             manager.logger.debug(f"Load containers from repository `{url}`")
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path) or not os.path.isdir(repo_path):
                 manager.logger.warning(f"Repository `{url}` not found, skip.")
                 continue
-            for container in self._walk(repo_path, max_level=2):
+
+            # Manifest schema/kind/cntr/Python compatibility is validated
+            # before this repository's container.py is ever imported (Spec
+            # section 27). A legacy repository (no .linktools.json) loads
+            # exactly as before -- no warning, no migration required.
+            try:
+                manifest = manager.repo_manifest.load(repo_path)
+                manager.repo_manifest.ensure_loadable(manifest)
+            except RepositoryManifestError as exc:
+                manager.logger.warning(f"Repository `{url}` failed manifest validation, skip: {exc}")
+                continue
+
+            repo_context = ContainerRepositoryContext(
+                url=url, root_path=repo_path, manifest=manifest, builtin=False,
+            )
+            for container in self._walk(repo_path, max_level=2, repository=repo_context):
                 containers.append(container)
 
         return containers
 
-    def _walk(self, path: "PathType", max_level: int) -> "Iterator[BaseContainer]":
+    def _walk(
+            self, path: "PathType", max_level: int, repository: "ContainerRepositoryContext",
+    ) -> "Iterator[BaseContainer]":
         if not os.path.isdir(path):
             return
-        yield from self._load_one(path)
+        yield from self._load_one(path, repository)
         if max_level <= 0:
             return
         for name in os.listdir(path):
-            yield from self._walk(os.path.join(path, name), max_level - 1)
+            yield from self._walk(os.path.join(path, name), max_level - 1, repository)
 
-    def _load_one(self, path: "PathType") -> "Iterator[BaseContainer]":
+    def _load_one(
+            self, path: "PathType", repository: "ContainerRepositoryContext",
+    ) -> "Iterator[BaseContainer]":
         manager = self.manager
         container_path = os.path.join(path, manager.docker_container_name)
         if os.path.exists(container_path):
@@ -73,8 +96,9 @@ class ContainerLoader:
                         # would otherwise be found first.
                         if not value.__abstract__ and value.__module__ == module.__name__:
                             container = value(manager, path)
+                            container._repository = repository
                             manager.logger.debug(f"Load container {container.name} in {path}")
-                            manager._callback(container.on_init)
+                            container.on_init()
                             yield container
                             return
             except Exception as e:
@@ -85,7 +109,8 @@ class ContainerLoader:
             compose_path = os.path.join(path, compose_name)
             if os.path.exists(compose_path):
                 container = SimpleContainer(manager, path)
+                container._repository = repository
                 manager.logger.debug(f"Load container {container.name} in {path}")
-                manager._callback(container.on_init)
+                container.on_init()
                 yield container
                 return

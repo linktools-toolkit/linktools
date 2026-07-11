@@ -17,7 +17,7 @@ class NginxMixin:
     def get_nginx_domain(self: "BaseContainer", name: str = None):
 
         def get_domain(cfg):
-            if not self.manager.containers["nginx"].enable:
+            if not self.containers["nginx"].enable:
                 return ""
             if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
                 return cfg.get("NGINX_ROOT_DOMAIN")
@@ -40,7 +40,7 @@ class NginxMixin:
             auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
     ):
 
-        nginx = self.manager.containers["nginx"]
+        nginx = self.containers["nginx"]
         if nginx.enable:
             nginx.write_conf(
                 container=self,

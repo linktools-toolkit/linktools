@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """Read-only environment & security checks.
 
-``ct-cntr doctor`` inspects the runtime, generated compose, repos and config and
-reports findings as [WARN]/[INFO]/[OK]. It never modifies anything -- every new
-or safer behavior stays opt-in elsewhere.
+``ct-cntr doctor`` inspects the runtime, generated compose, repos, lock and
+config, and reports findings as [WARN]/[INFO]/[OK]. It never modifies
+anything -- every new or safer behavior stays opt-in elsewhere.
 """
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from dulwich.errors import NotGitRepository
@@ -23,11 +23,29 @@ WARN = "WARN"
 INFO = "INFO"
 OK = "OK"
 
+# Stable finding codes (Spec section 44) -- part of the --json contract;
+# don't rename once released.
+RUNTIME_BINARY_MISSING = "runtime.binary_missing"
+RUNTIME_ENDPOINT_MISSING = "runtime.endpoint_missing"
+RUNTIME_ACCESS_DENIED = "runtime.access_denied"
+COMPOSE_VALIDATION_FAILED = "compose.validation_failed"
+REPO_MANIFEST_INVALID = "repo.manifest_invalid"
+REPO_INCOMPATIBLE = "repo.incompatible"
+REPO_DIRTY = "repo.dirty"
+LOCK_DRIFT = "lock.drift"
+ARTIFACT_STALE = "artifact.stale"
+SECURITY_DOCKER_SOCKET_MOUNT = "security.docker_socket_mount"
+SECURITY_LATEST_IMAGE = "security.latest_image"
+SECURITY_TLS_DISABLED = "security.tls_disabled"
 
-@dataclass
+
+@dataclass(frozen=True)
 class Finding:
     severity: str
     message: str
+    code: "str | None" = None
+    component: "str | None" = None
+    details: "dict[str, object]" = field(default_factory=dict)
 
 
 def _image_uses_latest(image: str) -> bool:
@@ -66,7 +84,8 @@ def scan_compose(container_name: str, compose: "dict[str, Any] | None") -> "list
             findings.append(Finding(
                 WARN,
                 f"{where} uses image tag `latest`. Kept for compatibility; "
-                f"consider pinning an explicit tag."))
+                f"consider pinning an explicit tag.",
+                code=SECURITY_LATEST_IMAGE, component=where))
 
         for volume in config.get("volumes") or []:
             text = str(volume)
@@ -74,7 +93,8 @@ def scan_compose(container_name: str, compose: "dict[str, Any] | None") -> "list
                 findings.append(Finding(
                     WARN,
                     f"{where} mounts the docker socket ({text}). This grants high "
-                    f"privilege over the host container runtime."))
+                    f"privilege over the host container runtime.",
+                    code=SECURITY_DOCKER_SOCKET_MOUNT, component=where))
 
         for entry in _env_entries(config.get("environment")):
             key, _, value = entry.partition("=")
@@ -82,7 +102,8 @@ def scan_compose(container_name: str, compose: "dict[str, Any] | None") -> "list
                 findings.append(Finding(
                     WARN,
                     f"{where} sets NODE_TLS_REJECT_UNAUTHORIZED=0, disabling TLS "
-                    f"verification. Kept for compatibility; consider removing it."))
+                    f"verification. Kept for compatibility; consider removing it.",
+                    code=SECURITY_TLS_DISABLED, component=where))
     return findings
 
 
@@ -92,25 +113,57 @@ class Doctor:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def check_runtime(self) -> "list[Finding]":
+    def check_runtime(self, sudo_prompt: bool = False) -> "list[Finding]":
         findings: "list[Finding]" = []
         container_type = self.manager.container_type
         runtimes = {
             "docker": shutil.which("docker"),
             "docker-rootless": shutil.which("docker"),
-            "podman": shutil.which("podman"),
         }
         wanted = runtimes.get(container_type)
         if not wanted:
-            findings.append(Finding(WARN, f"container type is `{container_type}` but its "
-                                          f"runtime binary was not found on PATH."))
+            findings.append(Finding(
+                WARN, f"container type is `{container_type}` but its runtime binary was not found on PATH.",
+                code=RUNTIME_BINARY_MISSING, component=container_type))
         else:
-            findings.append(Finding(OK, f"runtime binary for `{container_type}` found."))
+            findings.append(Finding(OK, f"runtime binary for `{container_type}` found.", component=container_type))
 
         host = self.manager.container_host
         if host and ("docker.sock" in host or host.endswith(".sock")):
             if not os.path.exists(host):
-                findings.append(Finding(WARN, f"DOCKER_HOST socket `{host}` does not exist."))
+                findings.append(Finding(
+                    WARN, f"DOCKER_HOST socket `{host}` does not exist.",
+                    code=RUNTIME_ENDPOINT_MISSING, component="docker"))
+
+        if wanted:
+            findings.extend(self._check_runtime_versions(sudo_prompt=sudo_prompt))
+        return findings
+
+    def _check_runtime_versions(self, sudo_prompt: bool = False) -> "list[Finding]":
+        # Non-interactive (sudo -n) by default: doctor must never block
+        # waiting on a password prompt (Spec section 10). --sudo-prompt is an
+        # explicit opt-in to an interactive prompt instead. A probe failure
+        # (missing sudo policy, daemon unreachable, unparsable output) is
+        # reported as WARN with runtime.access_denied, never mistaken for
+        # "not installed".
+        findings: "list[Finding]" = []
+        engine = self.manager.docker_inspector.get_engine_version(allow_sudo_prompt=sudo_prompt)
+        if engine.server:
+            findings.append(Finding(OK, f"docker engine version: {engine.server}.", component="docker"))
+        else:
+            findings.append(Finding(
+                WARN, "docker engine version could not be determined. "
+                      "Run `sudo -v` first, configure sudo policy, or use docker-rootless.",
+                code=RUNTIME_ACCESS_DENIED, component="docker"))
+
+        compose_version = self.manager.docker_inspector.get_compose_version(allow_sudo_prompt=sudo_prompt)
+        if compose_version:
+            findings.append(Finding(OK, f"docker compose version: {compose_version}.", component="docker-compose"))
+        else:
+            findings.append(Finding(
+                WARN, "docker compose version could not be determined. "
+                      "Run `sudo -v` first, configure sudo policy, or use docker-rootless.",
+                code=RUNTIME_ACCESS_DENIED, component="docker-compose"))
         return findings
 
     def check_compose(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
@@ -120,8 +173,9 @@ class Doctor:
             try:
                 compose = container.docker_compose
             except Exception as exc:  # noqa: BLE001 - doctor must never crash on one container
-                findings.append(Finding(WARN, f"failed to render compose for "
-                                              f"`{container.name}`: {exc}"))
+                findings.append(Finding(
+                    WARN, f"failed to render compose for `{container.name}`: {exc}",
+                    code=COMPOSE_VALIDATION_FAILED, component=container.name))
                 continue
             findings.extend(scan_compose(container.name, compose))
             for service, config in (compose or {}).get("services", {}).items() if compose else []:
@@ -134,20 +188,70 @@ class Doctor:
                         findings.append(Finding(
                             WARN,
                             f"duplicate container_name `{cname}` "
-                            f"({owner} vs {container.name}/{service})."))
+                            f"({owner} vs {container.name}/{service}).",
+                            component=container.name))
                     else:
                         seen_container_names[cname] = f"{container.name}/{service}"
         return findings
 
-    def check_repos(self) -> "list[Finding]":
+    def check_compose_validation(
+            self, containers: "Iterable[BaseContainer]", sudo_prompt: bool = False,
+    ) -> "list[Finding]":
+        """``docker compose config`` validation (only when a runtime binary
+        is present -- this genuinely talks to Docker, unlike check_compose's
+        static scan)."""
+        findings: "list[Finding]" = []
+        if not shutil.which("docker"):
+            return findings
+        containers = tuple(containers)
+        if not containers:
+            return findings
+        try:
+            result = self.manager.docker_inspector.validate_compose(containers, allow_sudo_prompt=sudo_prompt)
+        except Exception as exc:  # noqa: BLE001 - doctor must stay read-only & non-fatal
+            findings.append(Finding(WARN, f"compose validation could not run: {exc}", code=COMPOSE_VALIDATION_FAILED))
+            return findings
+        if not result.succeeded:
+            findings.append(Finding(
+                WARN, f"docker compose config failed: {result.stderr.strip()[:500]}",
+                code=COMPOSE_VALIDATION_FAILED))
+        return findings
+
+    def check_repos(self, runtime: bool = False) -> "list[Finding]":
         findings: "list[Finding]" = []
         from linktools.git import GitRepository
-        for url, meta in self.manager.get_all_repos().items():
+        from .repo.manifest import RepositoryManifestError
+        for url, meta in self.manager.repo_store.get_all().items():
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path):
                 continue
+
+            manifest = None
+            try:
+                manifest = self.manager.repo_manifest.load(repo_path)
+            except RepositoryManifestError as exc:
+                findings.append(Finding(
+                    WARN, f"repo `{url}` has an invalid manifest: {exc}",
+                    code=REPO_MANIFEST_INVALID, component=url))
+
+            if manifest is not None:
+                for key in self.manager.repo_manifest.unknown_requirement_keys(manifest):
+                    findings.append(Finding(
+                        INFO, f"repo `{url}` manifest declares an unrecognized requirement `{key}` "
+                              f"(kept, not enforced by this version).",
+                        component=url))
+                for issue in self.manager.repo_manifest.check_host_requirements(manifest):
+                    findings.append(Finding(
+                        WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
+                        code=REPO_INCOMPATIBLE, component=url))
+                if runtime:
+                    for issue in self.manager.repo_manifest.check_runtime_requirements(manifest):
+                        findings.append(Finding(
+                            WARN, f"repo `{url}` manifest requires {issue.key} {issue.required}: {issue.message}",
+                            code=REPO_INCOMPATIBLE, component=url))
+
             if os.path.islink(repo_path):
-                findings.append(Finding(INFO, f"repo `{url}` is a local symlink ({repo_path})."))
+                findings.append(Finding(INFO, f"repo `{url}` is a local symlink ({repo_path}).", component=url))
                 continue
             try:
                 repo = GitRepository(self.manager.environ, repo_path)
@@ -155,17 +259,63 @@ class Doctor:
                 continue
             try:
                 if repo.is_dirty():
-                    findings.append(Finding(INFO, f"repo `{url}` has uncommitted changes."))
+                    findings.append(Finding(
+                        INFO, f"repo `{url}` has uncommitted changes.", code=REPO_DIRTY, component=url))
             except Exception:  # noqa: BLE001
                 pass
         return findings
 
-    def run(self) -> "list[Finding]":
-        findings = self.check_runtime()
-        findings.extend(self.check_repos())
+    def check_lock(self) -> "list[Finding]":
+        """Opt-in: only reports anything if a lock file already exists
+        (Spec section 43 -- a missing lock is never a warning)."""
+        findings: "list[Finding]" = []
+        persisted = self.manager.lock_store.load()
+        if persisted is None:
+            return findings
+        from .lock.diff import compute_diff
+        current = self.manager.lock_store.build()
+        diff = compute_diff(persisted, current)
+        if not diff.is_empty:
+            findings.append(Finding(
+                WARN, "current state has drifted from container.lock.json.",
+                code=LOCK_DRIFT, details=dict(
+                    cntr_version_changed=diff.cntr_version_changed,
+                    repository_drifts=len(diff.repository_drifts),
+                    containers_added=list(diff.containers_added),
+                    containers_removed=list(diff.containers_removed),
+                    artifacts_drifted=len(diff.artifact_drifts),
+                )))
+        return findings
+
+    def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
+        """Report an indexed artifact whose container no longer produces it
+        (Spec section 30: report only, never auto-delete)."""
+        from .artifacts.index import collect_candidates
+        findings: "list[Finding]" = []
+        indexed = self.manager.artifact_index.load()
+        if not indexed:
+            return findings
+        candidates = collect_candidates(self.manager, tuple(containers))
+        current_paths = {
+            os.path.relpath(dest, str(self.manager.data_path)).replace(os.sep, "/")
+            for dest in candidates
+        }
+        for path in sorted(set(indexed) - current_paths):
+            findings.append(Finding(
+                INFO, f"generated artifact `{path}` is no longer produced by any installed container.",
+                code=ARTIFACT_STALE, component=path))
+        return findings
+
+    def run(self, runtime: bool = False, sudo_prompt: bool = False) -> "list[Finding]":
+        findings = self.check_runtime(sudo_prompt=sudo_prompt)
+        findings.extend(self.check_repos(runtime=runtime))
+        findings.extend(self.check_lock())
         try:
             containers = self.manager.prepare_installed_containers()
             findings.extend(self.check_compose(containers))
+            findings.extend(self.check_artifacts(containers))
+            if runtime:
+                findings.extend(self.check_compose_validation(containers, sudo_prompt=sudo_prompt))
         except Exception as exc:  # noqa: BLE001 - doctor must stay read-only & non-fatal
             findings.append(Finding(INFO, f"skipped compose checks: {exc}"))
         return findings

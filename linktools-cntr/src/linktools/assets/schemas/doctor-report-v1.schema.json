@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/linktools-toolkit/linktools/master/linktools-cntr/assets/schemas/doctor-report-v1.schema.json",
+  "title": "linktools-cntr doctor report (v1)",
+  "description": "ct-cntr doctor --json output. Doctor is strictly read-only; this report never reflects a state change.",
+  "type": "object",
+  "required": ["schema_version", "project", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "project": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["OK", "INFO", "WARN"]
+          },
+          "code": {
+            "type": ["string", "null"],
+            "description": "Stable finding code, e.g. runtime.binary_missing, security.latest_image. Null for findings not yet assigned a stable code."
+          },
+          "component": {
+            "type": ["string", "null"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

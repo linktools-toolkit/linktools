@@ -74,6 +74,7 @@ class RepoStore:
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
                 self.sync.clone_git(url, repo_path, branch)
+                self._validate_new_repo_manifest(repo_path)
                 repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
             else:
                 path = os.path.abspath(os.path.expanduser(url))
@@ -85,6 +86,7 @@ class RepoStore:
                 repo_name = utils.guess_file_name(path)
                 repo_path = self._choose_repo_path(repo_name)
                 self.sync.link_local(path, repo_path)
+                self._validate_new_repo_manifest(repo_path)
                 repos[path] = dict(type="local", repo_path=repo_path, repo_name=repo_name)
 
             self._dump(repos)
@@ -92,6 +94,27 @@ class RepoStore:
     def update(self, branch: str = None, reset: bool = False) -> None:
         for url, meta in self.get_all().items():
             self.sync.sync(url, meta, branch=branch, reset=reset)
+            self._warn_if_manifest_incompatible_after_update(url, meta)
+
+    def _warn_if_manifest_incompatible_after_update(self, url: str, meta: "dict[str, str]") -> None:
+        # Spec section 26: re-read and validate the manifest after update
+        # completes. No automatic Git rollback / transactional replace is
+        # implemented here (explicitly deferred) -- this only informs.
+        from .manifest import RepositoryManifestError
+        repo_path = meta.get("repo_path")
+        if not repo_path or not os.path.exists(repo_path):
+            return
+        try:
+            manifest = self.manager.repo_manifest.load(repo_path)
+        except RepositoryManifestError as exc:
+            self.logger.warning(f"Repository `{url}` manifest is invalid after update: {exc}")
+            return
+        if manifest is None:
+            return
+        issues = self.manager.repo_manifest.check_host_requirements(manifest)
+        if issues:
+            details = "; ".join(issue.message for issue in issues)
+            self.logger.warning(f"Repository `{url}` is incompatible with this host after update: {details}")
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
@@ -101,6 +124,20 @@ class RepoStore:
                 raise ContainerError(f"Repository `{url}` not found.")
             self._remove_repo_file(repos.pop(url))
             self._dump(repos)
+
+    def _validate_new_repo_manifest(self, repo_path: str) -> None:
+        # Read .linktools.json (if any) and check host requirements before
+        # this repo is ever written to INSTALLED_REPOS; on failure, clean up
+        # the just-cloned/linked path rather than leaving a half-added repo
+        # (Spec section 26). The full manifest is intentionally not persisted
+        # into INSTALLED_REPOS itself, to avoid stale metadata drifting from
+        # the on-disk .linktools.json.
+        try:
+            manifest = self.manager.repo_manifest.load(repo_path)
+            self.manager.repo_manifest.ensure_loadable(manifest)
+        except Exception:
+            self._remove_repo_file(dict(repo_path=repo_path))
+            raise
 
     def _choose_repo_path(self, name: str) -> str:
         index = 0

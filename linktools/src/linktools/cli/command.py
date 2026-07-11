@@ -1442,10 +1442,8 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
 
         group = parser.add_argument_group(title="interaction options")
-        group.add_argument(f"{prefix}{prefix}no-input", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
-                           help="never prompt; return defaults or error")
         group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
-                           help="answer yes/accept defaults to all prompts (alias for --no-input)")
+                           help="answer yes/accept defaults to all prompts")
 
         if get_log_handler():
             group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,

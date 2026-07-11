@@ -14,6 +14,7 @@ import os
 import textwrap
 
 from linktools.cntr.registry.loader import ContainerLoader
+from linktools.cntr.repo.manifest import ContainerRepositoryContext
 
 
 def _write_container_importing_a_shared_concrete_base(tmp_path):
@@ -44,7 +45,8 @@ def _write_container_importing_a_shared_concrete_base(tmp_path):
 def test_loader_picks_the_locally_defined_subclass_not_the_imported_base(fresh_manager, tmp_path):
     _write_container_importing_a_shared_concrete_base(tmp_path)
 
-    loaded = list(ContainerLoader(fresh_manager)._load_one(str(tmp_path)))
+    builtin_context = ContainerRepositoryContext(url=None, root_path=None, manifest=None, builtin=True)
+    loaded = list(ContainerLoader(fresh_manager)._load_one(str(tmp_path), builtin_context))
 
     assert len(loaded) == 1
     assert loaded[0].__class__.__name__ == "AppContainer"

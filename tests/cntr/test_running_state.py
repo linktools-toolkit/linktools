@@ -12,6 +12,8 @@ import pytest
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.context import EventContext
+from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
+from linktools.cntr.lifecycle.hooks import HookRegistry
 from linktools.cntr.state.running import RuntimeStateUnavailable
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -26,14 +28,15 @@ def _record(manager, monkeypatch, fail=False):
                     raise RuntimeError("compose failed")
                 return 0
         return _Proc()
-    monkeypatch.setattr(manager, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager, "_callback", lambda *a, **k: None)
+    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
+    monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
 
 
 def _partial_ctx(manager, name):
     ctx = EventContext()
     ctx.commands = ["up"]
-    ctx.containers = manager.get_installed_containers(resolve=True)
+    ctx.containers = manager.installed_state.get(resolve=True)
     ctx.target_containers = [c for c in ctx.containers if c.name == name]
     ctx.is_full_containers = False
     return ctx
@@ -41,14 +44,24 @@ def _partial_ctx(manager, name):
 
 # --- RunningStateStore unit tests ---
 
-def test_get_actual_raises_unavailable(fresh_manager):
+def test_get_actual_with_no_containers_returns_empty(fresh_manager):
+    # Nothing to build a --file set from -- trivially nothing running, not
+    # an unavailable/unqueryable runtime.
+    assert fresh_manager.running_state.get_actual([]) == []
+
+
+def test_get_actual_raises_unavailable_when_docker_binary_is_missing(fresh_manager):
+    # This sandbox has no `docker` binary; querying a real container's actual
+    # state must degrade to RuntimeStateUnavailable, not crash.
+    container = fresh_manager.containers["nginx"]
     with pytest.raises(RuntimeStateUnavailable):
-        fresh_manager.running_state.get_actual([])
+        fresh_manager.running_state.get_actual([container])
 
 
 def test_get_effective_falls_back_to_persisted(fresh_manager):
     fresh_manager.running_state._set(["portainer"])
-    assert fresh_manager.running_state.get_effective([]) == ["portainer"]
+    container = fresh_manager.containers["nginx"]
+    assert fresh_manager.running_state.get_effective([container]) == ["portainer"]
 
 
 def test_mark_started_partial_adds_targets(fresh_manager):
@@ -67,7 +80,7 @@ def test_mark_started_full_writes_target_set(fresh_manager):
     fresh_manager.running_state._set(["stale"])
     ctx = EventContext()
     ctx.commands = ["up"]
-    ctx.containers = fresh_manager.get_installed_containers(resolve=False)
+    ctx.containers = fresh_manager.installed_state.get(resolve=False)
     ctx.target_containers = ctx.containers
     ctx.is_full_containers = True
     fresh_manager.running_state.mark_started(ctx)
@@ -80,7 +93,7 @@ def test_mark_stopped_full_clears(fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer"])
     ctx = EventContext()
     ctx.commands = ["down"]
-    ctx.containers = fresh_manager.get_installed_containers(resolve=False)
+    ctx.containers = fresh_manager.installed_state.get(resolve=False)
     ctx.target_containers = ctx.containers
     ctx.is_full_containers = True
     fresh_manager.running_state.mark_stopped(ctx)

@@ -117,7 +117,7 @@ def make_manager(data_path, temp_path, name: str = "aio"):
 
     environ = Environ()  # fresh instance; no stale instance-level caches
     manager = ContainerManager(environ, name=name)
-    manager.add_installed_containers(*manager.containers.keys())
+    manager.installed_state.add(*manager.containers.keys())
     manager.prepare_installed_containers()
     return manager
 

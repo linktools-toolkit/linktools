@@ -1,6 +1,6 @@
 # linktools-cntr
 
-Docker / Podman 容器部署和管理工具，为 homelab 及服务器环境提供统一的容器生命周期管理（命令前缀 `ct-cntr`）。
+Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一的容器生命周期管理（命令前缀 `ct-cntr`）。
 
 ## 开始使用
 
@@ -64,7 +64,7 @@ linktools-cntr 内置了常用容器定义，开箱即用：
 
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `CONTAINER_TYPE` | str | — | 容器运行时：`docker` / `docker-rootless` / `podman` |
+| `CONTAINER_TYPE` | str | — | 容器运行时：`docker` / `docker-rootless`（Podman 已不再支持） |
 | `DOCKER_USER` | str | 当前用户 | 部分 rootless 容器使用此用户权限运行 |
 | `DOCKER_HOST` | str | `/var/run/docker.sock` | Docker Daemon 地址 |
 | `DOCKER_APP_PATH` | str | `~/.linktools/data/container/app` | 容器数据持久化目录（建议置于 SSD） |
@@ -134,6 +134,71 @@ ct-cntr config edit --editor vim
 
 # 重新加载配置
 ct-cntr config reload
+```
+
+## 进阶功能
+
+```bash
+#######################
+# compose 命名空间（与根命令 up/restart/down/status 行为完全一致，共用同一实现）
+#######################
+
+ct-cntr compose up
+ct-cntr compose config nginx --format json
+ct-cntr compose validate nginx --with-dependencies
+
+#######################
+# 实际运行状态（只读，默认不弹 sudo 密码）
+#######################
+
+ct-cntr status
+ct-cntr status --json
+ct-cntr status --sudo-prompt
+
+#######################
+# 执行计划（只展示会发生什么，不实际执行）
+#######################
+
+ct-cntr plan up
+ct-cntr up --dry-run
+
+#######################
+# 部署锁定（完全可选，不影响 up/restart/down 默认行为）
+#######################
+
+ct-cntr lock          # 生成/更新 container.lock.json
+ct-cntr lock --check  # 与已有 lock 比对，仅在有 drift 时非零退出
+ct-cntr diff          # 展示 repo/容器/生成文件的 drift 详情
+
+#######################
+# 诊断（只读；--json 输出结构化结果供 CI 使用）
+#######################
+
+ct-cntr doctor --json
+ct-cntr doctor --check    # 存在 WARN 级别 finding 时非零退出
+ct-cntr doctor --runtime  # 额外校验 compose config 及仓库声明的运行时版本要求
+```
+
+### 仓库清单（`.linktools.json`）
+
+容器仓库可以在根目录放置一个 `.linktools.json`，声明仓库自身的名称、版本以及最低 `linktools-cntr`/Python 版本要求。缺失该文件的仓库按“遗留仓库”处理，行为不变；版本不满足要求的仓库会在 `repo add`/加载前被拒绝，其中的 `container.py` 不会被执行。
+
+```json
+{
+  "schema_version": 1,
+  "kind": "linktools-cntr-repository",
+  "name": "linktools-homelab",
+  "version": "1.2.0",
+  "requires": {
+    "linktools-cntr": ">=0.10.0,<1.0",
+    "python": ">=3.6"
+  }
+}
+```
+
+```bash
+ct-cntr repo status --runtime
+ct-cntr repo validate --json
 ```
 
 ## 容器事件时序

@@ -99,26 +99,53 @@ class ComposeRunner:
         return args
 
     def build(self, context: "EventContext", options: ComposeOptions):
-        return self.manager.create_docker_compose_process(
+        return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.build_args(options)
         ).check_call()
 
     def up(self, context: "EventContext", options: ComposeOptions):
-        return self.manager.create_docker_compose_process(
+        return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.up_args(options)
         ).check_call()
 
     def stop(self, context: "EventContext", services: "Sequence[str]"):
-        return self.manager.create_docker_compose_process(
+        return self.manager.runtime.create_docker_compose_process(
             context.containers, "stop", *services
         ).check_call()
 
     def down(self, context: "EventContext", services: "Sequence[str]"):
-        return self.manager.create_docker_compose_process(
+        return self.manager.runtime.create_docker_compose_process(
             context.containers, "down", *services
         ).check_call()
 
-    def config(self, context: "EventContext", services: "Sequence[str]" = ()):
-        return self.manager.create_docker_compose_process(
-            context.containers, "config", *services, privilege=False
+    def config_args(
+            self,
+            services: "Sequence[str]" = (),
+            output_format: "str | None" = None,
+            quiet: bool = False,
+    ) -> "list[str]":
+        """Shared ``docker compose config`` argument builder.
+
+        Reused by ``compose config``/``compose validate`` and by Plan
+        preflight, so all three can never drift from each other.
+        """
+        args: "list[str]" = ["config"]
+        if quiet:
+            args.append("--quiet")
+        if output_format:
+            args.extend(["--format", output_format])
+        args.extend(services)
+        return args
+
+    def config(
+            self,
+            context: "EventContext",
+            services: "Sequence[str]" = (),
+            output_format: "str | None" = None,
+            quiet: bool = False,
+    ):
+        return self.manager.runtime.create_docker_compose_process(
+            context.containers,
+            *self.config_args(services=services, output_format=output_format, quiet=quiet),
+            privilege=False,
         ).check_call()

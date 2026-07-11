@@ -8,6 +8,8 @@ recorded docker-compose arguments for each command.
 """
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
+from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
+from linktools.cntr.lifecycle.hooks import HookRegistry
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
@@ -26,9 +28,11 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(manager, "create_docker_compose_process", fake)
-    # Avoid running real mkdir/chown hooks during the routing check.
-    monkeypatch.setattr(manager, "_callback", lambda *a, **k: None)
+    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    # Avoid running real mkdir/chown hooks and on_check/on_starting/... calls
+    # during the routing check.
+    monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
+    monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     return recorded
 
 
@@ -93,4 +97,6 @@ def test_root_command_mounts_subcommands_in_order():
 
     subcommands = main_module.Command().init_subcommands()
     wrapped_names = [type(sub.command).__name__ for sub in subcommands[1:]]
-    assert wrapped_names == ["ExecCommand", "ConfigCommand", "RepoCommand"]
+    assert wrapped_names == [
+        "ExecCommand", "ConfigCommand", "RepoCommand", "ComposeCommand", "PlanCommand", "LockCommand", "DiffCommand",
+    ]

@@ -85,7 +85,7 @@ class ExposeMixin:
             if 0 < port < 65535:
                 return utils.make_url(
                     "https" if https else "http",
-                    self.manager.host,
+                    self.host,
                     port,
                     *path,
                     queries=queries)
@@ -151,7 +151,7 @@ class ExposeMixin:
             str(proxy_name), str(proxy_domain_name), str(proxy_conf), str(proxy_url),
             str(https_enable), str(waf_enable), auth_enable, _freeze(auth_extra),
         )
-        self.add_start_hook(hook_key, make_nginx_conf)
+        self.add_start_hook(hook_key, make_nginx_conf, name="write_nginx_conf", order=400, source="builtin")
         return lazy_load(make_url)
 
     def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType",

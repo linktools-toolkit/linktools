@@ -14,12 +14,12 @@ from linktools.cntr.container import ContainerError
 
 
 def _installed_names(manager):
-    return {c.name for c in manager.get_installed_containers(resolve=False)}
+    return {c.name for c in manager.installed_state.get(resolve=False)}
 
 
 def test_remove_leaf_container_succeeds(fresh_manager):
     # portainer declares no dependencies and nothing depends on it.
-    removed = fresh_manager.remove_installed_containers("portainer")
+    removed = fresh_manager.installed_state.remove("portainer")
     assert {c.name for c in removed} == {"portainer"}
     assert "portainer" not in _installed_names(fresh_manager)
 
@@ -27,13 +27,13 @@ def test_remove_leaf_container_succeeds(fresh_manager):
 def test_remove_container_with_dependents_without_force_raises(fresh_manager):
     # authelia and safeline depend on nginx; removing nginx without force must fail.
     with pytest.raises(ContainerError):
-        fresh_manager.remove_installed_containers("nginx")
+        fresh_manager.installed_state.remove("nginx")
     # Nothing should have been removed.
     assert "nginx" in _installed_names(fresh_manager)
 
 
 def test_remove_container_with_force_removes_dependents(fresh_manager):
-    removed = fresh_manager.remove_installed_containers("nginx", force=True)
+    removed = fresh_manager.installed_state.remove("nginx", force=True)
     removed_names = {c.name for c in removed}
     # nginx plus its direct dependents (authelia, safeline) are removed together.
     assert "nginx" in removed_names
@@ -52,7 +52,7 @@ def test_remove_container_with_force_removes_dependents(fresh_manager):
 def test_remove_unknown_name_is_noop(fresh_manager):
     # Names not present in discovered containers are silently skipped (legacy behavior).
     before = _installed_names(fresh_manager)
-    removed = fresh_manager.remove_installed_containers("does-not-exist")
+    removed = fresh_manager.installed_state.remove("does-not-exist")
     assert removed == []
     assert _installed_names(fresh_manager) == before
 
@@ -71,5 +71,5 @@ def test_remove_survives_a_dependency_on_a_container_that_no_longer_exists(fresh
     flare = fresh_manager.containers["flare"]
     monkeypatch.setattr(type(flare), "dependencies", property(lambda self: ["ghost-container"]))
 
-    removed = fresh_manager.remove_installed_containers("portainer")
+    removed = fresh_manager.installed_state.remove("portainer")
     assert {c.name for c in removed} == {"portainer"}

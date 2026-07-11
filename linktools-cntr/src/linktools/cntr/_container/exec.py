@@ -20,51 +20,51 @@ if TYPE_CHECKING:
 
 def up(container: "BaseContainer", build: bool = True, pull: bool = False):
     context = container._make_exec_context(["up", pull and "pull", build and "build"])
-    services = container.manager.compose_runner.collect_services(context)
+    services = container.compose_runner.collect_services(context)
     # exec never emitted default --pull flags -> emit_default_pull=False.
     options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
 
-    with container.manager.notify_start(context):
+    with container.lifecycle.notify_start(context):
         if build:
-            container.manager.compose_runner.build(context, options)
-        container.manager.compose_runner.up(context, options)
+            container.compose_runner.build(context, options)
+        container.compose_runner.up(context, options)
 
     # Record running state only after a successful up.
-    container.manager.running_state.mark_started(context)
+    container.running_state.mark_started(context)
 
 
 def restart(container: "BaseContainer", build: bool = True, pull: bool = False):
     context = container._make_exec_context(["restart", pull and "pull", build and "build"])
-    services = container.manager.compose_runner.collect_services(context)
+    services = container.compose_runner.collect_services(context)
     options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
 
-    with container.manager.notify_stop(context):
-        container.manager.compose_runner.stop(context, services)
+    with container.lifecycle.notify_stop(context):
+        container.compose_runner.stop(context, services)
 
-    with container.manager.notify_start(context):
+    with container.lifecycle.notify_start(context):
         if build:
-            container.manager.compose_runner.build(context, options)
-        container.manager.compose_runner.up(context, options)
+            container.compose_runner.build(context, options)
+        container.compose_runner.up(context, options)
 
     # restart ends with the target running.
-    container.manager.running_state.mark_started(context)
+    container.running_state.mark_started(context)
 
 
 def down(container: "BaseContainer"):
     context = container._make_exec_context("down")
-    services = container.manager.compose_runner.collect_services(context)
+    services = container.compose_runner.collect_services(context)
 
-    with container.manager.notify_stop(context):
-        container.manager.compose_runner.down(context, services)
+    with container.lifecycle.notify_stop(context):
+        container.compose_runner.down(context, services)
 
     # Record stopped state only after a successful down.
-    container.manager.running_state.mark_stopped(context)
+    container.running_state.mark_stopped(context)
 
 
 def config(container: "BaseContainer"):
     context = container._make_exec_context("config")
-    services = container.manager.compose_runner.collect_services(context)
-    return container.manager.compose_runner.config(context, services)
+    services = container.compose_runner.collect_services(context)
+    return container.compose_runner.config(context, services)
 
 
 def shell(container: "BaseContainer", command: str = None, privileged: bool = False,
@@ -92,7 +92,7 @@ def shell(container: "BaseContainer", command: str = None, privileged: bool = Fa
     else:
         commands = utils.cmdline2list(command)
 
-    return container.manager.create_docker_process(
+    return container.runtime.create_docker_process(
         "exec", "-it", *options, service.get("container_name"), *commands
     ).call()
 
@@ -115,7 +115,7 @@ def logs(container: "BaseContainer", follow: bool = True, tail: str = None, time
     if until:
         options.append("--until")
         options.append(until)
-    return container.manager.create_docker_process(
+    return container.runtime.create_docker_process(
         "logs", *options, service.get("container_name")
     ).call()
 

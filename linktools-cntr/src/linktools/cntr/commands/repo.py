@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os
-
 import yaml
 
 from linktools.cli import BaseCommandGroup, subcommand, subcommand_argument
@@ -21,7 +19,7 @@ class RepoCommand(BaseCommandGroup):
 
     @subcommand("list", help="list repositories")
     def on_command_list(self):
-        repos = _shared.manager.get_all_repos()
+        repos = _shared.manager.repo_store.get_all()
         for key, value in repos.items():
             data = {key: value}
             self.logger.info(
@@ -42,40 +40,68 @@ class RepoCommand(BaseCommandGroup):
                     "Only add repositories you trust. Continue?",
                     default=False):
                 raise ContainerError("Canceled")
-        _shared.manager.add_repo(url, branch=branch, force=force)
+        _shared.manager.repo_store.add(url, branch=branch, force=force)
 
     @subcommand("status", help="show repository status (read-only)")
-    def on_command_status(self):
-        repos = _shared.manager.get_all_repos()
+    @subcommand_argument("--runtime", action="store_true", default=False,
+                         help="also check docker-engine/docker-compose requirements")
+    def on_command_status(self, runtime: bool = False):
+        repos = _shared.manager.repo_store.get_all()
         if not repos:
             self.logger.info("No repository found")
             return
-        from linktools.git import GitRepository
-        from dulwich.errors import NotGitRepository
+        from ..repo.manifest import describe_repository
         for url, meta in repos.items():
-            repo_type = meta.get("type", "unknown")
-            repo_path = meta.get("repo_path")
-            line = f"{url} ({repo_type}) -> {repo_path}"
-            if repo_type == "git" and repo_path and os.path.exists(repo_path):
-                try:
-                    repo = GitRepository(_shared.manager.environ, repo_path)
-                    line += f" [dirty={repo.is_dirty()}]"
-                except NotGitRepository:
-                    pass
-                except Exception:
-                    pass
-            self.logger.info(line)
+            info = describe_repository(_shared.manager, url, meta, check_runtime=runtime)
+            self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
+
+    @subcommand("validate", help="validate repository manifest and compatibility (read-only)")
+    @subcommand_argument("url", nargs="?", help="repository url or local path; all repositories if omitted")
+    @subcommand_argument("--runtime", action="store_true", default=False,
+                         help="also check docker-engine/docker-compose requirements")
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
+    def on_command_validate(self, url: str = None, runtime: bool = False, as_json: bool = False):
+        repos = _shared.manager.repo_store.get_all()
+        if url is not None:
+            if url not in repos:
+                raise ContainerError(f"Repository `{url}` not found.")
+            targets = {url: repos[url]}
+        else:
+            targets = repos
+
+        if not targets:
+            self.logger.info("No repository found")
+            return
+
+        from ..repo.manifest import describe_repository
+        results = {
+            u: describe_repository(_shared.manager, u, m, check_runtime=runtime)
+            for u, m in targets.items()
+        }
+
+        if as_json:
+            import json
+            # Machine-readable output goes straight to stdout, not the logger
+            # (whose destination depends on TTY/rich state).
+            print(json.dumps(results, indent=2, sort_keys=True, default=str))
+        else:
+            for u, info in results.items():
+                self.logger.info(yaml.dump({u: info}, sort_keys=False).strip())
+
+        incompatible = sorted(u for u, info in results.items() if info.get("compatible") is False)
+        if incompatible:
+            raise ContainerError(f"Incompatible repositories: {', '.join(incompatible)}")
 
     @subcommand("update", help="update repositories")
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force update")
     def on_command_update(self, branch: str = None, force: bool = False):
-        _shared.manager.update_repos(branch=branch, reset=force)
+        _shared.manager.repo_store.update(branch=branch, reset=force)
 
     @subcommand("remove", help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")
     def on_command_remove(self, url: str = None):
-        repos = list(_shared.manager.get_all_repos().keys())
+        repos = list(_shared.manager.repo_store.get_all().keys())
         if not repos:
             raise ContainerError("No repository found")
 
@@ -83,12 +109,12 @@ class RepoCommand(BaseCommandGroup):
             repo = choose("Choose repository you want to remove", repos)
             if not confirm(f"Remove repository `{repo}`?", default=False):
                 raise ContainerError("Canceled")
-            _shared.manager.remove_repo(repo)
+            _shared.manager.repo_store.remove(repo)
 
         elif url in repos:
             if not confirm(f"Remove repository `{url}`?", default=False):
                 raise ContainerError("Canceled")
-            _shared.manager.remove_repo(url)
+            _shared.manager.repo_store.remove(url)
 
         else:
             raise ContainerError(f"Repository `{url}` not found.")
