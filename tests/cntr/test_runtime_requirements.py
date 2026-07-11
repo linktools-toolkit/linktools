@@ -147,23 +147,6 @@ def test_compose_check_is_blocked(fresh_manager, monkeypatch):
         fresh_manager.compose_operations.render(check=True)
 
 
-def test_lock_is_blocked(fresh_manager, monkeypatch):
-    nginx = fresh_manager.containers["nginx"]
-    _attach_manifest(nginx, {"docker-compose": ">=2.30"})
-    monkeypatch.setattr(fresh_manager.docker_inspector, "get_compose_version", lambda *a, **k: "2.10.0")
-
-    import linktools.cntr.commands._shared as cntr_shared
-    from linktools.cntr.commands.lock import LockCommand
-    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
-
-    class _Args:
-        check = False
-        as_json = False
-
-    with pytest.raises(ContainerError):
-        LockCommand().run(_Args())
-
-
 def test_down_is_never_blocked(fresh_manager, monkeypatch):
     nginx = fresh_manager.containers["nginx"]
     _attach_manifest(nginx, {"docker-compose": ">=2.30"})

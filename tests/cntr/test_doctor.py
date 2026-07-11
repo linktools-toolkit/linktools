@@ -6,7 +6,7 @@ scan_compose is a pure function over a rendered compose dict; Doctor.run ties th
 checks together and must never modify the config store.
 """
 from linktools.cntr.doctor import (
-    ARTIFACT_STALE, COMPOSE_VALIDATION_FAILED, INFO, LOCK_DRIFT, SECURITY_DOCKER_SOCKET_MOUNT, SECURITY_LATEST_IMAGE,
+    ARTIFACT_STALE, COMPOSE_VALIDATION_FAILED, INFO, SECURITY_DOCKER_SOCKET_MOUNT, SECURITY_LATEST_IMAGE,
     SECURITY_TLS_DISABLED, Doctor, Finding, WARN, scan_compose,
 )
 
@@ -57,6 +57,15 @@ def test_scan_clean_compose_has_no_warnings():
     assert findings == []
 
 
+def test_lock_is_fully_removed(fresh_manager):
+    """Deployment Lock (and its Doctor finding) is gone with no trace: no
+    manager.lock_store, no Doctor.check_lock, no lock.* finding code."""
+    assert not hasattr(fresh_manager, "lock_store")
+    assert not hasattr(Doctor, "check_lock")
+    findings = Doctor(fresh_manager).run()
+    assert not any((f.code or "").startswith("lock.") for f in findings)
+
+
 def test_doctor_runs_on_builtins(fresh_manager):
     findings = Doctor(fresh_manager).run()
     assert isinstance(findings, list)
@@ -101,28 +110,6 @@ def test_scan_compose_findings_carry_stable_codes():
     tls = scan_compose("c", {"services": {"a": {
         "image": "x:1", "environment": ["NODE_TLS_REJECT_UNAUTHORIZED=0"]}}})
     assert any(f.code == SECURITY_TLS_DISABLED for f in tls)
-
-
-# -- Lock drift (opt-in) ------------------------------------------------------
-
-def test_check_lock_is_empty_when_no_lock_file_exists(fresh_manager):
-    assert Doctor(fresh_manager).check_lock() == []
-
-
-def test_check_lock_reports_drift_when_persisted_lock_is_stale(fresh_manager, monkeypatch):
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", lambda *a, **k: object())
-    from linktools.cntr.runtime.structured import CommandResult
-    monkeypatch.setattr(
-        fresh_manager.structured_runner, "execute_text",
-        lambda *a, **k: CommandResult(args=(), returncode=0, stdout="", stderr="", duration=0.0),
-    )
-    lock = fresh_manager.lock_store.build()
-    fresh_manager.lock_store.write(lock)
-
-    fresh_manager.installed_state.remove("portainer")
-
-    findings = Doctor(fresh_manager).check_lock()
-    assert any(f.code == LOCK_DRIFT for f in findings)
 
 
 # -- Artifact staleness (report-only) --------------------------------------

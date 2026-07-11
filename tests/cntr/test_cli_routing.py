@@ -98,5 +98,5 @@ def test_root_command_mounts_subcommands_in_order():
     subcommands = main_module.Command().init_subcommands()
     wrapped_names = [type(sub.command).__name__ for sub in subcommands[1:]]
     assert wrapped_names == [
-        "ExecCommand", "ComposeCommand", "PlanCommand", "ConfigCommand", "RepoCommand", "LockCommand", "DiffCommand",
+        "ExecCommand", "ComposeCommand", "PlanCommand", "ConfigCommand", "RepoCommand",
     ]

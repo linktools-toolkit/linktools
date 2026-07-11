@@ -77,8 +77,8 @@ class CompatibilityIssue:
 class ContainerRepositoryContext:
     """Private container-side record of where a container came from.
 
-    Not exposed as public BaseContainer API -- Lock/Plan read it directly
-    off ``container._repository``.
+    Not exposed as public BaseContainer API -- Plan and the runtime
+    requirement gate read it directly off ``container._repository``.
     """
     url: "str | None"
     root_path: "PathType | None"

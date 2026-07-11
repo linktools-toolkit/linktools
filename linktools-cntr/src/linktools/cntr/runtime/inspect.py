@@ -340,9 +340,7 @@ class DockerInspector:
         """Validate candidate compose file *content* (path -> text, not yet
         written anywhere real) by rendering it into a temp directory and
         running ``docker compose config --quiet`` there. Never touches the
-        real generated files. Returns "passed"/"skipped"/"failed" -- shared
-        by Plan preflight and Lock's own preflight so they can't diverge.
-        """
+        real generated files. Returns "passed"/"skipped"/"failed"."""
         manager = self.manager
         try:
             with tempfile.TemporaryDirectory(prefix="cntr-preflight-") as tmp_dir:

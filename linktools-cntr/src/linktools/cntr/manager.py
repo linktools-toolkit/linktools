@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from .repo.manifest import RepositoryManifestService
     from .artifacts.index import ArtifactIndex
     from .execution.planner import ExecutionPlanner
-    from .lock.store import LockStore
 
 
 class ContainerManager:
@@ -281,11 +280,6 @@ class ContainerManager:
     def planner(self) -> "ExecutionPlanner":
         from .execution.planner import ExecutionPlanner
         return ExecutionPlanner(self)
-
-    @cached_property
-    def lock_store(self) -> "LockStore":
-        from .lock.store import LockStore
-        return LockStore(self)
 
     @cached_property
     def lifecycle(self) -> "LifecycleDispatcher":

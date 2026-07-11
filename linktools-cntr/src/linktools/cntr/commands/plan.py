@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """``ct-cntr plan up/restart/down``: shows what an action would
 do without doing it. Never executes a Docker write operation, a lifecycle
-hook, or writes a generated artifact/state/lock file."""
+hook, or writes a generated artifact/state file."""
 import dataclasses
 import json
 from typing import TYPE_CHECKING

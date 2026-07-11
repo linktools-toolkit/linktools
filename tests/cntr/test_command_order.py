@@ -70,8 +70,13 @@ def test_wrapper_registration_order_does_not_affect_final_order():
     wrapped_names = [type(sub.command).__name__ for sub in subcommands[1:]]
     assert set(wrapped_names) == {
         "ExecCommand", "ComposeCommand", "PlanCommand", "ConfigCommand", "RepoCommand",
-        "LockCommand", "DiffCommand",
     }
 
     text = _help_text()
     _assert_in_order(text, ["exec", "compose", "plan", "config", "repo"])
+
+
+def test_lock_and_diff_commands_no_longer_exist():
+    text = _help_text()
+    assert "lock" not in text.split()
+    assert "diff" not in text.split()

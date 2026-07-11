@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Generated Artifact Index: ``<data_path>/generated/
 index.json`` records which generated file came from which container/source
-and its content hash, for Plan/Lock/Doctor to reason about drift later.
+and its content hash, for Plan/Doctor to reason about drift later.
 
 Never records config values, secrets, or full template context -- only a
 relative path, kind, owning container, sha256 and (best-effort) source path.
@@ -31,9 +31,9 @@ def collect_candidates(manager: "ContainerManager", containers) -> "dict[str, tu
     in-memory -- never touching the real generated file on disk. Returns
     ``{absolute_destination_path: (kind, container_name, content)}``.
 
-    Shared by ExecutionPlanner (dry-run artifact hashing) and the
-    Deployment Lock (artifact hashing at lock time), so the two can never
-    compute a candidate's destination or content differently.
+    Shared by ExecutionPlanner (dry-run artifact hashing) and the real
+    up/restart write path, so the two can never compute a candidate's
+    destination or content differently.
     """
     import yaml
     from linktools import utils

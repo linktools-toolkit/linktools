@@ -6,7 +6,7 @@ Uniformly captures stdout/stderr, returncode, duration and timeout for a
 process created by ``manager.runtime.create_process``/``create_docker_process``/
 ``create_docker_compose_process`` (with ``capture_output=True``), and parses
 JSON output. This is the shared foundation Actual Status, Plan preflight,
-Doctor and Lock all build on: it wraps existing process execution, it is not
+and Doctor all build on: it wraps existing process execution, it is not
 a second runtime.
 
 ``ProcessResult`` (in ``linktools.runtime``) is not reused as this module's

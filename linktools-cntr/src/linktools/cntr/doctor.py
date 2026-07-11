@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Read-only environment & security checks.
 
-``ct-cntr doctor`` inspects the runtime, generated compose, repos, lock and
+``ct-cntr doctor`` inspects the runtime, generated compose, repos and
 config, and reports findings as [ERROR]/[WARN]/[INFO]/[OK]. It never
 modifies anything -- every new or safer behavior stays opt-in elsewhere.
 """
@@ -13,15 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 from dulwich.errors import NotGitRepository
 
-from .lock.store import LockInvalid
-
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from .container import BaseContainer
     from .manager import ContainerManager
 
 
-ERROR = "ERROR"
 WARN = "WARN"
 INFO = "INFO"
 OK = "OK"
@@ -35,8 +32,6 @@ COMPOSE_VALIDATION_FAILED = "compose.validation_failed"
 REPO_MANIFEST_INVALID = "repo.manifest_invalid"
 REPO_INCOMPATIBLE = "repo.incompatible"
 REPO_DIRTY = "repo.dirty"
-LOCK_DRIFT = "lock.drift"
-LOCK_INVALID = "lock.invalid"
 ARTIFACT_STALE = "artifact.stale"
 SECURITY_DOCKER_SOCKET_MOUNT = "security.docker_socket_mount"
 SECURITY_LATEST_IMAGE = "security.latest_image"
@@ -269,36 +264,6 @@ class Doctor:
                 pass
         return findings
 
-    def check_lock(self) -> "list[Finding]":
-        """Opt-in: only reports anything if a lock file already exists --
-        a missing lock is never a finding. A lock file that exists but is
-        corrupt/invalid is a different, more severe case: it must never be
-        silently treated the same as "no lock", so it's reported as an
-        ERROR finding instead of propagating and crashing doctor."""
-        findings: "list[Finding]" = []
-        try:
-            persisted = self.manager.lock_store.load()
-        except LockInvalid as exc:
-            findings.append(Finding(
-                ERROR, f"container.lock.json is invalid: {exc}", code=LOCK_INVALID))
-            return findings
-        if persisted is None:
-            return findings
-        from .lock.diff import compute_diff
-        current = self.manager.lock_store.build()
-        diff = compute_diff(persisted, current)
-        if not diff.is_empty:
-            findings.append(Finding(
-                WARN, "current state has drifted from container.lock.json.",
-                code=LOCK_DRIFT, details=dict(
-                    cntr_version_changed=diff.cntr_version_changed,
-                    repository_drifts=len(diff.repository_drifts),
-                    containers_added=list(diff.containers_added),
-                    containers_removed=list(diff.containers_removed),
-                    artifacts_drifted=len(diff.artifact_drifts),
-                )))
-        return findings
-
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
         """Report an indexed artifact whose container no longer produces it.
         Report-only: never deletes the stale index entry."""
@@ -321,7 +286,6 @@ class Doctor:
     def run(self, runtime: bool = False, sudo_prompt: bool = False) -> "list[Finding]":
         findings = self.check_runtime(sudo_prompt=sudo_prompt)
         findings.extend(self.check_repos(runtime=runtime))
-        findings.extend(self.check_lock())
         try:
             containers = self.manager.prepare_installed_containers()
             findings.extend(self.check_compose(containers))

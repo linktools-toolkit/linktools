@@ -9,7 +9,7 @@ Reuses existing logic rather than re-implementing it: ``ComposeOperations
 own ``iter_phase`` for hook description. Plan never calls
 ``compose_runner.build/up/stop/down/config`` (the actual subprocess-running
 methods), never runs a lifecycle hook, and never writes a generated
-artifact, persisted state, or lock file.
+artifact or persisted state.
 """
 import os
 from typing import TYPE_CHECKING

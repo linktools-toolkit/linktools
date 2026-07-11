@@ -12,13 +12,12 @@ from linktools.cli import (
 from linktools.cli.argparse import BooleanOptionalAction, LazyChoices
 from linktools.errors import ConfigError, GitError
 from ..container import ContainerError
-from ..doctor import ERROR, WARN, Doctor
+from ..doctor import WARN, Doctor
 from . import _shared
 from ._order import ROOT_COMMAND_ORDER
 from .compose import ComposeCommand
 from .config import ConfigCommand
 from .exec_ import ExecCommand
-from .lock import DiffCommand, LockCommand
 from .plan import PlanCommand, maybe_dry_run
 from .repo import RepoCommand
 from .status import StatusCommands
@@ -61,8 +60,6 @@ class Command(StatusCommands, BaseCommandGroup):
             SubCommandWrapper(PlanCommand(), order=ROOT_COMMAND_ORDER["plan"]),
             SubCommandWrapper(ConfigCommand(), order=ROOT_COMMAND_ORDER["config"]),
             SubCommandWrapper(RepoCommand(), order=ROOT_COMMAND_ORDER["repo"]),
-            SubCommandWrapper(LockCommand()),
-            SubCommandWrapper(DiffCommand()),
         ]
 
     @subcommand("list", order=ROOT_COMMAND_ORDER["list"], help="list all containers")
@@ -209,7 +206,7 @@ class Command(StatusCommands, BaseCommandGroup):
             self.logger.info("[INFO] No change has been made. Suggestions are kept for compatibility.")
         # Default `doctor` exit behavior is unchanged; only --check turns
         # findings into a non-zero exit.
-        if check and any(f.severity in (WARN, ERROR) for f in findings):
+        if check and any(f.severity == WARN for f in findings):
             raise ContainerError("Doctor found WARN-or-worse issues")
 
     def _make_context(self, commands, names):
