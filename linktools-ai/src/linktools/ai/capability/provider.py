@@ -32,6 +32,7 @@ class CapabilityContext:
     execution: "ExecutionBackend | None" = None
     run_id: "str | None" = None
     root_run_id: "str | None" = None
+    parent_run_id: "str | None" = None
     session_id: "str | None" = None
     event_store: "EventStore | None" = None
     # Identity fields propagated to subagent child runs.
@@ -101,13 +102,14 @@ def make_event_emitter(context: "CapabilityContext | None"):
     store = context.event_store
     run_id = context.run_id
     root_run_id = context.root_run_id or run_id
+    parent_run_id = context.parent_run_id
     session_id = context.session_id or run_id
     agent_id = context.agent_id
 
     async def emit(payload: Any) -> None:
         await store.append(
             stream_id=run_id, run_id=run_id, root_run_id=root_run_id,
-            parent_run_id=None, session_id=session_id, runnable_id=agent_id,
+            parent_run_id=parent_run_id, session_id=session_id, runnable_id=agent_id,
             payload=payload,
         )
 

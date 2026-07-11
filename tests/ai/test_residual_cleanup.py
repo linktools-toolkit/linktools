@@ -95,11 +95,13 @@ def test_resolve_methods_retained_as_public_api():
     assert "DeprecationWarning" not in rt
 
 
-def test_tool_exposure_counting_uses_shared_helper():
-    # Runner must count tools via capability.toolset_names (same helper the
-    # assembler uses for conflict detection), not a private getattr.
+def test_tool_exposure_counting_uses_descriptors_not_introspection():
+    # The runner must count exposed tools from ToolContribution descriptors
+    # (the single source of truth), NOT via toolset introspection
+    # (toolset_names / getattr(ts, "tools")) -- opaque toolsets would otherwise
+    # be miscounted.
     runner = (_AI_SRC / "agent" / "runner.py").read_text(encoding="utf-8")
-    assert "toolset_names" in runner
+    assert "toolset_names" not in runner, "runner must not count via toolset_names"
     assert 'getattr(ts, "tools"' not in runner
 
 

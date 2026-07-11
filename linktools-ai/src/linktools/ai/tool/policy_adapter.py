@@ -49,7 +49,11 @@ class MetadataBackedPolicyProvider:
         else:
             risk = "medium"
         approval = getattr(meta, "approval", None)
-        require_approval = approval is not None and str(approval).upper() != "NEVER"
+        # Compare the enum VALUE, not str(enum): on Python 3.11+
+        # str(ApprovalMode.NEVER) is "ApprovalMode.NEVER" (not "never"), so a
+        # str().upper()-based check would wrongly require approval for NEVER.
+        from ..policy.rule import ApprovalMode
+        require_approval = approval not in (None, ApprovalMode.NEVER)
         side_effect = getattr(meta, "side_effect", None)
         idempotent = bool(getattr(meta, "idempotent", False))
         timeout = getattr(meta, "timeout_seconds", None)

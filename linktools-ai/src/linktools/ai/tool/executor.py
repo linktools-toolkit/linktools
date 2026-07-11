@@ -45,12 +45,17 @@ class ToolExecutor:
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
         pause_on_approval: bool = False,
         idempotency_store: "IdempotencyStore | None" = None,
+        retry_policy: Any = None,
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
         self._event_store = event_store
         self._run_id_resolver = run_id_resolver
         self._idempotency_store = idempotency_store
+        # Retry is policy-driven: only clearly-transient errors, and never a
+        # mutating non-idempotent tool. DefaultRetryPolicy when none supplied.
+        from .retry import DefaultRetryPolicy
+        self._retry_policy = retry_policy or DefaultRetryPolicy()
         # When True, the require-approval branch persists the request (via
         # _record_approval) and then raises RunPaused(run_id, approval_id)
         # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
@@ -213,6 +218,8 @@ class ToolExecutor:
         max_retries: int = 0,
         idempotency_key: "str | None" = None,
         schema_version: str = "1",
+        descriptor: Any = None,
+        effective_policy: Any = None,
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -257,6 +264,15 @@ class ToolExecutor:
         # can be reused across different runs without colliding. ``scope`` is
         # part of the request_hash too, so a hash mismatch always reflects a
         # genuine difference in (tool, args, scope) -- not just (tool, args).
+        # Fail closed: a tool declared idempotent (so a key was provided) but
+        # run against a Storage with no IdempotencyStore must not silently run
+        # non-idempotently -- that would let a replayed call execute twice.
+        if idempotency_key is not None and self._idempotency_store is None:
+            from ..errors import StorageCapabilityError
+            raise StorageCapabilityError(
+                f"tool {request.tool_name!r} is idempotent but no IdempotencyStore "
+                f"is wired; refusing to run non-idempotently"
+            )
         use_idempotency = self._idempotency_store is not None and idempotency_key is not None
         if use_idempotency:
             scope = context.run_id
@@ -277,7 +293,19 @@ class ToolExecutor:
                 # FAILED allows retry per policy.
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
-        for attempt in range(max_retries + 1):
+        # Defaults for the retry decision when the caller didn't supply a
+        # descriptor/effective_policy (e.g. a direct executor call): treat the
+        # tool as non-mutating with default policy, so the retry decision is
+        # governed purely by the error type.
+        from ..security.descriptor import ToolDescriptor as _Desc
+        from .policy import EffectiveToolPolicy as _Eff
+        from .retry import backoff_delay
+        retry_desc = descriptor or _Desc(
+            name=request.tool_name, source="executor", category="custom",
+            risk="medium", mutating=False)
+        retry_pol = effective_policy or _Eff()
+        attempt = 0
+        while True:
             try:
                 if timeout is not None:
                     result = await asyncio.wait_for(handler(**arguments), timeout=timeout)
@@ -286,10 +314,16 @@ class ToolExecutor:
                 if use_idempotency:
                     await self._idempotency_store.complete(scope, idempotency_key, result)
                 return result
-            except Exception as exc:  # noqa: BLE001 - retry then re-raise
+            except Exception as exc:  # noqa: BLE001 - decide via retry policy
                 last_error = exc
-                if attempt < max_retries:
-                    continue
+                if attempt >= max_retries:
+                    break
+                if not self._retry_policy.should_retry(
+                        error=exc, attempt=attempt, policy=retry_pol, descriptor=retry_desc):
+                    break
+                # Transient: back off (cancellable) and retry.
+                await asyncio.sleep(backoff_delay(attempt + 1))
+                attempt += 1
         if use_idempotency:
             await self._idempotency_store.fail(scope, idempotency_key, str(last_error))
         raise last_error  # type: ignore[misc]

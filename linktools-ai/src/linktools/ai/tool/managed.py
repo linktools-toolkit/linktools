@@ -155,6 +155,12 @@ class ManagedToolAdapter:
         if not policy.enabled:
             raise ToolDeniedError(f"tool {self._descriptor.name!r} is disabled by policy")
 
+        # Validate the original arguments against the tool's parameter schema.
+        # pydantic-ai already validates this for signature-derived tools, but a
+        # **kwargs handler registered via Tool.from_schema skips validation, so
+        # this is the gate that catches a bad original payload uniformly.
+        validate_arguments(arguments, parameter_schema, tool_name=self._descriptor.name)
+
         # 2. Pipeline before_tool.
         if self._pipeline is not None:
             event = ToolInvocationEvent(
@@ -225,7 +231,6 @@ class ManagedToolAdapter:
             )
 
         # 4. Execute. can_retry mirrors the mutating/idempotent safety rule:
-        # 4. Execute. can_retry mirrors the mutating/idempotent safety rule:
         # a mutating, non-idempotent tool is never retried even if a positive
         # max_retries was declared upstream.
         from ..events.payloads import ToolCompleted, ToolFailed, ToolStarted
@@ -250,21 +255,41 @@ class ManagedToolAdapter:
                     category=self._descriptor.category, risk=self._descriptor.risk,
                     mutating=self._descriptor.mutating,
                 )
+                # When the policy declares the tool idempotent, derive a stable
+                # idempotency key (run + tool + canonical args + schema_version)
+                # so replays return the cached result; pass schema_version so a
+                # contract change is a fresh idempotency record. The executor
+                # fail-closes if no IdempotencyStore is wired.
+                idempotency_key = None
+                if policy.idempotent:
+                    from .idempotency_key import DefaultIdempotencyKeyBuilder
+                    idempotency_key = DefaultIdempotencyKeyBuilder().build(
+                        descriptor=self._descriptor, arguments=arguments,
+                        run_context=ctx, schema_version=policy.schema_version)
                 try:
                     result = await self._tool_executor.execute(
                         request, tc, self._handler,
                         timeout=policy.timeout_seconds,
                         max_retries=effective_retries,
+                        descriptor=self._descriptor,
+                        effective_policy=policy,
+                        idempotency_key=idempotency_key,
+                        schema_version=policy.schema_version,
                     )
                 except asyncio.TimeoutError:
                     raise ToolTimeoutError(
                         f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s")
             else:
                 # No executor wired (e.g. a standalone adapter in tests): apply
-                # timeout/retry from the resolved policy directly.
+                # timeout/retry from the resolved policy directly, governed by
+                # the same DefaultRetryPolicy (transient-only; mutating
+                # non-idempotent never retries).
+                from .retry import DefaultRetryPolicy, backoff_delay
+                retry_policy = DefaultRetryPolicy()
                 max_attempts = 1 + effective_retries
                 result = None
-                for attempt in range(1, max_attempts + 1):
+                attempt = 0
+                while True:
                     try:
                         if policy.timeout_seconds is not None:
                             result = await asyncio.wait_for(
@@ -275,10 +300,15 @@ class ManagedToolAdapter:
                     except asyncio.TimeoutError:
                         raise ToolTimeoutError(
                             f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s")
-                    except TransientToolError:
-                        if attempt < max_attempts:
-                            continue
-                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        if attempt >= max_attempts - 1:
+                            raise
+                        if not retry_policy.should_retry(
+                                error=exc, attempt=attempt, policy=policy,
+                                descriptor=self._descriptor):
+                            raise
+                        await asyncio.sleep(backoff_delay(attempt + 1))
+                        attempt += 1
         except Exception as exec_exc:
             # Tool execution failed (timeout/transient-exhausted/handler error).
             # Emit the execution-error audit event, then re-raise so the caller

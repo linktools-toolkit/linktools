@@ -6,8 +6,9 @@ Construction is synchronous and side-effect-free; connections are
 opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 
 import hashlib
+import json
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 from ..errors import MCPConnectionError
 from ..registry.mcp import MCPServerSpec
@@ -15,16 +16,25 @@ from ..registry.mcp import MCPServerSpec
 _LOGGER = logging.getLogger(__name__)
 
 
+def _digest_mapping(values: "Mapping[str, str]") -> str:
+    """Irreversible SHA-256 digest of a mapping's canonical JSON. Two different
+    secret VALUES (or keys) produce different digests, but the secret plaintext
+    never enters the fingerprint, logs, or exceptions."""
+    canonical = json.dumps(
+        sorted(values.items()), ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _config_fingerprint(spec: MCPServerSpec) -> str:
     """A stable hash of the governance-relevant MCPServerSpec configuration.
 
-    The cache key must reflect everything that changes which tools a server
-    exposes or how they are filtered/prefixed: transport, command/url, cwd,
-    timeout, tool filters, prefix config, and a revision of env/headers. Secret
-    plaintext (env/header VALUES) is folded into the hash, never stored or
-    logged in clear text -- only a counter/revision contributes, so two
-    different secret values produce different hashes without the values
-    themselves entering the key."""
+    The cache key reflects everything that changes which tools a server exposes
+    or how they are filtered/prefixed: transport, command/url, cwd, timeout,
+    tool filters, prefix config, discovery mode, and a DIGEST of env/headers.
+    The digest covers both keys AND values, so a changed secret value (e.g. a
+    rotated Authorization token) invalidates the cache -- without the secret
+    plaintext ever entering the key, logs, or exceptions."""
     parts = [
         spec.transport,
         spec.command_or_url,
@@ -33,8 +43,9 @@ def _config_fingerprint(spec: MCPServerSpec) -> str:
         str(spec.tool_prefix),
         ",".join(spec.enabled_tools) if spec.enabled_tools else "",
         ",".join(spec.disabled_tools),
-        str(len(spec.env)),
-        str(len(spec.headers)),
+        getattr(spec, "discovery_mode", "strict"),
+        _digest_mapping(spec.env),
+        _digest_mapping(spec.headers),
     ]
     payload = "|".join(parts).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]

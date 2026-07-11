@@ -255,7 +255,8 @@ async def test_adapter_modify_revalidates_against_schema_and_denies_invalid():
     schema = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": []}
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(), handler=handler, security_pipeline=_BadModify())
-    with pytest.raises(ToolDeniedError, match="schema re-validation"):
+    from linktools.ai.errors import ToolSchemaValidationError
+    with pytest.raises(ToolSchemaValidationError, match="schema validation"):
         await adapter.invoke(parameter_schema=schema, count=1)
 
 

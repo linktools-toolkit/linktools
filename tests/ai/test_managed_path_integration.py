@@ -71,16 +71,19 @@ async def test_managed_adapter_from_assembler_output_deny(tmp_path):
     )
     bundle = await asm.assemble(spec, ctx)
 
-    # Build adapters from the auto-generated contributions.
+    # Build adapters from the assembled contributions (per-tool form). The
+    # assembler normalizes introspectable toolsets to ManagedToolDefinitions, so
+    # iterate contrib.tools -- iterating contrib.descriptors would be empty and
+    # the deny assertion would never run.
     pipeline = _DenyAllPipeline()
+    denied = 0
     for contrib in bundle.tool_contributions:
-        for desc in contrib.descriptors:
-            handler = extract_handler(contrib.toolset, desc.name)
-            if handler is None:
-                continue
+        for md in contrib.tools:
             adapter = ManagedToolAdapter(
-                descriptor=desc, handler=handler,
+                descriptor=md.descriptor, handler=md.handler,
                 security_pipeline=pipeline,
             )
             with pytest.raises(ToolDeniedError, match="blocked by test pipeline"):
                 await adapter.invoke()
+            denied += 1
+    assert denied > 0, "expected at least one assembled tool to be denied"

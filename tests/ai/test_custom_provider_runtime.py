@@ -89,7 +89,12 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
             tools=(ToolRef(name="skill-creator", kind=kind),),
         )
         bundle = await rt.assemble(spec, execution=None)
-        assert len(bundle.toolsets) == 1, f"{kind} ref did not resolve"
+        # The ref resolved to a non-empty contribution (tools form for
+        # introspectable toolsets). package-entrypoint with no expose_call_tool
+        # contributes only a discovery tool; package-resource contributes read tools.
+        contrib_names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
+            d.name for c in bundle.tool_contributions for d in c.descriptors}
+        assert contrib_names, f"{kind} ref did not resolve"
 
 
 @pytest.mark.asyncio
@@ -149,8 +154,9 @@ async def test_custom_skill_provider_wires_assembler(tmp_path):
     bundle = await rt.assemble(spec, execution=None)
     # Skill catalog prompt injected + list_skills/read_skill exposed.
     assert "sql" in bundle.prompt_sections.get("skills", "")
-    names = set(bundle.toolsets[0].tools.keys())
-    assert {"list_skills", "read_skills"} <= names or {"list_skills", "read_skill"} <= names
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
+        d.name for c in bundle.tool_contributions for d in c.descriptors}
+    assert {"list_skills", "read_skill"} <= names
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,19 @@ def _ctx(execution, policy=None, agent_id="a1"):
     )
 
 
+def _contrib_names(bundle):
+    """Descriptor names across all contributions, from the per-tool ``tools``
+    form and/or the legacy ``descriptors`` tuple (the assembler normalizes
+    introspectable contributions to the tools form)."""
+    names = set()
+    for c in bundle.tool_contributions:
+        for md in getattr(c, "tools", ()):
+            names.add(md.descriptor.name)
+        for d in getattr(c, "descriptors", ()):
+            names.add(d.name)
+    return names
+
+
 def _spec(tools):
     return AgentSpec(
         id="a1", name="a1", model=ModelPolicy(primary="gpt-4"),
@@ -44,7 +57,7 @@ async def test_assemble_builtin_file_only(tmp_path):
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     bundle = await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend))
     assert isinstance(bundle, CapabilityBundle)
-    names = {d.name for c in bundle.tool_contributions for d in c.descriptors}
+    names = _contrib_names(bundle)
     assert "read_file" in names and "bash" not in names and "write_file" not in names
 
 
@@ -54,7 +67,7 @@ async def test_assemble_builtin_file_execution_tools_allowed_exposes_writes(tmp_
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
     bundle = await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend, policy=policy))
-    names = {d.name for c in bundle.tool_contributions for d in c.descriptors}
+    names = _contrib_names(bundle)
     assert {"read_file", "write_file", "batch_files", "apply_patch"} <= names
 
 
@@ -69,7 +82,7 @@ async def test_assemble_kindname_string_resolves(tmp_path):
     # kind:name parsed form
     spec = _spec((ToolRef(name="terminal", kind="builtin"),))
     bundle = await asm.assemble(spec, _ctx(backend, policy=policy))
-    assert tuple(bundle.toolsets[0].tools.keys()) == ("bash",)
+    assert _contrib_names(bundle) == {"bash"}
 
 
 @pytest.mark.asyncio

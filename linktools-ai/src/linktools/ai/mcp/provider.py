@@ -39,6 +39,17 @@ from .client import MCPConnectionManager
 from .toolset import detect_mcp_conflicts, filter_tool_names, final_tool_name
 
 
+@dataclass(frozen=True)
+class MCPExposedTool:
+    """One MCP tool's name contract: the raw server-side name (used for the
+    actual MCP call) and the exposed name (the only name the model ever sees,
+    after prefixing). Carried so the raw->exposed mapping is explicit and
+    auditable rather than implicit in two parallel name lists."""
+    server_id: str
+    raw_name: str
+    exposed_name: str
+
+
 @dataclass
 class MCPProvider:
     """CapabilityProvider for MCP servers. Both the spec provider and the
@@ -113,16 +124,28 @@ class MCPProvider:
                     filtered_toolset = toolset.filtered(
                         lambda _ctx, tool_def: False)
                 toolsets.append(filtered_toolset)
-                # Build ToolContribution with conservative MCP descriptors.
+                # Build ToolContribution with conservative MCP descriptors. The
+                # model only ever sees the EXPOSED (prefixed) name; the raw name
+                # is carried in descriptor metadata for audit so the MCP call
+                # (which uses the raw name) is traceable to the descriptor.
                 from ..security.descriptor import ToolDescriptor
                 from ..tool.contribution import ToolContribution
                 kw = dict(source="mcp", capability_kind="mcp", capability_name=server_id)
+                # The explicit raw->exposed mapping (one MCPExposedTool per
+                # surviving tool) drives descriptor naming so the contract is
+                # centralized, not inferred from two parallel name lists.
+                exposed_tools = [
+                    MCPExposedTool(server_id=server_id, raw_name=r, exposed_name=e)
+                    for r, e in zip(filtered, final)
+                ]
                 # Conservative: unknown MCP tools are treated as write/high/mutating
                 # (default conservative when mutation unknown).
                 descs = tuple(
                     ToolDescriptor(
-                        name=n, category="mcp-write", risk="high", mutating=True, **kw,
-                    ) for n in final
+                        name=et.exposed_name, category="mcp-write", risk="high",
+                        mutating=True, metadata={"raw_name": et.raw_name}, **kw,
+                    )
+                    for et in exposed_tools
                 )
                 contributions.append(ToolContribution(toolset=filtered_toolset, descriptors=descs))
         detect_mcp_conflicts(final_names_by_server)

@@ -30,15 +30,16 @@ def test_execute_timeout_raises_asyncio_timeout_error_when_handler_exceeds_timeo
 
 
 def test_execute_max_retries_succeeds_after_failures():
-    """Case 2: handler fails twice then succeeds on the third attempt -> the
-    successful result is returned."""
+    """Case 2: handler fails twice (transient) then succeeds -> the successful
+    result is returned. Only TransientToolError is retried."""
+    from linktools.ai.errors import TransientToolError
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
         calls["n"] += 1
         if calls["n"] < 3:
-            raise RuntimeError(f"transient {calls['n']}")
+            raise TransientToolError(f"transient {calls['n']}")
         return "ok"
 
     async def _run():
@@ -53,15 +54,39 @@ def test_execute_max_retries_succeeds_after_failures():
     assert calls["n"] == 3
 
 
-def test_execute_max_retries_raises_after_all_attempts_fail():
-    """Case 3: handler always fails -> its exception is raised after
-    ``max_retries + 1`` total attempts."""
+def test_execute_does_not_retry_permanent_error():
+    """A permanent error (RuntimeError) is NOT retried -- the handler runs once
+    even with max_retries set."""
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
         calls["n"] += 1
-        raise RuntimeError(f"fail {calls['n']}")
+        raise RuntimeError("permanent")
+
+    async def _run():
+        return await executor.execute(
+            ToolRequest(tool_name="broken", arguments={}),
+            ToolContext(run_id="r1", session_id="s1"),
+            _handler,
+            max_retries=3,
+        )
+
+    with pytest.raises(RuntimeError, match="permanent"):
+        asyncio.run(_run())
+    assert calls["n"] == 1, "permanent error must not be retried"
+
+
+def test_execute_max_retries_raises_after_all_attempts_fail():
+    """Case 3: handler always fails (transient) -> its exception is raised
+    after ``max_retries + 1`` total attempts."""
+    from linktools.ai.errors import TransientToolError
+    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    calls = {"n": 0}
+
+    async def _handler() -> str:
+        calls["n"] += 1
+        raise TransientToolError(f"fail {calls['n']}")
 
     async def _run():
         return await executor.execute(
@@ -71,7 +96,7 @@ def test_execute_max_retries_raises_after_all_attempts_fail():
             max_retries=1,
         )
 
-    with pytest.raises(RuntimeError, match="fail 2"):
+    with pytest.raises(TransientToolError, match="fail 2"):
         asyncio.run(_run())
     assert calls["n"] == 2
 

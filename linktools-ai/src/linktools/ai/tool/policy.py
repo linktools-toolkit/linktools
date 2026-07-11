@@ -31,6 +31,7 @@ class ResolvedToolPolicy:
     idempotent: "bool | None" = None
     require_approval: "bool | None" = None
     risk: "str | None" = None
+    schema_version: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -51,6 +52,7 @@ class EffectiveToolPolicy:
     idempotent: bool = False
     require_approval: bool = False
     risk: str = "medium"
+    schema_version: str = "1"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
@@ -133,6 +135,11 @@ def merge_policies(
     risks = [l.risk for l in layers if l.risk]
     risk = max(risks, key=lambda r: risk_order.get(r, 2)) if risks else None
 
+    # schema_version: the highest declared version wins (a newer schema version
+    # is the most specific statement of the tool's current input contract).
+    versions = [l.schema_version for l in layers if l.schema_version]
+    schema_version = max(versions) if versions else None
+
     metadata: "dict[str, Any]" = {}
     for l in layers:
         if l.metadata:
@@ -145,6 +152,7 @@ def merge_policies(
         idempotent=idempotent,
         require_approval=require_approval,
         risk=risk,
+        schema_version=schema_version,
         metadata=metadata,
     )
 
@@ -165,5 +173,6 @@ def finalize_policy(resolved: "ResolvedToolPolicy | None") -> EffectiveToolPolic
         idempotent=bool(resolved.idempotent),
         require_approval=bool(resolved.require_approval),
         risk=resolved.risk or "medium",
+        schema_version=resolved.schema_version or "1",
         metadata=resolved.metadata,
     )

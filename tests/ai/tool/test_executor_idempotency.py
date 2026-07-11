@@ -100,7 +100,9 @@ def test_same_key_with_different_args_raises_conflict(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_no_idempotency_store_disables_caching_and_handler_runs_each_call():
+def test_no_idempotency_key_means_no_caching_handler_runs_each_call():
+    """Without an idempotency_key (the normal non-idempotent case) there is no
+    caching regardless of store -- the handler runs on every call."""
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
@@ -113,17 +115,37 @@ def test_no_idempotency_store_disables_caching_and_handler_runs_each_call():
             ToolRequest(tool_name="echo", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
-            idempotency_key="ignored",
         )
         await executor.execute(
             ToolRequest(tool_name="echo", arguments={"value": 2}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
-            idempotency_key="ignored",
         )
 
     asyncio.run(_run())
-    assert calls["n"] == 2, "without a store the handler must run on every call"
+    assert calls["n"] == 2, "without a key the handler must run on every call"
+
+
+def test_idempotency_key_without_store_fails_closed():
+    """A tool declared idempotent (so a key is provided) but run against a
+    Storage with no IdempotencyStore must fail closed -- it must NOT silently
+    run non-idempotently (which would let a replayed call execute twice)."""
+    from linktools.ai.errors import StorageCapabilityError
+    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+
+    async def _handler(value: int) -> int:
+        return value
+
+    async def _run():
+        await executor.execute(
+            ToolRequest(tool_name="echo", arguments={"value": 1}),
+            ToolContext(run_id="r1", session_id="s1"),
+            _handler,
+            idempotency_key="some-key",
+        )
+
+    with pytest.raises(StorageCapabilityError):
+        asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

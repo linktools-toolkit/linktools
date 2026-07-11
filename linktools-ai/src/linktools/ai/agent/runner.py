@@ -116,6 +116,26 @@ async def _noop_span():
     yield None
 
 
+def _toolset_for_definition(md) -> Any:
+    """Build a one-tool FunctionToolset from a ManagedToolDefinition. When the
+    definition carries parameters_json_schema (a ``**kwargs`` handler like an
+    MCP forwarding closure has no signature to derive one from), register via
+    Tool.from_schema so the model sees the correct parameters; otherwise let
+    pydantic-ai derive the schema from the handler signature."""
+    from pydantic_ai.toolsets import FunctionToolset
+    ts: "FunctionToolset" = FunctionToolset()
+    if md.parameters_json_schema:
+        from pydantic_ai.tools import Tool
+        ts.add_tool(Tool.from_schema(
+            function=md.handler, name=md.descriptor.name,
+            description=md.descriptor.name,
+            json_schema=dict(md.parameters_json_schema),
+        ))
+    else:
+        ts.add_function(md.handler, name=md.descriptor.name)
+    return ts
+
+
 class AgentRunner:
     def __init__(self, *, run_store: RunStore, session_store: SessionStore,
                  event_store: EventStore, checkpoint_store: CheckpointStore,
@@ -133,6 +153,7 @@ class AgentRunner:
                  security_pipeline: Any = None,
                  baseline_policy: Any = None,
                  tool_policy_provider: Any = None,
+                 managed_tool_executor: Any = None,
                  ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -185,7 +206,10 @@ class AgentRunner:
         self._security_pipeline = security_pipeline
         self._baseline_policy = baseline_policy
         self._tool_policy_provider = tool_policy_provider
-        self._tool_executor_for_managed = None  # set by Runtime.build if pause_on_approval
+        # The ToolExecutor every managed tool delegates to. Constructor-injected
+        # (Runtime.build passes the compiler's executor) so the runner is fully
+        # wired at construction -- no post-build private-field mutation.
+        self._tool_executor_for_managed = managed_tool_executor
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -414,7 +438,7 @@ class AgentRunner:
                 needs_default = agent.spec.tools is None and deps.execution is not None
                 if (agent.spec.tools or needs_default) and has_assembler:
                     from ..capability.policy import CapabilityToolExposurePolicy
-                    from ..capability.provider import CapabilityContext, toolset_names as _count_tool_names
+                    from ..capability.provider import CapabilityContext
 
                     exposure = (
                         self._capability_options.tool_exposure
@@ -424,7 +448,8 @@ class AgentRunner:
                     cap_ctx = CapabilityContext(
                         agent_id=agent.spec.id, exposure_policy=exposure,
                         execution=deps.execution, run_id=context.run_id,
-                        root_run_id=context.root_run_id, session_id=context.session_id,
+                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                        session_id=context.session_id,
                         event_store=self._event_store,
                         user_id=context.user_id, tenant_id=context.tenant_id,
                         workspace=context.workspace,
@@ -448,24 +473,28 @@ class AgentRunner:
                     # whether a tool is ManagedToolsetWrapper-wrapped) can
                     # classify calls by category/risk/mutating too -- not just
                     # by tool name.
+                    # Build the per-run descriptor lookup from BOTH contribution
+                    # forms (per-tool ``tools`` and legacy ``descriptors``) -- the
+                    # assembler normalizes introspectable contributions to the
+                    # tools form (descriptors empty), so reading descriptors alone
+                    # would leave the lookup empty and defeat the single-check
+                    # (PolicyCapability would not recognize these as managed).
+                    from ..capability.assembler import _contribution_descriptors
                     descriptor_lookup = {
                         d.name: d
                         for contrib in cap_bundle.tool_contributions
-                        for d in contrib.descriptors
+                        for d in _contribution_descriptors(contrib)
                     }
                     if descriptor_lookup:
                         deps = dataclasses.replace(deps, descriptor_lookup=descriptor_lookup)
-                    # Managed governance applies to ALL tools (including default
-                    # builtin) when any security object is configured OR a
-                    # capability declared a pipeline (a declared pipeline that
-                    # never wraps its tools is a silently-dropped declaration).
-                    use_managed = (self._security_pipeline is not None
-                                   or self._baseline_policy is not None
-                                   or self._tool_policy_provider is not None)
-                    # Pipelines declared by capabilities are composed with the
-                    # baseline pipeline so they take effect for this run (a
-                    # capability-declared pipeline that is never wired in is a
-                    # silently-dropped declaration).
+                    # Every ToolContribution ALWAYS goes through
+                    # ManagedToolsetWrapper -> ManagedToolAdapter ->
+                    # ToolExecutor.execute, whether or not a security object is
+                    # configured. The managed path owns more than security --
+                    # timeout, retry, idempotency, stable errors, events, call
+                    # id -- so disabling the baseline must NOT route tools back
+                    # to a raw toolset. A declared capability pipeline is
+                    # composed with the baseline pipeline so it takes effect.
                     effective_pipeline = self._security_pipeline
                     if cap_bundle.pipelines:
                         from ..security.pipeline import CompositeSecurityPipeline
@@ -475,51 +504,40 @@ class AgentRunner:
                                 (effective_pipeline,) + declared)
                         else:
                             effective_pipeline = CompositeSecurityPipeline(declared)
-                    # A capability-declared pipeline forces the managed path so
-                    # the pipeline actually wraps its tools (otherwise the
-                    # declared pipeline would be computed then dropped on the
-                    # raw-toolsets fallback).
-                    if effective_pipeline is not None:
-                        use_managed = True
-                    if use_managed and cap_bundle.tool_contributions:
+                    if cap_bundle.tool_contributions:
                         from ..tool.managed_toolset import ManagedToolsetWrapper
+                        wrap_kw = dict(
+                            security_pipeline=effective_pipeline,
+                            tool_executor=self._tool_executor_for_managed,
+                            policy_provider=self._tool_policy_provider,
+                            baseline_policy=self._baseline_policy,
+                            run_context=context,
+                            event_store=self._event_store,
+                        )
                         for contrib in cap_bundle.tool_contributions:
                             if contrib.tools:
                                 # Per-tool form: each tool gets its own wrapped
-                                # toolset built from the explicit handler, so
-                                # every tool is governed by its own descriptor
-                                # + handler pair (never "first descriptor for
-                                # the whole toolset").
-                                from pydantic_ai.toolsets import FunctionToolset
+                                # toolset built from its explicit handler. When
+                                # the definition carries parameters_json_schema
+                                # (e.g. a **kwargs MCP forwarding handler), use
+                                # it so the model sees the right parameters;
+                                # otherwise pydantic-ai derives it from the
+                                # handler signature.
                                 for md in contrib.tools:
-                                    ts = FunctionToolset()
-                                    ts.add_function(md.handler, name=md.descriptor.name)
                                     toolsets.append(ManagedToolsetWrapper(
-                                        ts,
+                                        _toolset_for_definition(md),
                                         descriptors={md.descriptor.name: md.descriptor},
-                                        security_pipeline=effective_pipeline,
-                                        tool_executor=self._tool_executor_for_managed,
-                                        policy_provider=self._tool_policy_provider,
-                                        baseline_policy=self._baseline_policy,
-                                        run_context=context,
-                                        event_store=self._event_store,
+                                        **wrap_kw,
                                     ))
-                            elif contrib.descriptors:
-                                wrapper = ManagedToolsetWrapper(
+                            elif contrib.toolset is not None and contrib.descriptors:
+                                # Legacy toolset+descriptors form (opaque
+                                # toolsets). Still wrapped -- never raw.
+                                toolsets.append(ManagedToolsetWrapper(
                                     contrib.toolset,
                                     descriptors={d.name: d for d in contrib.descriptors},
-                                    security_pipeline=effective_pipeline,
-                                    tool_executor=self._tool_executor_for_managed,
-                                    policy_provider=self._tool_policy_provider,
-                                    baseline_policy=self._baseline_policy,
-                                    run_context=context,
-                                    event_store=self._event_store,
-                                )
-                                toolsets.append(wrapper)
-                            else:
-                                toolsets.append(contrib.toolset)
-                    else:
-                        toolsets.extend(cap_bundle.toolsets)
+                                    **wrap_kw,
+                                ))
+                            # else: empty contribution -- nothing to expose.
                 elif needs_default:
                     # No assembler wired (e.g. a bare AgentRunner) — fall back
                     # to the raw builtin toolset so existing callers keep working.
@@ -534,13 +552,18 @@ class AgentRunner:
                 # capability assembler ran (cap_bundle exists).
                 if cap_bundle is not None:
                     from ..events.payloads import PromptCatalogInjected, ToolExposureApplied
+                    # Descriptor-only tool count (no toolset introspection): the
+                    # same source the assembler used for conflict/cap checks.
+                    total = 0
+                    for c in cap_bundle.tool_contributions:
+                        total += len(c.tools) if c.tools else len(c.descriptors)
                     await self._event_store.append(
                         stream_id=context.run_id, run_id=context.run_id,
                         root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
                         session_id=context.session_id, runnable_id=context.runnable_id,
                         payload=ToolExposureApplied(
                             agent_id=agent.spec.id,
-                            total_tools=len(_count_tool_names(toolsets)),
+                            total_tools=total,
                         ),
                     )
                     if cap_bundle.prompt_sections:

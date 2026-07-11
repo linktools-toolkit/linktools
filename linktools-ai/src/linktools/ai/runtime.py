@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
 # generator below; the function itself is an ``async def`` that ``yield``s.
@@ -32,7 +32,7 @@ from .agent.spec import AgentSpec
 from .capability.assembler import CapabilityAssembler
 from .capability.builtin import BuiltinProvider
 from .capability.options import CapabilityRuntimeOptions
-from .errors import SessionError, SwarmError
+from .errors import CapabilityResolutionError, SessionError, SwarmError
 from .execution.protocols import ExecutionBackend
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
@@ -167,6 +167,22 @@ class Runtime:
         if allow_mcp_wildcard and not resolved_options.allow_mcp_wildcard:
             resolved_options = dataclasses.replace(resolved_options, allow_mcp_wildcard=True)
 
+        # Resolve the effective SecurityBaseline once -- the single source every
+        # consumer (compiler executor, runner policy/pipeline, exposure policy)
+        # reads from. Resolved here, before any consumer, so SecurityBaseline
+        # (enabled=False) genuinely reaches all of them.
+        from .security.baseline import SecurityBaseline
+        baseline = security if security is not None else SecurityBaseline()
+
+        # Exposure policy priority: an explicit ``options`` arg wins; otherwise
+        # (options is None) a baseline-declared tool_exposure_policy is honored,
+        # but only while the baseline is enabled -- baseline disabled means no
+        # baseline-shipped exposure policy either (Runtime options still apply).
+        if (options is None and baseline.enabled
+                and baseline.tool_exposure_policy is not None):
+            resolved_options = dataclasses.replace(
+                resolved_options, tool_exposure=baseline.tool_exposure_policy)
+
         bundle = providers if providers is not None else ProviderBundle(
             agents=agents, skills=skills, mcp_servers=mcp_servers,
             tool_policies=tool_policies, swarms=swarms, subagents=subagents,
@@ -175,14 +191,9 @@ class Runtime:
 
         router = model_router or ModelRouter()
 
-        # Single resolution point for the default security configuration:
-        # every consumer below (the compiler's ToolExecutor, the runner's
-        # baseline policy/pipeline) reads from THIS ONE ``baseline`` object.
-        # SecurityBaseline(enabled=False) must reach every one of them --
-        # resolving ``security or SecurityBaseline()`` more than once risks a
-        # consumer silently reinstating a default the caller explicitly disabled.
-        from .security.baseline import SecurityBaseline
-        baseline = security if security is not None else SecurityBaseline()
+        # ``baseline`` was resolved above (before the exposure-policy merge) so
+        # SecurityBaseline(enabled=False) reaches every consumer: the compiler's
+        # ToolExecutor, the runner's policy/pipeline, and the exposure policy.
 
         resolved_executor = tool_executor
         if tool_executor is None:
@@ -196,6 +207,11 @@ class Runtime:
             resolved_executor = ToolExecutor(
                 policy=PolicyEngine(rules=tuple(rules)),
                 approval_store=storage.approvals,
+                # Wire the IdempotencyStore so policy.idempotent tools actually
+                # persist + replay through ToolExecutor.execute -- without this,
+                # every idempotent tool fail-closes (StorageCapabilityError) even
+                # though the store is sitting unused in storage.idempotency.
+                idempotency_store=storage.idempotency,
                 pause_on_approval=pause_on_approval,
             )
         compiler = AgentCompiler(
@@ -219,6 +235,27 @@ class Runtime:
             from .tool.policy_adapter import MetadataBackedPolicyProvider
             runner_policy_provider = MetadataBackedPolicyProvider(bundle.tool_policies)
 
+        # Capability providers + assembler are built BEFORE the runner so the
+        # runner can be constructed with its assembler + managed executor wired
+        # in (no post-build private-field mutation). The subagent executor
+        # resolves the runner lazily via runner_provider, breaking the
+        # runner→assembler→provider→executor→runner cycle.
+        mcp_manager = MCPConnectionManager() if bundle.mcp_servers is not None else None
+        sub_executor = None
+        if bundle.entrypoints is not None or bundle.subagents is not None:
+            # ``runner`` is assigned below; the lambda resolves it at call time
+            # (only during a real subagent execute, long after build returns).
+            sub_executor = _make_runtime_subagent_executor(
+                storage=storage, compiler=compiler,
+                runner_provider=lambda: runner,
+            )
+        capability_providers = _build_capability_providers(
+            bundle, execution, resolved_options, mcp_manager, sub_executor,
+        )
+        assembler = (
+            CapabilityAssembler(capability_providers) if capability_providers else None
+        )
+
         runner = AgentRunner(
             run_store=storage.runs, session_store=storage.sessions,
             event_store=storage.events, checkpoint_store=storage.checkpoints,
@@ -230,13 +267,12 @@ class Runtime:
             execution=execution,
             approval_store=storage.approvals,
             capability_options=resolved_options,
+            capability_assembler=assembler,
             security_pipeline=runner_pipeline,
             baseline_policy=runner_baseline_policy,
             tool_policy_provider=runner_policy_provider,
+            managed_tool_executor=resolved_executor,
         )
-        # Wire the ToolExecutor so ManagedToolsetWrapper can delegate policy/
-        # approval checks for managed tool calls.
-        runner._tool_executor_for_managed = resolved_executor
         swarm_runner = SwarmRunner(
             swarm_store=storage.swarms,
             run_store=storage.runs,
@@ -246,26 +282,6 @@ class Runtime:
             agent_runner=runner,
             run_controller=run_controller,
         )
-
-        # Capability providers + assembler. The subagent executor captures the
-        # runner/compiler/storage just built, so build it first and pass it into
-        # _build_capability_providers so SubagentProvider + PackageProvider
-        # receive it at construction (no post-mutation).
-        mcp_manager = MCPConnectionManager() if bundle.mcp_servers is not None else None
-        sub_executor = None
-        if bundle.entrypoints is not None or bundle.subagents is not None:
-            sub_executor = _make_runtime_subagent_executor(
-                storage=storage, compiler=compiler, runner=runner,
-            )
-        capability_providers = _build_capability_providers(
-            bundle, execution, resolved_options, mcp_manager, sub_executor,
-        )
-        assembler = (
-            CapabilityAssembler(capability_providers) if capability_providers else None
-        )
-        # AgentRunner reads the assembler at execute() time; set it now that
-        # capability providers (which needed the runner) are wired.
-        runner._capability_assembler = assembler
 
         return cls(
             storage=storage, compiler=compiler, runner=runner,
@@ -285,14 +301,15 @@ class Runtime:
 
     @property
     def capability_assembler(self) -> "CapabilityAssembler | None":
-        """The CapabilityAssembler used internally. Prefer
-        ``capability_assembler.assemble(spec, context)`` over the deprecated
-        :meth:`assemble`."""
+        """The CapabilityAssembler used internally. Equivalent to assembling via
+        :meth:`assemble`; both resolve an AgentSpec's declared tools into a
+        CapabilityBundle."""
         return self._capability_assembler
 
     async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
-        """Convenience wrapper around ``runtime.capability_assembler.assemble(spec, context)``.
-        ."""
+        """Resolve ``spec.tools`` into a CapabilityBundle (prompt sections +
+        tool contributions) under this runtime's exposure policy. Returns an
+        empty bundle when no capability providers are configured."""
         from .capability.provider import CapabilityContext
 
         if self._capability_assembler is None:
@@ -305,20 +322,32 @@ class Runtime:
         )
         return await self._capability_assembler.assemble(spec, context)
 
+    async def inspect(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> "CapabilityInspection":
+        """A stable, immutable view of what ``spec`` resolves to: the exposed
+        tool descriptors, merged prompt sections, and any warnings. Unlike
+        :meth:`assemble` (which returns the internal CapabilityBundle), this
+        leaks no mutable internal state -- downstream tooling can rely on the
+        shape."""
+        from .capability.inspection import CapabilityInspection
+        bundle = await self.assemble(spec, execution=execution)
+        return CapabilityInspection.from_bundle(bundle)
+
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
-        """Convenience wrapper around ``runtime.providers.swarms.get(swarm_id)``.
-        ."""
+        """Resolve a swarm id to its SwarmSpec via the configured
+        SwarmSpecProvider. Raises SwarmError when no swarm provider is
+        configured."""
         bundle = self._provider_bundle
         if bundle is None or bundle.swarms is None:
             raise SwarmError("no SwarmSpecProvider configured")
         return await bundle.swarms.get(swarm_id)
 
     async def resolve_agent(self, agent_id: str) -> AgentSpec:
-        """Convenience wrapper around ``runtime.providers.agents.get(agent_id)``.
-        ."""
+        """Resolve an agent id to its AgentSpec via the configured
+        AgentSpecProvider. Raises CapabilityResolutionError when no agent
+        provider is configured."""
         bundle = self._provider_bundle
         if bundle is None or bundle.agents is None:
-            raise SwarmError("no AgentSpecProvider configured")
+            raise CapabilityResolutionError("no AgentSpecProvider configured")
         return await bundle.agents.get(agent_id)
 
     async def __aenter__(self) -> "Runtime":
@@ -518,15 +547,20 @@ class Runtime:
 
 
 def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler,
-                                    runner: AgentRunner):
+                                    runner_provider: "Callable[[], AgentRunner]"):
     """Build a SubagentExecutor that runs a resolved child AgentSpec under a
     parent run: creates a child session (parent_id = parent session), mints a
     child run recording parent_run_id / root_run_id, delegates to the runner
     (bounded by timeout_seconds), and returns a structured SubagentResult.
 
-    Depth is tracked via the ``_CURRENT_DEPTH`` contextvar: the child run sees
-    parent_depth + 1, so SubagentProvider.enforce_depth bounds the full chain
-    (the token is reset on return so parallel/sibling calls are unaffected)."""
+    ``runner_provider`` resolves the runner LAZILY (called inside ``execute``)
+    so Runtime.build can construct the runner with its assembler before the
+    subagent executor references it -- breaking the
+    runner→assembler→provider→executor→runner cycle without post-build private
+    mutation. Depth is tracked via the ``_CURRENT_DEPTH`` contextvar: the child
+    run sees parent_depth + 1, so SubagentProvider.enforce_depth bounds the full
+    chain (the token is reset on return so parallel/sibling calls are
+    unaffected)."""
     from .subagent.runner import _CURRENT_DEPTH
 
     async def execute(*, agent_spec, task, context, parent, scope, timeout_seconds):
@@ -558,7 +592,7 @@ def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler
 
         async def _drive():
             compiled = await compiler.compile(agent_spec)
-            return await runner.run(compiled, RunInput(prompt=task), run_ctx)
+            return await runner_provider().run(compiled, RunInput(prompt=task), run_ctx)
 
         # Increment depth for the child run; reset on return so siblings/parents
         # keep their own depth value.

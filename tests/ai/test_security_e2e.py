@@ -418,7 +418,8 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
         tools=(ToolRef(name="*"),),  # builtin:* but mutating tools gated off
     )
     bundle = await rt.assemble(spec, execution=backend)
-    names = {d.name for c in bundle.tool_contributions for d in c.descriptors}
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
+        d.name for c in bundle.tool_contributions for d in c.descriptors}
     assert {"list_dir", "read_file"} <= names
     assert "write_file" not in names
     assert "bash" not in names

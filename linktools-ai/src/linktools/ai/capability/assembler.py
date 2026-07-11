@@ -42,7 +42,7 @@ async def _emit(context: CapabilityContext, payload) -> None:
         return
     await store.append(
         stream_id=run_id, run_id=run_id,
-        root_run_id=context.root_run_id or run_id, parent_run_id=None,
+        root_run_id=context.root_run_id or run_id, parent_run_id=context.parent_run_id,
         session_id=context.session_id or run_id, runnable_id=context.agent_id,
         payload=payload,
     )
@@ -180,45 +180,34 @@ class CapabilityAssembler:
                         handler=ToolsetAdapter.extract_handler(contrib.toolset, d.name))
                     for d in contrib.descriptors
                 )
-                contributions[idx] = ToolContribution(
-                    toolset=contrib.toolset, descriptors=contrib.descriptors, tools=built)
+                # Normalize to the per-tool form: the descriptor/handler pairs
+                # are now the source of truth. Keep the legacy fields too for
+                # any consumer still reading them, but ``tools`` is canonical.
+                contributions[idx] = ToolContribution(tools=built)
 
             # Centralized ToolExposurePolicy gate -- the single place a
             # descriptor's category/mutating flag decides whether it reaches
             # the model, regardless of which Provider produced it. A denied
             # tool is dropped entirely: it appears in neither the merged
             # toolsets nor the merged contributions, so it cannot be called
-            # via any path (managed or raw).
+            # via any path. Both contribution forms are filtered consistently
+            # (per-tool ``tools`` and legacy ``toolset+descriptors``); a
+            # tools-only contribution (toolset is None) must NOT crash on
+            # ``.filtered``.
             exposed_contributions = []
             denied_names: "list[str]" = []
             for contrib in contributions:
-                exposed = tuple(
-                    d for d in contrib.descriptors if is_descriptor_exposable(d, cap))
-                denied_names.extend(
-                    d.name for d in contrib.descriptors if d not in exposed)
-                if not contrib.descriptors:
-                    # No descriptors at all (shouldn't happen post auto-wrap,
-                    # but never silently expose an unclassified toolset).
-                    continue
-                if not exposed:
-                    continue
-                if len(exposed) == len(contrib.descriptors):
-                    exposed_contributions.append(contrib)
-                else:
-                    allowed_names = {d.name for d in exposed}
-                    from ..tool.contribution import ToolContribution
-                    filtered_toolset = contrib.toolset.filtered(
-                        lambda _ctx, tool_def, _names=allowed_names: tool_def.name in _names
-                    )
-                    exposed_contributions.append(
-                        ToolContribution(toolset=filtered_toolset, descriptors=exposed))
+                filtered, dropped = filter_contribution(contrib, cap)
+                denied_names.extend(dropped)
+                if filtered is not None:
+                    exposed_contributions.append(filtered)
 
             if denied_names:
                 await _emit(context, ToolExposureDenied(
                     agent_id=spec.id,
                     reason=f"capability {ref}: tools not exposed by policy: {denied_names}"))
 
-            names = tuple(d.name for c in exposed_contributions for d in c.descriptors)
+            names = tuple(d.name for c in exposed_contributions for d in _contribution_descriptors(c))
             await _emit(context, CapabilityResolveCompleted(
                 agent_id=spec.id, capability_ref=str(ref), tool_count=len(names)))
             if len(names) > cap.max_tools_per_capability:
@@ -240,7 +229,7 @@ class CapabilityAssembler:
                 else:
                     merged_prompt[section] = text
 
-            merged_toolsets.extend(c.toolset for c in exposed_contributions)
+            merged_toolsets.extend(c.toolset for c in exposed_contributions if c.toolset is not None)
             merged_contributions.extend(exposed_contributions)
             # Merge pipelines declared by this capability -- a stable Bundle
             # field that must never be silently dropped. The runtime wires the
@@ -277,6 +266,52 @@ class CapabilityAssembler:
 def _to_capability_ref(agent_id: str, tool_ref: ToolRef) -> CapabilityRef:
     kind = tool_ref.kind or "builtin"
     return CapabilityRef(kind=kind, name=tool_ref.name, config=dict(tool_ref.config))
+
+
+def _contribution_descriptors(contrib) -> "tuple":
+    """All descriptors on a contribution -- the per-tool form (preferred) and/or
+    the legacy descriptors tuple. The single source for counting, conflict
+    detection, and exposure accounting (no toolset introspection)."""
+    out: "list" = []
+    if contrib.tools:
+        out.extend(md.descriptor for md in contrib.tools)
+    if contrib.descriptors:
+        seen = {d.name for d in out}
+        for d in contrib.descriptors:
+            if d.name not in seen:
+                out.append(d)
+    return tuple(out)
+
+
+def filter_contribution(contrib, policy):
+    """Apply ToolExposurePolicy to one ToolContribution.
+
+    Returns ``(filtered_or_None, dropped_names)``. Handles both the per-tool
+    ``tools`` form and the legacy ``toolset + descriptors`` form consistently:
+    a tools-only contribution (toolset is None) filters its ``tools`` tuple and
+    never crashes on ``.filtered``. An empty result returns ``None`` (the
+    contribution is dropped entirely) rather than raising.
+    """
+    descs = _contribution_descriptors(contrib)
+    if not descs:
+        return None, []
+    allowed = tuple(d for d in descs if is_descriptor_exposable(d, policy))
+    dropped = [d.name for d in descs if d not in allowed]
+    if not allowed:
+        return None, dropped
+    if len(allowed) == len(descs):
+        return contrib, []
+    allowed_names = frozenset(d.name for d in allowed)
+    from ..tool.contribution import ToolContribution
+    if contrib.tools:
+        kept = tuple(md for md in contrib.tools if md.descriptor.name in allowed_names)
+        return ToolContribution(tools=kept), dropped
+    if contrib.toolset is not None:
+        kept_descs = tuple(d for d in contrib.descriptors if d.name in allowed_names)
+        filtered_toolset = contrib.toolset.filtered(
+            lambda _ctx, tool_def, _names=allowed_names: tool_def.name in _names)
+        return ToolContribution(toolset=filtered_toolset, descriptors=kept_descs), dropped
+    return ToolContribution(descriptors=allowed), dropped
 
 
 # Both names refer to the same orchestrator.

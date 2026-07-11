@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Argument safety for audit-facing copies (spec §16.3 minimum): mask values
-under secret-looking keys and cap size, so tool arguments persisted to the
-approval store / event log never leak credentials or unbounded payloads.
+"""Argument safety for audit-facing copies: mask values under secret-looking
+keys and cap size, so tool arguments persisted to the approval store / event
+log never leak credentials or unbounded payloads.
 
 Applied ONLY to audit copies (e.g. RunPaused.arguments -> ApprovalRequest),
 never to the arguments actually passed to the tool handler -- the handler must

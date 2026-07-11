@@ -43,11 +43,17 @@ class PolicyCapability(AbstractCapability[None]):
     ) -> Any:
         lookup = getattr(ctx.deps, "descriptor_lookup", None)
         descriptor = lookup.get(tool_def.name) if lookup else None
+        # Managed tools (those with a descriptor in the per-run lookup) are
+        # governed by ManagedToolAdapter -> ToolExecutor.execute, which already
+        # runs this same PolicyEngine. Running check() here too would execute
+        # every rule (and mint approval records / deny events) TWICE per call.
+        # So this hook only applies the PolicyEngine to LEGACY/raw tools -- the
+        # ones with no descriptor (e.g. a bare AgentRunner's raw builtin path).
+        if descriptor is not None:
+            return args
         request = ToolRequest(
             tool_name=tool_def.name, arguments=args,
-            category=descriptor.category if descriptor else None,
-            risk=descriptor.risk if descriptor else None,
-            mutating=descriptor.mutating if descriptor else None,
+            category=None, risk=None, mutating=None,
         )
         # Thread ToolCallPart.tool_call_id through ToolContext so the executor
         # keys ApprovalRequest.tool_call_id on the SAME id pydantic-ai's message

@@ -122,5 +122,6 @@ async def test_mutating_mcp_tool_exposed_when_execution_tools_allowed():
     asm = CapabilityAssembler({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(agent_id="a1", exposure_policy=Policy(expose_execution_tools=True))
     bundle = await asm.assemble(_spec(), ctx)
-    names = {d.name for c in bundle.tool_contributions for d in c.descriptors}
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
+        d.name for c in bundle.tool_contributions for d in c.descriptors}
     assert names == {"risky_call"}

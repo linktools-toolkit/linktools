@@ -163,6 +163,19 @@ class ToolTimeoutError(ToolError):
     pass
 
 
+class ToolSchemaValidationError(ToolError):
+    """A tool's arguments (or result) failed JSON-schema validation -- e.g. a
+    pipeline MODIFY produced arguments the tool cannot accept, or the original
+    call's arguments did not match the declared parameters_json_schema. Never
+    retried: the same payload will fail the same way."""
+
+
+class PipelineExecutionError(ToolError):
+    """A SecurityPipeline hook raised an unexpected exception. Pipelines fail
+    closed; this is the stable error surfaced when a pipeline error cannot be
+    attributed to a DENY decision. Never retried."""
+
+
 class TransientToolError(ToolError):
     """A tool execution error that MAY succeed on retry (network blip, transient
     lock conflict, etc.). ManagedToolAdapter retries these up to max_retries."""

@@ -51,7 +51,7 @@ def auto_contribute(
 
 class ToolsetAdapter:
     """Formal adapter for resolving a descriptor name to the unique raw handler
-    in a toolset (spec §9.3). For introspectable toolsets (pydantic-ai
+    in a toolset. For introspectable toolsets (pydantic-ai
     FunctionToolset) the handler is the tool's function; for opaque toolsets
     (FilteredToolset/MCPToolset) extraction returns None -- those use the
     ManagedToolsetWrapper forwarding model instead."""

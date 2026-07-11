@@ -19,13 +19,14 @@ from ..security.descriptor import ToolDescriptor
 @dataclass(frozen=True, slots=True)
 class ManagedToolDefinition:
     """One model-callable tool: its descriptor, the raw async handler that
-    actually executes it, and the tool's parameter JSON schema (for MODIFY
-    re-validation). The preferred per-tool unit so each tool is governed by its
-    own descriptor/handler pair -- never "the first descriptor for a toolset"."""
+    actually executes it, and the tool's parameter JSON schema. The schema is
+    consumed when the tool is registered with the model (a ``**kwargs`` handler
+    -- e.g. an MCP forwarding closure -- has no signature to derive one from, so
+    the explicit schema is what tells the model the tool's parameters) and is
+    re-used to re-validate arguments after a pipeline MODIFY."""
     descriptor: ToolDescriptor
     handler: Any  # Callable[..., Awaitable[Any]]
-    parameter_schema: "Mapping[str, Any] | None" = None
-    result_schema: "Mapping[str, Any] | None" = None
+    parameters_json_schema: "Mapping[str, Any] | None" = None
 
 
 @dataclass(frozen=True, slots=True)
