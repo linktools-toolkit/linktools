@@ -5,5 +5,6 @@
 
 from .executor import ToolExecutor
 from .idempotency import IdempotencyRecord, IdempotencyStatus
+from .legacy import LegacyToolsetAdapter
 
-__all__ = ["ToolExecutor", "IdempotencyRecord", "IdempotencyStatus"]
+__all__ = ["ToolExecutor", "IdempotencyRecord", "IdempotencyStatus", "LegacyToolsetAdapter"]

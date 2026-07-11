@@ -2,10 +2,14 @@ import pytest
 
 from linktools.ai.errors import (
     IdempotencyConfigurationError,
+    MCPErrorCode,
 )
 from linktools.ai.mcp.provider import MCPExposedTool
+from linktools.ai.mcp.client import MCPConnectionManager, MCPConnectionRef, MCPToolsetHandle
+from linktools.ai.registry.mcp import MCPServerSpec
 from linktools.ai.security.descriptor import ToolDescriptor
 from linktools.ai.security.redact import redact_for_audit, redact_exception
+from linktools.ai.security.emitter import DefaultSecurityEventSanitizer
 from linktools.ai.tool.idempotency_key import DefaultIdempotencyKeyBuilder
 from linktools.ai.tool.idempotency_key import encode_business_key
 from linktools.ai.tool.policy import (
@@ -64,3 +68,45 @@ def test_policy_strategy_is_normalized_at_the_domain_boundary():
 def test_business_key_rejects_unstable_values(value):
     with pytest.raises(IdempotencyConfigurationError):
         encode_business_key(value)
+
+
+def test_mcp_error_codes_are_stable_and_sanitizer_bounds_secrets_and_payload():
+    assert MCPErrorCode.AUTHENTICATION.value == "authentication"
+    sanitizer = DefaultSecurityEventSanitizer()
+    event = {
+        "reason": "https://example.test/callback?token=secret-value",
+        "nested": ["x" * 4_096 for _ in range(10)],
+    }
+    result = sanitizer.sanitize(event)
+    rendered = str(result)
+    assert "secret-value" not in rendered
+    assert len(rendered.encode("utf-8")) <= sanitizer._MAX_PAYLOAD
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_uses_list_tools_not_contextual_get_tools():
+    manager = MCPConnectionManager()
+    spec = MCPServerSpec(
+        id="srv", name="srv", transport="stdio", command_or_url="x",
+        command=("x",),
+    )
+
+    class Tool:
+        name = "query"
+        description = "query"
+        inputSchema = {"type": "object", "properties": {}}
+
+    class Toolset:
+        async def list_tools(self):
+            return (Tool(),)
+        async def get_tools(self, _ctx):
+            raise AssertionError("contextual get_tools must not be used for discovery")
+
+    manager.get_toolset = lambda _spec: _async_handle(Toolset())
+    result = await manager.list_tools_result(spec)
+    assert result.verified is True
+    assert [tool.name for tool in result.tools] == ["query"]
+
+
+async def _async_handle(toolset):
+    return MCPToolsetHandle(MCPConnectionRef("srv", "fp"), toolset)

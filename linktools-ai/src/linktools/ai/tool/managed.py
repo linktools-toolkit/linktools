@@ -29,6 +29,7 @@ from ..security.pipeline import (
     SecurityPipeline,
     ToolInvocationEvent,
     ToolResultEvent,
+    validate_tool_decision,
 )
 from .policy import (
     EffectiveToolPolicy,
@@ -214,6 +215,10 @@ class ManagedToolAdapter:
             except Exception:
                 raise ToolDeniedError(
                     f"pipeline before_tool failed for {self._descriptor.name!r}")
+            try:
+                validate_tool_decision(decision, stage="before")
+            except Exception as exc:
+                raise ToolDeniedError(str(exc)) from exc
             await self._emit(ToolPipelineDecision(
                 run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
                 action=decision.action.value, reason=decision.reason or "", stage="before"))
@@ -376,6 +381,13 @@ class ManagedToolAdapter:
                     success=True, execution_success=True, result_action="denied"))
                 raise ToolResultDeniedError(
                     f"after_tool pipeline failed for {self._descriptor.name!r}")
+            try:
+                validate_tool_decision(after_decision, stage="after")
+            except Exception as exc:
+                await self._emit(ToolCompleted(
+                    tool_name=self._descriptor.name, tool_call_id=call_id,
+                    success=True, execution_success=True, result_action="denied"))
+                raise ToolResultDeniedError(str(exc)) from exc
             await self._emit(ToolPipelineDecision(
                 run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
                 action=after_decision.action.value, reason=after_decision.reason or "",

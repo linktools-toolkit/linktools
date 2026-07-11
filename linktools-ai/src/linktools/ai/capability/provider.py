@@ -73,23 +73,6 @@ def provider_kinds(provider: "CapabilityProvider") -> "frozenset[str]":
     return frozenset({provider.kind})
 
 
-def _toolset_tool_names(toolset: Any) -> "tuple[str, ...]":
-    """Best-effort tool-name extraction for conflict detection. pydantic-ai
-    ``FunctionToolset`` exposes ``.tools`` (name -> tool); other toolset shapes
-    return empty so unknown toolsets never produce false conflicts."""
-    tools = getattr(toolset, "tools", None)
-    if isinstance(tools, dict):
-        return tuple(str(k) for k in tools.keys())
-    return ()
-
-
-def toolset_names(toolsets: "tuple[Any, ...]") -> "tuple[str, ...]":
-    out: "list[str]" = []
-    for ts in toolsets:
-        out.extend(_toolset_tool_names(ts))
-    return tuple(out)
-
-
 async def _noop_emit(payload: Any) -> None:
     return None
 

@@ -228,3 +228,9 @@ MCP handlers bind to a `server_id` plus configuration fingerprint. MCP public
 capabilities contain only per-tool managed definitions; raw server names are
 used solely for the final server call. Registry `business_key` values must be
 strings, integers, or UUIDs.
+
+`Runtime.inspect()` is the public capability inspection API. `Runtime.assemble()`
+is deprecated and returns the same safe inspection snapshot; executable bundles
+and handlers remain internal. Direct `AgentRunner` construction requires an
+explicit capability assembler and managed executor, while `Runtime.build()` is
+the default construction path.

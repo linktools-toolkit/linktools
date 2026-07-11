@@ -69,6 +69,22 @@ class MCPToolInfo:
     read_only: bool | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        from ..utils.freeze import freeze_value
+        if not isinstance(self.name, str) or not self.name.strip():
+            from ..errors import MCPToolDefinitionError
+            raise MCPToolDefinitionError("MCP tool name must be non-empty")
+        try:
+            from ..tool.schema_validate import validate_schema
+            validate_schema(self.parameters_json_schema)
+        except Exception as exc:
+            from ..errors import MCPToolDefinitionError
+            raise MCPToolDefinitionError(
+                f"invalid schema for MCP tool {self.name!r}") from exc
+        object.__setattr__(self, "parameters_json_schema",
+                           freeze_value(dict(self.parameters_json_schema)))
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
+
 
 @dataclass(frozen=True)
 class MCPDiscoveryResult:
@@ -123,11 +139,21 @@ class MCPProvider:
             if (not discovery.verified and self.connection_manager is not None
                     and discovery_mode == "best_effort"):
                 from ..events.payloads import SecurityDegraded
-                if context.security_event_emitter is not None:
-                    await context.security_event_emitter.emit_security(SecurityDegraded(
-                        run_id=context.run_id, component="mcp-discovery",
-                        reason=str(discovery.error or "tool enumeration unavailable"),
-                    ))
+                if context.security_event_emitter is None:
+                    raise CapabilityResolutionError(
+                        f"mcp server {server_id!r}: best-effort discovery requires "
+                        "a security event emitter")
+                await context.security_event_emitter.emit_security(SecurityDegraded(
+                    run_id=context.run_id, component="mcp-discovery",
+                    reason=str(discovery.error or "tool enumeration unavailable"),
+                    error_code=getattr(getattr(discovery.error, "code", None), "value",
+                                       getattr(discovery.error, "code", None)),
+                    server_id=server_id,
+                    connection_fingerprint=(
+                        discovery.connection_ref.fingerprint[:12]
+                        if discovery.connection_ref else None
+                    ),
+                ))
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
             final = tuple(final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered)
             if max_per_cap and len(final) > max_per_cap:

@@ -46,7 +46,7 @@ class JsonSchemaToolValidator:
     def validate_schema(self, schema: "Mapping[str, Any]") -> None:
         import jsonschema
         try:
-            jsonschema.Draft7Validator.check_schema(schema)
+            jsonschema.Draft7Validator.check_schema(_thaw(schema))
         except jsonschema.SchemaError as exc:
             raise ToolSchemaDefinitionError(
                 f"malformed parameters_json_schema: {exc.message}"
@@ -58,7 +58,7 @@ class JsonSchemaToolValidator:
     ) -> None:
         import jsonschema
         try:
-            jsonschema.validate(dict(arguments), schema)
+            jsonschema.validate(dict(arguments), _thaw(schema))
         except jsonschema.ValidationError as exc:
             raise ToolSchemaValidationError(
                 f"tool {tool_name!r} arguments failed schema validation: {exc.message}"
@@ -66,6 +66,15 @@ class JsonSchemaToolValidator:
 
 
 _DEFAULT: "JsonSchemaToolValidator | None" = None
+
+
+def _thaw(value: Any) -> Any:
+    """Convert immutable public snapshots back to JSON-native containers."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return [_thaw(item) for item in value]
+    return value
 
 
 def _default_validator() -> JsonSchemaToolValidator:

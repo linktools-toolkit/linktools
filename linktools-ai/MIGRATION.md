@@ -18,3 +18,8 @@
 - MCP raw toolsets are no longer returned from capability bundles. After-tool
   audit events now precede the final `ToolCompleted` event and record whether a
   result was returned, modified, or denied.
+- Migrate public capability inspection from `Runtime.assemble()` to
+  `Runtime.inspect()`. Direct `AgentRunner` callers must inject the assembler
+  and managed executor, or use `Runtime.build()`.
+- Providers returning opaque toolsets must wrap them in the explicit
+  `LegacyToolsetAdapter`; implicit assembler introspection is rejected.

@@ -26,7 +26,7 @@ from ..events.payloads import (
 )
 from .bundle import CapabilityBundle
 from .exposure import is_descriptor_exposable
-from .provider import CapabilityContext, CapabilityProvider, toolset_names
+from .provider import CapabilityContext, CapabilityProvider
 from .ref import CapabilityRef
 
 if TYPE_CHECKING:
@@ -121,69 +121,24 @@ class CapabilityAssembler:
                 agent_id=spec.id, capability_ref=str(ref)))
             bundle = await provider.resolve(ref, context)
 
-            # Auto-wrap raw toolsets into ToolContributions with conservative
-            # descriptors so downstream (ManagedToolAdapter) never needs
-            # toolset introspection. This is a compat adaptation: every
-            # first-party Provider already returns explicit descriptors, so a
-            # Provider hitting this path hasn't migrated yet. Surface it via
-            # DeprecationWarning (compat behavior must be observable) rather
-            # than silently introspecting.
             contributions = list(bundle.tool_contributions)
             if not contributions and bundle.toolsets:
-                import warnings
-                warnings.warn(
-                    f"capability {ref} returned raw toolsets without ToolContribution "
-                    f"descriptors; auto-introspection is deprecated -- return "
-                    f"ToolContribution with explicit ToolDescriptors",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                from ..tool.auto_descriptor import auto_contribute
-                contributions = [
-                    auto_contribute(ts, source=ref.kind, capability_kind=ref.kind,
-                                     capability_name=ref.name)
-                    for ts in bundle.toolsets
-                ]
-
-            # Descriptor/handler resolution: for the toolset+descriptors form
-            # with an introspectable toolset, every declared descriptor must
-            # resolve to a unique raw handler in the toolset -- otherwise the
-            # descriptor would only fail-closed at call time. Catch the mismatch
-            # here, at assembly. Opaque toolsets (no .tools dict, e.g. MCP's
-            # FilteredToolset) are exempt: their handlers are the forwarding
-            # closures, not introspectable functions.
-            from ..tool.auto_descriptor import ToolsetAdapter, _toolset_tool_names
-            for idx, contrib in enumerate(contributions):
-                if contrib.tools:
-                    continue  # per-tool form: handler is explicit per definition
-                if not contrib.toolset or not contrib.descriptors:
-                    continue
-                names_in_toolset = set(_toolset_tool_names(contrib.toolset))
-                if not names_in_toolset:
-                    continue  # opaque toolset -- skip (forwarding model)
-                missing = [d.name for d in contrib.descriptors
-                           if d.name not in names_in_toolset]
-                if missing:
+                from ..tool.legacy import LegacyToolsetAdapter
+                if all(isinstance(ts, LegacyToolsetAdapter) for ts in bundle.toolsets):
+                    contributions = [ts.contribution() for ts in bundle.toolsets]
+                else:
                     raise CapabilityResolutionError(
-                        f"agent {spec.id}: capability {ref} declared descriptors "
-                        f"with no matching handler in the toolset: {missing}")
-                # Populate the per-tool ManagedToolDefinition form from the
-                # introspectable toolset so downstream (the runner) governs each
-                # tool via its own explicit descriptor+handler pair -- the
-                # preferred per-tool model, derived here for any toolset whose
-                # handlers are extractable. Opaque toolsets (MCP) keep the
-                # toolset+descriptors form.
-                from ..tool.contribution import ManagedToolDefinition, ToolContribution
-                built = tuple(
-                    ManagedToolDefinition(
-                        descriptor=d,
-                        handler=ToolsetAdapter.extract_handler(contrib.toolset, d.name))
-                    for d in contrib.descriptors
-                )
-                # Normalize to the per-tool form: the descriptor/handler pairs
-                # are now the source of truth. Keep the legacy fields too for
-                # any consumer still reading them, but ``tools`` is canonical.
-                contributions[idx] = ToolContribution(tools=built)
+                        f"capability {ref} returned raw toolsets without explicit "
+                        "ToolContribution; use an explicit legacy adapter"
+                    )
+
+            for contrib in contributions:
+                if (contrib.toolset is not None and contrib.descriptors
+                        and not contrib.legacy_adapter
+                        and isinstance(getattr(contrib.toolset, "tools", None), dict)):
+                    raise CapabilityResolutionError(
+                        f"capability {ref} returned an introspectable raw toolset; "
+                        "Provider must return ManagedToolDefinition entries")
 
             # Assembly-time schema validation: every ManagedToolDefinition that
             # declares a parameters_json_schema must have a well-formed schema.

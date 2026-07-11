@@ -199,7 +199,7 @@ async def test_descriptor_without_matching_handler_fails_at_assembly(tmp_path):
             )
 
     asm = CapabilityAssembler({"mcp": _Mismatch()})
-    with pytest.raises(CapabilityResolutionError, match="no matching handler"):
+    with pytest.raises(CapabilityResolutionError, match="ManagedToolDefinition"):
         await asm.assemble(_spec((ToolRef(name="x", kind="mcp"),)), _ctx(None))
 
 
@@ -237,9 +237,15 @@ class _CollidingProvider:
 
     async def resolve(self, ref, context):
         from linktools.ai.execution.toolset import BuiltinToolContext, build_builtin_toolset
+        from linktools.ai.security.descriptor import ToolDescriptor
+        from linktools.ai.tool.legacy import LegacyToolsetAdapter
         ts = build_builtin_toolset(
             BuiltinToolContext(backend=context.execution, enabled_tools={"file"}))
-        return CapabilityBundle(toolsets=(ts,))
+        descriptors = tuple(ToolDescriptor(
+            name=name, source="mcp", category="custom", risk="high", mutating=True,
+            capability_kind="mcp", capability_name=ref.name,
+        ) for name in ("list_dir", "read_file", "write_file", "batch_files", "apply_patch"))
+        return CapabilityBundle(toolsets=(LegacyToolsetAdapter(ts, descriptors),))
 
 
 @pytest.mark.asyncio

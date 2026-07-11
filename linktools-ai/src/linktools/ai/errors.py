@@ -3,6 +3,8 @@
 """errors.py: stable domain error hierarchy. Never identify an error by string
 matching -- always by type."""
 
+from enum import Enum
+
 
 class LinktoolsAIError(Exception):
     """Base class for every error raised by linktools.ai."""
@@ -159,6 +161,10 @@ class ToolDeniedError(ToolError):
 
 class ToolResultDeniedError(ToolDeniedError):
     """The tool ran, but its result was rejected by after-tool policy."""
+
+
+class PipelineExecutionError(ToolError):
+    """A security pipeline returned an action invalid for the current phase."""
 
 
 class ToolApprovalRequiredError(ToolError):
@@ -324,8 +330,17 @@ class MCPServerNotFoundError(CapabilityNotFoundError):
     pass
 
 
+class MCPErrorCode(str, Enum):
+    AUTHENTICATION = "authentication"
+    CONNECTION = "connection"
+    DISCOVERY_UNSUPPORTED = "discovery_unsupported"
+    INVALID_TOOL_DEFINITION = "invalid_tool_definition"
+    PROTOCOL = "protocol"
+
+
 class MCPConnectionError(LinktoolsAIError):
     """An MCP server connection could not be established or was lost."""
+    code = MCPErrorCode.CONNECTION
 
 
 class MCPConnectionUnavailableError(MCPConnectionError):
@@ -333,19 +348,24 @@ class MCPConnectionUnavailableError(MCPConnectionError):
 
 
 class MCPAuthenticationError(MCPConnectionError):
-    pass
+    code = MCPErrorCode.AUTHENTICATION
 
 
 class MCPDiscoveryError(MCPConnectionError):
-    pass
+    code = MCPErrorCode.PROTOCOL
 
 
 class MCPDiscoveryUnsupportedError(MCPDiscoveryError):
-    pass
+    code = MCPErrorCode.DISCOVERY_UNSUPPORTED
+
+
+class MCPToolDefinitionError(MCPDiscoveryError):
+    code = MCPErrorCode.INVALID_TOOL_DEFINITION
 
 
 class MCPToolError(LinktoolsAIError):
     """An MCP tool invocation failed at the protocol/transport layer."""
+    code = MCPErrorCode.PROTOCOL
 
 
 class ToolSecurityAuditError(ToolError):

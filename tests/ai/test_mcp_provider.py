@@ -3,6 +3,8 @@
 """MCPProvider + toolset shaping + spec/client (contract). Deterministic policy
 is unit-tested; live connection is environment-dependent and excluded."""
 
+import dataclasses
+
 import pytest
 
 from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
@@ -295,10 +297,16 @@ async def test_mcp_best_effort_discovery_mode_opts_out_of_fail_closed():
                   "discovery_mode": "best_effort"},
     )
     provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _legacy(_UnenumerableManager(), empty_is_verified=False))
-    bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
+    events = []
+    class _Emitter:
+        async def emit_security(self, event):
+            events.append(event)
+    ctx = dataclasses.replace(_ctx(), security_event_emitter=_Emitter())
+    bundle = await provider.resolve(CapabilityRef("mcp", "risk"), ctx)
     # Proceeds without raising, but exposes no unverified execution tools.
     assert bundle.toolsets == ()
     assert all(not contribution.tools for contribution in bundle.tool_contributions)
+    assert len(events) == 1 and events[0].component == "mcp-discovery"
 
 
 @pytest.mark.asyncio

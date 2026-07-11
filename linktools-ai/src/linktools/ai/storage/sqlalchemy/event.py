@@ -8,6 +8,7 @@ inserts the row. On the rare race where two concurrent transactions both
 computed the same next_seq, the unique constraint's IntegrityError is caught
 and the whole append retried (re-reading MAX under a fresh transaction)."""
 
+import asyncio
 import json
 import uuid
 from dataclasses import asdict
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import EventRow
@@ -135,6 +136,16 @@ class SqlAlchemyEventStore:
                 # Unique (stream_id, sequence) collision -- a concurrent append
                 # reserved the same sequence first. Retry to re-read MAX.
                 last_exc = exc
+                await asyncio.sleep(0)
+                continue
+            except OperationalError as exc:
+                # SQLite serializes writers and can briefly report a lock while
+                # another append commits. Retry only that transient condition;
+                # unrelated operational failures must still surface unchanged.
+                if "database is locked" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                await asyncio.sleep(0.01)
                 continue
         raise EventSequenceConflictError(
             f"could not reserve a unique event sequence for stream {stream_id!r} "

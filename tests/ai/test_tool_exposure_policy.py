@@ -77,7 +77,7 @@ from linktools.ai.capability import CapabilityAssembler, CapabilityContext
 from linktools.ai.capability.bundle import CapabilityBundle
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.security.descriptor import ToolDescriptor
-from linktools.ai.tool.contribution import ToolContribution
+from linktools.ai.tool.contribution import ToolContribution, declared_tool_definitions
 
 
 class _FakeMutatingProvider:
@@ -95,7 +95,8 @@ class _FakeMutatingProvider:
             risk="high", mutating=True,
         )
         return CapabilityBundle(
-            toolsets=(ts,), tool_contributions=(ToolContribution(toolset=ts, descriptors=(descriptor,)),),
+            tool_contributions=(ToolContribution(
+                tools=declared_tool_definitions(ts, (descriptor,))),),
         )
 
 

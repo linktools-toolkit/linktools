@@ -65,12 +65,18 @@ def _user_function_toolsets(compiled) -> "list[FunctionToolset]":
 
 
 def _make_runner(tmp_path, *, execution=None) -> AgentRunner:
+    from linktools.ai.capability.assembler import CapabilityAssembler
+    from linktools.ai.capability.builtin import BuiltinProvider
+    from linktools.ai.policy.engine import PolicyEngine
+    from linktools.ai.tool.executor import ToolExecutor
     return AgentRunner(
         run_store=FileRunStore(root=tmp_path / "runs"),
         session_store=FileSessionStore(root=tmp_path / "sessions"),
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
         execution=execution,
+        capability_assembler=CapabilityAssembler({"builtin": BuiltinProvider()}),
+        managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
     )
 
 

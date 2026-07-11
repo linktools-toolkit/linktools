@@ -38,7 +38,8 @@ def _ctx():
 async def test_fake_resource_provider_works():
     provider = PackageProvider(resource_provider=_FakeResourceProvider())
     bundle = await provider.resolve(CapabilityRef("package-resource", "pkg"), _ctx())
-    read_fn = bundle.toolsets[0].tools["read_package_resource"].function
+    read_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
+                   if md.descriptor.name == "read_package_resource")
     out = await read_fn("pkg", "SKILL.md")
     assert out["size_bytes"] == 3
 
@@ -47,6 +48,7 @@ async def test_fake_resource_provider_works():
 async def test_fake_entrypoint_resolver_works():
     provider = PackageProvider(entrypoint_resolver=_FakeEntrypointResolver())
     bundle = await provider.resolve(CapabilityRef("package-entrypoint", "pkg"), _ctx())
-    list_fn = bundle.toolsets[0].tools["list_package_entrypoints"].function
+    list_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
+                   if md.descriptor.name == "list_package_entrypoints")
     out = await list_fn("pkg", kind="agent")
     assert any(i["name"] == "grader" for i in out["items"])

@@ -32,11 +32,38 @@ class ManagedToolDefinition:
 @dataclass(frozen=True, slots=True)
 class ToolContribution:
     """A capability's exposed tools. ``tools`` is the preferred per-tool form
-    (ManagedToolDefinition per tool). ``toolset + descriptors`` is the fallback
-    for opaque toolsets (MCP) where individual handlers cannot be extracted; in
-    that form every descriptor must still resolve to a unique handler in the
-    toolset (enforced at assembly)."""
+    (ManagedToolDefinition per tool). ``toolset + descriptors`` is the explicit
+    fallback for opaque toolsets (MCP) where handlers cannot be extracted."""
     toolset: Any = None
     descriptors: "tuple[ToolDescriptor, ...]" = ()
     tools: "tuple[ManagedToolDefinition, ...]" = ()
+    legacy_adapter: bool = False
 
+
+def declared_tool_definitions(
+    toolset: Any, descriptors: tuple[ToolDescriptor, ...],
+) -> tuple[ManagedToolDefinition, ...]:
+    """Build explicit definitions at a Provider boundary.
+
+    Providers own the mapping from declared descriptors to handlers; the
+    assembler deliberately has no toolset introspection fallback.
+    """
+    tools = getattr(toolset, "tools", None)
+    if not isinstance(tools, dict):
+        raise TypeError("declared tool definitions require an introspectable toolset")
+    declared = {descriptor.name for descriptor in descriptors}
+    actual = {str(name) for name in tools}
+    if declared != actual:
+        raise ValueError(
+            f"tool descriptor mismatch: missing={sorted(declared - actual)}, "
+            f"extra={sorted(actual - declared)}")
+    return tuple(
+        ManagedToolDefinition(
+            descriptor=descriptor,
+            handler=tools[descriptor.name].function,
+            parameters_json_schema=getattr(
+                getattr(tools[descriptor.name], "tool_def", None),
+                "parameters_json_schema", None),
+        )
+        for descriptor in descriptors
+    )

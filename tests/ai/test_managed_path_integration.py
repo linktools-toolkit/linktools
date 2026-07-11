@@ -14,7 +14,6 @@ from linktools.ai.execution.local import LocalExecutionBackend
 from linktools.ai.security.pipeline import (
     PipelineAction, PipelineDecision, SecurityPipeline,
 )
-from linktools.ai.tool.auto_descriptor import extract_handler
 from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.model.policy import ModelPolicy
 
@@ -30,9 +29,8 @@ class _DenyAllPipeline:
 
 
 @pytest.mark.asyncio
-async def test_assembler_auto_wraps_toolsets_into_contributions(tmp_path):
-    """The assembler auto-generates ToolContributions with conservative
-    descriptors from raw toolsets (compat layer, contract)."""
+async def test_assembler_returns_explicit_managed_definitions(tmp_path):
+    """Providers return explicit descriptors and handlers at the boundary."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     spec = AgentSpec(
@@ -45,13 +43,13 @@ async def test_assembler_auto_wraps_toolsets_into_contributions(tmp_path):
         execution=backend,
     )
     bundle = await asm.assemble(spec, ctx)
-    # Auto-wrapped: tool_contributions should be populated.
+    # Explicit per-tool definitions are populated by the Provider.
     assert len(bundle.tool_contributions) > 0
-    # Each contribution has descriptors with conservative defaults.
+    # Each definition has an explicit descriptor and callable handler.
     for contrib in bundle.tool_contributions:
-        for desc in contrib.descriptors:
-            assert desc.name  # has a name
-            assert desc.risk in ("low", "medium", "high", "critical")
+        for md in contrib.tools:
+            assert md.descriptor.name
+            assert callable(md.handler)
 
 
 @pytest.mark.asyncio

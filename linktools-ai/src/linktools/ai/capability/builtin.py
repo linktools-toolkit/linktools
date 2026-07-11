@@ -19,7 +19,7 @@ import warnings
 from ..errors import CapabilityNotFoundError, CapabilityResolutionError
 from ..execution.toolset import BuiltinToolContext, build_builtin_toolset
 from ..security.descriptor import ToolDescriptor
-from ..tool.contribution import ToolContribution
+from ..tool.contribution import ToolContribution, declared_tool_definitions
 from .bundle import CapabilityBundle
 from .provider import CapabilityContext
 from .ref import CapabilityRef
@@ -49,8 +49,8 @@ class BuiltinProvider:
             BuiltinToolContext(backend=context.execution, enabled_tools=enabled)
         )
         descriptors = _builtin_descriptors(enabled, ref)
-        contribution = ToolContribution(toolset=toolset, descriptors=descriptors)
-        return CapabilityBundle(toolsets=(toolset,), tool_contributions=(contribution,))
+        contribution = ToolContribution(tools=declared_tool_definitions(toolset, descriptors))
+        return CapabilityBundle(tool_contributions=(contribution,))
 
 
 def _builtin_descriptors(enabled: "set[str]", ref: CapabilityRef) -> "tuple[ToolDescriptor, ...]":

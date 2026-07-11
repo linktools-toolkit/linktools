@@ -71,7 +71,7 @@ def _spec():
         id="e2e", name="e2e",
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="terminal"),),
+        tools=(),
     )
 
 
@@ -417,9 +417,8 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(name="*"),),  # builtin:* but mutating tools gated off
     )
-    bundle = await rt.assemble(spec, execution=backend)
-    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
-        d.name for c in bundle.tool_contributions for d in c.descriptors}
+    inspection = await rt.inspect(spec, execution=backend)
+    names = {tool.name for tool in inspection.tools}
     assert {"list_dir", "read_file"} <= names
     assert "write_file" not in names
     assert "bash" not in names

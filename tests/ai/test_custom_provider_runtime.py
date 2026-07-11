@@ -58,8 +58,8 @@ async def test_assemble_empty_without_providers(tmp_path):
     rt = _runtime(tmp_path)
     spec = AgentSpec(id="a", name="a", model=ModelPolicy(primary="m"),
                      instructions=PromptSpec(instructions="hi"))
-    bundle = await rt.assemble(spec, execution=None)
-    assert bundle.toolsets == ()
+    inspection = await rt.inspect(spec, execution=None)
+    assert inspection.tools == ()
 
 
 @pytest.mark.asyncio
@@ -88,13 +88,11 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
             instructions=PromptSpec(instructions="hi"),
             tools=(ToolRef(name="skill-creator", kind=kind),),
         )
-        bundle = await rt.assemble(spec, execution=None)
+        inspection = await rt.inspect(spec, execution=None)
         # The ref resolved to a non-empty contribution (tools form for
         # introspectable toolsets). package-entrypoint with no expose_call_tool
         # contributes only a discovery tool; package-resource contributes read tools.
-        contrib_names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
-            d.name for c in bundle.tool_contributions for d in c.descriptors}
-        assert contrib_names, f"{kind} ref did not resolve"
+        assert inspection.tools, f"{kind} ref did not resolve"
 
 
 @pytest.mark.asyncio
@@ -120,13 +118,84 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
     rt_off = Runtime.build(storage=FileStorage(root=tmp_path), mcp_servers=_McpSrc())
     assert rt_off._options.allow_mcp_wildcard is False
     with pytest.raises(CapabilityResolutionError, match="allow_mcp_wildcard"):
-        await rt_off.assemble(spec, execution=None)
+        await rt_off.inspect(spec, execution=None)
 
     # On: the build flag is folded into options (live connection is exercised
     # separately via MCPProvider + a fake manager in test_mcp_provider.py).
     rt_on = Runtime.build(storage=FileStorage(root=tmp_path / "on"),
                           mcp_servers=_McpSrc(), allow_mcp_wildcard=True)
     assert rt_on._options.allow_mcp_wildcard is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+    from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+    from linktools.ai.mcp.client import MCPConnectionRef
+    from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPToolInfo
+    from linktools.ai.capability.options import CapabilityRuntimeOptions
+    from linktools.ai.capability.policy import CapabilityToolExposurePolicy
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.registry.mcp import MCPServerSpec
+
+    class _McpSrc:
+        async def list_ids(self):
+            return ("srv",)
+        async def get(self, sid):
+            return MCPServerSpec(id=sid, name=sid, transport="stdio",
+                                 command_or_url="python -m fake",
+                                 command=("python", "-m", "fake"))
+
+    class _Manager:
+        def __init__(self):
+            self.calls = []
+            self.ref = MCPConnectionRef("srv", "fingerprint-a")
+
+        async def list_tools_result(self, spec):
+            return MCPDiscoveryResult(
+                tools=(MCPToolInfo("echo", {"type": "object", "properties": {
+                    "value": {"type": "string"}}}),),
+                verified=True, connection_ref=self.ref)
+
+        async def call_tool(self, *, connection_ref, tool_name, arguments):
+            self.calls.append((connection_ref, tool_name, arguments))
+            return {"echo": arguments["value"]}
+
+    calls = []
+    def model_fn(messages, info: AgentInfo) -> ModelResponse:
+        if not calls:
+            calls.append(True)
+            function_tools = getattr(info, "function_tools", ())
+            if isinstance(function_tools, dict):
+                tool_name = next(iter(function_tools))
+            else:
+                tool_name = getattr(function_tools[0], "name", "srv.echo")
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name=tool_name, args={"value": "hello"})])
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    registry = ModelRegistry()
+    registry.register("m", model=FunctionModel(model_fn))
+    rt = Runtime.build(
+        storage=FileStorage(root=tmp_path),
+        model_router=ModelRouter(registry=registry),
+        mcp_servers=_McpSrc(),
+        options=CapabilityRuntimeOptions(
+            tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)),
+    )
+    manager = _Manager()
+    rt._capability_assembler._providers["mcp"].connection_manager = manager
+    spec = AgentSpec(
+        id="mcp-e2e", name="mcp-e2e", model=ModelPolicy(primary="m"),
+        instructions=PromptSpec(instructions="hi"),
+        tools=(ToolRef(name="srv", kind="mcp"),),
+    )
+    result = await rt.run(spec, "call echo")
+    assert "done" in str(result.output)
+    assert manager.calls == [(manager.ref, "echo", {"value": "hello"})]
 
 
 @pytest.mark.asyncio
@@ -151,11 +220,10 @@ async def test_custom_skill_provider_wires_assembler(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(name="*", kind="skill"),),
     )
-    bundle = await rt.assemble(spec, execution=None)
+    inspection = await rt.inspect(spec, execution=None)
     # Skill catalog prompt injected + list_skills/read_skill exposed.
-    assert "sql" in bundle.prompt_sections.get("skills", "")
-    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools} | {
-        d.name for c in bundle.tool_contributions for d in c.descriptors}
+    assert "sql" in inspection.prompt_sections.get("skills", "")
+    names = {tool.name for tool in inspection.tools}
     assert {"list_skills", "read_skill"} <= names
 
 

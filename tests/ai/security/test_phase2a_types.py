@@ -312,7 +312,7 @@ async def test_adapter_after_tool_deny():
         async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
         async def before_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
         async def after_tool(self, e):
-            return PipelineDecision(action=PipelineAction.DENY, reason="result blocked")
+            return PipelineDecision(action=PipelineAction.DENY_RESULT, reason="result blocked")
         async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
     async def handler(): return "executed"

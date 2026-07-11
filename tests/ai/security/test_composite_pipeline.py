@@ -82,10 +82,10 @@ async def test_sequential_modify_second_pipeline_sees_first_pipelines_edit():
 @pytest.mark.asyncio
 async def test_sequential_modify_applies_to_result_field_for_after_tool():
     def _a_modify(e):
-        return PipelineDecision(action=PipelineAction.MODIFY, modified_payload=f"{e.result}-a")
+        return PipelineDecision(action=PipelineAction.MODIFY_RESULT, modified_payload=f"{e.result}-a")
 
     def _b_modify(e):
-        return PipelineDecision(action=PipelineAction.MODIFY, modified_payload=f"{e.result}-b")
+        return PipelineDecision(action=PipelineAction.MODIFY_RESULT, modified_payload=f"{e.result}-b")
 
     composite = CompositeSecurityPipeline([
         _FixedPipeline(after_tool=_a_modify),

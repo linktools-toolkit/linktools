@@ -310,7 +310,7 @@ class Runtime:
         CapabilityBundle."""
         return self._capability_assembler
 
-    async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
+    async def _assemble_internal(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
         """Resolve ``spec.tools`` into a CapabilityBundle (prompt sections +
         tool contributions) under this runtime's exposure policy. Returns an
         empty bundle when no capability providers are configured."""
@@ -326,6 +326,10 @@ class Runtime:
         )
         return await self._capability_assembler.assemble(spec, context)
 
+    async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
+        """Return the safe public inspection snapshot for a capability spec."""
+        return await self.inspect(spec, execution=execution)
+
     async def inspect(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
         tool descriptors, merged prompt sections, and any warnings. Unlike
@@ -333,8 +337,9 @@ class Runtime:
         leaks no mutable internal state -- downstream tooling can rely on the
         shape."""
         from .capability.inspection import CapabilityInspection
-        bundle = await self.assemble(spec, execution=execution)
-        return CapabilityInspection.from_bundle(bundle)
+        bundle = await self._assemble_internal(spec, execution=execution)
+        return CapabilityInspection.from_bundle(
+            bundle, exposure_policy=self._options.tool_exposure)
 
     async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
         """Resolve a swarm id to its SwarmSpec via the configured

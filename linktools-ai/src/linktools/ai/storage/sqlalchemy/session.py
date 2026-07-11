@@ -32,13 +32,14 @@ assigns fresh ones inside the inserting transaction.
   with an atomic ``UPDATE ... RETURNING`` (mirroring how ``claim_task``
   allocates), NOT a broader retry loop."""
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import SessionMessageRow, SessionRow
@@ -159,6 +160,13 @@ class SqlAlchemySessionStore:
                 # Unique (session_id, sequence) collision -- a concurrent
                 # append reserved the same sequence first. Retry to re-read MAX.
                 last_exc = exc
+                await asyncio.sleep(0)
+                continue
+            except OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                await asyncio.sleep(0.01)
                 continue
         raise SessionSequenceConflictError(
             f"could not reserve a unique message sequence for session {session_id!r} "

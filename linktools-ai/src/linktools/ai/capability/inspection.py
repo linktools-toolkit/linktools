@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from ..security.descriptor import ToolDescriptor
 from ..utils.freeze import freeze_value
+from .policy import CapabilityToolExposurePolicy
 
 
 @dataclass(frozen=True)
@@ -17,9 +18,11 @@ class CapabilityInspection:
     tools: "tuple[ToolDescriptor, ...]" = ()
     prompt_sections: "Mapping[str, str]" = field(default_factory=dict)
     warnings: "tuple[str, ...]" = ()
+    exposure_policy: CapabilityToolExposurePolicy = field(
+        default_factory=CapabilityToolExposurePolicy)
 
     @classmethod
-    def from_bundle(cls, bundle: Any) -> "CapabilityInspection":
+    def from_bundle(cls, bundle: Any, *, exposure_policy: CapabilityToolExposurePolicy | None = None) -> "CapabilityInspection":
         """Build an inspection from a CapabilityBundle without leaking its
         mutable internals: tools come from the per-tool definitions (and/or
         legacy descriptors), prompt sections are copied."""
@@ -39,4 +42,5 @@ class CapabilityInspection:
         return cls(
             tools=tuple(unique),
             prompt_sections=freeze_value(dict(bundle.prompt_sections)),
+            exposure_policy=exposure_policy or CapabilityToolExposurePolicy(),
         )

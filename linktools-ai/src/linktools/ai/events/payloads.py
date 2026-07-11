@@ -295,6 +295,9 @@ class SecurityDegraded:
     run_id: "str | None" = None
     component: str = ""
     reason: str = ""
+    error_code: str | None = None
+    server_id: str | None = None
+    connection_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

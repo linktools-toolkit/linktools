@@ -144,34 +144,63 @@ class MCPConnectionManager:
 
     async def list_tools_result(self, server: MCPServerSpec):
         from .provider import MCPDiscoveryResult, MCPToolInfo
+        handle = None
         try:
             handle = await self.get_toolset(server)
             toolset = handle.toolset
-            getter = getattr(toolset, "get_tools", None)
-            if getter is None:
+            lister = getattr(toolset, "list_tools", None)
+            if lister is None:
                 return MCPDiscoveryResult((), False, MCPDiscoveryUnsupportedError(
                     f"MCP server {server.id!r} cannot enumerate tools"))
-            # pydantic-ai toolsets yield ToolDefinition objects; read .name off each.
-            import inspect
-            result = getter()
-            if inspect.isawaitable(result):
-                tools = await result
-            else:
-                tools = result
-            tools: "list[MCPToolInfo]" = []
-            for t in tools or ():
-                name = getattr(t, "name", None) or getattr(getattr(t, "function", None), "name", None)
-                if name:
-                    tools.append(MCPToolInfo(
-                        name=str(name),
-                        parameters_json_schema=getattr(t, "parameters_json_schema", {}) or {},
-                        description=getattr(t, "description", None),
-                        read_only=None,
-                        metadata=getattr(t, "metadata", {}) or {},
-                    ))
-            return MCPDiscoveryResult(tuple(tools), True, None, handle.connection_ref)
+            raw_tools = await lister()
+            tools = tuple(self._convert_tool_info(t) for t in raw_tools or ())
+            return MCPDiscoveryResult(tools, True, None, handle.connection_ref)
         except Exception as exc:
-            return MCPDiscoveryResult((), False, MCPDiscoveryError(str(exc)))
+            error = self._normalize_discovery_error(exc)
+            return MCPDiscoveryResult((), False, error,
+                                      handle.connection_ref if handle else None)
+
+    @staticmethod
+    def _convert_tool_info(tool: Any):
+        from .provider import MCPToolInfo
+        from ..errors import MCPToolDefinitionError
+        name = getattr(tool, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise MCPToolDefinitionError("MCP tool name must be non-empty")
+        schema = (getattr(tool, "inputSchema", None)
+                  or getattr(tool, "input_schema", None)
+                  or getattr(tool, "parameters_json_schema", None)
+                  or {"type": "object", "properties": {}})
+        if not isinstance(schema, Mapping):
+            raise MCPToolDefinitionError(f"invalid schema for MCP tool {name!r}")
+        from ..tool.schema_validate import validate_schema
+        try:
+            validate_schema(schema)
+        except Exception as exc:
+            raise MCPToolDefinitionError(
+                f"invalid schema for MCP tool {name!r}") from exc
+        return MCPToolInfo(
+            name=name,
+            description=getattr(tool, "description", None),
+            parameters_json_schema=schema,
+            read_only=None,
+            metadata=getattr(tool, "metadata", {}) or {},
+        )
+
+    @staticmethod
+    def _normalize_discovery_error(exc: BaseException):
+        from ..errors import MCPAuthenticationError, MCPConnectionError
+        if isinstance(exc, MCPDiscoveryError):
+            return exc
+        name = type(exc).__name__.lower()
+        text = str(exc)
+        if "auth" in name or "unauthorized" in text.lower() or "forbidden" in text.lower():
+            return MCPAuthenticationError("MCP authentication failed")
+        if "unsupported" in name or "notimplemented" in name:
+            return MCPDiscoveryUnsupportedError("MCP discovery is unsupported")
+        if "connect" in name or "timeout" in name or "transport" in name:
+            return MCPConnectionError("MCP connection failed")
+        return MCPDiscoveryError("MCP discovery failed")
 
     async def call_tool(self, *, connection_ref: MCPConnectionRef, tool_name: str,
                         arguments: Mapping[str, Any]) -> Any:

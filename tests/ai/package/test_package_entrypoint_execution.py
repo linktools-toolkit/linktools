@@ -27,7 +27,8 @@ async def test_call_without_executor_raises_not_reserved():
         "allowed_kinds": ["agent"], "allowed_names": ["grader"], "expose_call_tool": True,
     })
     bundle = await provider.resolve(ref, _ctx())
-    call = bundle.toolsets[0].tools["call_package_entrypoint"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools
+                if md.descriptor.name == "call_package_entrypoint")
     with pytest.raises(Exception):  # PackageEntrypointDeniedError (no executor)
         await call("pkg", "agent", "grader", "do it")
 

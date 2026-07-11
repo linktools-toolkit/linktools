@@ -93,6 +93,7 @@ async def test_no_event_store_is_safe():
     ctx = CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy())
     provider = SkillProvider(_SkillSrc())
     bundle = await provider.resolve(CapabilityRef("skill", "sql"), ctx)
-    read_fn = bundle.toolsets[0].tools["read_skill"].function
+    read_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
+                   if md.descriptor.name == "read_skill")
     out = await read_fn("sql")
     assert out["content"] == "x"

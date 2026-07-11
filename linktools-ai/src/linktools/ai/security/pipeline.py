@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from ..utils.freeze import freeze_value
+from ..errors import PipelineExecutionError
 
 
 class PipelineAction(str, Enum):
@@ -123,6 +124,22 @@ def _with_modified_payload(event: Any, payload: Any) -> Any:
     return dataclasses.replace(event, **{field_name: payload})
 
 
+def validate_tool_decision(decision: PipelineDecision, *, stage: str) -> None:
+    before = {
+        PipelineAction.ALLOW, PipelineAction.DENY,
+        PipelineAction.REQUIRE_APPROVAL, PipelineAction.MODIFY,
+        PipelineAction.AUDIT_ONLY,
+    }
+    after = {
+        PipelineAction.ALLOW, PipelineAction.DENY_RESULT,
+        PipelineAction.MODIFY_RESULT, PipelineAction.AUDIT_ONLY,
+    }
+    allowed = before if stage == "before" else after
+    if decision.action not in allowed:
+        raise PipelineExecutionError(
+            f"pipeline action {decision.action.value!r} is invalid at {stage}_tool")
+
+
 class CompositeSecurityPipeline:
     """Composes multiple SecurityPipelines. Decision precedence:
     DENY > REQUIRE_APPROVAL > MODIFY (in order) > ALLOW. AUDIT_ONLY never
@@ -146,6 +163,10 @@ class CompositeSecurityPipeline:
         require_approval: "PipelineDecision | None" = None
         for p in self._pipelines:
             decision = await getattr(p, hook_name)(current_event)
+            if hook_name == "before_tool":
+                validate_tool_decision(decision, stage="before")
+            elif hook_name == "after_tool":
+                validate_tool_decision(decision, stage="after")
             if decision.action in (PipelineAction.DENY, PipelineAction.DENY_RESULT):
                 return decision
             if decision.action == PipelineAction.REQUIRE_APPROVAL:

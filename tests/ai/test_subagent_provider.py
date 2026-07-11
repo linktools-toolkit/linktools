@@ -69,7 +69,7 @@ def _ctx():
 async def test_call_subagent_allowed_global():
     provider = SubagentProvider(subagent_provider=_SubSrc(("reviewer",)), executor=_Executor())
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     out = await call("reviewer", "review this")
     assert out["status"] == "succeeded"
     assert out["output"] == "did:review this"
@@ -80,7 +80,7 @@ async def test_call_subagent_allowed_global():
 async def test_call_subagent_unauthorized_rejected():
     provider = SubagentProvider(subagent_provider=_SubSrc(("reviewer",)), executor=_Executor())
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentNotFoundError):
         await call("ghost", "task")
 
@@ -94,7 +94,7 @@ async def test_call_subagent_depth_exceeded():
     )
     ref = CapabilityRef("subagent", "reviewer", config={"max_depth": 3})
     bundle = await provider.resolve(ref, _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentDepthExceededError):
         await call("reviewer", "task")
 
@@ -105,7 +105,7 @@ async def test_call_subagent_structured_error_on_failure():
         subagent_provider=_SubSrc(("reviewer",)), executor=_Executor(fail=("reviewer",)),
     )
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     out = await call("reviewer", "task")
     assert out["status"] == "failed"
     assert out["error"] == {"reason": "boom"}
@@ -115,7 +115,7 @@ async def test_call_subagent_structured_error_on_failure():
 async def test_call_subagent_no_executor_raises_execution_error():
     provider = SubagentProvider(subagent_provider=_SubSrc(("reviewer",)), executor=None)
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentExecutionError):
         await call("reviewer", "task")
 
@@ -125,7 +125,7 @@ async def test_subagent_wildcard_authorizes_all():
     provider = SubagentProvider(
         subagent_provider=_SubSrc(("a", "b")), executor=_Executor())
     bundle = await provider.resolve(CapabilityRef("subagent", "*"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     await call("a", "t")
     await call("b", "t")
     with pytest.raises(SubagentNotFoundError):

@@ -26,7 +26,7 @@ def _ctx(execution, agent_id="a1"):
 async def test_builtin_file_exposes_only_file_tools(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "file"), _ctx(backend))
-    names = tuple(bundle.toolsets[0].tools.keys())
+    names = tuple(md.descriptor.name for c in bundle.tool_contributions for md in c.tools)
     assert set(names) == {"list_dir", "read_file", "write_file", "batch_files", "apply_patch"}
 
 
@@ -34,14 +34,14 @@ async def test_builtin_file_exposes_only_file_tools(tmp_path):
 async def test_builtin_terminal_exposes_only_bash(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "terminal"), _ctx(backend))
-    assert tuple(bundle.toolsets[0].tools.keys()) == ("bash",)
+    assert tuple(md.descriptor.name for c in bundle.tool_contributions for md in c.tools) == ("bash",)
 
 
 @pytest.mark.asyncio
 async def test_builtin_wildcard_exposes_both(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "*"), _ctx(backend))
-    names = set(bundle.toolsets[0].tools.keys())
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
     assert "bash" in names and "read_file" in names
 
 
@@ -62,10 +62,10 @@ async def test_builtin_unknown_name_raises(tmp_path):
 async def test_builtin_file_read_exposes_only_read_tools(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "file-read"), _ctx(backend))
-    names = set(bundle.toolsets[0].tools.keys())
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
     assert names == {"list_dir", "read_file"}
     # read-only categories on the descriptors
-    cats = {d.category for d in bundle.tool_contributions[0].descriptors}
+    cats = {md.descriptor.category for c in bundle.tool_contributions for md in c.tools}
     assert cats == {"file-read"}
 
 
@@ -73,9 +73,9 @@ async def test_builtin_file_read_exposes_only_read_tools(tmp_path):
 async def test_builtin_file_write_exposes_only_write_tools(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "file-write"), _ctx(backend))
-    names = set(bundle.toolsets[0].tools.keys())
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
     assert names == {"write_file", "batch_files", "apply_patch"}
-    descs = bundle.tool_contributions[0].descriptors
+    descs = tuple(md.descriptor for c in bundle.tool_contributions for md in c.tools)
     assert all(d.mutating for d in descs)
     assert {d.category for d in descs} == {"file-write"}
 
@@ -87,5 +87,5 @@ async def test_builtin_file_deprecated_maps_to_read_plus_write(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     with pytest.warns(DeprecationWarning, match="deprecated"):
         bundle = await BuiltinProvider().resolve(CapabilityRef("builtin", "file"), _ctx(backend))
-    names = set(bundle.toolsets[0].tools.keys())
+    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
     assert {"list_dir", "read_file", "write_file", "batch_files", "apply_patch"} == names

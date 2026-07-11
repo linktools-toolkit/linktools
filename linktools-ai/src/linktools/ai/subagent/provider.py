@@ -90,15 +90,14 @@ class SubagentProvider:
             parent=parent,
         )
         from ..security.descriptor import ToolDescriptor
-        from ..tool.contribution import ToolContribution
-        contrib = ToolContribution(toolset=toolset, descriptors=(
-            ToolDescriptor(
+        from ..tool.contribution import ToolContribution, declared_tool_definitions
+        descriptors = (ToolDescriptor(
                 name="call_subagent", source="subagent", category="subagent",
                 risk="medium", mutating=True,
                 capability_kind="subagent", capability_name=ref.name,
-            ),
-        ))
-        return CapabilityBundle(toolsets=(toolset,), tool_contributions=(contrib,))
+            ),)
+        contrib = ToolContribution(tools=declared_tool_definitions(toolset, descriptors))
+        return CapabilityBundle(tool_contributions=(contrib,))
 
     async def _allowed_names(self, ref: CapabilityRef) -> "set[str]":
         if ref.name == "*":

@@ -512,6 +512,10 @@ class AgentRunner:
                         else:
                             effective_pipeline = CompositeSecurityPipeline(declared)
                     if cap_bundle.tool_contributions:
+                        if self._tool_executor_for_managed is None:
+                            from ..errors import RuntimeInitializationError
+                            raise RuntimeInitializationError(
+                                "managed tool execution requires a ToolExecutor")
                         from ..tool.managed_toolset import ManagedToolsetWrapper
                         wrap_kw = dict(
                             security_pipeline=effective_pipeline,
@@ -548,15 +552,13 @@ class AgentRunner:
                                 ))
                             # else: empty contribution -- nothing to expose.
                 elif needs_default:
-                    # No assembler wired (e.g. a bare AgentRunner) — fall back
-                    # to the raw builtin toolset so existing callers keep working.
-                    from ..execution.toolset import (
-                        BuiltinToolContext, build_builtin_toolset,
-                    )
-                    toolsets.append(build_builtin_toolset(BuiltinToolContext(
-                        backend=deps.execution,
-                        enabled_tools={"file-read", "file-write", "terminal"},
-                    )))
+                    from ..errors import RuntimeInitializationError
+                    raise RuntimeInitializationError(
+                        "AgentRunner requires a CapabilityAssembler for builtin tools")
+                elif agent.spec.tools:
+                    from ..errors import RuntimeInitializationError
+                    raise RuntimeInitializationError(
+                        "AgentRunner requires a CapabilityAssembler for declared tools")
                 # ToolExposureApplied + PromptCatalog events only fire when the
                 # capability assembler ran (cap_bundle exists).
                 if cap_bundle is not None:

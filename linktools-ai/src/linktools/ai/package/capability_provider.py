@@ -22,7 +22,7 @@ from ..capability.ref import CapabilityRef
 from ..providers.package import PackageResourceProvider
 from ..run.identity import ParentRunIdentity
 from ..security.descriptor import ToolDescriptor
-from ..tool.contribution import ToolContribution
+from ..tool.contribution import ToolContribution, declared_tool_definitions
 from ..subagent.runner import SubagentExecutor
 from .entrypoint import EntrypointInfo
 from .resolver import EntrypointResolver
@@ -78,11 +78,12 @@ class PackageProvider:
             )
             pkw = dict(source="package", capability_kind="package-resource",
                        capability_name=ref.name, category="package-read", risk="low", mutating=False)
-            contrib = ToolContribution(toolset=ts, descriptors=(
+            descriptors = (
                 ToolDescriptor(name="list_package_resources", **pkw),
                 ToolDescriptor(name="read_package_resource", **pkw),
-            ))
-            return CapabilityBundle(toolsets=(ts,), tool_contributions=(contrib,))
+            )
+            contrib = ToolContribution(tools=declared_tool_definitions(ts, descriptors))
+            return CapabilityBundle(tool_contributions=(contrib,))
 
         if ref.kind == "package-entrypoint":
             if self.entrypoint_resolver is None:
@@ -118,8 +119,8 @@ class PackageProvider:
             if expose_call:
                 descs.append(ToolDescriptor(name="call_package_entrypoint", category="package-execute",
                                             risk="high", mutating=True, **ekw))
-            contrib = ToolContribution(toolset=ts, descriptors=tuple(descs))
-            return CapabilityBundle(toolsets=(ts,), tool_contributions=(contrib,))
+            contrib = ToolContribution(tools=declared_tool_definitions(ts, tuple(descs)))
+            return CapabilityBundle(tool_contributions=(contrib,))
 
         # An unknown package-* kind slipped through; nothing to expose.
         return CapabilityBundle()

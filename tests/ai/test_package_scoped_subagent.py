@@ -47,7 +47,7 @@ async def test_scoped_subagent_resolves_via_entrypoint(env):
     # Scoped calls require the scenario be declared on the ref (confinement).
     bundle = await provider.resolve(
         CapabilityRef("subagent", "grader", config={"allowed_packages": ["skill-creator"]}), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     out = await call("grader", "grade it", scope={"package_id": "skill-creator", "package_kind": "skill"})
     assert out["status"] == "succeeded"
     assert out["output"] == "package:skill-creator:agent:grader"
@@ -58,7 +58,7 @@ async def test_scoped_subagent_undeclared_package_rejected(env):
     provider = env
     # No allowed_packages declared -> a scoped call to any scenario refused.
     bundle = await provider.resolve(CapabilityRef("subagent", "grader"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentNotFoundError, match="package scope not allowed"):
         await call("grader", "t", scope={"package_id": "skill-creator"})
 
@@ -68,7 +68,7 @@ async def test_scoped_subagent_missing_in_package_raises(env):
     provider = env
     bundle = await provider.resolve(
         CapabilityRef("subagent", "grader", config={"allowed_packages": ["skill-creator"]}), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentNotFoundError):
         # 'grader' is allowed by name + scenario, but the scenario no 'ghost'.
         await call("ghost", "t", scope={"package_id": "skill-creator"})
@@ -80,7 +80,7 @@ async def test_scoped_subagent_does_not_register_globally(env):
     # subagent_provider is None, so an unscoped call cannot resolve.
     provider = env
     bundle = await provider.resolve(CapabilityRef("subagent", "grader"), _ctx())
-    call = bundle.toolsets[0].tools["call_subagent"].function
+    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     from linktools.ai.errors import SubagentExecutionError
     with pytest.raises(SubagentExecutionError):
         await call("grader", "t")  # no scope, no global provider
