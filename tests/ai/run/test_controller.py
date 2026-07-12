@@ -5,6 +5,7 @@ bridge between Runtime.cancel and the in-flight asyncio.Task -- it sets the
 CancellationToken (observed at execution points) and cancels the task
 (observed at any suspended await). These tests cover register/cancel/
 unregister/get_token and the no-op-on-missing-run contract."""
+
 import asyncio
 import contextlib
 

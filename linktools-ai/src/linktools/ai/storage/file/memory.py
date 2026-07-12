@@ -111,7 +111,11 @@ class FileMemoryStore:
         limit: int = 10,
     ) -> "tuple[MemoryRecord, ...]":
         return await asyncio.to_thread(
-            self._search_sync, query, owner_id=owner_id, category=category, limit=limit,
+            self._search_sync,
+            query,
+            owner_id=owner_id,
+            category=category,
+            limit=limit,
         )
 
     # -- write ---------------------------------------------------------
@@ -161,7 +165,9 @@ class FileMemoryStore:
             updated_at=datetime.now(current.created_at.tzinfo or timezone.utc),
             metadata=new_metadata,
         )
-        _atomic_write(self._path(memory_id), json.dumps(_record_to_json(updated)).encode("utf-8"))
+        _atomic_write(
+            self._path(memory_id), json.dumps(_record_to_json(updated)).encode("utf-8")
+        )
         return updated
 
     async def update(
@@ -176,9 +182,13 @@ class FileMemoryStore:
     ) -> MemoryRecord:
         async with self._lock:
             return await asyncio.to_thread(
-                self._update_sync, memory_id,
-                expected_version=expected_version, content=content, category=category,
-                confidence=confidence, metadata=metadata,
+                self._update_sync,
+                memory_id,
+                expected_version=expected_version,
+                content=content,
+                category=category,
+                confidence=confidence,
+                metadata=metadata,
             )
 
     def _forget_sync(self, memory_id: str, *, expected_version: int) -> None:
@@ -193,4 +203,6 @@ class FileMemoryStore:
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._forget_sync, memory_id, expected_version=expected_version)
+            await asyncio.to_thread(
+                self._forget_sync, memory_id, expected_version=expected_version
+            )

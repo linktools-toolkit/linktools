@@ -37,12 +37,19 @@ class FileCheckpointStore:
         return self._run_dir(run_id) / f"{sequence}.json"
 
     def _save_sync(self, checkpoint: RunCheckpoint) -> None:
-        self._payload_path(checkpoint.run_id, checkpoint.sequence).write_bytes(checkpoint.payload)
+        self._payload_path(checkpoint.run_id, checkpoint.sequence).write_bytes(
+            checkpoint.payload
+        )
         meta = {
-            "id": checkpoint.id, "format": checkpoint.format, "schema_version": checkpoint.schema_version,
-            "created_at": checkpoint.created_at.isoformat(), "metadata": dict(checkpoint.metadata),
+            "id": checkpoint.id,
+            "format": checkpoint.format,
+            "schema_version": checkpoint.schema_version,
+            "created_at": checkpoint.created_at.isoformat(),
+            "metadata": dict(checkpoint.metadata),
         }
-        self._meta_path(checkpoint.run_id, checkpoint.sequence).write_text(json.dumps(meta))
+        self._meta_path(checkpoint.run_id, checkpoint.sequence).write_text(
+            json.dumps(meta)
+        )
 
     async def save(self, checkpoint: RunCheckpoint) -> None:
         await asyncio.to_thread(self._save_sync, checkpoint)
@@ -54,9 +61,14 @@ class FileCheckpointStore:
             return None
         meta = json.loads(meta_path.read_text())
         return RunCheckpoint(
-            id=meta["id"], run_id=run_id, sequence=sequence, format=meta["format"],
-            schema_version=meta["schema_version"], payload=payload_path.read_bytes(),
-            created_at=datetime.fromisoformat(meta["created_at"]), metadata=meta["metadata"],
+            id=meta["id"],
+            run_id=run_id,
+            sequence=sequence,
+            format=meta["format"],
+            schema_version=meta["schema_version"],
+            payload=payload_path.read_bytes(),
+            created_at=datetime.fromisoformat(meta["created_at"]),
+            metadata=meta["metadata"],
         )
 
     def _latest_sync(self, run_id: str) -> "RunCheckpoint | None":

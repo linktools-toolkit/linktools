@@ -10,7 +10,12 @@ router moves on to the next fallback. Total attempts per resolve =
 ``(1 + max_retries) * len(attempted)``. The default max_retries=0 reproduces the
 prior behavior (exactly one attempt per model_type)."""
 
-from ..model.registry import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
+from ..model.registry import (
+    ModelBundle,
+    ModelClientUnavailable,
+    ModelRegistry,
+    model_registry,
+)
 from ..errors import ModelRoutingError
 from .policy import ModelPolicy
 
@@ -23,7 +28,7 @@ class ModelRouter:
         attempted = [policy.primary, *policy.fallbacks]
         last_error: "Exception | None" = None
         # retry each model_type up to max_retries times before falling
-        # back. max_retries=0 -> one attempt per model_type (legacy behavior).
+        # back. max_retries=0 -> one attempt per model_type (prior behavior).
         for model_type in attempted:
             for _attempt in range(policy.max_retries + 1):
                 try:

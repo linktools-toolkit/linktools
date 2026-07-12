@@ -103,5 +103,6 @@ class ToolContext:
 
 @runtime_checkable
 class PolicyRule(Protocol):
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
-        ...
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision: ...

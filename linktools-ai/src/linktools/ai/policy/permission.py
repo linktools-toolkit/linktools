@@ -26,10 +26,14 @@ class PermissionRule:
         self._allowed = allowed
         self._tool_metadata: "Mapping[str, ToolPolicyMetadata]" = tool_metadata or {}
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         meta = self._tool_metadata.get(request.tool_name)
         if meta is None:
-            return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="permission-rule", reason=None)
+            return PolicyDecision(
+                kind=PolicyDecisionKind.ALLOW, rule_id="permission-rule", reason=None
+            )
         disallowed = meta.permissions - self._allowed
         if disallowed:
             return PolicyDecision(
@@ -37,4 +41,6 @@ class PermissionRule:
                 rule_id="permission-rule",
                 reason=f"tool requires {disallowed}",
             )
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="permission-rule", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="permission-rule", reason=None
+        )

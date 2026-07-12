@@ -18,14 +18,18 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
-from ..errors import (RunPaused, ToolDeniedError, ToolTimeoutError,
-                      TransientToolError, ToolSecurityAuditError, ToolResultDeniedError)
-from ..security.descriptor import ToolDescriptor
+from ..errors import (
+    RunPaused,
+    ToolDeniedError,
+    ToolTimeoutError,
+    ToolSecurityAuditError,
+    ToolResultDeniedError,
+)
+from ..tool.models import ToolDescriptor
 from ..security.redact import redact_for_audit, redact_exception
-from ..tool.schema_validate import validate_arguments
+from ..tool.schema import validate_arguments
 from ..security.pipeline import (
     PipelineAction,
-    PipelineDecision,
     SecurityPipeline,
     ToolInvocationEvent,
     ToolResultEvent,
@@ -34,7 +38,6 @@ from ..security.pipeline import (
 from .policy import (
     EffectiveToolPolicy,
     ResolvedToolPolicy,
-    ToolInvocationContext,
     ToolPolicyProvider,
     finalize_policy,
     merge_policies,
@@ -73,11 +76,15 @@ class ManagedToolAdapter:
         self._baseline = baseline_policy
         self._run_context = run_context
         self._event_store = event_store
-        self._security_audit_failure_mode = getattr(security_audit_failure_mode, "value", security_audit_failure_mode)
+        self._security_audit_failure_mode = getattr(
+            security_audit_failure_mode, "value", security_audit_failure_mode
+        )
         if security_event_emitter is None and event_store is not None:
             from ..security.emitter import EventStoreSecurityEventEmitter
+
             security_event_emitter = EventStoreSecurityEventEmitter(
-                event_store, context=run_context,
+                event_store,
+                context=run_context,
                 failure_mode=security_audit_failure_mode,
             )
         self._security_event_emitter = security_event_emitter
@@ -87,8 +94,12 @@ class ManagedToolAdapter:
         and the call falls back to a fail-closed posture. Never raises -- a
         degraded-path event-emission failure must not mask the original deny."""
         from ..events.payloads import SecurityDegraded
-        await self._emit_security(SecurityDegraded(
-            run_id=self._run_id_for_events(), component=component, reason=reason))
+
+        await self._emit_security(
+            SecurityDegraded(
+                run_id=self._run_id_for_events(), component=component, reason=reason
+            )
+        )
 
     async def _emit_security(self, payload: Any) -> None:
         """Persist a security-critical audit event (policy decision, pipeline
@@ -121,19 +132,31 @@ class ManagedToolAdapter:
         ctx = self._run_context
         run_id = getattr(ctx, "run_id", None) if ctx else None
         root = (getattr(ctx, "root_run_id", None) or run_id) if ctx else run_id
+        from ..events.context import EventContext, append_event
+
         try:
-            await self._event_store.append(
-                stream_id=run_id or "", run_id=run_id, root_run_id=root,
-                parent_run_id=getattr(ctx, "parent_run_id", None) if ctx else None,
-                session_id=getattr(ctx, "session_id", None) if ctx else None,
-                runnable_id=getattr(ctx, "runnable_id", None) if ctx else None,
-                payload=payload,
+            await append_event(
+                self._event_store,
+                EventContext(
+                    stream_id=run_id or "",
+                    run_id=run_id,
+                    root_run_id=root,
+                    parent_run_id=getattr(ctx, "parent_run_id", None) if ctx else None,
+                    session_id=getattr(ctx, "session_id", None) if ctx else None,
+                    runnable_id=getattr(ctx, "runnable_id", None) if ctx else None,
+                ),
+                payload,
             )
         except Exception as exc:  # noqa: BLE001 - security events can fail closed
-            _LOGGER.debug("failed to emit %r for %r", type(payload).__name__, self._descriptor.name)
+            _LOGGER.debug(
+                "failed to emit %r for %r",
+                type(payload).__name__,
+                self._descriptor.name,
+            )
             if security and self._security_audit_failure_mode != "best_effort":
                 raise ToolSecurityAuditError(
-                    f"failed to persist security audit event {type(payload).__name__}") from exc
+                    f"failed to persist security audit event {type(payload).__name__}"
+                ) from exc
 
     def _run_id_for_events(self) -> "str | None":
         ctx = self._run_context
@@ -170,27 +193,41 @@ class ManagedToolAdapter:
         provider_policy = None
         if self._policy_provider is not None and ctx is not None:
             try:
-                provider_policy = await self._policy_provider.resolve(self._descriptor, ctx)
+                provider_policy = await self._policy_provider.resolve(
+                    self._descriptor, ctx
+                )
             except Exception as exc:
                 # Provider failure -> fail closed (deny) AND emit a security
                 # degradation event so the silent fallback is observable.
                 await self._emit_degraded(
-                    "tool-policy-provider", f"{type(exc).__name__}: {exc}")
+                    "tool-policy-provider", f"{type(exc).__name__}: {exc}"
+                )
                 raise ToolDeniedError(
-                    f"tool policy resolution failed for {self._descriptor.name!r}")
+                    f"tool policy resolution failed for {self._descriptor.name!r}"
+                )
         policy: EffectiveToolPolicy = finalize_policy(
-            merge_policies(None, self._baseline, provider_policy))
+            merge_policies(None, self._baseline, provider_policy)
+        )
         # Audit: the finalized policy governing this call -- emitted BEFORE the
         # enabled check so a policy-disabled tool is still auditable.
         from ..events.payloads import ToolPolicyResolved
-        await self._emit_security(ToolPolicyResolved(
-            run_id=run_id, tool_name=self._descriptor.name,
-            enabled=policy.enabled, timeout_seconds=policy.timeout_seconds,
-            max_retries=policy.max_retries, idempotent=policy.idempotent,
-            require_approval=policy.require_approval, risk=policy.risk,
-        ))
+
+        await self._emit_security(
+            ToolPolicyResolved(
+                run_id=run_id,
+                tool_name=self._descriptor.name,
+                enabled=policy.enabled,
+                timeout_seconds=policy.timeout_seconds,
+                max_retries=policy.max_retries,
+                idempotent=policy.idempotent,
+                require_approval=policy.require_approval,
+                risk=policy.risk,
+            )
+        )
         if not policy.enabled:
-            raise ToolDeniedError(f"tool {self._descriptor.name!r} is disabled by policy")
+            raise ToolDeniedError(
+                f"tool {self._descriptor.name!r} is disabled by policy"
+            )
 
         # Validate the original arguments against the tool's parameter schema.
         # pydantic-ai already validates this for signature-derived tools, but a
@@ -219,24 +256,60 @@ class ManagedToolAdapter:
                 parameter_schema=parameter_schema,
             )
             from ..events.payloads import ToolPipelineBefore, ToolPipelineDecision
-            await self._emit_observability(ToolPipelineBefore(
-                run_id=run_id, tool_name=self._descriptor.name, call_id=call_id))
+
+            await self._emit_observability(
+                ToolPipelineBefore(
+                    run_id=run_id, tool_name=self._descriptor.name, call_id=call_id
+                )
+            )
             try:
                 decision = await self._pipeline.before_tool(event)
-            except Exception:
+            except Exception as exc:
+                # before_tool raised: surface the degradation so the silent
+                # fallback to deny is observable, then fail closed. The handler
+                # never runs -- this raise precedes the execution section.
+                await self._emit_degraded(
+                    "security-pipeline-before-tool", f"{type(exc).__name__}: {exc}"
+                )
                 raise ToolDeniedError(
-                    f"pipeline before_tool failed for {self._descriptor.name!r}")
+                    f"pipeline before_tool failed for {self._descriptor.name!r}"
+                ) from exc
             try:
                 validate_tool_decision(decision, stage="before")
             except Exception as exc:
+                # before_tool returned an after-only/illegal action: treat it as
+                # an explicit deny, audit the decision, then fail closed. The
+                # handler never runs.
+                await self._emit_security(
+                    ToolPipelineDecision(
+                        run_id=run_id,
+                        tool_name=self._descriptor.name,
+                        call_id=call_id,
+                        action=PipelineAction.DENY.value,
+                        reason=str(exc) or "invalid before-action",
+                        stage="before",
+                    )
+                )
                 raise ToolDeniedError(str(exc)) from exc
-            await self._emit_security(ToolPipelineDecision(
-                run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
-                action=decision.action.value, reason=decision.reason or "", stage="before"))
+            await self._emit_security(
+                ToolPipelineDecision(
+                    run_id=run_id,
+                    tool_name=self._descriptor.name,
+                    call_id=call_id,
+                    action=decision.action.value,
+                    reason=decision.reason or "",
+                    stage="before",
+                )
+            )
             if decision.action == PipelineAction.DENY:
                 raise ToolDeniedError(
-                    decision.reason or f"tool {self._descriptor.name!r} denied by pipeline")
-            if decision.action == PipelineAction.REQUIRE_APPROVAL and not await _already_approved():
+                    decision.reason
+                    or f"tool {self._descriptor.name!r} denied by pipeline"
+                )
+            if (
+                decision.action == PipelineAction.REQUIRE_APPROVAL
+                and not await _already_approved()
+            ):
                 raise RunPaused(
                     run_id=run_id or "",
                     approval_id=str(uuid.uuid4()),
@@ -253,7 +326,8 @@ class ManagedToolAdapter:
                 # schema so a pipeline cannot inject a payload the tool cannot
                 # safely accept. Fails closed (deny) on a mismatch.
                 validate_arguments(
-                    arguments, parameter_schema, tool_name=self._descriptor.name)
+                    arguments, parameter_schema, tool_name=self._descriptor.name
+                )
 
         # 3. Require approval from the resolved policy. Checked regardless of
         # whether a ToolExecutor is wired -- a ToolPolicyProvider/baseline
@@ -275,12 +349,16 @@ class ManagedToolAdapter:
         # a mutating, non-idempotent tool is never retried even if a positive
         # max_retries was declared upstream.
         from ..events.payloads import ToolCompleted, ToolFailed, ToolStarted
+
         if policy.idempotent and self._tool_executor is None:
             from ..errors import IdempotencyConfigurationError
+
             raise IdempotencyConfigurationError(
-                f"tool {self._descriptor.name!r} is idempotent but has no persistent executor")
-        await self._emit_observability(ToolStarted(
-            tool_name=self._descriptor.name, tool_call_id=call_id))
+                f"tool {self._descriptor.name!r} is idempotent but has no persistent executor"
+            )
+        await self._emit_observability(
+            ToolStarted(tool_name=self._descriptor.name, tool_call_id=call_id)
+        )
         can_retry = not (self._descriptor.mutating and not policy.idempotent)
         effective_retries = policy.max_retries if can_retry else 0
         try:
@@ -290,14 +368,17 @@ class ManagedToolAdapter:
                 # with timeout/retry -- never call handler directly when an
                 # executor is wired.
                 from ..policy.engine import ToolContext, ToolRequest
+
                 tc = ToolContext(
                     run_id=run_id or "",
                     session_id=getattr(ctx, "session_id", None) if ctx else None,
                     tool_call_id=call_id,
                 )
                 request = ToolRequest(
-                    tool_name=self._descriptor.name, arguments=arguments,
-                    category=self._descriptor.category, risk=self._descriptor.risk,
+                    tool_name=self._descriptor.name,
+                    arguments=arguments,
+                    category=self._descriptor.category,
+                    risk=self._descriptor.risk,
                     mutating=self._descriptor.mutating,
                 )
                 # When the policy declares the tool idempotent, derive a stable
@@ -307,14 +388,20 @@ class ManagedToolAdapter:
                 # fail-closes if no IdempotencyStore is wired.
                 idempotency_key = None
                 if policy.idempotent:
-                    from .idempotency_key import DefaultIdempotencyKeyBuilder
+                    from .idempotency import DefaultIdempotencyKeyBuilder
+
                     idempotency_key = DefaultIdempotencyKeyBuilder().build(
-                        descriptor=self._descriptor, arguments=arguments,
-                        run_context=ctx, schema_version=policy.schema_version,
-                        policy=policy)
+                        descriptor=self._descriptor,
+                        arguments=arguments,
+                        run_context=ctx,
+                        schema_version=policy.schema_version,
+                        policy=policy,
+                    )
                 try:
                     result = await self._tool_executor.execute(
-                        request, tc, self._handler,
+                        request,
+                        tc,
+                        self._handler,
                         timeout=policy.timeout_seconds,
                         max_retries=effective_retries,
                         descriptor=self._descriptor,
@@ -324,19 +411,22 @@ class ManagedToolAdapter:
                         idempotency_scope=(
                             f"{getattr(ctx, 'tenant_id', '')}|{getattr(ctx, 'workspace', '')}|"
                             f"{self._descriptor.name}|{policy.schema_version}"
-                            if getattr(policy, "idempotency_strategy", None).value == "business_key"
+                            if getattr(policy, "idempotency_strategy", None).value
+                            == "business_key"
                             else None
                         ),
                     )
                 except asyncio.TimeoutError:
                     raise ToolTimeoutError(
-                        f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s")
+                        f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
+                    )
             else:
                 # No executor wired (e.g. a standalone adapter in tests): apply
                 # timeout/retry from the resolved policy directly, governed by
                 # the same DefaultRetryPolicy (transient-only; mutating
                 # non-idempotent never retries).
                 from .retry import DefaultRetryPolicy, backoff_delay
+
                 retry_policy = DefaultRetryPolicy()
                 max_attempts = 1 + effective_retries
                 result = None
@@ -345,19 +435,25 @@ class ManagedToolAdapter:
                     try:
                         if policy.timeout_seconds is not None:
                             result = await asyncio.wait_for(
-                                self._handler(**arguments), timeout=policy.timeout_seconds)
+                                self._handler(**arguments),
+                                timeout=policy.timeout_seconds,
+                            )
                         else:
                             result = await self._handler(**arguments)
                         break
                     except asyncio.TimeoutError:
                         raise ToolTimeoutError(
-                            f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s")
+                            f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
+                        )
                     except Exception as exc:  # noqa: BLE001
                         if attempt >= max_attempts - 1:
                             raise
                         if not retry_policy.should_retry(
-                                error=exc, attempt=attempt, policy=policy,
-                                descriptor=self._descriptor):
+                            error=exc,
+                            attempt=attempt,
+                            policy=policy,
+                            descriptor=self._descriptor,
+                        ):
                             raise
                         await asyncio.sleep(backoff_delay(attempt + 1))
                         attempt += 1
@@ -365,65 +461,122 @@ class ManagedToolAdapter:
             # Tool execution failed (timeout/transient-exhausted/handler error).
             # Emit the execution-error audit event, then re-raise so the caller
             # sees the stable error.
-            await self._emit_observability(ToolFailed(
-                tool_name=self._descriptor.name, tool_call_id=call_id,
-                error_message=f"{type(exec_exc).__name__}: {redact_exception(exec_exc)}"))
+            await self._emit_observability(
+                ToolFailed(
+                    tool_name=self._descriptor.name,
+                    tool_call_id=call_id,
+                    error_message=f"{type(exec_exc).__name__}: {redact_exception(exec_exc)}",
+                )
+            )
             raise
         # 5. Pipeline after_tool.
         result_action = "returned"
         if self._pipeline is not None:
             result_event = ToolResultEvent(
-                tool_name=self._descriptor.name, result=result,
+                tool_name=self._descriptor.name,
+                result=result,
                 success=True,
-                run_id=run_id, call_id=call_id,
+                run_id=run_id,
+                call_id=call_id,
             )
             from ..events.payloads import ToolPipelineAfter
+
             try:
                 after_decision = await self._pipeline.after_tool(result_event)
             except Exception:
-                _LOGGER.warning("after_tool pipeline error for %r (fail closed)",
-                                self._descriptor.name)
-                await self._emit_security(ToolPipelineDecision(
-                    run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
-                    action=PipelineAction.DENY_RESULT.value,
-                    reason="after_tool pipeline failed", stage="after"))
-                await self._emit_observability(ToolCompleted(
-                    tool_name=self._descriptor.name, tool_call_id=call_id,
-                    success=True, execution_success=True, result_action="denied"))
+                _LOGGER.warning(
+                    "after_tool pipeline error for %r (fail closed)",
+                    self._descriptor.name,
+                )
+                await self._emit_security(
+                    ToolPipelineDecision(
+                        run_id=run_id,
+                        tool_name=self._descriptor.name,
+                        call_id=call_id,
+                        action=PipelineAction.DENY_RESULT.value,
+                        reason="after_tool pipeline failed",
+                        stage="after",
+                    )
+                )
+                await self._emit_observability(
+                    ToolCompleted(
+                        tool_name=self._descriptor.name,
+                        tool_call_id=call_id,
+                        success=True,
+                        execution_success=True,
+                        result_action="denied",
+                    )
+                )
                 raise ToolResultDeniedError(
-                    f"after_tool pipeline failed for {self._descriptor.name!r}")
+                    f"after_tool pipeline failed for {self._descriptor.name!r}"
+                )
             try:
                 validate_tool_decision(after_decision, stage="after")
             except Exception as exc:
-                await self._emit_observability(ToolCompleted(
-                    tool_name=self._descriptor.name, tool_call_id=call_id,
-                    success=True, execution_success=True, result_action="denied"))
+                await self._emit_observability(
+                    ToolCompleted(
+                        tool_name=self._descriptor.name,
+                        tool_call_id=call_id,
+                        success=True,
+                        execution_success=True,
+                        result_action="denied",
+                    )
+                )
                 raise ToolResultDeniedError(str(exc)) from exc
-            await self._emit_security(ToolPipelineDecision(
-                run_id=run_id, tool_name=self._descriptor.name, call_id=call_id,
-                action=after_decision.action.value, reason=after_decision.reason or "",
-                stage="after"))
-            from ..events.payloads import ToolPipelineAfter
-            await self._emit_observability(ToolPipelineAfter(
-                run_id=run_id, tool_name=self._descriptor.name,
-                call_id=call_id, success=True))
-            # after_tool distinct actions: DENY_RESULT (or legacy DENY) discards
-            # the result; MODIFY_RESULT (or legacy MODIFY) replaces it. The
+            await self._emit_security(
+                ToolPipelineDecision(
+                    run_id=run_id,
+                    tool_name=self._descriptor.name,
+                    call_id=call_id,
+                    action=after_decision.action.value,
+                    reason=after_decision.reason or "",
+                    stage="after",
+                )
+            )
+            await self._emit_observability(
+                ToolPipelineAfter(
+                    run_id=run_id,
+                    tool_name=self._descriptor.name,
+                    call_id=call_id,
+                    success=True,
+                )
+            )
+            # after_tool distinct actions: DENY_RESULT (or prior DENY) discards
+            # the result; MODIFY_RESULT (or prior MODIFY) replaces it. The
             # result-level decision is never confused with a before_tool
             # call-level DENY/MODIFY.
-            if after_decision.action in (PipelineAction.DENY, PipelineAction.DENY_RESULT):
+            if after_decision.action in (
+                PipelineAction.DENY,
+                PipelineAction.DENY_RESULT,
+            ):
                 result_action = "denied"
-                await self._emit_observability(ToolCompleted(
-                    tool_name=self._descriptor.name, tool_call_id=call_id,
-                    success=True, execution_success=True, result_action=result_action))
+                await self._emit_observability(
+                    ToolCompleted(
+                        tool_name=self._descriptor.name,
+                        tool_call_id=call_id,
+                        success=True,
+                        execution_success=True,
+                        result_action=result_action,
+                    )
+                )
                 raise ToolResultDeniedError(
-                    f"tool {self._descriptor.name!r} result denied by after_tool pipeline")
-            if after_decision.action in (PipelineAction.MODIFY, PipelineAction.MODIFY_RESULT):
+                    f"tool {self._descriptor.name!r} result denied by after_tool pipeline"
+                )
+            if after_decision.action in (
+                PipelineAction.MODIFY,
+                PipelineAction.MODIFY_RESULT,
+            ):
                 result = after_decision.modified_payload
                 result_action = "modified"
 
-        await self._emit_observability(ToolCompleted(
-            tool_name=self._descriptor.name, tool_call_id=call_id, success=True,
-            execution_success=True, result_action=result_action))
+        await self._emit_observability(
+            ToolCompleted(
+                tool_name=self._descriptor.name,
+                tool_call_id=call_id,
+                success=True,
+                execution_success=True,
+                result_action=result_action,
+            )
+        )
 
         return result

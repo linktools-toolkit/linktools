@@ -34,6 +34,7 @@ from linktools.ai.swarm.store import SwarmStore
 
 # --- SwarmStatus enum --------------------------------------------------------
 
+
 def test_swarm_status_values():
     assert SwarmStatus.PENDING.value == "pending"
     assert SwarmStatus.RUNNING.value == "running"
@@ -50,6 +51,7 @@ def test_swarm_status_is_str_enum():
 
 # --- SwarmTaskStatus enum ----------------------------------------------------
 
+
 def test_swarm_task_status_values():
     assert SwarmTaskStatus.PENDING.value == "pending"
     assert SwarmTaskStatus.CLAIMED.value == "claimed"
@@ -60,47 +62,60 @@ def test_swarm_task_status_values():
 
 # --- ALLOWED_SWARM_TRANSITIONS ----------------------------------------------
 
+
 def test_allowed_swarm_transitions_pending():
-    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.PENDING] == frozenset({SwarmStatus.RUNNING})
+    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.PENDING] == frozenset(
+        {SwarmStatus.RUNNING}
+    )
 
 
 def test_allowed_swarm_transitions_running():
-    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.RUNNING] == frozenset({
-        SwarmStatus.PAUSED,
-        SwarmStatus.SUCCEEDED,
-        SwarmStatus.FAILED,
-        SwarmStatus.CANCELLING,
-        SwarmStatus.CANCELLED,
-    })
+    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.RUNNING] == frozenset(
+        {
+            SwarmStatus.PAUSED,
+            SwarmStatus.SUCCEEDED,
+            SwarmStatus.FAILED,
+            SwarmStatus.CANCELLING,
+            SwarmStatus.CANCELLED,
+        }
+    )
 
 
 def test_allowed_swarm_transitions_paused():
-    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.PAUSED] == frozenset({
-        SwarmStatus.RUNNING,
-        SwarmStatus.CANCELLING,
-        SwarmStatus.CANCELLED,
-    })
+    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.PAUSED] == frozenset(
+        {
+            SwarmStatus.RUNNING,
+            SwarmStatus.CANCELLING,
+            SwarmStatus.CANCELLED,
+        }
+    )
 
 
 def test_allowed_swarm_transitions_cancelling():
     """CANCELLING distinguishes "cancel requested" from "actually cancelled"
     (mirrors RunStatus.CANCELLING) -- actionable-fix-contract."""
-    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.CANCELLING] == frozenset({
-        SwarmStatus.CANCELLED,
+    assert ALLOWED_SWARM_TRANSITIONS[SwarmStatus.CANCELLING] == frozenset(
+        {
+            SwarmStatus.CANCELLED,
+            SwarmStatus.FAILED,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        SwarmStatus.SUCCEEDED,
         SwarmStatus.FAILED,
-    })
-
-
-@pytest.mark.parametrize("status", [
-    SwarmStatus.SUCCEEDED,
-    SwarmStatus.FAILED,
-    SwarmStatus.CANCELLED,
-])
+        SwarmStatus.CANCELLED,
+    ],
+)
 def test_allowed_swarm_transitions_terminals_empty(status):
     assert ALLOWED_SWARM_TRANSITIONS[status] == frozenset()
 
 
 # --- AgentRef ---------------------------------------------------------------
+
 
 def test_agent_ref_defaults():
     ref = AgentRef("a1")
@@ -116,6 +131,7 @@ def test_agent_ref_frozen():
 
 # --- TaskInput --------------------------------------------------------------
 
+
 def test_task_input_defaults():
     ti = TaskInput(prompt="hi")
     assert ti.prompt == "hi"
@@ -123,6 +139,7 @@ def test_task_input_defaults():
 
 
 # --- TokenUsage -------------------------------------------------------------
+
 
 def test_token_usage_defaults():
     tu = TokenUsage()
@@ -162,6 +179,7 @@ def test_token_usage_from_mapping_none_values():
 
 # --- SwarmRun ---------------------------------------------------------------
 
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -194,15 +212,22 @@ def test_swarm_run_construct():
 def test_swarm_run_frozen():
     now = _now()
     run = SwarmRun(
-        id="sr-1", run_id="r-1", round=0, status=SwarmStatus.PENDING,
-        version=0, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=now, updated_at=now,
+        id="sr-1",
+        run_id="r-1",
+        round=0,
+        status=SwarmStatus.PENDING,
+        version=0,
+        token_usage=TokenUsage(),
+        cost=Decimal("0"),
+        created_at=now,
+        updated_at=now,
     )
     with pytest.raises(FrozenInstanceError):
         run.status = SwarmStatus.RUNNING
 
 
 # --- SwarmTask --------------------------------------------------------------
+
 
 def test_swarm_task_construct_with_result_and_error():
     now = _now()
@@ -280,10 +305,22 @@ def test_swarm_task_construct():
 def test_swarm_task_frozen():
     now = _now()
     task = SwarmTask(
-        id="t-1", swarm_run_id="sr-1", parent_task_id=None, assigned_agent_id=None,
-        description="x", status=SwarmTaskStatus.PENDING, dependencies=(),
-        input=TaskInput(prompt="hi"), result=None, error=None, attempts=0, version=0,
-        claimed_at=None, lease_expires_at=None, created_at=now, updated_at=now,
+        id="t-1",
+        swarm_run_id="sr-1",
+        parent_task_id=None,
+        assigned_agent_id=None,
+        description="x",
+        status=SwarmTaskStatus.PENDING,
+        dependencies=(),
+        input=TaskInput(prompt="hi"),
+        result=None,
+        error=None,
+        attempts=0,
+        version=0,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=now,
+        updated_at=now,
     )
     with pytest.raises(FrozenInstanceError):
         task.status = SwarmTaskStatus.CLAIMED
@@ -291,17 +328,21 @@ def test_swarm_task_frozen():
 
 # --- SwarmError family ------------------------------------------------------
 
+
 def test_swarm_error_is_linktools_ai_error():
     assert issubclass(SwarmError, LinktoolsAIError)
 
 
-@pytest.mark.parametrize("exc_cls", [
-    SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
-    SwarmConflictError,
-    InvalidSwarmTransitionError,
-    SwarmLimitExceededError,
-])
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        SwarmRunNotFoundError,
+        SwarmTaskNotFoundError,
+        SwarmConflictError,
+        InvalidSwarmTransitionError,
+        SwarmLimitExceededError,
+    ],
+)
 def test_swarm_error_subclasses(exc_cls):
     assert issubclass(exc_cls, SwarmError)
 
@@ -319,46 +360,43 @@ def test_swarm_limit_exceeded_raises_as_swarm_error():
 
 # --- SwarmStore Protocol ----------------------------------------------------
 
+
 class _StubStore:
-    async def create_run(self, run):
-        ...
+    async def create_run(self, run): ...
 
-    async def get_run(self, swarm_run_id):
-        ...
+    async def get_run(self, swarm_run_id): ...
 
-    async def update_run(self, swarm_run_id, *, expected_version, status=None,
-                         round=None, token_usage=None, cost=None, metadata=None):
-        ...
+    async def update_run(
+        self,
+        swarm_run_id,
+        *,
+        expected_version,
+        status=None,
+        round=None,
+        token_usage=None,
+        cost=None,
+        metadata=None,
+    ): ...
 
-    async def create_task(self, task):
-        ...
+    async def create_task(self, task): ...
 
-    async def claim_task(self, swarm_run_id, agent_id, *, lease_seconds=None):
-        ...
+    async def claim_task(self, swarm_run_id, agent_id, *, lease_seconds=None): ...
 
-    async def set_active_run(self, task_id, run_id, *, expected_version):
-        ...
+    async def set_active_run(self, task_id, run_id, *, expected_version): ...
 
-    async def complete_task(self, task_id, result):
-        ...
+    async def complete_task(self, task_id, result): ...
 
-    async def fail_task(self, task_id, error):
-        ...
+    async def fail_task(self, task_id, error): ...
 
-    async def list_tasks(self, swarm_run_id, *, status=None):
-        ...
+    async def list_tasks(self, swarm_run_id, *, status=None): ...
 
-    async def reclaim_expired_tasks(self, swarm_run_id):
-        ...
+    async def reclaim_expired_tasks(self, swarm_run_id): ...
 
-    async def record_attempt(self, attempt):
-        ...
+    async def record_attempt(self, attempt): ...
 
-    async def list_attempts(self, task_id):
-        ...
+    async def list_attempts(self, task_id): ...
 
-    async def renew_lease(self, task_id, *, expected_version, lease_seconds):
-        ...
+    async def renew_lease(self, task_id, *, expected_version, lease_seconds): ...
 
 
 def test_swarm_store_is_runtime_checkable():
@@ -367,7 +405,6 @@ def test_swarm_store_is_runtime_checkable():
 
 def test_swarm_store_rejects_non_implementor():
     class _Incomplete:
-        async def create_run(self, run):
-            ...
+        async def create_run(self, run): ...
 
     assert not isinstance(_Incomplete(), SwarmStore)

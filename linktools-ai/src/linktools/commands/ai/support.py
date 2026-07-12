@@ -50,9 +50,7 @@ def resolve_model_config(
             "no base url provided: pass --base-url or set OPENAI_BASE_URL"
         )
     if not resolved_api_key:
-        raise CommandError(
-            "no api key provided: pass --api-key or set OPENAI_API_KEY"
-        )
+        raise CommandError("no api key provided: pass --api-key or set OPENAI_API_KEY")
 
     return RuntimeModelConfig(
         model_type="standard",
@@ -115,7 +113,8 @@ def build_agent_spec(args: "Namespace") -> AgentSpec:
     """
     config = resolve_model_config(args.model, args.base_url, args.api_key)
     return AgentSpec(
-        id="ai", name="ai",
+        id="ai",
+        name="ai",
         model=ModelPolicy(primary=config.model_type),
         instructions=PromptSpec(instructions=SYSTEM_PROMPT),
         output_schema=str,
@@ -132,7 +131,13 @@ async def ensure_session(storage: FileStorage, session_id: str) -> None:
     """
     if await storage.sessions.get(session_id) is None:
         now = datetime.now(timezone.utc)
-        await storage.sessions.create(SessionRecord(
-            id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=now, updated_at=now,
-        ))
+        await storage.sessions.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )

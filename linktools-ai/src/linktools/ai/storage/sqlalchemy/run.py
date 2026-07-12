@@ -13,7 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import RunRow
 from ...errors import InvalidRunTransitionError, RunConflictError, RunNotFoundError
-from ...run.models import ALLOWED_RUN_TRANSITIONS, RunErrorInfo, RunInput, RunnableType, RunRecord, RunResult, RunStatus
+from ...run.models import (
+    ALLOWED_RUN_TRANSITIONS,
+    RunErrorInfo,
+    RunInput,
+    RunnableType,
+    RunRecord,
+    RunResult,
+    RunStatus,
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -27,13 +35,25 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_record(row: RunRow) -> RunRecord:
     return RunRecord(
-        id=row.id, root_run_id=row.root_run_id, parent_run_id=row.parent_run_id,
-        session_id=row.session_id, runnable_id=row.runnable_id, runnable_type=RunnableType(row.runnable_type),
-        status=RunStatus(row.status), input=RunInput(**json.loads(row.input_json)),
-        result=None if row.result_json is None else RunResult(**json.loads(row.result_json)),
-        error=None if row.error_json is None else RunErrorInfo(**json.loads(row.error_json)),
-        version=row.version, created_at=_as_utc(row.created_at), started_at=_as_utc(row.started_at),
-        finished_at=_as_utc(row.finished_at), metadata=json.loads(row.metadata_json),
+        id=row.id,
+        root_run_id=row.root_run_id,
+        parent_run_id=row.parent_run_id,
+        session_id=row.session_id,
+        runnable_id=row.runnable_id,
+        runnable_type=RunnableType(row.runnable_type),
+        status=RunStatus(row.status),
+        input=RunInput(**json.loads(row.input_json)),
+        result=None
+        if row.result_json is None
+        else RunResult(**json.loads(row.result_json)),
+        error=None
+        if row.error_json is None
+        else RunErrorInfo(**json.loads(row.error_json)),
+        version=row.version,
+        created_at=_as_utc(row.created_at),
+        started_at=_as_utc(row.started_at),
+        finished_at=_as_utc(row.finished_at),
+        metadata=json.loads(row.metadata_json),
     )
 
 
@@ -65,13 +85,31 @@ class SqlAlchemyRunStore:
 
     async def create(self, run: RunRecord) -> RunRecord:
         async def _do(session):
-            session.add(RunRow(
-                id=run.id, root_run_id=run.root_run_id, parent_run_id=run.parent_run_id,
-                session_id=run.session_id, runnable_id=run.runnable_id, runnable_type=run.runnable_type.value,
-                status=run.status.value, input_json=json.dumps({"prompt": run.input.prompt, "metadata": dict(run.input.metadata)}),
-                result_json=None, error_json=None, version=run.version, created_at=run.created_at,
-                started_at=run.started_at, finished_at=run.finished_at, metadata_json=json.dumps(dict(run.metadata)),
-            ))
+            session.add(
+                RunRow(
+                    id=run.id,
+                    root_run_id=run.root_run_id,
+                    parent_run_id=run.parent_run_id,
+                    session_id=run.session_id,
+                    runnable_id=run.runnable_id,
+                    runnable_type=run.runnable_type.value,
+                    status=run.status.value,
+                    input_json=json.dumps(
+                        {
+                            "prompt": run.input.prompt,
+                            "metadata": dict(run.input.metadata),
+                        }
+                    ),
+                    result_json=None,
+                    error_json=None,
+                    version=run.version,
+                    created_at=run.created_at,
+                    started_at=run.started_at,
+                    finished_at=run.finished_at,
+                    metadata_json=json.dumps(dict(run.metadata)),
+                )
+            )
+
         await self._execute_in_session(_do)
         return run
 
@@ -80,6 +118,7 @@ class SqlAlchemyRunStore:
             result = await session.execute(select(RunRow).where(RunRow.id == run_id))
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     async def transition(
@@ -102,7 +141,8 @@ class SqlAlchemyRunStore:
         # UPDATE's WHERE also enforces the transition-legality check
         # atomically, not just the version.
         valid_sources = tuple(
-            source.value for source, targets in ALLOWED_RUN_TRANSITIONS.items()
+            source.value
+            for source, targets in ALLOWED_RUN_TRANSITIONS.items()
             if target in targets
         )
         now = datetime.now(timezone.utc)
@@ -114,15 +154,21 @@ class SqlAlchemyRunStore:
         if target in (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED):
             values["finished_at"] = now
         if result is not None:
-            values["result_json"] = json.dumps({
-                "output": result.output, "token_usage": dict(result.token_usage),
-                "metadata": dict(result.metadata),
-            })
+            values["result_json"] = json.dumps(
+                {
+                    "output": result.output,
+                    "token_usage": dict(result.token_usage),
+                    "metadata": dict(result.metadata),
+                }
+            )
         if error is not None:
-            values["error_json"] = json.dumps({
-                "error_type": error.error_type, "message": error.message,
-                "detail": dict(error.detail),
-            })
+            values["error_json"] = json.dumps(
+                {
+                    "error_type": error.error_type,
+                    "message": error.message,
+                    "detail": dict(error.detail),
+                }
+            )
 
         async def _do(session):
             stmt = (
@@ -136,21 +182,33 @@ class SqlAlchemyRunStore:
             if result_proxy.rowcount == 0:
                 # WHERE didn't match: discriminate missing / stale-version /
                 # illegal-transition so the caller sees the right error class.
-                query_result = await session.execute(select(RunRow).where(RunRow.id == run_id))
+                query_result = await session.execute(
+                    select(RunRow).where(RunRow.id == run_id)
+                )
                 row = query_result.scalar_one_or_none()
                 if row is None:
                     raise RunNotFoundError(f"run not found: {run_id}")
                 if row.version != expected_version:
-                    raise RunConflictError(f"expected version {expected_version}, found {row.version}")
+                    raise RunConflictError(
+                        f"expected version {expected_version}, found {row.version}"
+                    )
                 current_status = RunStatus(row.status)
-                raise InvalidRunTransitionError(f"cannot transition {current_status} -> {target}")
-            query_result = await session.execute(select(RunRow).where(RunRow.id == run_id))
+                raise InvalidRunTransitionError(
+                    f"cannot transition {current_status} -> {target}"
+                )
+            query_result = await session.execute(
+                select(RunRow).where(RunRow.id == run_id)
+            )
             row = query_result.scalar_one()
             return _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     async def list_children(self, run_id: str) -> "tuple[RunRecord, ...]":
         async def _do(session):
-            result = await session.execute(select(RunRow).where(RunRow.parent_run_id == run_id))
+            result = await session.execute(
+                select(RunRow).where(RunRow.parent_run_id == run_id)
+            )
             return tuple(_row_to_record(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)

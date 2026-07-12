@@ -4,3 +4,7 @@
 domain models (SwarmRun/SwarmTask, AgentRef, TaskInput, TokenUsage) plus the
 SwarmStore Protocol. Backends (FileSwarmStore, SqlAlchemySwarmStore) land in
 later phases."""
+
+from .spec import SwarmSpec
+
+__all__ = ["SwarmSpec"]

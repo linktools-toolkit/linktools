@@ -19,6 +19,7 @@ REQUIRE_APPROVAL; pydantic-ai tries to execute the tool;
 ``PolicyCapability.before_tool_execute`` calls ``executor.check`` which raises
 ``RunPaused``; that propagates out of the ``async for node in run:`` loop into
 the new ``except RunPaused`` handler."""
+
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.agent.checkpoint_io import deserialize_messages
+from linktools.ai.agent.checkpoint import deserialize_messages
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.runner import AgentRunner
@@ -72,18 +73,32 @@ def _registry() -> ModelRegistry:
 
 def _run_context(run_id="run-p1", session_id="session-p1") -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT,
-        user_id=None, tenant_id=None, workspace=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
 def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    asyncio.run(store.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    )))
+    asyncio.run(
+        store.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
 
 def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
@@ -96,7 +111,9 @@ def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
     )
 
 
-def _compile(tmp_path, *, agent_id="agent-1") -> "tuple[AgentRunner, CompiledAgent, FileApprovalStore]":
+def _compile(
+    tmp_path, *, agent_id="agent-1"
+) -> "tuple[AgentRunner, CompiledAgent, FileApprovalStore]":
     approval_store = FileApprovalStore(root=tmp_path / "approvals")
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
@@ -107,14 +124,23 @@ def _compile(tmp_path, *, agent_id="agent-1") -> "tuple[AgentRunner, CompiledAge
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
     )
-    compiled = asyncio.run(compiler.compile(AgentSpec(
-        id=agent_id, name="a", model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
-    )))
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id=agent_id,
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=str,
+            )
+        )
+    )
+
     # Register a real pydantic-ai tool whose name matches the ApprovalRule.
     @compiled.pydantic_agent.tool
     async def risky(ctx, x: int) -> int:  # noqa: ANN001
         return x * 2
+
     # P0-6/G1: the runner (not the executor) persists the ApprovalRequest now
     # -- it must share the SAME approval_store instance the test asserts against.
     runner = _make_runner(tmp_path, approval_store=approval_store)
@@ -135,9 +161,15 @@ def test_run_stream_catches_run_paused_and_yields_paused_event(tmp_path):
     runner, compiled, approval_store = _compile(tmp_path)
     _seed_session(runner._session_store, "session-p1")
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"), _run_context(),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(),
+            )
+        )
+    )
 
     paused_events = [e for e in events if e["type"] == "paused"]
     assert len(paused_events) == 1, f"expected one paused event, got {events}"
@@ -161,10 +193,15 @@ def test_run_stream_pause_saves_real_checkpoint_with_model_response(tmp_path):
     runner, compiled, approval_store = _compile(tmp_path)
     _seed_session(runner._session_store, "session-p1")
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"),
-        _run_context(run_id="run-p2", session_id="session-p1"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(run_id="run-p2", session_id="session-p1"),
+            )
+        )
+    )
 
     paused = next(e for e in events if e["type"] == "paused")
     approval_id = paused["approval_id"]
@@ -192,10 +229,15 @@ def test_run_stream_pause_does_not_yield_terminal_events(tmp_path):
     runner, compiled, _ = _compile(tmp_path)
     _seed_session(runner._session_store, "session-p1")
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"),
-        _run_context(run_id="run-p3", session_id="session-p1"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(run_id="run-p3", session_id="session-p1"),
+            )
+        )
+    )
 
     types = [e["type"] for e in events]
     assert "paused" in types

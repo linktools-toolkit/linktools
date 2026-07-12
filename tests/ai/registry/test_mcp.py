@@ -23,15 +23,13 @@ def _write_mcps(tmp_path) -> None:
     (mcp / "search.yaml").write_text(
         "name: search\n"
         "transport: stdio\n"
-        "command: [\"python\", \"-m\", \"search_server\"]\n"
+        'command: ["python", "-m", "search_server"]\n'
         "env:\n"
         "  API_KEY: xxx\n",
         encoding="utf-8",
     )
     (mcp / "remote.yaml").write_text(
-        "name: remote\n"
-        "transport: sse\n"
-        "url: https://example.com/sse\n",
+        "name: remote\ntransport: sse\nurl: https://example.com/sse\n",
         encoding="utf-8",
     )
 
@@ -49,11 +47,11 @@ def test_get_returns_stdio_mcp_spec(tmp_path):
     assert spec.id == "search"
     assert spec.name == "search"
     assert spec.transport == "stdio"
-    assert spec.command_or_url == "python -m search_server"
+    assert " ".join(spec.command) == "python -m search_server"
     assert dict(spec.env) == {"API_KEY": "xxx"}
 
 
-# 2. get() parses an sse YAML into an MCPServerSpec using url as command_or_url.
+# 2. get() parses an sse YAML into an MCPServerSpec using url.
 def test_get_returns_sse_mcp_spec(tmp_path):
     _write_mcps(tmp_path)
     registry = MCPRegistry(SpecLoader.from_filesystem(tmp_path / "mcp"))
@@ -63,7 +61,7 @@ def test_get_returns_sse_mcp_spec(tmp_path):
 
     spec = asyncio.run(_run())
     assert spec.transport == "sse"
-    assert spec.command_or_url == "https://example.com/sse"
+    assert spec.url == "https://example.com/sse"
     assert dict(spec.env) == {}
 
 
@@ -162,17 +160,10 @@ def test_parse_mcp_spec_defaults_transport_and_name():
     spec = parse_mcp_spec("fallback", {"command": "run"})
     assert spec.name == "fallback"
     assert spec.transport == "stdio"
-    assert spec.command_or_url == "run"
+    assert spec.command == ("run",)
 
 
-# 9. parse_mcp_spec: type alias works as transport.
-def test_parse_mcp_spec_accepts_type_alias_for_transport():
-    spec = parse_mcp_spec("r", {"type": "http", "url": "https://x"})
-    assert spec.transport == "http"
-    assert spec.command_or_url == "https://x"
-
-
-# 10. Malformed YAML -> RegistryParseError.
+# 9. Malformed YAML -> RegistryParseError.
 def test_get_malformed_yaml_raises_parse_error(tmp_path):
     mcp = tmp_path / "mcp"
     mcp.mkdir()

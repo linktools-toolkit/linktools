@@ -10,6 +10,7 @@ test loop); ``Base.metadata.create_all`` already covers ``SwarmRunRow`` /
 
 Uses the ``def test_x(store_factory):`` + ``asyncio.run(_run())`` style (sync
 test wrapper driving its own event loop) — no pytest-asyncio mode config needed."""
+
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -146,7 +147,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/swarm-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/swarm-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -190,7 +193,9 @@ def test_create_run_then_get_run_roundtrip(store_factory):
     async def _run():
         run = make_run(
             cost=Decimal("1.25"),
-            token_usage=TokenUsage(input_tokens=10, output_tokens=20, total_cost=Decimal("1.25")),
+            token_usage=TokenUsage(
+                input_tokens=10, output_tokens=20, total_cost=Decimal("1.25")
+            ),
         )
         created = await store.create_run(run)
         fetched = await store.get_run("swarm-1")
@@ -228,7 +233,9 @@ def test_update_run_advances_version_and_applies_fields(store_factory):
             expected_version=1,
             status=SwarmStatus.RUNNING,
             round=2,
-            token_usage=TokenUsage(input_tokens=100, output_tokens=200, total_cost=Decimal("2")),
+            token_usage=TokenUsage(
+                input_tokens=100, output_tokens=200, total_cost=Decimal("2")
+            ),
             cost=Decimal("9.99"),
             metadata={"new": "k"},
         )
@@ -249,7 +256,9 @@ def test_update_run_wrong_expected_version_raises_conflict(store_factory):
     async def _run():
         await store.create_run(make_run())
         with pytest.raises(SwarmConflictError):
-            await store.update_run("swarm-1", expected_version=99, status=SwarmStatus.RUNNING)
+            await store.update_run(
+                "swarm-1", expected_version=99, status=SwarmStatus.RUNNING
+            )
 
     asyncio.run(_run())
 
@@ -262,7 +271,9 @@ def test_update_run_invalid_transition_raises(store_factory):
         # PENDING -> RUNNING is).
         await store.create_run(make_run())
         with pytest.raises(InvalidSwarmTransitionError):
-            await store.update_run("swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED)
+            await store.update_run(
+                "swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED
+            )
 
     asyncio.run(_run())
 
@@ -277,9 +288,15 @@ def test_create_task_then_list_with_status_filter(store_factory):
 
     async def _run():
         await store.create_run(make_run())
-        await store.create_task(make_task(task_id="t-pending", status=SwarmTaskStatus.PENDING))
         await store.create_task(
-            make_task(task_id="t-claimed", status=SwarmTaskStatus.CLAIMED, assigned_agent_id="agent-7"),
+            make_task(task_id="t-pending", status=SwarmTaskStatus.PENDING)
+        )
+        await store.create_task(
+            make_task(
+                task_id="t-claimed",
+                status=SwarmTaskStatus.CLAIMED,
+                assigned_agent_id="agent-7",
+            ),
         )
         all_tasks = await store.list_tasks("swarm-1")
         assert {t.id for t in all_tasks} == {"t-pending", "t-claimed"}
@@ -319,7 +336,9 @@ def test_claim_task_respects_dependencies(store_factory):
     async def _run():
         await store.create_run(make_run())
         # t-dep is PENDING (claimable, no deps); t-blocked depends on t-dep.
-        await store.create_task(make_task(task_id="t-dep", status=SwarmTaskStatus.PENDING))
+        await store.create_task(
+            make_task(task_id="t-dep", status=SwarmTaskStatus.PENDING)
+        )
         await store.create_task(make_task(task_id="t-blocked", dependencies=("t-dep",)))
         # First claim picks t-dep (created first, deps trivially satisfied),
         # NOT t-blocked whose only dependency is still PENDING.
@@ -342,7 +361,9 @@ def test_claim_task_returns_none_when_nothing_claimable(store_factory):
         # No tasks at all -> nothing to claim.
         assert await store.claim_task("swarm-1", "agent-1") is None
         # A terminal/SUCCEEDED task is not claimable either.
-        await store.create_task(make_task(task_id="t-done", status=SwarmTaskStatus.SUCCEEDED))
+        await store.create_task(
+            make_task(task_id="t-done", status=SwarmTaskStatus.SUCCEEDED)
+        )
         assert await store.claim_task("swarm-1", "agent-1") is None
 
     asyncio.run(_run())
@@ -409,13 +430,17 @@ def test_set_active_run_requires_claimed_status(store_factory):
         claimed = await store.claim_task("swarm-1", "agent-1")
         assert claimed is not None
         completed = await store.complete_task(
-            "t-1", RunResult(output="done"), expected_version=claimed.version,
+            "t-1",
+            RunResult(output="done"),
+            expected_version=claimed.version,
         )
         # completed.version is the CORRECT current version -- but the task
         # is now SUCCEEDED, not CLAIMED, so set_active_run must still reject.
         with pytest.raises(SwarmConflictError):
             await store.set_active_run(
-                "t-1", "child-1", expected_version=completed.version,
+                "t-1",
+                "child-1",
+                expected_version=completed.version,
             )
 
     asyncio.run(_run())
@@ -432,11 +457,14 @@ def test_set_active_run_roundtrips_through_persistence(store_factory):
         await store.create_task(make_task(task_id="t-1"))
         claimed = await store.claim_task("swarm-1", "agent-1")
         assert claimed is not None
-        await store.set_active_run("t-1", "child-run-xyz", expected_version=claimed.version)
+        await store.set_active_run(
+            "t-1", "child-run-xyz", expected_version=claimed.version
+        )
         # read back through the same serialization path the next process would.
         tasks = await store.list_tasks("swarm-1")
         assert len(tasks) == 1
         assert tasks[0].active_run_id == "child-run-xyz"
+
     asyncio.run(_run())
 
 
@@ -453,11 +481,15 @@ def test_complete_and_fail_task_store_result_and_error(store_factory):
         await store.create_task(make_task(task_id="t-ok"))
         claimed_ok = await store.claim_task("swarm-1", "agent-1")
         result = RunResult(
-            output={"done": True}, token_usage={"input_tokens": 1}, metadata={"m": "n"},
+            output={"done": True},
+            token_usage={"input_tokens": 1},
+            metadata={"m": "n"},
         )
         # Lifecycle create(v1) -> claim(v2) -> complete(v3): each step bumps
         # version, so a completed-via-claim task lands at version 3.
-        completed = await store.complete_task("t-ok", result, expected_version=claimed_ok.version)
+        completed = await store.complete_task(
+            "t-ok", result, expected_version=claimed_ok.version
+        )
         assert completed.status == SwarmTaskStatus.SUCCEEDED
         assert completed.result.output == {"done": True}
         assert dict(completed.result.metadata) == {"m": "n"}
@@ -466,7 +498,9 @@ def test_complete_and_fail_task_store_result_and_error(store_factory):
         await store.create_task(make_task(task_id="t-bad"))
         claimed_bad = await store.claim_task("swarm-1", "agent-2")
         err = RunErrorInfo(error_type="ValueError", message="boom", detail={"x": 1})
-        failed = await store.fail_task("t-bad", err, expected_version=claimed_bad.version)
+        failed = await store.fail_task(
+            "t-bad", err, expected_version=claimed_bad.version
+        )
         assert failed.status == SwarmTaskStatus.FAILED
         assert failed.error.error_type == "ValueError"
         assert failed.error.message == "boom"
@@ -489,11 +523,17 @@ def test_missing_run_and_task_raise_not_found(store_factory):
         assert await store.get_run("nope") is None
         # update_run / complete_task / fail_task on missing ids -> typed errors.
         with pytest.raises(SwarmRunNotFoundError):
-            await store.update_run("nope", expected_version=1, status=SwarmStatus.RUNNING)
+            await store.update_run(
+                "nope", expected_version=1, status=SwarmStatus.RUNNING
+            )
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.complete_task("nope", RunResult(output=None), expected_version=1)
+            await store.complete_task(
+                "nope", RunResult(output=None), expected_version=1
+            )
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"), expected_version=1)
+            await store.fail_task(
+                "nope", RunErrorInfo(error_type="X", message="y"), expected_version=1
+            )
 
     asyncio.run(_run())
 
@@ -517,6 +557,8 @@ def test_path_traversal_in_swarm_ids_is_rejected(tmp_path):
         with pytest.raises(ValueError):
             await store.create_task(make_task(task_id="../evil"))
         with pytest.raises(ValueError):
-            await store.complete_task("../evil", RunResult(output=None), expected_version=1)
+            await store.complete_task(
+                "../evil", RunResult(output=None), expected_version=1
+            )
 
     asyncio.run(_run())

@@ -178,8 +178,9 @@ def test_update_bumps_version_and_applies_content(tmp_path):
 def test_update_category_none_clears_category_and_omitted_fields_unchanged(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            rec = _record(content="keep", category="note", confidence=0.8,
-                          metadata={"k": "v"})
+            rec = _record(
+                content="keep", category="note", confidence=0.8, metadata={"k": "v"}
+            )
             await store.remember(rec)
             # category=None with the sentinel means EXPLICIT clear.
             updated = await store.update(rec.id, expected_version=1, category=None)
@@ -252,11 +253,15 @@ def test_search_category_filter_isolates_categories(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
             note_rec = _record(
-                memory_id="m-note", owner_id="user-x", content="same query",
+                memory_id="m-note",
+                owner_id="user-x",
+                content="same query",
                 category="note",
             )
             log_rec = _record(
-                memory_id="m-log", owner_id="user-x", content="same query",
+                memory_id="m-log",
+                owner_id="user-x",
+                content="same query",
                 category="log",
             )
             await store.remember(note_rec)

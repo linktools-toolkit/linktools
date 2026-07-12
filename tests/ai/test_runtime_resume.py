@@ -24,6 +24,7 @@ The full round trip at the Runtime level:
 All three phases run inside one ``asyncio.run`` so the FileApprovalStore's
 ``asyncio.Lock`` stays bound to one event loop (the lock is acquired during
 both the pause create and the approve resolve)."""
+
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -57,7 +58,10 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
     for m in messages:
         parts = getattr(m, "parts", None) or []
         for p in parts:
-            if isinstance(p, ToolReturnPart) and getattr(p, "tool_name", None) == TOOL_NAME:
+            if (
+                isinstance(p, ToolReturnPart)
+                and getattr(p, "tool_name", None) == TOOL_NAME
+            ):
                 return ModelResponse(parts=[TextPart(content="done")])
     return ModelResponse(parts=[ToolCallPart(tool_name=TOOL_NAME, args={"x": 1})])
 
@@ -66,7 +70,10 @@ async def _stream_fn(messages, info: AgentInfo):
     for m in messages:
         parts = getattr(m, "parts", None) or []
         for p in parts:
-            if isinstance(p, ToolReturnPart) and getattr(p, "tool_name", None) == TOOL_NAME:
+            if (
+                isinstance(p, ToolReturnPart)
+                and getattr(p, "tool_name", None) == TOOL_NAME
+            ):
                 yield "done"
                 return
     yield {0: DeltaToolCall(name=TOOL_NAME, json_args=json.dumps({"x": 1}))}
@@ -75,16 +82,19 @@ async def _stream_fn(messages, info: AgentInfo):
 def _registry() -> ModelRegistry:
     registry = ModelRegistry()
     registry.register(
-        "test-model", model=FunctionModel(_model_fn, stream_function=_stream_fn),
+        "test-model",
+        model=FunctionModel(_model_fn, stream_function=_stream_fn),
     )
     return registry
 
 
 def _spec() -> AgentSpec:
     return AgentSpec(
-        id="agent-resume", name="resume-agent",
+        id="agent-resume",
+        name="resume-agent",
         model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
+        instructions=PromptSpec(instructions="hi"),
+        output_schema=str,
     )
 
 
@@ -151,19 +161,31 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
 
         async def _stub_compile(_spec):
             return compiled
+
         runtime.compiler.compile = _stub_compile
 
         # Create a session.
         now = datetime.now(timezone.utc)
-        await storage.sessions.create(SessionRecord(
-            id="session-r1", parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=now, updated_at=now,
-        ))
+        await storage.sessions.create(
+            SessionRecord(
+                id="session-r1",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
         # run_stream pauses on the risky tool.
-        pause_events = await _collect(runtime.run_stream(
-            spec, "call risky", session_id="session-r1", run_id="run-r1",
-        ))
+        pause_events = await _collect(
+            runtime.run_stream(
+                spec,
+                "call risky",
+                session_id="session-r1",
+                run_id="run-r1",
+            )
+        )
         paused = next(e for e in pause_events if e["type"] == "paused")
         approval_id = paused["approval_id"]
         assert paused["run_id"] == "run-r1"
@@ -174,7 +196,9 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
 
         # human approves the pending request.
         await storage.approvals.approve(
-            approval_id, expected_version=1, resolved_by="test",
+            approval_id,
+            expected_version=1,
+            resolved_by="test",
         )
 
         # resume re-enters run_stream with message_history.
@@ -192,8 +216,7 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
 
     # Tool executed (end event with ok=True).
     tool_ends = [
-        e for e in resume_events
-        if e.get("type") == "tool" and e.get("phase") == "end"
+        e for e in resume_events if e.get("type") == "tool" and e.get("phase") == "end"
     ]
     assert any(e["name"] == TOOL_NAME and e["ok"] is True for e in tool_ends), (
         f"expected tool end event for {TOOL_NAME} with ok=True, got {resume_events}"
@@ -233,13 +256,24 @@ def test_resume_not_waiting_approval_raises(tmp_path):
 
     async def _seed_and_resume():
         now = datetime.now(timezone.utc)
-        await storage.runs.create(RunRecord(
-            id="run-done", root_run_id="run-done", parent_run_id=None,
-            session_id="session-x", runnable_id="agent-resume",
-            runnable_type=RunnableType.AGENT, status=RunStatus.SUCCEEDED,
-            input=RunInput(prompt=""), result=None, error=None,
-            version=1, created_at=now, started_at=now, finished_at=now,
-        ))
+        await storage.runs.create(
+            RunRecord(
+                id="run-done",
+                root_run_id="run-done",
+                parent_run_id=None,
+                session_id="session-x",
+                runnable_id="agent-resume",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.SUCCEEDED,
+                input=RunInput(prompt=""),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
         try:
             async for _ in runtime.resume("run-done", spec):
                 pass
@@ -258,14 +292,24 @@ def test_resume_no_checkpoint_raises(tmp_path):
 
     async def _seed_and_resume():
         now = datetime.now(timezone.utc)
-        await storage.runs.create(RunRecord(
-            id="run-paused-nockpt", root_run_id="run-paused-nockpt",
-            parent_run_id=None, session_id="session-y",
-            runnable_id="agent-resume", runnable_type=RunnableType.AGENT,
-            status=RunStatus.WAITING_APPROVAL,
-            input=RunInput(prompt=""), result=None, error=None,
-            version=1, created_at=now, started_at=now, finished_at=None,
-        ))
+        await storage.runs.create(
+            RunRecord(
+                id="run-paused-nockpt",
+                root_run_id="run-paused-nockpt",
+                parent_run_id=None,
+                session_id="session-y",
+                runnable_id="agent-resume",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.WAITING_APPROVAL,
+                input=RunInput(prompt=""),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
         try:
             async for _ in runtime.resume("run-paused-nockpt", spec):
                 pass

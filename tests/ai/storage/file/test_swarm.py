@@ -4,6 +4,7 @@
 persistence for SwarmRun/SwarmTask. Uses the `def test_x(): asyncio.run(_run())`
 style (sync test wrapper driving its own event loop) so no pytest-asyncio mode
 config is needed."""
+
 import asyncio
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
@@ -47,7 +48,9 @@ def _run(
         round=round,
         status=status,
         version=version,
-        token_usage=TokenUsage(input_tokens=10, output_tokens=20, total_cost=Decimal("0.5")),
+        token_usage=TokenUsage(
+            input_tokens=10, output_tokens=20, total_cost=Decimal("0.5")
+        ),
         cost=Decimal("1.25"),
         created_at=now,
         updated_at=now,
@@ -132,7 +135,9 @@ def test_update_run_advances_version_and_applies_fields(tmp_path):
             expected_version=1,
             status=SwarmStatus.RUNNING,
             round=2,
-            token_usage=TokenUsage(input_tokens=100, output_tokens=200, total_cost=Decimal("2")),
+            token_usage=TokenUsage(
+                input_tokens=100, output_tokens=200, total_cost=Decimal("2")
+            ),
             cost=Decimal("9.99"),
             metadata={"new": "k"},
         )
@@ -153,7 +158,9 @@ def test_update_run_wrong_expected_version_raises_conflict(tmp_path):
         store = FileSwarmStore(root=tmp_path)
         await store.create_run(_run())
         with pytest.raises(SwarmConflictError):
-            await store.update_run("swarm-1", expected_version=99, status=SwarmStatus.RUNNING)
+            await store.update_run(
+                "swarm-1", expected_version=99, status=SwarmStatus.RUNNING
+            )
 
     asyncio.run(_run_case())
 
@@ -164,7 +171,9 @@ def test_update_run_invalid_transition_raises(tmp_path):
         # PENDING -> SUCCEEDED is not in ALLOWED_SWARM_TRANSITIONS.
         await store.create_run(_run())
         with pytest.raises(InvalidSwarmTransitionError):
-            await store.update_run("swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED)
+            await store.update_run(
+                "swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED
+            )
 
     asyncio.run(_run_case())
 
@@ -173,7 +182,9 @@ def test_update_run_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(SwarmRunNotFoundError):
-            await store.update_run("nope", expected_version=1, status=SwarmStatus.RUNNING)
+            await store.update_run(
+                "nope", expected_version=1, status=SwarmStatus.RUNNING
+            )
 
     asyncio.run(_run_case())
 
@@ -200,9 +211,15 @@ def test_list_tasks_status_filter(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         await store.create_run(_run())
-        await store.create_task(_task(task_id="t-pending", status=SwarmTaskStatus.PENDING))
         await store.create_task(
-            _task(task_id="t-claimed", status=SwarmTaskStatus.CLAIMED, assigned_agent_id="agent-7"),
+            _task(task_id="t-pending", status=SwarmTaskStatus.PENDING)
+        )
+        await store.create_task(
+            _task(
+                task_id="t-claimed",
+                status=SwarmTaskStatus.CLAIMED,
+                assigned_agent_id="agent-7",
+            ),
         )
         pending = await store.list_tasks("swarm-1", status=SwarmTaskStatus.PENDING)
         claimed = await store.list_tasks("swarm-1", status=SwarmTaskStatus.CLAIMED)
@@ -286,8 +303,12 @@ def test_complete_task_stores_result(tmp_path):
         await store.create_run(_run())
         await store.create_task(_task(task_id="t-1"))
         claimed = await store.claim_task("swarm-1", "agent-a")
-        result = RunResult(output={"done": True}, token_usage={"input_tokens": 1}, metadata={"m": "n"})
-        completed = await store.complete_task("t-1", result, expected_version=claimed.version)
+        result = RunResult(
+            output={"done": True}, token_usage={"input_tokens": 1}, metadata={"m": "n"}
+        )
+        completed = await store.complete_task(
+            "t-1", result, expected_version=claimed.version
+        )
         assert completed.status == SwarmTaskStatus.SUCCEEDED
         assert completed.result.output == {"done": True}
         assert completed.result.metadata == {"m": "n"}
@@ -317,7 +338,9 @@ def test_complete_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.complete_task("nope", RunResult(output=None), expected_version=1)
+            await store.complete_task(
+                "nope", RunResult(output=None), expected_version=1
+            )
 
     asyncio.run(_run_case())
 
@@ -326,7 +349,9 @@ def test_fail_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(SwarmTaskNotFoundError):
-            await store.fail_task("nope", RunErrorInfo(error_type="X", message="y"), expected_version=1)
+            await store.fail_task(
+                "nope", RunErrorInfo(error_type="X", message="y"), expected_version=1
+            )
 
     asyncio.run(_run_case())
 
@@ -335,17 +360,22 @@ def test_complete_task_with_fencing_token_requires_claimed_status(tmp_path):
     """G9: mirrors the SqlAlchemy contract -- a stale fencing token retry
     against an already-completed task must be rejected, not silently
     re-applied."""
+
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         await store.create_run(_run())
         await store.create_task(_task(task_id="t-1"))
         claimed = await store.claim_task("swarm-1", "agent-a")
         await store.complete_task(
-            "t-1", RunResult(output="first"), expected_version=claimed.version,
+            "t-1",
+            RunResult(output="first"),
+            expected_version=claimed.version,
         )
         with pytest.raises(SwarmConflictError):
             await store.complete_task(
-                "t-1", RunResult(output="stale-retry"), expected_version=claimed.version,
+                "t-1",
+                RunResult(output="stale-retry"),
+                expected_version=claimed.version,
             )
 
     asyncio.run(_run_case())
@@ -358,11 +388,14 @@ def test_fail_task_with_fencing_token_requires_claimed_status(tmp_path):
         await store.create_task(_task(task_id="t-1"))
         claimed = await store.claim_task("swarm-1", "agent-a")
         await store.complete_task(
-            "t-1", RunResult(output="first"), expected_version=claimed.version,
+            "t-1",
+            RunResult(output="first"),
+            expected_version=claimed.version,
         )
         with pytest.raises(SwarmConflictError):
             await store.fail_task(
-                "t-1", RunErrorInfo(error_type="X", message="y"),
+                "t-1",
+                RunErrorInfo(error_type="X", message="y"),
                 expected_version=claimed.version,
             )
 
@@ -403,7 +436,9 @@ def test_path_traversal_in_task_id_rejected(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         with pytest.raises(ValueError):
-            await store.complete_task("../evil", RunResult(output=None), expected_version=1)
+            await store.complete_task(
+                "../evil", RunResult(output=None), expected_version=1
+            )
 
     asyncio.run(_run_case())
 
@@ -441,10 +476,16 @@ def test_record_attempt_then_list_roundtrip(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         started = _now()
-        recorded = await store.record_attempt(_attempt(
-            attempt_id="att-1", task_id="task-1", run_id="run-1",
-            attempt=1, status=AttemptStatus.RUNNING, started_at=started,
-        ))
+        recorded = await store.record_attempt(
+            _attempt(
+                attempt_id="att-1",
+                task_id="task-1",
+                run_id="run-1",
+                attempt=1,
+                status=AttemptStatus.RUNNING,
+                started_at=started,
+            )
+        )
         assert recorded.id == "att-1"
         listed = await store.list_attempts("task-1")
         assert len(listed) == 1
@@ -464,16 +505,23 @@ def test_record_attempt_upsert_updates_existing_row(tmp_path):
     """Strategy records RUNNING before worker, SUCCEEDED after -- same id, two
     writes. Verify the second write updates the row (not creates a new one) and
     that finished_at + error round-trip."""
+
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
-        await store.record_attempt(_attempt(
-            attempt_id="att-1", status=AttemptStatus.RUNNING,
-        ))
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-1",
+                status=AttemptStatus.RUNNING,
+            )
+        )
         finished = _now()
-        await store.record_attempt(_attempt(
-            attempt_id="att-1", status=AttemptStatus.SUCCEEDED,
-            finished_at=finished,
-        ))
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-1",
+                status=AttemptStatus.SUCCEEDED,
+                finished_at=finished,
+            )
+        )
         listed = await store.list_attempts("task-1")
         assert len(listed) == 1
         assert listed[0].status is AttemptStatus.SUCCEEDED
@@ -485,17 +533,30 @@ def test_record_attempt_upsert_updates_existing_row(tmp_path):
 def test_list_attempts_filters_by_task_id_and_orders_by_attempt(tmp_path):
     """Two attempts for task-1 (incrementing attempt#) and one for task-2;
     list_attempts(task-1) returns just task-1's, ordered by attempt number."""
+
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
-        await store.record_attempt(_attempt(
-            attempt_id="att-1a", task_id="task-1", attempt=1,
-        ))
-        await store.record_attempt(_attempt(
-            attempt_id="att-1b", task_id="task-1", attempt=2,
-        ))
-        await store.record_attempt(_attempt(
-            attempt_id="att-2a", task_id="task-2", attempt=1,
-        ))
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-1a",
+                task_id="task-1",
+                attempt=1,
+            )
+        )
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-1b",
+                task_id="task-1",
+                attempt=2,
+            )
+        )
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-2a",
+                task_id="task-2",
+                attempt=1,
+            )
+        )
         listed = await store.list_attempts("task-1")
         assert [a.attempt for a in listed] == [1, 2]
         assert all(a.task_id == "task-1" for a in listed)
@@ -507,10 +568,14 @@ def test_record_attempt_round_trips_error_field(tmp_path):
     async def _run_case():
         store = FileSwarmStore(root=tmp_path)
         err = RunErrorInfo(error_type="ValueError", message="boom", detail={"k": "v"})
-        await store.record_attempt(_attempt(
-            attempt_id="att-1", status=AttemptStatus.FAILED,
-            finished_at=_now(), error=err,
-        ))
+        await store.record_attempt(
+            _attempt(
+                attempt_id="att-1",
+                status=AttemptStatus.FAILED,
+                finished_at=_now(),
+                error=err,
+            )
+        )
         listed = await store.list_attempts("task-1")
         assert listed[0].error == err
 
@@ -532,7 +597,9 @@ def test_renew_lease_extends_lease_expires_at(tmp_path):
         original_lease = claimed.lease_expires_at
         assert original_lease is not None
         renewed = await store.renew_lease(
-            "t-1", expected_version=claimed.version, lease_seconds=60.0,
+            "t-1",
+            expected_version=claimed.version,
+            lease_seconds=60.0,
         )
         assert renewed.lease_expires_at is not None
         # New lease is ~60s out, well beyond the original ~10s.
@@ -551,7 +618,9 @@ def test_renew_lease_wrong_version_raises_conflict(tmp_path):
         assert claimed is not None
         with pytest.raises(SwarmConflictError):
             await store.renew_lease(
-                "t-1", expected_version=claimed.version + 1, lease_seconds=60.0,
+                "t-1",
+                expected_version=claimed.version + 1,
+                lease_seconds=60.0,
             )
 
     asyncio.run(_run_case())
@@ -565,7 +634,9 @@ def test_renew_lease_non_claimed_raises_invalid_transition(tmp_path):
         await store.create_task(_task(task_id="t-1"))
         with pytest.raises(InvalidSwarmTransitionError):
             await store.renew_lease(
-                "t-1", expected_version=1, lease_seconds=60.0,
+                "t-1",
+                expected_version=1,
+                lease_seconds=60.0,
             )
 
     asyncio.run(_run_case())

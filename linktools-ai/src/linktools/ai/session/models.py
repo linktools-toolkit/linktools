@@ -59,6 +59,7 @@ class NewSessionMessage:
     sequence number themselves. The caller supplies only the semantic
     content; the store returns the persisted :class:`SessionMessage` with
     the fields it assigned."""
+
     role: MessageRole
     content: "str | Mapping[str, Any]"
     run_id: "str | None"

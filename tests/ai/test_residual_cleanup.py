@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-_AI_SRC = Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linktools" / "ai"
+_AI_SRC = (
+    Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linktools" / "ai"
+)
 
 # Requirement-origin markers that must not appear in core comments/docstrings.
 # Match single-character packaging tags without embedding historical labels.
@@ -20,7 +22,12 @@ _AI_SRC = Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linkto
 _MARKER_RE = re.compile(
     r"review3|" + r"review" + r"[- ]?doc|" + r"Package [A-Z0-9](?![a-z])|Task [0-9]+|"
     r"P[01]-[0-9]+|\bG[0-9]\b|GAP-[0-9]+|Decision D|Decision #[0-9]+|"
-    r"actionable-fix|" + r"spec " + "§" + r"|" + "§" + r"[0-9]|spec section|spec docs|docs/linktools-ai\.md|"
+    r"actionable-fix|"
+    + r"spec "
+    + "§"
+    + r"|"
+    + "§"
+    + r"[0-9]|spec section|spec docs|docs/linktools-ai\.md|"
     r"Phase [0-9]",
     re.IGNORECASE,
 )
@@ -45,7 +52,7 @@ def test_no_requirement_source_comment_markers():
         for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#") and _MARKER_RE.search(line):
                 hits.append(f"{p}:{n}: {line.strip()}")
-    assert not hits, f"requirement-source markers in comments:\n" + "\n".join(hits[:30])
+    assert not hits, "requirement-source markers in comments:\n" + "\n".join(hits[:30])
 
 
 def test_runtime_build_has_no_default_command_rule():
@@ -78,20 +85,25 @@ async def test_import_linktools_ai_without_sqlalchemy():
         "from linktools.ai.storage import Storage, FileStorage\n"
     )
     env = {
-        "PYTHONPATH": str(_AI_SRC.parents[1]) + ":" + str(_AI_SRC.parents[2] / "linktools" / "src"),
+        "PYTHONPATH": str(_AI_SRC.parents[1])
+        + ":"
+        + str(_AI_SRC.parents[2] / "linktools" / "src"),
         "PATH": "/usr/bin:/bin",
     }
-    r = subprocess.run([sys.executable, "-c", blocker], capture_output=True, text=True, env=env)
+    r = subprocess.run(
+        [sys.executable, "-c", blocker], capture_output=True, text=True, env=env
+    )
     assert r.returncode == 0, f"STDERR:\n{r.stderr}"
 
 
-def test_resolve_methods_retained_as_public_api():
+def test_resolve_methods_removed_from_public_api():
     rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
-    # resolve_agent / resolve_swarm / assemble are retained as convenience
-    # Wrappers remain supported public compatibility surfaces.
-    assert "def resolve_agent" in rt
-    assert "def resolve_swarm" in rt
-    assert "def assemble" in rt
+    # No-compat simplification: resolve_agent / resolve_swarm / assemble are
+    # removed. Runtime.inspect is the single assembly-inspection entry point;
+    # by-id resolution is the caller's job via the ProviderBundle directly.
+    assert "def resolve_agent" not in rt
+    assert "def resolve_swarm" not in rt
+    assert "def assemble" not in rt
     assert "DeprecationWarning" not in rt
 
 

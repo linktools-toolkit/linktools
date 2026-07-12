@@ -39,7 +39,9 @@ def _record_to_json(record: IdempotencyRecord) -> dict:
         "result": record.result,
         "error": record.error,
         "created_at": record.created_at.isoformat(),
-        "completed_at": None if record.completed_at is None else record.completed_at.isoformat(),
+        "completed_at": None
+        if record.completed_at is None
+        else record.completed_at.isoformat(),
     }
 
 
@@ -53,7 +55,9 @@ def _record_from_json(raw: dict) -> IdempotencyRecord:
         result=raw.get("result"),
         error=raw.get("error"),
         created_at=datetime.fromisoformat(raw["created_at"]),
-        completed_at=None if raw.get("completed_at") is None else datetime.fromisoformat(raw["completed_at"]),
+        completed_at=None
+        if raw.get("completed_at") is None
+        else datetime.fromisoformat(raw["completed_at"]),
     )
 
 
@@ -132,7 +136,11 @@ class FileIdempotencyStore:
     ) -> "IdempotencyRecord | None":
         async with self._lock:
             return await asyncio.to_thread(
-                self._reserve_sync, scope, key, request_hash, expires_at=expires_at,
+                self._reserve_sync,
+                scope,
+                key,
+                request_hash,
+                expires_at=expires_at,
             )
 
     def _complete_sync(self, scope: str, key: str, result: Any) -> None:
@@ -151,7 +159,9 @@ class FileIdempotencyStore:
             created_at=current.created_at,
             completed_at=now,
         )
-        _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
+        _atomic_write(
+            self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8")
+        )
 
     async def complete(self, scope: str, key: str, result: Any) -> None:
         async with self._lock:
@@ -173,7 +183,9 @@ class FileIdempotencyStore:
             created_at=current.created_at,
             completed_at=now,
         )
-        _atomic_write(self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8"))
+        _atomic_write(
+            self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8")
+        )
 
     async def fail(self, scope: str, key: str, error: str) -> None:
         async with self._lock:

@@ -44,10 +44,12 @@ from ..errors import (
 )
 
 from ..events.payloads import SwarmCompleted, SwarmStarted
+from ..events.context import EventContext, append_event
 from ..events.store import EventStore
 from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
 from ..run.controller import RunController
+from ..run.lifecycle import mark_completed, mark_failed
 from ..run.models import (
     RunErrorInfo,
     RunInput,
@@ -161,7 +163,9 @@ class SwarmRunner:
         )
         created_swarm = await self._swarm_store.create_run(swarm_run)
         swarm_run = await self._swarm_store.update_run(
-            swarm_run.id, expected_version=created_swarm.version, status=SwarmStatus.RUNNING
+            swarm_run.id,
+            expected_version=created_swarm.version,
+            status=SwarmStatus.RUNNING,
         )
         # version is now 2 after the PENDING -> RUNNING update.
         swarm_version = swarm_run.version
@@ -184,14 +188,10 @@ class SwarmRunner:
             if token is not None:
                 await token.raise_if_cancelled()
             # 3. SwarmStarted event (store assigns the next sequence).
-            await self._event_store.append(
-                stream_id=context.run_id,
-                run_id=context.run_id,
-                root_run_id=context.root_run_id,
-                parent_run_id=context.parent_run_id,
-                session_id=context.session_id,
-                runnable_id=context.runnable_id,
-                payload=SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
+            await append_event(
+                self._event_store,
+                EventContext.from_run_context(context),
+                SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
             )
 
             # 4. build the context the strategy consumes + delegate the round loop.
@@ -233,15 +233,21 @@ class SwarmRunner:
             limits = spec.limits
             acc_input = int(result.token_usage.get("input_tokens", 0))
             acc_output = int(result.token_usage.get("output_tokens", 0))
-            if limits.max_total_tokens is not None and (acc_input + acc_output) > limits.max_total_tokens:
+            if (
+                limits.max_total_tokens is not None
+                and (acc_input + acc_output) > limits.max_total_tokens
+            ):
                 raise SwarmLimitExceededError(
                     f"swarm exceeded max_total_tokens={limits.max_total_tokens}: "
                     f"used {acc_input + acc_output}",
                     kind="max_total_tokens",
                 )
             swarm_run = await self._swarm_store.update_run(
-                swarm_run.id, expected_version=swarm_version,
-                token_usage=TokenUsage(input_tokens=acc_input, output_tokens=acc_output),
+                swarm_run.id,
+                expected_version=swarm_version,
+                token_usage=TokenUsage(
+                    input_tokens=acc_input, output_tokens=acc_output
+                ),
             )
             swarm_version = swarm_run.version
 
@@ -257,23 +263,23 @@ class SwarmRunner:
                 await self._write_aggregate(context, result)
 
             # 6. transition driving Run + SwarmRun to SUCCEEDED.
-            await self._run_store.transition(
-                context.run_id, RunStatus.SUCCEEDED,
-                expected_version=driving_running.version, result=result,
+            await mark_completed(
+                self._run_store,
+                context.run_id,
+                expected_version=driving_running.version,
+                result=result,
             )
             await self._swarm_store.update_run(
-                swarm_run.id, expected_version=swarm_version, status=SwarmStatus.SUCCEEDED
+                swarm_run.id,
+                expected_version=swarm_version,
+                status=SwarmStatus.SUCCEEDED,
             )
 
             # 7. SwarmCompleted event (store assigns the next sequence).
-            await self._event_store.append(
-                stream_id=context.run_id,
-                run_id=context.run_id,
-                root_run_id=context.root_run_id,
-                parent_run_id=context.parent_run_id,
-                session_id=context.session_id,
-                runnable_id=context.runnable_id,
-                payload=SwarmCompleted(swarm_run_id=swarm_run.id),
+            await append_event(
+                self._event_store,
+                EventContext.from_run_context(context),
+                SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
         except asyncio.CancelledError:
@@ -300,14 +306,16 @@ class SwarmRunner:
             except Exception as transition_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition driving run %s to CANCELLED: %s",
-                    context.run_id, transition_exc,
+                    context.run_id,
+                    transition_exc,
                 )
             try:
                 await self._finalize_cancelled_swarm_run(swarm_run.id)
             except Exception as swarm_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition swarm run %s to CANCELLED: %s",
-                    swarm_run.id, swarm_exc,
+                    swarm_run.id,
+                    swarm_exc,
                 )
             raise
         except Exception as exc:
@@ -323,28 +331,31 @@ class SwarmRunner:
             # exc (the actual cause) with a store/version error, losing the
             # cause for the caller. The warnings keep the transition failures
             # visible rather than silent.
-            error_info = RunErrorInfo(
-                error_type=type(exc).__name__, message=str(exc)
-            )
+            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             try:
-                await self._run_store.transition(
-                    context.run_id, RunStatus.FAILED,
-                    expected_version=driving_running.version, error=error_info,
+                await mark_failed(
+                    self._run_store,
+                    context.run_id,
+                    expected_version=driving_running.version,
+                    error=error_info,
                 )
             except Exception as transition_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition driving run %s to FAILED: %s",
-                    context.run_id, transition_exc,
+                    context.run_id,
+                    transition_exc,
                 )
             try:
                 await self._swarm_store.update_run(
-                    swarm_run.id, expected_version=swarm_version,
+                    swarm_run.id,
+                    expected_version=swarm_version,
                     status=SwarmStatus.FAILED,
                 )
             except Exception as swarm_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition swarm run %s to FAILED: %s",
-                    swarm_run.id, swarm_exc,
+                    swarm_run.id,
+                    swarm_exc,
                 )
             raise
         finally:
@@ -389,7 +400,9 @@ class SwarmRunner:
         driving_version = driving.version
         swarm_version = swarm_run.version
         driving_was_terminal = driving.status in (
-            RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
         )
 
         try:
@@ -413,30 +426,28 @@ class SwarmRunner:
                 await self._write_aggregate(parent_context, result)
 
             if not driving_was_terminal:
-                await self._run_store.transition(
-                    parent_context.run_id, RunStatus.SUCCEEDED,
-                    expected_version=driving_version, result=result,
+                await mark_completed(
+                    self._run_store,
+                    parent_context.run_id,
+                    expected_version=driving_version,
+                    result=result,
                 )
             await self._swarm_store.update_run(
-                swarm_run.id, expected_version=swarm_version, status=SwarmStatus.SUCCEEDED
+                swarm_run.id,
+                expected_version=swarm_version,
+                status=SwarmStatus.SUCCEEDED,
             )
 
             # SwarmCompleted event -- the store assigns the next sequence
             # (events from the original run already occupy the low ones).
-            await self._event_store.append(
-                stream_id=parent_context.run_id,
-                run_id=parent_context.run_id,
-                root_run_id=parent_context.root_run_id,
-                parent_run_id=parent_context.parent_run_id,
-                session_id=parent_context.session_id,
-                runnable_id=parent_context.runnable_id,
-                payload=SwarmCompleted(swarm_run_id=swarm_run.id),
+            await append_event(
+                self._event_store,
+                EventContext.from_run_context(parent_context),
+                SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
         except Exception as exc:
-            error_info = RunErrorInfo(
-                error_type=type(exc).__name__, message=str(exc)
-            )
+            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             # kept best-effort ONLY because we are
             # already in the failing path -- letting the transition error
             # escape would replace the ORIGINAL exc with a store/version error.
@@ -444,23 +455,28 @@ class SwarmRunner:
             if not driving_was_terminal:
                 try:
                     await self._run_store.transition(
-                        parent_context.run_id, RunStatus.FAILED,
-                        expected_version=driving_version, error=error_info,
+                        parent_context.run_id,
+                        RunStatus.FAILED,
+                        expected_version=driving_version,
+                        error=error_info,
                     )
                 except Exception as transition_exc:  # noqa: BLE001
                     _LOGGER.warning(
                         "failed to transition driving run %s to FAILED: %s",
-                        parent_context.run_id, transition_exc,
+                        parent_context.run_id,
+                        transition_exc,
                     )
             try:
                 await self._swarm_store.update_run(
-                    swarm_run.id, expected_version=swarm_version,
+                    swarm_run.id,
+                    expected_version=swarm_version,
                     status=SwarmStatus.FAILED,
                 )
             except Exception as swarm_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition swarm run %s to FAILED: %s",
-                    swarm_run.id, swarm_exc,
+                    swarm_run.id,
+                    swarm_exc,
                 )
             raise
 
@@ -483,7 +499,9 @@ class SwarmRunner:
         if current is None:
             raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
         if current.status in (
-            SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
+            SwarmStatus.SUCCEEDED,
+            SwarmStatus.FAILED,
+            SwarmStatus.CANCELLED,
         ):
             return  # already terminal -- no-op
 
@@ -499,15 +517,19 @@ class SwarmRunner:
             # through this two-step transition.
             driving_record = await self._run_store.get(driving_run_id)
             if driving_record is not None and driving_record.status not in (
-                RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                RunStatus.SUCCEEDED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
                 RunStatus.CANCELLING,
             ):
                 await self._run_store.transition(
-                    driving_run_id, RunStatus.CANCELLING,
+                    driving_run_id,
+                    RunStatus.CANCELLING,
                     expected_version=driving_record.version,
                 )
             await self._swarm_store.update_run(
-                swarm_run_id, expected_version=current.version,
+                swarm_run_id,
+                expected_version=current.version,
                 status=SwarmStatus.CANCELLING,
             )
             await self._run_controller.cancel(driving_run_id)
@@ -516,7 +538,8 @@ class SwarmRunner:
             # actually stop, so go straight to CANCELLED (pre-Package-2
             # behavior, preserved for the store-only / cross-process case).
             await self._swarm_store.update_run(
-                swarm_run_id, expected_version=current.version,
+                swarm_run_id,
+                expected_version=current.version,
                 status=SwarmStatus.CANCELLED,
             )
 
@@ -542,7 +565,9 @@ class SwarmRunner:
                 if child is None:
                     continue
                 if child.status in (
-                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                    RunStatus.SUCCEEDED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
                 ):
                     continue
                 child_in_flight = (
@@ -552,7 +577,8 @@ class SwarmRunner:
                 if child_in_flight:
                     if child.status != RunStatus.CANCELLING:
                         child = await self._run_store.transition(
-                            task.active_run_id, RunStatus.CANCELLING,
+                            task.active_run_id,
+                            RunStatus.CANCELLING,
                             expected_version=child.version,
                         )
                     # The child's OWN AgentRunner.execute() -- registered with
@@ -562,12 +588,16 @@ class SwarmRunner:
                     await self._run_controller.cancel(task.active_run_id)
                 else:
                     await self._run_store.transition(
-                        task.active_run_id, RunStatus.CANCELLED, expected_version=child.version
+                        task.active_run_id,
+                        RunStatus.CANCELLED,
+                        expected_version=child.version,
                     )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to cancel child run %s for swarm run %s: %s",
-                    task.active_run_id, swarm_run_id, exc,
+                    task.active_run_id,
+                    swarm_run_id,
+                    exc,
                 )
 
     # -- recover() -------------------------------------------------------------
@@ -598,7 +628,8 @@ class SwarmRunner:
             raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
 
         claimed = await self._swarm_store.list_tasks(
-            swarm_run_id, status=SwarmTaskStatus.CLAIMED,
+            swarm_run_id,
+            status=SwarmTaskStatus.CLAIMED,
         )
         now = datetime.now(timezone.utc)
         for task in claimed:
@@ -616,7 +647,9 @@ class SwarmRunner:
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "recover: failed to read child run %s for task %s: %s",
-                    task.active_run_id, task.id, exc,
+                    task.active_run_id,
+                    task.id,
+                    exc,
                 )
                 continue
             # Missing Run record: lost. Reset to PENDING via reclaim below.
@@ -627,12 +660,16 @@ class SwarmRunner:
             try:
                 if child.status == RunStatus.SUCCEEDED and child.result is not None:
                     await self._swarm_store.complete_task(
-                        task.id, child.result, expected_version=task.version,
+                        task.id,
+                        child.result,
+                        expected_version=task.version,
                         active_run_id=task.active_run_id,
                     )
                 elif child.status == RunStatus.FAILED and child.error is not None:
                     await self._swarm_store.fail_task(
-                        task.id, child.error, expected_version=task.version,
+                        task.id,
+                        child.error,
+                        expected_version=task.version,
                         active_run_id=task.active_run_id,
                     )
                 elif child.status == RunStatus.RUNNING:
@@ -644,7 +681,10 @@ class SwarmRunner:
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "recover: failed to reconcile task %s from child run %s (%s): %s",
-                    task.id, task.active_run_id, child.status, exc,
+                    task.id,
+                    task.active_run_id,
+                    child.status,
+                    exc,
                 )
 
         # Reset everything still CLAIMED with an expired lease (cases above we
@@ -675,19 +715,27 @@ class SwarmRunner:
         if current is None:
             return
         if current.status in (
-            RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
         ):
             return
         if current.status == RunStatus.CANCELLING:
             await self._run_store.transition(
-                run_id, RunStatus.CANCELLED, expected_version=current.version,
+                run_id,
+                RunStatus.CANCELLED,
+                expected_version=current.version,
             )
             return
         cancelling = await self._run_store.transition(
-            run_id, RunStatus.CANCELLING, expected_version=current.version,
+            run_id,
+            RunStatus.CANCELLING,
+            expected_version=current.version,
         )
         await self._run_store.transition(
-            run_id, RunStatus.CANCELLED, expected_version=cancelling.version,
+            run_id,
+            RunStatus.CANCELLED,
+            expected_version=cancelling.version,
         )
 
     async def _finalize_cancelled_swarm_run(self, swarm_run_id: str) -> None:
@@ -697,21 +745,26 @@ class SwarmRunner:
         if current is None:
             return
         if current.status in (
-            SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED,
+            SwarmStatus.SUCCEEDED,
+            SwarmStatus.FAILED,
+            SwarmStatus.CANCELLED,
         ):
             return
         if current.status == SwarmStatus.CANCELLING:
             await self._swarm_store.update_run(
-                swarm_run_id, expected_version=current.version,
+                swarm_run_id,
+                expected_version=current.version,
                 status=SwarmStatus.CANCELLED,
             )
             return
         cancelling = await self._swarm_store.update_run(
-            swarm_run_id, expected_version=current.version,
+            swarm_run_id,
+            expected_version=current.version,
             status=SwarmStatus.CANCELLING,
         )
         await self._swarm_store.update_run(
-            swarm_run_id, expected_version=cancelling.version,
+            swarm_run_id,
+            expected_version=cancelling.version,
             status=SwarmStatus.CANCELLED,
         )
 
@@ -734,9 +787,7 @@ class SwarmRunner:
             compiled[agent_id] = await self._compiler.compile(agents[agent_id])
         return compiled
 
-    async def _write_aggregate(
-        self, context: RunContext, result: RunResult
-    ) -> None:
+    async def _write_aggregate(self, context: RunContext, result: RunResult) -> None:
         """Append the single aggregate assistant message to the shared/parent
         Session. Sequence is assigned by the SessionStore itself, not
         computed here from `len(prior_messages) + 1`."""

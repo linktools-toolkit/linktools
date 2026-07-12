@@ -21,22 +21,25 @@ if TYPE_CHECKING:
 @runtime_checkable
 class MemoryPolicy(Protocol):
     async def select_memories(
-        self, context: "RunContext", query: str,
-    ) -> "Sequence[MemoryRecord]":
-        ...
+        self,
+        context: "RunContext",
+        query: str,
+    ) -> "Sequence[MemoryRecord]": ...
 
     async def maybe_write_memories(
-        self, context: "RunContext", result: "RunResult",
-    ) -> None:
-        ...
+        self,
+        context: "RunContext",
+        result: "RunResult",
+    ) -> None: ...
 
 
 @runtime_checkable
 class RetrievalPolicy(Protocol):
     async def retrieve(
-        self, context: "RunContext", query: str,
-    ) -> "Sequence[KnowledgeItem]":
-        ...
+        self,
+        context: "RunContext",
+        query: str,
+    ) -> "Sequence[KnowledgeItem]": ...
 
 
 @runtime_checkable
@@ -79,14 +82,20 @@ class DefaultPromptContextFormatter:
 
     def format_memory(self, records):
         from ..knowledge.context import format_memory
+
         return format_memory(records)
 
     def format_knowledge(self, items):
         from ..knowledge.context import KnowledgeContext
+
         return KnowledgeContext(documents=list(items)).format()
 
 
 __all__ = [
-    "MemoryPolicy", "RetrievalPolicy", "PromptContextFormatter",
-    "DefaultMemoryPolicy", "DefaultRetrievalPolicy", "DefaultPromptContextFormatter",
+    "MemoryPolicy",
+    "RetrievalPolicy",
+    "PromptContextFormatter",
+    "DefaultMemoryPolicy",
+    "DefaultRetrievalPolicy",
+    "DefaultPromptContextFormatter",
 ]

@@ -32,6 +32,7 @@ from linktools.ai.swarm.spec import (
 
 # --- helpers -----------------------------------------------------------------
 
+
 def _make_task(output) -> SwarmTask:
     """Build a minimal SwarmTask carrying a succeeded RunResult(output=...)."""
     return SwarmTask(
@@ -78,6 +79,7 @@ def _make_failed_task() -> SwarmTask:
 
 # --- SwarmLimits -------------------------------------------------------------
 
+
 def test_swarm_limits_constructs_with_all_fields():
     limits = SwarmLimits(
         max_rounds=5,
@@ -112,15 +114,21 @@ def test_default_swarm_limits_values():
 
 def test_swarm_limits_is_frozen():
     limits = SwarmLimits(
-        max_rounds=1, max_tasks=1, max_delegations=1, max_depth=1,
-        max_concurrency=1, max_total_tokens=None,
-        max_total_cost=None, timeout_seconds=None,
+        max_rounds=1,
+        max_tasks=1,
+        max_delegations=1,
+        max_depth=1,
+        max_concurrency=1,
+        max_total_tokens=None,
+        max_total_cost=None,
+        timeout_seconds=None,
     )
     with pytest.raises(FrozenInstanceError):
         limits.max_rounds = 99  # type: ignore[misc]
 
 
 # --- AggregationPolicy -------------------------------------------------------
+
 
 def test_aggregation_policy_defaults_to_concat():
     policy = AggregationPolicy()
@@ -136,6 +144,7 @@ def test_aggregation_mode_is_str_enum():
 
 
 # --- aggregate() -------------------------------------------------------------
+
 
 def test_aggregate_concat_joins_outputs():
     tasks = (_make_task("alpha"), _make_task("beta"))
@@ -214,6 +223,7 @@ def test_aggregate_concat_uses_str_on_non_string_outputs():
 
 # --- SwarmContextPolicy ------------------------------------------------------
 
+
 def test_swarm_context_policy_defaults():
     policy = SwarmContextPolicy()
     assert policy.coordinator_reads_session is True
@@ -230,6 +240,7 @@ def test_swarm_context_policy_is_frozen():
 
 # --- SwarmStrategySpec -------------------------------------------------------
 
+
 def test_swarm_strategy_spec_defaults_config_to_empty_dict():
     strategy = SwarmStrategySpec(kind="parallel_fan_out")
     assert strategy.kind == "parallel_fan_out"
@@ -242,6 +253,7 @@ def test_swarm_strategy_spec_accepts_config():
 
 
 # --- SwarmSpec ---------------------------------------------------------------
+
 
 def _make_spec() -> SwarmSpec:
     coordinator = AgentRef(agent_id="agent-coord", role="coordinator")

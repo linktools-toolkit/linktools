@@ -23,7 +23,9 @@ class ApprovalStatus(str, Enum):
 
 
 ALLOWED_APPROVAL_TRANSITIONS: "Mapping[ApprovalStatus, frozenset[ApprovalStatus]]" = {
-    ApprovalStatus.PENDING: frozenset({ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}),
+    ApprovalStatus.PENDING: frozenset(
+        {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}
+    ),
     ApprovalStatus.APPROVED: frozenset(),
     ApprovalStatus.REJECTED: frozenset(),
 }
@@ -80,7 +82,10 @@ def build_approval_request(
 
 
 def check_dedupe_conflict(
-    existing: ApprovalRequest, *, tool_name: str, arguments: "Mapping[str, Any]",
+    existing: ApprovalRequest,
+    *,
+    tool_name: str,
+    arguments: "Mapping[str, Any]",
 ) -> None:
     """when
     ``create_or_get_pending()`` finds an existing request for

@@ -27,7 +27,7 @@ from ..policy.rule import ToolContext
 
 if TYPE_CHECKING:
     from ..execution.protocols import ExecutionBackend
-    from ..security.descriptor import ToolDescriptor
+    from ..tool.models import ToolDescriptor
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,5 +38,5 @@ class AgentDependencies:
     # CapabilityAssembler has resolved this run's tool contributions. Lets
     # PolicyCapability (the global before-every-tool-call hook) classify a
     # call by category/risk/mutating instead of only by tool name -- None
-    # (default) when no assembler ran, preserving the legacy name-only path.
+    # (default) when no assembler ran, preserving the prior name-only path.
     descriptor_lookup: "Mapping[str, ToolDescriptor] | None" = None

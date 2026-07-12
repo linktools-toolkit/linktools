@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_session_store_contract.py"""
+
 from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.session.models import MessageRole, NewSessionMessage, SessionRecord, SessionStatus
+from linktools.ai.session.models import (
+    MessageRole,
+    NewSessionMessage,
+    SessionRecord,
+    SessionStatus,
+)
 from linktools.ai.storage.file.session import FileSessionStore
 
 
 def _record(session_id="session-1") -> SessionRecord:
     now = datetime.now(timezone.utc)
-    return SessionRecord(id=session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1, created_at=now, updated_at=now)
+    return SessionRecord(
+        id=session_id,
+        parent_id=None,
+        status=SessionStatus.ACTIVE,
+        version=1,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _message(role=MessageRole.USER, content="hi") -> NewSessionMessage:
@@ -64,7 +77,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/sessions-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/sessions-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -115,7 +130,8 @@ async def test_append_then_list_messages_in_order(store_factory):
     store = store_factory()
     await store.create(_record())
     persisted = await store.append_messages(
-        "session-1", (_message(content="hi"), _message(role=MessageRole.ASSISTANT, content="hello")),
+        "session-1",
+        (_message(content="hi"), _message(role=MessageRole.ASSISTANT, content="hello")),
     )
     # append_messages returns the persisted messages with store-assigned
     # id/sequence/created_at (G6).
@@ -141,14 +157,18 @@ async def test_append_messages_assigns_sequence_the_store_never_reuses(store_fac
     restarting at 1."""
     store = store_factory()
     await store.create(_record())
-    first_batch = await store.append_messages("session-1", (_message(content="a"), _message(content="b")))
+    first_batch = await store.append_messages(
+        "session-1", (_message(content="a"), _message(content="b"))
+    )
     assert [m.sequence for m in first_batch] == [1, 2]
     second_batch = await store.append_messages("session-1", (_message(content="c"),))
     assert [m.sequence for m in second_batch] == [3]
 
 
 @pytest.mark.asyncio
-async def test_concurrent_append_messages_never_assigns_duplicate_sequence(store_factory):
+async def test_concurrent_append_messages_never_assigns_duplicate_sequence(
+    store_factory,
+):
     """G6: two coroutines racing to append to the SAME session must never be
     assigned the same sequence number -- the store is the sole sequence
     authority, so unlike the old caller-computed-sequence design, there is no
@@ -175,7 +195,9 @@ async def test_concurrent_append_messages_never_assigns_duplicate_sequence(store
 async def test_update_status_and_metadata(store_factory):
     store = store_factory()
     await store.create(_record())
-    updated = await store.update("session-1", status=SessionStatus.ARCHIVED, metadata={"k": "v"})
+    updated = await store.update(
+        "session-1", status=SessionStatus.ARCHIVED, metadata={"k": "v"}
+    )
     assert updated.status == SessionStatus.ARCHIVED
     assert dict(updated.metadata) == {"k": "v"}
     assert updated.version == 2

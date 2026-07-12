@@ -16,9 +16,11 @@ def _make_pkg(base, pkg_id, agents=("grader",)):
     (root / "agents").mkdir(parents=True)
     for a in agents:
         (root / "agents" / f"{a}.md").write_text(
-            "---\nname: {n}\nmodel:\n  primary: gpt-4o\n---\nYou are {n}.\n".format(n=a),
+            "---\nname: {n}\nmodel:\n  primary: gpt-4o\n---\nYou are {n}.\n".format(
+                n=a
+            ),
             encoding="utf-8",
-    )
+        )
     return root
 
 
@@ -26,10 +28,12 @@ def _make_pkg(base, pkg_id, agents=("grader",)):
 def resolver(tmp_path):
     _make_pkg(tmp_path, "skill-creator", agents=("grader", "comparator"))
     _make_pkg(tmp_path, "another-skill", agents=("grader",))
-    return DirectoryEntrypointResolver({
-        "skill-creator": tmp_path / "skill-creator",
-        "another-skill": tmp_path / "another-skill",
-    })
+    return DirectoryEntrypointResolver(
+        {
+            "skill-creator": tmp_path / "skill-creator",
+            "another-skill": tmp_path / "another-skill",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -48,7 +52,9 @@ async def test_list_entrypoints_pagination(resolver):
     page1 = await resolver.list_entrypoints(scope, kind="agent", limit=1)
     assert len(page1.items) == 1
     assert page1.next_cursor is not None
-    page2 = await resolver.list_entrypoints(scope, kind="agent", limit=1, cursor=page1.next_cursor)
+    page2 = await resolver.list_entrypoints(
+        scope, kind="agent", limit=1, cursor=page1.next_cursor
+    )
     assert len(page2.items) == 1
     assert {i.name for i in page1.items + page2.items} == {"grader", "comparator"}
 
@@ -56,7 +62,9 @@ async def test_list_entrypoints_pagination(resolver):
 @pytest.mark.asyncio
 async def test_resolve_scoped_agent_has_namespaced_id(resolver):
     scope = PackageScope("skill-creator", "skill")
-    agent = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=scope))
+    agent = await resolver.resolve_agent(
+        EntrypointRef(kind="agent", name="grader", scope=scope)
+    )
     assert agent.id == "package:skill-creator:agent:grader"
     assert agent.model.primary == "gpt-4o"
 
@@ -65,8 +73,12 @@ async def test_resolve_scoped_agent_has_namespaced_id(resolver):
 async def test_namespace_isolation_same_name_different_packages(resolver):
     s1 = PackageScope("skill-creator", "skill")
     s2 = PackageScope("another-skill", "skill")
-    a1 = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=s1))
-    a2 = await resolver.resolve_agent(EntrypointRef(kind="agent", name="grader", scope=s2))
+    a1 = await resolver.resolve_agent(
+        EntrypointRef(kind="agent", name="grader", scope=s1)
+    )
+    a2 = await resolver.resolve_agent(
+        EntrypointRef(kind="agent", name="grader", scope=s2)
+    )
     # Same entrypoint name, distinct scoped ids -> no global namespace clash.
     assert a1.id != a2.id
     assert a1.id == "package:skill-creator:agent:grader"
@@ -77,7 +89,9 @@ async def test_namespace_isolation_same_name_different_packages(resolver):
 async def test_resolve_missing_entrypoint_raises(resolver):
     scope = PackageScope("skill-creator", "skill")
     with pytest.raises(PackageEntrypointNotFoundError):
-        await resolver.resolve_agent(EntrypointRef(kind="agent", name="ghost", scope=scope))
+        await resolver.resolve_agent(
+            EntrypointRef(kind="agent", name="ghost", scope=scope)
+        )
 
 
 @pytest.mark.asyncio

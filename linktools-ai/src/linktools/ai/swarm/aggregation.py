@@ -45,8 +45,12 @@ def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmTask, ...]") -> RunR
         out = merged
     else:
         raise ValueError(f"unknown aggregation mode: {policy.mode}")
-    total_input = sum(int(t.result.token_usage.get("input_tokens", 0)) for t in succeeded)
-    total_output = sum(int(t.result.token_usage.get("output_tokens", 0)) for t in succeeded)
+    total_input = sum(
+        int(t.result.token_usage.get("input_tokens", 0)) for t in succeeded
+    )
+    total_output = sum(
+        int(t.result.token_usage.get("output_tokens", 0)) for t in succeeded
+    )
     return RunResult(
         output=out,
         token_usage={"input_tokens": total_input, "output_tokens": total_output},

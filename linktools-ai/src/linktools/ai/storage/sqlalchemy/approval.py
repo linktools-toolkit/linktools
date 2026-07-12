@@ -118,16 +118,22 @@ class SqlAlchemyApprovalStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_request(row)
+
         return await self._execute_in_session(_do)
 
     async def list_pending(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
         async def _do(session):
-            stmt = select(ApprovalRow).where(
-                ApprovalRow.run_id == run_id,
-                ApprovalRow.status == ApprovalStatus.PENDING.value,
-            ).order_by(ApprovalRow.created_at)
+            stmt = (
+                select(ApprovalRow)
+                .where(
+                    ApprovalRow.run_id == run_id,
+                    ApprovalRow.status == ApprovalStatus.PENDING.value,
+                )
+                .order_by(ApprovalRow.created_at)
+            )
             result = await session.execute(stmt)
             return tuple(_row_to_request(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)
 
     async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
@@ -137,31 +143,37 @@ class SqlAlchemyApprovalStore:
         # recognize a call that was approved externally without re-persisting
         # a PENDING duplicate.
         async def _do(session):
-            stmt = select(ApprovalRow).where(
-                ApprovalRow.run_id == run_id
-            ).order_by(ApprovalRow.created_at)
+            stmt = (
+                select(ApprovalRow)
+                .where(ApprovalRow.run_id == run_id)
+                .order_by(ApprovalRow.created_at)
+            )
             result = await session.execute(stmt)
             return tuple(_row_to_request(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)
 
     # -- write ---------------------------------------------------------
 
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:
         async def _do(session):
-            session.add(ApprovalRow(
-                id=request.id,
-                run_id=request.run_id,
-                tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name,
-                reason=request.reason,
-                arguments_json=json.dumps(dict(request.arguments)),
-                status=request.status.value,
-                version=request.version,
-                created_at=request.created_at,
-                resolved_at=request.resolved_at,
-                resolved_by=request.resolved_by,
-                metadata_json=json.dumps(dict(request.metadata)),
-            ))
+            session.add(
+                ApprovalRow(
+                    id=request.id,
+                    run_id=request.run_id,
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    reason=request.reason,
+                    arguments_json=json.dumps(dict(request.arguments)),
+                    status=request.status.value,
+                    version=request.version,
+                    created_at=request.created_at,
+                    resolved_at=request.resolved_at,
+                    resolved_by=request.resolved_by,
+                    metadata_json=json.dumps(dict(request.metadata)),
+                )
+            )
+
         try:
             await self._execute_in_session(_do)
         except IntegrityError as exc:
@@ -175,22 +187,34 @@ class SqlAlchemyApprovalStore:
         return request
 
     async def _find_by_run_and_tool_call(
-        self, run_id: str, tool_call_id: str,
+        self,
+        run_id: str,
+        tool_call_id: str,
     ) -> "ApprovalRequest | None":
         async def _do(session):
             result = await session.execute(
                 select(ApprovalRow)
-                .where(ApprovalRow.run_id == run_id, ApprovalRow.tool_call_id == tool_call_id)
+                .where(
+                    ApprovalRow.run_id == run_id,
+                    ApprovalRow.tool_call_id == tool_call_id,
+                )
                 .order_by(ApprovalRow.created_at.desc())
                 .limit(1)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_request(row)
+
         return await self._execute_in_session(_do)
 
     async def create_or_get_pending(
-        self, *, run_id: str, tool_call_id: str, tool_name: str,
-        reason: "str | None", arguments: "dict[str, Any]", approval_id: str,
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        reason: "str | None",
+        arguments: "dict[str, Any]",
+        approval_id: str,
     ) -> ApprovalRequest:
         """Dedup on (run_id, tool_call_id): a retry, a duplicate model drive, or a re-entrant pause for the
         same tool_call reuses the existing request rather than creating a
@@ -206,18 +230,28 @@ class SqlAlchemyApprovalStore:
             return existing
 
         request = build_approval_request(
-            run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
-            reason=reason, arguments=arguments, approval_id=approval_id,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            reason=reason,
+            arguments=arguments,
+            approval_id=approval_id,
         )
 
         def _row() -> ApprovalRow:
             return ApprovalRow(
-                id=request.id, run_id=request.run_id, tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name, reason=request.reason,
+                id=request.id,
+                run_id=request.run_id,
+                tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name,
+                reason=request.reason,
                 arguments_json=json.dumps(dict(request.arguments)),
-                status=request.status.value, version=request.version,
-                created_at=request.created_at, resolved_at=request.resolved_at,
-                resolved_by=request.resolved_by, metadata_json=json.dumps(dict(request.metadata)),
+                status=request.status.value,
+                version=request.version,
+                created_at=request.created_at,
+                resolved_at=request.resolved_at,
+                resolved_by=request.resolved_by,
+                metadata_json=json.dumps(dict(request.metadata)),
             )
 
         # NOTE on NOT using session.begin_nested() here: a SAVEPOINT that
@@ -246,8 +280,10 @@ class SqlAlchemyApprovalStore:
                 self._session.add(_row())
                 await self._session.flush()
             else:
+
                 async def _insert(session):
                     session.add(_row())
+
                 await self._execute_in_session(_insert)
             return request
         except IntegrityError:
@@ -256,7 +292,9 @@ class SqlAlchemyApprovalStore:
             # why UoW mode does not attempt to recover from this here).
             existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
             if existing is not None:
-                check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments)
+                check_dedupe_conflict(
+                    existing, tool_name=tool_name, arguments=arguments
+                )
                 return existing
             raise
 
@@ -308,7 +346,9 @@ class SqlAlchemyApprovalStore:
                 raise ApprovalConflictError(
                     f"expected version {expected_version}, found {row.version}"
                 )
-            if target not in ALLOWED_APPROVAL_TRANSITIONS.get(current_status, frozenset()):
+            if target not in ALLOWED_APPROVAL_TRANSITIONS.get(
+                current_status, frozenset()
+            ):
                 raise InvalidApprovalTransitionError(
                     f"cannot transition {current_status} -> {target}"
                 )
@@ -326,4 +366,5 @@ class SqlAlchemyApprovalStore:
             row.version = row.version + 1
             await session.flush()
             return _row_to_request(row)
+
         return await self._execute_in_session(_do)

@@ -12,6 +12,7 @@ both ``run()`` and ``run_stream()``.
 If ``RunPaused`` were caught by the generic ``except Exception`` handler, the
 Run would transition to ``FAILED`` instead of ``WAITING_APPROVAL`` -- this is
 the bug the test guards against."""
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -58,18 +59,32 @@ def _registry() -> ModelRegistry:
 
 def _run_context(run_id="run-n1", session_id="session-n1") -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT,
-        user_id=None, tenant_id=None, workspace=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
 def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    asyncio.run(store.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    )))
+    asyncio.run(
+        store.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
 
 def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
@@ -82,7 +97,9 @@ def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
     )
 
 
-def _compile(tmp_path, *, agent_id="agent-1") -> "tuple[AgentRunner, CompiledAgent, FileApprovalStore]":
+def _compile(
+    tmp_path, *, agent_id="agent-1"
+) -> "tuple[AgentRunner, CompiledAgent, FileApprovalStore]":
     approval_store = FileApprovalStore(root=tmp_path / "approvals")
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
@@ -93,13 +110,22 @@ def _compile(tmp_path, *, agent_id="agent-1") -> "tuple[AgentRunner, CompiledAge
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
     )
-    compiled = asyncio.run(compiler.compile(AgentSpec(
-        id=agent_id, name="a", model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
-    )))
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id=agent_id,
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=str,
+            )
+        )
+    )
+
     @compiled.pydantic_agent.tool
     async def risky(ctx, x: int) -> int:  # noqa: ANN001
         return x * 2
+
     # P0-6/G1: the runner (not the executor) persists the ApprovalRequest now
     # -- it must share the SAME approval_store instance the test asserts against.
     runner = _make_runner(tmp_path, approval_store=approval_store)
@@ -117,9 +143,13 @@ def test_run_catches_run_paused_transitions_to_waiting_and_reraises(tmp_path):
     _seed_session(runner._session_store, "session-n1")
 
     with pytest.raises(RunPaused):
-        asyncio.run(runner.run(
-            compiled, RunInput(prompt="call the risky tool"), _run_context(),
-        ))
+        asyncio.run(
+            runner.run(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(),
+            )
+        )
 
     run_record = asyncio.run(runner._run_store.get("run-n1"))
     assert run_record.status is RunStatus.WAITING_APPROVAL
@@ -133,10 +163,13 @@ def test_run_pause_carries_approval_id_on_exception(tmp_path):
 
     raised: "RunPaused | None" = None
     try:
-        asyncio.run(runner.run(
-            compiled, RunInput(prompt="call the risky tool"),
-            _run_context(run_id="run-n2", session_id="session-n1"),
-        ))
+        asyncio.run(
+            runner.run(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(run_id="run-n2", session_id="session-n1"),
+            )
+        )
     except RunPaused as exc:
         raised = exc
 
@@ -155,10 +188,13 @@ def test_run_pause_emits_run_paused_event(tmp_path):
     _seed_session(runner._session_store, "session-n1")
 
     with pytest.raises(RunPaused):
-        asyncio.run(runner.run(
-            compiled, RunInput(prompt="call the risky tool"),
-            _run_context(run_id="run-n3", session_id="session-n1"),
-        ))
+        asyncio.run(
+            runner.run(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context(run_id="run-n3", session_id="session-n1"),
+            )
+        )
 
     events = asyncio.run(runner._event_store.list("run-n3"))
     payload_types = {type(e.payload).__name__ for e in events.items}

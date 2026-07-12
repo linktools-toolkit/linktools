@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/coordination/test_redis_coordinator.py"""
+
 import pytest
 
 redis = pytest.importorskip("redis")
 fakeredis = pytest.importorskip("fakeredis")
 
-from linktools.ai.storage.coordination.redis import RedisResourceCoordinator
+from linktools.ai.storage.coordination.redis import RedisResourceCoordinator  # noqa: E402
 
 
 @pytest.fixture
@@ -30,6 +31,7 @@ async def test_publish_then_hint_roundtrip(redis_client):
 @pytest.mark.asyncio
 async def test_lock_is_exclusive(redis_client):
     import asyncio
+
     coord = RedisResourceCoordinator(redis=redis_client)
     order = []
 

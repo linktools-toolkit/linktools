@@ -13,12 +13,12 @@ access is a separate ``package-resource`` capability, not auto-enabled here."""
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ..capability.bundle import CapabilityBundle
+from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
-from ..capability.ref import CapabilityRef
+from ..capability.models import CapabilityRef
 from ..providers.skill import SkillSpecProvider
-from ..security.descriptor import ToolDescriptor
-from ..tool.contribution import ToolContribution, declared_tool_definitions
+from ..tool.models import ToolDescriptor
+from ..tool.models import ToolContribution, declared_tool_definitions
 from .prompt import render_skill_catalog
 from .toolset import _summary_from_spec, build_skill_toolset
 
@@ -66,26 +66,37 @@ class SkillProvider:
             except (KeyError, LookupError):
                 continue
             summaries.append(_summary_from_spec(sid, spec))
-        toolset = build_skill_toolset(self.skill_provider, authorized=set(ids), emit=emit)
+        toolset = build_skill_toolset(
+            self.skill_provider, authorized=set(ids), emit=emit
+        )
         sections = {}
         if context.exposure_policy.expose_prompt_catalog and summaries:
             sections["skills"] = render_skill_catalog(summaries)
         contribution = _skill_contribution(toolset)
-        return CapabilityBundle(prompt_sections=sections,
-                                tool_contributions=(contribution,))
+        return CapabilityBundle(
+            prompt_sections=sections, tool_contributions=(contribution,)
+        )
 
     def _resolve_single(self, skill_id, emit=None) -> CapabilityBundle:
         # Single-skill ref also respects expose_discovery_tools.
         if not emit:
             pass  # emit check is handled by caller's exposure policy
-        toolset = build_skill_toolset(self.skill_provider, authorized={skill_id}, emit=emit)
+        toolset = build_skill_toolset(
+            self.skill_provider, authorized={skill_id}, emit=emit
+        )
         contribution = _skill_contribution(toolset)
         return CapabilityBundle(tool_contributions=(contribution,))
 
 
 def _skill_contribution(toolset) -> ToolContribution:
     """Both skill tools are read-only discovery."""
-    kw = dict(source="skill", capability_kind="skill", category="discovery", risk="low", mutating=False)
+    kw = dict(
+        source="skill",
+        capability_kind="skill",
+        category="discovery",
+        risk="low",
+        mutating=False,
+    )
     descriptors = (
         ToolDescriptor(name="list_skills", **kw),
         ToolDescriptor(name="read_skill", **kw),

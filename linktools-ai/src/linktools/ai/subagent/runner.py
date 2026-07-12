@@ -15,6 +15,8 @@ from ..package.scope import PackageScope
 from ..run.identity import ParentRunIdentity
 from .models import SubagentResult
 
+import contextvars
+
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_CONCURRENCY = 1
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -23,10 +25,10 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # sees 0; each subagent executor increments it for the child run it drives and
 # resets it when the child returns, so depth accounting holds across multiple
 # hops and parallel calls without a schema change to RunRecord/RunContext.
-import contextvars
 
 _CURRENT_DEPTH: "contextvars.ContextVar[int]" = contextvars.ContextVar(
-    "linktools_subagent_depth", default=0,
+    "linktools_subagent_depth",
+    default=0,
 )
 
 
@@ -53,8 +55,7 @@ class SubagentExecutor(Protocol):
         parent: ParentRunIdentity,
         scope: "PackageScope | None",
         timeout_seconds: "float | None",
-    ) -> SubagentResult:
-        ...
+    ) -> SubagentResult: ...
 
 
 def enforce_depth(current_depth: int, max_depth: int) -> int:
@@ -67,6 +68,7 @@ def enforce_depth(current_depth: int, max_depth: int) -> int:
     if child_depth > max_depth:
         raise SubagentDepthExceededError(
             f"subagent delegation depth {child_depth} exceeds max_depth {max_depth}",
-            depth=child_depth, max_depth=max_depth,
+            depth=child_depth,
+            max_depth=max_depth,
         )
     return child_depth

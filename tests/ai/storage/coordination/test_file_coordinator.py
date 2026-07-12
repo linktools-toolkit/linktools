@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/coordination/test_file_coordinator.py"""
+
 import pytest
 
 from linktools.ai.storage.coordination.file import FileResourceCoordinator
@@ -23,6 +24,7 @@ async def test_publish_then_hint_roundtrip(tmp_path):
 @pytest.mark.asyncio
 async def test_lock_is_exclusive_within_process(tmp_path):
     import asyncio
+
     coord = FileResourceCoordinator(root=tmp_path)
     order = []
 
@@ -44,6 +46,7 @@ async def test_lock_is_exclusive_within_process(tmp_path):
 @pytest.mark.asyncio
 async def test_lock_provides_exclusion_across_separate_coordinator_instances(tmp_path):
     import asyncio
+
     coord_a = FileResourceCoordinator(root=tmp_path)
     coord_b = FileResourceCoordinator(root=tmp_path)
     order = []

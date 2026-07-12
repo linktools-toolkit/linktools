@@ -7,6 +7,7 @@ and assigns the sequence itself (design note contract) -- callers never construc
 an EventEnvelope with a sequence. These tests verify the store-side sequence
 assignment, isolation, and round-tripping for both the file and sqlalchemy
 backends."""
+
 import asyncio
 
 import pytest
@@ -79,7 +80,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/events-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/events-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -194,8 +197,12 @@ async def test_occurred_at_roundtrips_as_timezone_aware(store_factory):
 async def test_append_routing_fields_roundtrip(store_factory):
     store = store_factory()
     await store.append(
-        stream_id="run-1", run_id="run-1", root_run_id="root-1",
-        parent_run_id="parent-1", session_id="sess-1", runnable_id="agent-x",
+        stream_id="run-1",
+        run_id="run-1",
+        root_run_id="root-1",
+        parent_run_id="parent-1",
+        session_id="sess-1",
+        runnable_id="agent-x",
         payload=RunStarted(run_id="run-1", runnable_id="agent-x"),
     )
     envelope = (await store.list("run-1")).items[0]
@@ -222,13 +229,21 @@ async def test_different_streams_can_share_sequence_number(store_factory):
     sequence at 1 without colliding."""
     store = store_factory()
     a = await store.append(
-        stream_id="stream-a", run_id="run-shared", root_run_id="run-shared",
-        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        stream_id="stream-a",
+        run_id="run-shared",
+        root_run_id="run-shared",
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
         payload=RunStarted(run_id="run-shared", runnable_id="agent-1"),
     )
     b = await store.append(
-        stream_id="stream-b", run_id="run-shared", root_run_id="run-shared",
-        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        stream_id="stream-b",
+        run_id="run-shared",
+        root_run_id="run-shared",
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
         payload=RunStarted(run_id="run-shared", runnable_id="agent-1"),
     )
     assert a.sequence == 1
@@ -248,13 +263,21 @@ async def test_event_sequence_unique_per_stream_not_per_run(store_factory):
     two) still assigns strictly increasing sequences within that stream."""
     store = store_factory()
     first = await store.append(
-        stream_id="shared-stream", run_id="run-x", root_run_id="run-x",
-        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        stream_id="shared-stream",
+        run_id="run-x",
+        root_run_id="run-x",
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
         payload=RunStarted(run_id="run-x", runnable_id="agent-1"),
     )
     second = await store.append(
-        stream_id="shared-stream", run_id="run-y", root_run_id="run-y",
-        parent_run_id=None, session_id="session-1", runnable_id="agent-1",
+        stream_id="shared-stream",
+        run_id="run-y",
+        root_run_id="run-y",
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
         payload=RunStarted(run_id="run-y", runnable_id="agent-1"),
     )
     assert first.sequence == 1

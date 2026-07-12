@@ -5,54 +5,51 @@ max_tools) via a fake connection manager that yields canned tool names."""
 
 import pytest
 
-from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.errors import CapabilityConflictError
-from linktools.ai.mcp import LegacyMCPConnectionManagerAdapter
-from linktools.ai.mcp.provider import MCPProvider
+from linktools.ai.mcp.client import MCPConnectionRef
+from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.registry.mcp import MCPServerSpec
 
 
 class _FakeMgr:
-    """Fake manager: yields canned tool names per server + a real FunctionToolset
-    carrying those tools (so the provider's toolset filtering actually has
-    something to filter, the way a live MCPToolset does)."""
+    """Fake manager: yields canned tool names per server via list_tools_result."""
+
     def __init__(self, names_by_server):
         self._names = names_by_server
+        self._ref = MCPConnectionRef("fake", "fp")
 
-    async def list_tools(self, server):
-        return tuple(self._names.get(server.id, ()))
+    async def list_tools_result(self, server):
+        names = tuple(self._names.get(server.id, ()))
+        return MCPDiscoveryResult(
+            tools=tuple(MCPToolInfo(name=n) for n in names),
+            verified=True,
+            connection_ref=self._ref,
+        )
 
-    async def get_toolset(self, server):
-        from pydantic_ai.toolsets import FunctionToolset
-        ts = FunctionToolset()
-        for name in self._names.get(server.id, ()):
-            async def _stub(**_kw):
-                return {}
-            _stub.__name__ = name
-            ts.add_function(_stub, name=name)
-        return ts
+    async def call_tool(self, *, connection_ref, tool_name, arguments):
+        return {}
 
 
 def _spec(sid, **kw):
-    base = dict(transport="stdio", command_or_url="python -m x", command=("python", "-m", "x"))
+    base = dict(transport="stdio", command=("python", "-m", "x"))
     base.update(kw)
     return MCPServerSpec(id=sid, name=sid, **base)
 
 
 def _ctx():
-    return CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy())
-
-
-def _legacy(manager):
-    return LegacyMCPConnectionManagerAdapter(manager, empty_is_verified=True)
+    return CapabilityContext(
+        agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+    )
 
 
 @pytest.mark.asyncio
 async def test_enabled_tools_filters():
     spec = _spec("risk", enabled_tools=("query_user",))
     mgr = _FakeMgr({"risk": ("query_user", "query_device", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
+    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
     bundle = await p.resolve(CapabilityRef("mcp", "risk"), _ctx())
     # No conflict -> resolves; governance applied (query_user kept, others dropped).
     assert len(bundle.tool_contributions) == 1
@@ -62,7 +59,7 @@ async def test_enabled_tools_filters():
 async def test_disabled_tools_filters():
     spec = _spec("risk", disabled_tools=("secret",))
     mgr = _FakeMgr({"risk": ("query_user", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
+    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
     await p.resolve(CapabilityRef("mcp", "risk"), _ctx())  # no raise
 
 
@@ -70,9 +67,11 @@ async def test_disabled_tools_filters():
 async def test_max_tools_per_capability_enforced():
     spec = _spec("risk")
     mgr = _FakeMgr({"risk": tuple(f"t{i}" for i in range(20))})
-    ctx = CapabilityContext(agent_id="a1",
-                            exposure_policy=CapabilityToolExposurePolicy(max_tools_per_capability=5))
-    p = MCPProvider(_FakeSrc({"risk": spec}), _legacy(mgr))
+    ctx = CapabilityContext(
+        agent_id="a1",
+        exposure_policy=CapabilityToolExposurePolicy(max_tools_per_capability=5),
+    )
+    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
     with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
         await p.resolve(CapabilityRef("mcp", "risk"), ctx)
 
@@ -84,7 +83,7 @@ async def test_cross_server_conflict_detected():
     s1 = _spec("a", tool_prefix=False)
     s2 = _spec("b", tool_prefix=False)
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), _legacy(mgr), allow_mcp_wildcard=True)
+    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
     with pytest.raises(CapabilityConflictError, match="exposed by both"):
         await p.resolve(CapabilityRef("mcp", "*"), _ctx())
 
@@ -95,7 +94,7 @@ async def test_tool_prefix_default_avoids_conflict():
     s1 = _spec("a")
     s2 = _spec("b")
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), _legacy(mgr), allow_mcp_wildcard=True)
+    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
     bundle = await p.resolve(CapabilityRef("mcp", "*"), _ctx())
     assert len(bundle.tool_contributions) == 2
 

@@ -73,18 +73,31 @@ class FileEventStore:
         occurred_at = datetime.now(timezone.utc)
         payload_type = type(payload).__name__
         raw = {
-            "event_id": event_id, "stream_id": stream_id, "sequence": next_seq,
+            "event_id": event_id,
+            "stream_id": stream_id,
+            "sequence": next_seq,
             "occurred_at": occurred_at.isoformat(),
-            "run_id": run_id, "root_run_id": root_run_id, "parent_run_id": parent_run_id,
-            "session_id": session_id, "runnable_id": runnable_id,
-            "payload_type": payload_type, "payload": asdict(payload),
+            "run_id": run_id,
+            "root_run_id": root_run_id,
+            "parent_run_id": parent_run_id,
+            "session_id": session_id,
+            "runnable_id": runnable_id,
+            "payload_type": payload_type,
+            "payload": asdict(payload),
         }
         path = stream_dir / f"{next_seq:010d}.json"
         path.write_text(json.dumps(raw))
         return EventEnvelope(
-            event_id=event_id, stream_id=stream_id, sequence=next_seq, occurred_at=occurred_at,
-            run_id=run_id, root_run_id=root_run_id, parent_run_id=parent_run_id,
-            session_id=session_id, runnable_id=runnable_id, payload=payload,
+            event_id=event_id,
+            stream_id=stream_id,
+            sequence=next_seq,
+            occurred_at=occurred_at,
+            run_id=run_id,
+            root_run_id=root_run_id,
+            parent_run_id=parent_run_id,
+            session_id=session_id,
+            runnable_id=runnable_id,
+            payload=payload,
         )
 
     async def append(
@@ -108,9 +121,13 @@ class FileEventStore:
         async with lock:
             return await asyncio.to_thread(
                 self._append_sync,
-                stream_id=stream_id, run_id=run_id, root_run_id=root_run_id,
-                parent_run_id=parent_run_id, session_id=session_id,
-                runnable_id=runnable_id, payload=payload,
+                stream_id=stream_id,
+                run_id=run_id,
+                root_run_id=root_run_id,
+                parent_run_id=parent_run_id,
+                session_id=session_id,
+                runnable_id=runnable_id,
+                payload=payload,
             )
 
     def _load(self, path: Path) -> EventEnvelope:
@@ -123,12 +140,19 @@ class FileEventStore:
             # became a first-class field -- every caller has always passed
             # stream_id == run_id, so this default is exact, not a guess.
             stream_id=raw.get("stream_id", raw["run_id"]),
-            sequence=raw["sequence"], occurred_at=datetime.fromisoformat(raw["occurred_at"]),
-            run_id=raw["run_id"], root_run_id=raw["root_run_id"], parent_run_id=raw["parent_run_id"],
-            session_id=raw["session_id"], runnable_id=raw["runnable_id"], payload=payload,
+            sequence=raw["sequence"],
+            occurred_at=datetime.fromisoformat(raw["occurred_at"]),
+            run_id=raw["run_id"],
+            root_run_id=raw["root_run_id"],
+            parent_run_id=raw["parent_run_id"],
+            session_id=raw["session_id"],
+            runnable_id=raw["runnable_id"],
+            payload=payload,
         )
 
-    def _list_sync(self, stream_id: str, *, after_sequence: int, limit: int) -> EventPage:
+    def _list_sync(
+        self, stream_id: str, *, after_sequence: int, limit: int
+    ) -> EventPage:
         stream_dir = self._root / _validate_id_segment(stream_id, kind="stream_id")
         if not stream_dir.exists():
             return EventPage(items=(), cursor=None)
@@ -140,7 +164,12 @@ class FileEventStore:
             items.append(envelope)
         return EventPage(items=tuple(items[:limit]), cursor=None)
 
-    async def list(self, stream_id: str, *, after_sequence: int = 0, limit: int = 100) -> EventPage:
+    async def list(
+        self, stream_id: str, *, after_sequence: int = 0, limit: int = 100
+    ) -> EventPage:
         return await asyncio.to_thread(
-            self._list_sync, stream_id, after_sequence=after_sequence, limit=limit,
+            self._list_sync,
+            stream_id,
+            after_sequence=after_sequence,
+            limit=limit,
         )

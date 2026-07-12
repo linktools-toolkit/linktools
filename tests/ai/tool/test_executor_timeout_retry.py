@@ -33,6 +33,7 @@ def test_execute_max_retries_succeeds_after_failures():
     """Case 2: handler fails twice (transient) then succeeds -> the successful
     result is returned. Only TransientToolError is retried."""
     from linktools.ai.errors import TransientToolError
+
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
@@ -81,6 +82,7 @@ def test_execute_max_retries_raises_after_all_attempts_fail():
     """Case 3: handler always fails (transient) -> its exception is raised
     after ``max_retries + 1`` total attempts."""
     from linktools.ai.errors import TransientToolError
+
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 

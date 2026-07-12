@@ -42,12 +42,7 @@ def _write_agents(tmp_path) -> None:
         encoding="utf-8",
     )
     (agents / "minimal.md").write_text(
-        "---\n"
-        "name: minimal\n"
-        "model:\n"
-        "  primary: gpt-4o-mini\n"
-        "---\n"
-        "Just do the thing.\n",
+        "---\nname: minimal\nmodel:\n  primary: gpt-4o-mini\n---\nJust do the thing.\n",
         encoding="utf-8",
     )
 

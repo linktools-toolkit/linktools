@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/policy/test_rule.py"""
+
 import pytest
 
 from linktools.ai.policy.rule import (
@@ -68,4 +69,7 @@ def test_permission_set_difference_semantics():
     # Non-empty difference -> rule would DENY.
     assert requested - granted == frozenset({Permission.WRITE, Permission.ADMIN})
     # Empty difference -> rule would ALLOW.
-    assert frozenset({Permission.READ}) - frozenset({Permission.READ, Permission.WRITE}) == frozenset()
+    assert (
+        frozenset({Permission.READ}) - frozenset({Permission.READ, Permission.WRITE})
+        == frozenset()
+    )

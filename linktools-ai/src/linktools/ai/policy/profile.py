@@ -5,7 +5,7 @@ the rich rules (Permission/Risk/Approval) actually enforce against real tool
 declarations. Without this helper only CommandRule -- the one rule that needs
 no metadata -- enforces, because nothing else consults the registry.
 
-The helper awaits ``ToolRegistry.to_metadata_map()`` and hands the resulting
+The helper awaits ``ToolRegistry.get_metadata_map()`` and hands the resulting
 ``{tool_name: ToolPolicyMetadata}`` mapping to each rich rule. Sensible defaults
 are exposed as keyword arguments; callers wanting different policy can pass
 overrides here, or build their own ``PolicyEngine`` and hand it to
@@ -55,7 +55,7 @@ async def build_default_policy_engine(
     silently disable the terminal blacklist that today's default PolicyEngine
     enforces.
     """
-    metadata = await tool_registry.to_metadata_map()
+    metadata = await tool_registry.get_metadata_map()
     return PolicyEngine(
         rules=(
             CommandRule(denied_patterns=denied_command_patterns),

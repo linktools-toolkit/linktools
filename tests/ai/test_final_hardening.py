@@ -5,23 +5,33 @@ from linktools.ai.errors import (
     MCPErrorCode,
 )
 from linktools.ai.mcp.provider import MCPExposedTool
-from linktools.ai.mcp.client import MCPConnectionManager, MCPConnectionRef, MCPToolsetHandle
+from linktools.ai.mcp.client import (
+    MCPConnectionManager,
+    MCPConnectionRef,
+    MCPToolsetHandle,
+)
 from linktools.ai.registry.mcp import MCPServerSpec
-from linktools.ai.security.descriptor import ToolDescriptor
+from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.security.redact import redact_for_audit, redact_exception
 from linktools.ai.security.emitter import DefaultSecurityEventSanitizer
-from linktools.ai.tool.idempotency_key import DefaultIdempotencyKeyBuilder
-from linktools.ai.tool.idempotency_key import encode_business_key
+from linktools.ai.tool.idempotency import DefaultIdempotencyKeyBuilder
+from linktools.ai.tool.idempotency import encode_business_key
 from linktools.ai.tool.policy import (
-    EffectiveToolPolicy, IdempotencyStrategy, ResolvedToolPolicy,
+    EffectiveToolPolicy,
+    IdempotencyStrategy,
+    ResolvedToolPolicy,
 )
 
 
 def test_public_snapshots_freeze_nested_values_and_copy_inputs():
     metadata = {"nested": {"items": [1]}}
     descriptor = ToolDescriptor(
-        name="tool", source="test", category="discovery", risk="low",
-        mutating=False, metadata=metadata,
+        name="tool",
+        source="test",
+        category="discovery",
+        risk="low",
+        mutating=False,
+        metadata=metadata,
     )
     metadata["nested"]["items"].append(2)
     assert tuple(descriptor.metadata["nested"]["items"]) == (1,)
@@ -31,7 +41,10 @@ def test_public_snapshots_freeze_nested_values_and_copy_inputs():
 
 def test_business_key_requires_trusted_configured_field():
     descriptor = ToolDescriptor(
-        name="create", source="test", category="mcp-write", risk="high",
+        name="create",
+        source="test",
+        category="mcp-write",
+        risk="high",
         mutating=True,
     )
     policy = EffectiveToolPolicy(
@@ -41,8 +54,11 @@ def test_business_key_requires_trusted_configured_field():
     )
     with pytest.raises(IdempotencyConfigurationError):
         DefaultIdempotencyKeyBuilder().build(
-            descriptor=descriptor, arguments={}, run_context=type("C", (), {"run_id": "r"})(),
-            schema_version="1", policy=policy,
+            descriptor=descriptor,
+            arguments={},
+            run_context=type("C", (), {"run_id": "r"})(),
+            schema_version="1",
+            policy=policy,
         )
 
 
@@ -59,8 +75,11 @@ def test_mcp_exposed_tool_is_deeply_immutable():
 
 
 def test_policy_strategy_is_normalized_at_the_domain_boundary():
-    policy = ResolvedToolPolicy(idempotent=True, idempotency_strategy="business_key",
-                                idempotency_key_field="external_id")
+    policy = ResolvedToolPolicy(
+        idempotent=True,
+        idempotency_strategy="business_key",
+        idempotency_key_field="external_id",
+    )
     assert policy.idempotency_strategy is IdempotencyStrategy.BUSINESS_KEY
 
 
@@ -87,7 +106,9 @@ def test_mcp_error_codes_are_stable_and_sanitizer_bounds_secrets_and_payload():
 async def test_mcp_discovery_uses_list_tools_not_contextual_get_tools():
     manager = MCPConnectionManager()
     spec = MCPServerSpec(
-        id="srv", name="srv", transport="stdio", command_or_url="x",
+        id="srv",
+        name="srv",
+        transport="stdio",
         command=("x",),
     )
 
@@ -99,6 +120,7 @@ async def test_mcp_discovery_uses_list_tools_not_contextual_get_tools():
     class Toolset:
         async def list_tools(self):
             return (Tool(),)
+
         async def get_tools(self, _ctx):
             raise AssertionError("contextual get_tools must not be used for discovery")
 

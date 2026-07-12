@@ -6,6 +6,7 @@ ApprovalRequest, emit an ApprovalRequested event (if an event_store is
 wired), and STILL raise ToolApprovalRequiredError so PolicyCapability
 translates it into SkipToolExecution. Default-None (no stores wired)
 preserves today's behavior identically."""
+
 import asyncio
 import uuid
 from datetime import datetime, timezone
@@ -100,10 +101,16 @@ class _StubEventStore:
     ) -> EventEnvelope:
         sequence = sum(1 for e in self.events if e.stream_id == stream_id) + 1
         envelope = EventEnvelope(
-            event_id=f"evt-{run_id}-{sequence}", stream_id=stream_id, sequence=sequence,
-            occurred_at=datetime.now(timezone.utc), run_id=run_id,
-            root_run_id=root_run_id, parent_run_id=parent_run_id,
-            session_id=session_id, runnable_id=runnable_id, payload=payload,
+            event_id=f"evt-{run_id}-{sequence}",
+            stream_id=stream_id,
+            sequence=sequence,
+            occurred_at=datetime.now(timezone.utc),
+            run_id=run_id,
+            root_run_id=root_run_id,
+            parent_run_id=parent_run_id,
+            session_id=session_id,
+            runnable_id=runnable_id,
+            payload=payload,
         )
         self.events.append(envelope)
         return envelope
@@ -112,7 +119,9 @@ class _StubEventStore:
         self, stream_id: str, *, after_sequence: int = 0, limit: int = 100
     ) -> EventPage:
         items = tuple(
-            e for e in self.events if e.stream_id == stream_id and e.sequence > after_sequence
+            e
+            for e in self.events
+            if e.stream_id == stream_id and e.sequence > after_sequence
         )
         return EventPage(items=items[:limit], cursor=None)
 

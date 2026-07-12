@@ -20,11 +20,7 @@ def _write_skills(tmp_path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir(parents=True, exist_ok=True)
     (skills / "greeter.md").write_text(
-        "---\n"
-        "name: greeter\n"
-        "description: says hello\n"
-        "---\n"
-        "Greet the user warmly.\n",
+        "---\nname: greeter\ndescription: says hello\n---\nGreet the user warmly.\n",
         encoding="utf-8",
     )
 

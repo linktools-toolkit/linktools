@@ -95,7 +95,9 @@ class FileStorage(Storage):
     def __init__(self, *, root: "str | Path" = "./data") -> None:
         root_path = Path(root)
         super().__init__(
-            resources=ResourceStore(primary=FileResourceBackend(root=root_path / "resources")),
+            resources=ResourceStore(
+                primary=FileResourceBackend(root=root_path / "resources")
+            ),
             sessions=FileSessionStore(root=root_path / "sessions"),
             runs=FileRunStore(root=root_path / "runs"),
             events=FileEventStore(root=root_path / "events"),

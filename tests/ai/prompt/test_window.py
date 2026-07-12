@@ -8,7 +8,10 @@ from dataclasses import dataclass
 import pytest
 
 from linktools.ai.prompt import (
-    NoopWindowPolicy, RecentWindowPolicy, SessionWindowPolicy, TokenBudgetWindowPolicy,
+    NoopWindowPolicy,
+    RecentWindowPolicy,
+    SessionWindowPolicy,
+    TokenBudgetWindowPolicy,
 )
 
 
@@ -22,6 +25,7 @@ class _Msg:
 def _policy():
     class _Any:
         max_tokens = None
+
     return _Any()
 
 

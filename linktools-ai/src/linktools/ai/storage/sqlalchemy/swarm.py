@@ -84,8 +84,12 @@ def _row_to_task(row: SwarmTaskRow) -> SwarmTask:
         status=SwarmTaskStatus(row.status),
         dependencies=tuple(json.loads(row.dependencies_json)),
         input=TaskInput(**json.loads(row.input_json)),
-        result=None if row.result_json is None else RunResult(**json.loads(row.result_json)),
-        error=None if row.error_json is None else RunErrorInfo(**json.loads(row.error_json)),
+        result=None
+        if row.result_json is None
+        else RunResult(**json.loads(row.result_json)),
+        error=None
+        if row.error_json is None
+        else RunErrorInfo(**json.loads(row.error_json)),
         attempts=row.attempts,
         version=row.version,
         claimed_at=_as_utc(row.claimed_at),
@@ -100,19 +104,23 @@ def _row_to_task(row: SwarmTaskRow) -> SwarmTask:
 
 
 def _result_to_json(result: RunResult) -> str:
-    return json.dumps({
-        "output": result.output,
-        "token_usage": dict(result.token_usage),
-        "metadata": dict(result.metadata),
-    })
+    return json.dumps(
+        {
+            "output": result.output,
+            "token_usage": dict(result.token_usage),
+            "metadata": dict(result.metadata),
+        }
+    )
 
 
 def _error_to_json(error: RunErrorInfo) -> str:
-    return json.dumps({
-        "error_type": error.error_type,
-        "message": error.message,
-        "detail": dict(error.detail),
-    })
+    return json.dumps(
+        {
+            "error_type": error.error_type,
+            "message": error.message,
+            "detail": dict(error.detail),
+        }
+    )
 
 
 def _row_to_attempt(row: SwarmTaskAttemptRow) -> SwarmTaskAttempt:
@@ -125,7 +133,9 @@ def _row_to_attempt(row: SwarmTaskAttemptRow) -> SwarmTaskAttempt:
         status=AttemptStatus(row.status),
         started_at=_as_utc(row.started_at),
         finished_at=_as_utc(row.finished_at),
-        error=None if row.error_json is None else RunErrorInfo(**json.loads(row.error_json)),
+        error=None
+        if row.error_json is None
+        else RunErrorInfo(**json.loads(row.error_json)),
     )
 
 
@@ -166,19 +176,22 @@ class SqlAlchemySwarmStore:
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
         async def _do(session):
-            session.add(SwarmRunRow(
-                id=run.id,
-                run_id=run.run_id,
-                round=run.round,
-                status=run.status.value,
-                version=run.version,
-                input_tokens=run.token_usage.input_tokens,
-                output_tokens=run.token_usage.output_tokens,
-                total_cost=str(run.cost),
-                created_at=run.created_at,
-                updated_at=run.updated_at,
-                metadata_json=json.dumps(dict(run.metadata)),
-            ))
+            session.add(
+                SwarmRunRow(
+                    id=run.id,
+                    run_id=run.run_id,
+                    round=run.round,
+                    status=run.status.value,
+                    version=run.version,
+                    input_tokens=run.token_usage.input_tokens,
+                    output_tokens=run.token_usage.output_tokens,
+                    total_cost=str(run.cost),
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                    metadata_json=json.dumps(dict(run.metadata)),
+                )
+            )
+
         await self._execute_in_session(_do)
         return run
 
@@ -189,6 +202,7 @@ class SqlAlchemySwarmStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_run(row)
+
         return await self._execute_in_session(_do)
 
     async def update_run(
@@ -215,8 +229,10 @@ class SqlAlchemySwarmStore:
             # requires ``status`` to be a legal target of the source per
             # ALLOWED_SWARM_TRANSITIONS.
             valid_sources = tuple(
-                source.value for source in SwarmStatus
-                if source == status or status in ALLOWED_SWARM_TRANSITIONS.get(source, frozenset())
+                source.value
+                for source in SwarmStatus
+                if source == status
+                or status in ALLOWED_SWARM_TRANSITIONS.get(source, frozenset())
             )
 
         async def _do(session):
@@ -265,34 +281,44 @@ class SqlAlchemySwarmStore:
             )
             row = query_result.scalar_one()
             return _row_to_run(row)
+
         return await self._execute_in_session(_do)
 
     # -- task lifecycle ------------------------------------------------
 
     async def create_task(self, task: SwarmTask) -> SwarmTask:
         async def _do(session):
-            session.add(SwarmTaskRow(
-                id=task.id,
-                swarm_run_id=task.swarm_run_id,
-                parent_task_id=task.parent_task_id,
-                assigned_agent_id=task.assigned_agent_id,
-                description=task.description,
-                status=task.status.value,
-                dependencies_json=json.dumps(list(task.dependencies)),
-                input_json=json.dumps({
-                    "prompt": task.input.prompt,
-                    "metadata": dict(task.input.metadata),
-                }),
-                result_json=None if task.result is None else _result_to_json(task.result),
-                error_json=None if task.error is None else _error_to_json(task.error),
-                attempts=task.attempts,
-                version=task.version,
-                claimed_at=task.claimed_at,
-                lease_expires_at=task.lease_expires_at,
-                created_at=task.created_at,
-                updated_at=task.updated_at,
-                active_run_id=task.active_run_id,
-            ))
+            session.add(
+                SwarmTaskRow(
+                    id=task.id,
+                    swarm_run_id=task.swarm_run_id,
+                    parent_task_id=task.parent_task_id,
+                    assigned_agent_id=task.assigned_agent_id,
+                    description=task.description,
+                    status=task.status.value,
+                    dependencies_json=json.dumps(list(task.dependencies)),
+                    input_json=json.dumps(
+                        {
+                            "prompt": task.input.prompt,
+                            "metadata": dict(task.input.metadata),
+                        }
+                    ),
+                    result_json=None
+                    if task.result is None
+                    else _result_to_json(task.result),
+                    error_json=None
+                    if task.error is None
+                    else _error_to_json(task.error),
+                    attempts=task.attempts,
+                    version=task.version,
+                    claimed_at=task.claimed_at,
+                    lease_expires_at=task.lease_expires_at,
+                    created_at=task.created_at,
+                    updated_at=task.updated_at,
+                    active_run_id=task.active_run_id,
+                )
+            )
+
         await self._execute_in_session(_do)
         return task
 
@@ -300,12 +326,15 @@ class SqlAlchemySwarmStore:
         self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
     ) -> "tuple[SwarmTask, ...]":
         async def _do(session):
-            query = select(SwarmTaskRow).where(SwarmTaskRow.swarm_run_id == swarm_run_id)
+            query = select(SwarmTaskRow).where(
+                SwarmTaskRow.swarm_run_id == swarm_run_id
+            )
             if status is not None:
                 query = query.where(SwarmTaskRow.status == status.value)
             query = query.order_by(SwarmTaskRow.created_at)
             result = await session.execute(query)
             return tuple(_row_to_task(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)
 
     async def claim_task(
@@ -340,7 +369,8 @@ class SqlAlchemySwarmStore:
                     continue
                 now = datetime.now(timezone.utc)
                 lease_expires = (
-                    None if lease_seconds is None
+                    None
+                    if lease_seconds is None
                     else now + timedelta(seconds=lease_seconds)
                 )
                 # Atomic optimistic claim: the WHERE status='pending' clause
@@ -367,6 +397,7 @@ class SqlAlchemySwarmStore:
                     return _row_to_task(candidate)
                 # rowcount == 0: another worker claimed it; try next candidate.
             return None
+
         return await self._execute_in_session(_do)
 
     async def set_active_run(
@@ -415,15 +446,19 @@ class SqlAlchemySwarmStore:
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
+
         return await self._execute_in_session(_do)
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *,
+        self,
+        task_id: str,
+        result: RunResult,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
         # expected_version is now
-        # MANDATORY -- there is no more unconditional legacy path. DB-level
+        # MANDATORY -- there is no more unconditional prior path. DB-level
         # CAS via UPDATE ... WHERE version=:expected AND status='claimed'
         # AND (active_run_id IS NULL OR active_run_id=:active_run_id): a
         # worker whose lease already expired and was reclaimed to a new
@@ -473,10 +508,14 @@ class SqlAlchemySwarmStore:
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
+
         return await self._execute_in_session(_do)
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *,
+        self,
+        task_id: str,
+        error: RunErrorInfo,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
@@ -522,6 +561,7 @@ class SqlAlchemySwarmStore:
                 select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
+
         return await self._execute_in_session(_do)
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
@@ -558,6 +598,7 @@ class SqlAlchemySwarmStore:
                 select(SwarmTaskRow).where(SwarmTaskRow.id.in_(reclaimed_ids))
             )
             return tuple(_row_to_task(row) for row in query_result.scalars())
+
         return await self._execute_in_session(_do)
 
     # -- lease renewal --------------------------------
@@ -602,6 +643,7 @@ class SqlAlchemySwarmStore:
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
+
         return await self._execute_in_session(_do)
 
     # -- attempts -------------------------------------
@@ -617,25 +659,30 @@ class SqlAlchemySwarmStore:
                 select(SwarmTaskAttemptRow).where(SwarmTaskAttemptRow.id == attempt.id)
             )
             row = query_result.scalar_one_or_none()
-            error_json = None if attempt.error is None else _error_to_json(attempt.error)
+            error_json = (
+                None if attempt.error is None else _error_to_json(attempt.error)
+            )
             if row is None:
-                session.add(SwarmTaskAttemptRow(
-                    id=attempt.id,
-                    task_id=attempt.task_id,
-                    run_id=attempt.run_id,
-                    agent_id=attempt.agent_id,
-                    attempt=attempt.attempt,
-                    status=attempt.status.value,
-                    started_at=attempt.started_at,
-                    finished_at=attempt.finished_at,
-                    error_json=error_json,
-                ))
+                session.add(
+                    SwarmTaskAttemptRow(
+                        id=attempt.id,
+                        task_id=attempt.task_id,
+                        run_id=attempt.run_id,
+                        agent_id=attempt.agent_id,
+                        attempt=attempt.attempt,
+                        status=attempt.status.value,
+                        started_at=attempt.started_at,
+                        finished_at=attempt.finished_at,
+                        error_json=error_json,
+                    )
+                )
             else:
                 row.status = attempt.status.value
                 row.finished_at = attempt.finished_at
                 row.error_json = error_json
             await session.flush()
             return attempt
+
         return await self._execute_in_session(_do)
 
     async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
@@ -646,4 +693,5 @@ class SqlAlchemySwarmStore:
                 .order_by(SwarmTaskAttemptRow.started_at, SwarmTaskAttemptRow.attempt)
             )
             return tuple(_row_to_attempt(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)

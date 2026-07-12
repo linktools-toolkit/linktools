@@ -36,7 +36,9 @@ class ApprovalRule:
         self._require_side_effect = require_side_effect
         self._tool_metadata: "Mapping[str, ToolPolicyMetadata]" = tool_metadata or {}
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         if request.tool_name in self._require_for:
             return PolicyDecision(
                 kind=PolicyDecisionKind.REQUIRE_APPROVAL,
@@ -45,10 +47,15 @@ class ApprovalRule:
             )
         meta = self._tool_metadata.get(request.tool_name)
         if meta is not None:
-            if _SIDE_EFFECT_RANK[meta.side_effect] >= _SIDE_EFFECT_RANK[self._require_side_effect]:
+            if (
+                _SIDE_EFFECT_RANK[meta.side_effect]
+                >= _SIDE_EFFECT_RANK[self._require_side_effect]
+            ):
                 return PolicyDecision(
                     kind=PolicyDecisionKind.REQUIRE_APPROVAL,
                     rule_id="approval-rule",
                     reason=f"tool side_effect {meta.side_effect.value} requires approval",
                 )
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="approval-rule", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="approval-rule", reason=None
+        )

@@ -7,6 +7,7 @@ approve() must find the matching approval). When PolicyCapability populates
 the field from a real ToolCallPart, the executor uses it verbatim; when a
 caller constructs ToolContext directly without it, the uuid fallback fires
 (preserving test_executor_approval.py's behavior unchanged)."""
+
 import asyncio
 import uuid
 
@@ -23,7 +24,9 @@ from linktools.ai.tool.executor import ToolExecutor
 
 class _Require:
     async def evaluate(self, request, context):
-        return PolicyDecision(kind=PolicyDecisionKind.REQUIRE_APPROVAL, rule_id="t", reason="x")
+        return PolicyDecision(
+            kind=PolicyDecisionKind.REQUIRE_APPROVAL, rule_id="t", reason="x"
+        )
 
 
 class _Store:
@@ -56,7 +59,9 @@ def test_tool_context_carries_tool_call_id_field_with_default_none():
 
 def test_executor_uses_context_tool_call_id_when_present():
     store = _Store()
-    executor = ToolExecutor(policy=PolicyEngine(rules=(_Require(),)), approval_store=store)
+    executor = ToolExecutor(
+        policy=PolicyEngine(rules=(_Require(),)), approval_store=store
+    )
 
     async def _run():
         await executor.check(
@@ -73,7 +78,9 @@ def test_executor_uses_context_tool_call_id_when_present():
 
 def test_executor_falls_back_to_uuid_when_tool_call_id_missing():
     store = _Store()
-    executor = ToolExecutor(policy=PolicyEngine(rules=(_Require(),)), approval_store=store)
+    executor = ToolExecutor(
+        policy=PolicyEngine(rules=(_Require(),)), approval_store=store
+    )
 
     async def _run():
         await executor.check(

@@ -52,7 +52,9 @@ class ObservabilitySink(Protocol):
         the caller decides whether to set it as the current contextvar."""
         ...
 
-    def record_event(self, name: str, *, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def record_event(
+        self, name: str, *, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         """Record a discrete event under the current span (if any)."""
         ...
 

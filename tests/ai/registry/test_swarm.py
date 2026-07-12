@@ -53,10 +53,7 @@ def _write_minimal(tmp_path) -> None:
     swarms = tmp_path / "swarms"
     swarms.mkdir()
     (swarms / "minimal.yaml").write_text(
-        "agents:\n"
-        "  - agent_id: worker\n"
-        "coordinator:\n"
-        "  agent_id: boss\n",
+        "agents:\n  - agent_id: worker\ncoordinator:\n  agent_id: boss\n",
         encoding="utf-8",
     )
 

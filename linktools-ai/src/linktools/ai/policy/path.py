@@ -37,7 +37,9 @@ class PathRule:
         self._allowed_roots = tuple(root.resolve() for root in allowed_roots)
         self._path_argument = path_argument
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         candidates: list[str] = []
         path_value = request.arguments.get(self._path_argument)
         if isinstance(path_value, str):
@@ -53,7 +55,9 @@ class PathRule:
                         candidates.append(token)
 
         if not candidates:
-            return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="path-rule", reason=None)
+            return PolicyDecision(
+                kind=PolicyDecisionKind.ALLOW, rule_id="path-rule", reason=None
+            )
 
         for candidate in candidates:
             resolved = Path(candidate).expanduser().resolve()
@@ -63,4 +67,6 @@ class PathRule:
                     rule_id="path-rule",
                     reason="path escapes allowed roots",
                 )
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="path-rule", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="path-rule", reason=None
+        )

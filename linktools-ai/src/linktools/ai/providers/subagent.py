@@ -19,11 +19,9 @@ if TYPE_CHECKING:
 class SubagentSpecProvider(Protocol):
     """Provides AgentSpec declarations usable as delegated subagents."""
 
-    async def list_ids(self) -> "tuple[str, ...]":
-        ...
+    async def list_ids(self) -> "tuple[str, ...]": ...
 
-    async def get(self, agent_id: str) -> "AgentSpec":
-        ...
+    async def get(self, agent_id: str) -> "AgentSpec": ...
 
 
 class AgentBackedSubagentSpecProvider:

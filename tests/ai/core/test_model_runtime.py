@@ -73,7 +73,8 @@ def test_model_registry_register_with_model_accepts_explicit_settings_and_limits
     registry = ModelRegistry()
     fake_model = FunctionModel(lambda messages, info: None)
     registry.register(
-        "custom", model=fake_model,
+        "custom",
+        model=fake_model,
         settings=ModelSettings(max_tokens=100),
         usage_limits=UsageLimits(request_limit=3),
     )
@@ -85,7 +86,9 @@ def test_model_registry_register_with_model_accepts_explicit_settings_and_limits
 def test_model_registry_register_rejects_both_config_and_model():
     registry = ModelRegistry()
     with pytest.raises(ValueError, match="exactly one"):
-        registry.register("standard", config=_config(), model=FunctionModel(lambda m, i: None))
+        registry.register(
+            "standard", config=_config(), model=FunctionModel(lambda m, i: None)
+        )
 
 
 def test_model_registry_register_rejects_neither_config_nor_model():

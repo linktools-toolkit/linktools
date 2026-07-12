@@ -14,7 +14,11 @@ downstream never sees a bare ``jsonschema.ValidationError`` /
 
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-from ..errors import RuntimeInitializationError, ToolSchemaDefinitionError, ToolSchemaValidationError
+from ..errors import (
+    RuntimeInitializationError,
+    ToolSchemaDefinitionError,
+    ToolSchemaValidationError,
+)
 
 if TYPE_CHECKING:
     pass
@@ -24,8 +28,11 @@ if TYPE_CHECKING:
 class ToolSchemaValidator(Protocol):
     def validate_schema(self, schema: "Mapping[str, Any]") -> None: ...
     def validate_arguments(
-        self, schema: "Mapping[str, Any]", arguments: "Mapping[str, Any]",
-        *, tool_name: str = "",
+        self,
+        schema: "Mapping[str, Any]",
+        arguments: "Mapping[str, Any]",
+        *,
+        tool_name: str = "",
     ) -> None: ...
 
 
@@ -45,6 +52,7 @@ class JsonSchemaToolValidator:
 
     def validate_schema(self, schema: "Mapping[str, Any]") -> None:
         import jsonschema
+
         try:
             jsonschema.Draft7Validator.check_schema(_thaw(schema))
         except jsonschema.SchemaError as exc:
@@ -53,10 +61,14 @@ class JsonSchemaToolValidator:
             ) from exc
 
     def validate_arguments(
-        self, schema: "Mapping[str, Any]", arguments: "Mapping[str, Any]",
-        *, tool_name: str = "",
+        self,
+        schema: "Mapping[str, Any]",
+        arguments: "Mapping[str, Any]",
+        *,
+        tool_name: str = "",
     ) -> None:
         import jsonschema
+
         try:
             jsonschema.validate(dict(arguments), _thaw(schema))
         except jsonschema.ValidationError as exc:
@@ -96,7 +108,8 @@ def validate_arguments(
     if not parameters_json_schema:
         return
     _default_validator().validate_arguments(
-        parameters_json_schema, arguments, tool_name=tool_name)
+        parameters_json_schema, arguments, tool_name=tool_name
+    )
 
 
 def validate_schema(parameters_json_schema: "Mapping[str, Any] | None") -> None:

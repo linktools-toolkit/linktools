@@ -21,7 +21,9 @@ class MemoryManager:
     store: "MemoryStore"
     index: "MemoryIndex | None" = None
 
-    async def recall(self, owner_id: str, query: str, *, limit: int = 10) -> "tuple[MemoryRecord, ...]":
+    async def recall(
+        self, owner_id: str, query: str, *, limit: int = 10
+    ) -> "tuple[MemoryRecord, ...]":
         return await self.store.search(query, owner_id=owner_id, limit=limit)
 
     async def remember(

@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.tool: ToolExecutor (the single entry point for every tool call)
-+ idempotency records."""
+"""linktools.ai.tool: the tool domain's public model (spec §18.2). ToolExecutor
++ idempotency records live in their submodules (``tool.executor``,
+``tool.idempotency``); the package re-exports only the descriptor / definition /
+policy types callers need."""
 
-from .executor import ToolExecutor
-from .idempotency import IdempotencyRecord, IdempotencyStatus
-from .legacy import LegacyToolsetAdapter
+from .models import ManagedToolDefinition, ToolDescriptor
+from .policy import (
+    EffectiveToolPolicy,
+    ResolvedToolPolicy,
+    ToolPolicyProvider,
+)
 
-__all__ = ["ToolExecutor", "IdempotencyRecord", "IdempotencyStatus", "LegacyToolsetAdapter"]
+__all__ = [
+    "ToolDescriptor",
+    "ManagedToolDefinition",
+    "ResolvedToolPolicy",
+    "EffectiveToolPolicy",
+    "ToolPolicyProvider",
+]

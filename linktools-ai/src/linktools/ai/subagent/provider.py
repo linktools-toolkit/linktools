@@ -12,9 +12,9 @@ EntrypointResolver; global ones through the SubagentSpecProvider."""
 from dataclasses import dataclass, field
 from typing import Callable, ClassVar
 
-from ..capability.bundle import CapabilityBundle
+from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext
-from ..capability.ref import CapabilityRef
+from ..capability.models import CapabilityRef
 from ..package.resolver import EntrypointResolver
 from ..providers.subagent import SubagentSpecProvider
 from ..run.identity import ParentRunIdentity
@@ -73,9 +73,12 @@ class SubagentProvider:
         parent = None
         if context.run_id is not None and context.session_id is not None:
             parent = ParentRunIdentity(
-                run_id=context.run_id, root_run_id=context.root_run_id or context.run_id,
-                session_id=context.session_id, user_id=context.user_id,
-                tenant_id=context.tenant_id, workspace=context.workspace,
+                run_id=context.run_id,
+                root_run_id=context.root_run_id or context.run_id,
+                session_id=context.session_id,
+                user_id=context.user_id,
+                tenant_id=context.tenant_id,
+                workspace=context.workspace,
             )
         toolset = build_subagent_toolset(
             allowed_names=allowed,
@@ -89,14 +92,23 @@ class SubagentProvider:
             allowed_packages=allowed_packages,
             parent=parent,
         )
-        from ..security.descriptor import ToolDescriptor
-        from ..tool.contribution import ToolContribution, declared_tool_definitions
-        descriptors = (ToolDescriptor(
-                name="call_subagent", source="subagent", category="subagent",
-                risk="medium", mutating=True,
-                capability_kind="subagent", capability_name=ref.name,
-            ),)
-        contrib = ToolContribution(tools=declared_tool_definitions(toolset, descriptors))
+        from ..tool.models import ToolDescriptor
+        from ..tool.models import ToolContribution, declared_tool_definitions
+
+        descriptors = (
+            ToolDescriptor(
+                name="call_subagent",
+                source="subagent",
+                category="subagent",
+                risk="medium",
+                mutating=True,
+                capability_kind="subagent",
+                capability_name=ref.name,
+            ),
+        )
+        contrib = ToolContribution(
+            tools=declared_tool_definitions(toolset, descriptors)
+        )
         return CapabilityBundle(tool_contributions=(contrib,))
 
     async def _allowed_names(self, ref: CapabilityRef) -> "set[str]":

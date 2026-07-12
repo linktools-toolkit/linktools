@@ -7,13 +7,15 @@ from linktools.ai.security.redact import redact_for_audit
 
 
 def test_secret_keyed_values_are_masked():
-    out = redact_for_audit({
-        "command": "rm -rf /",  # not secret -> visible
-        "api_key": "sk-supersecret",
-        "password": "hunter2",
-        "token": "abc",
-        "Authorization": "Bearer x",
-    })
+    out = redact_for_audit(
+        {
+            "command": "rm -rf /",  # not secret -> visible
+            "api_key": "sk-supersecret",
+            "password": "hunter2",
+            "token": "abc",
+            "Authorization": "Bearer x",
+        }
+    )
     assert out["command"] == "rm -rf /"
     assert out["api_key"] == "***REDACTED***"
     assert out["password"] == "***REDACTED***"

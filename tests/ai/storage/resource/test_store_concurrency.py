@@ -14,6 +14,7 @@ duplicate revisions, or both-pass-a-precondition.
 This file is SqlAlchemy-only -- the File backend's atomicity is best-effort
 under an in-process lock and the Memory backend has no real concurrency story,
 so neither is exercised here."""
+
 import asyncio
 
 import pytest
@@ -291,12 +292,18 @@ async def test_revision_bump_uses_atomic_update_returning(tmp_path):
     captured.clear()
     await store.put(ResourcePath("/bump.txt"), b"y")
 
-    revision_updates = [s for s in captured if "ai_resource_revision" in s and s.upper().startswith("UPDATE")]
+    revision_updates = [
+        s
+        for s in captured
+        if "ai_resource_revision" in s and s.upper().startswith("UPDATE")
+    ]
     assert revision_updates, "expected at least one UPDATE on ai_resource_revision"
     # Every revision UPDATE must be the server-side atomic increment: the SET
     # clause references the column itself (``value = value + ?``), not a literal.
     for stmt in revision_updates:
-        assert "value" in stmt.lower() and ("value + " in stmt.lower() or "value+" in stmt.lower()), (
+        assert "value" in stmt.lower() and (
+            "value + " in stmt.lower() or "value+" in stmt.lower()
+        ), (
             f"revision bump must use server-side atomic increment (value = value + 1), "
             f"got: {stmt!r}"
         )
@@ -332,7 +339,9 @@ async def test_resource_update_uses_conditional_where_on_version(tmp_path):
     captured.clear()
     await store.put(ResourcePath("/u.txt"), b"v2")
 
-    resource_updates = [s for s in captured if "ai_resources" in s and s.upper().startswith("UPDATE")]
+    resource_updates = [
+        s for s in captured if "ai_resources" in s and s.upper().startswith("UPDATE")
+    ]
     assert resource_updates, "expected at least one UPDATE on ai_resources"
     stmt = resource_updates[-1]
     assert "version" in stmt.lower() and "path" in stmt.lower(), (

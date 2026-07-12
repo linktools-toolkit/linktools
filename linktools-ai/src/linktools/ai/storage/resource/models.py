@@ -46,7 +46,9 @@ class Resource:
         return _json.loads(self.content)
 
     @classmethod
-    def from_text(cls, info: ResourceInfo, text: str, encoding: str = "utf-8") -> "Resource":
+    def from_text(
+        cls, info: ResourceInfo, text: str, encoding: str = "utf-8"
+    ) -> "Resource":
         return cls(info=info, content=text.encode(encoding))
 
     @classmethod

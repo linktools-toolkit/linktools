@@ -44,7 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import SessionMessageRow, SessionRow
 from ...errors import SessionError, SessionSequenceConflictError
-from ...session.models import MessageRole, NewSessionMessage, SessionMessage, SessionRecord, SessionStatus
+from ...session.models import (
+    MessageRole,
+    NewSessionMessage,
+    SessionMessage,
+    SessionRecord,
+    SessionStatus,
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -59,15 +65,25 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_record(row: SessionRow) -> SessionRecord:
     return SessionRecord(
-        id=row.id, parent_id=row.parent_id, status=SessionStatus(row.status), version=row.version,
-        created_at=_as_utc(row.created_at), updated_at=_as_utc(row.updated_at), metadata=json.loads(row.metadata_json),
+        id=row.id,
+        parent_id=row.parent_id,
+        status=SessionStatus(row.status),
+        version=row.version,
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+        metadata=json.loads(row.metadata_json),
     )
 
 
 def _row_to_message(row: SessionMessageRow) -> SessionMessage:
     return SessionMessage(
-        id=row.id, session_id=row.session_id, sequence=row.sequence, role=MessageRole(row.role),
-        content=json.loads(row.content_json), run_id=row.run_id, created_at=_as_utc(row.created_at),
+        id=row.id,
+        session_id=row.session_id,
+        sequence=row.sequence,
+        role=MessageRole(row.role),
+        content=json.loads(row.content_json),
+        run_id=row.run_id,
+        created_at=_as_utc(row.created_at),
         metadata=json.loads(row.metadata_json),
     )
 
@@ -98,28 +114,44 @@ class SqlAlchemySessionStore:
 
     async def create(self, session: SessionRecord) -> SessionRecord:
         async def _do(db_session):
-            db_session.add(SessionRow(
-                id=session.id, parent_id=session.parent_id, status=session.status.value, version=session.version,
-                created_at=session.created_at, updated_at=session.updated_at, metadata_json=json.dumps(dict(session.metadata)),
-            ))
+            db_session.add(
+                SessionRow(
+                    id=session.id,
+                    parent_id=session.parent_id,
+                    status=session.status.value,
+                    version=session.version,
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
+                    metadata_json=json.dumps(dict(session.metadata)),
+                )
+            )
+
         await self._execute_in_session(_do)
         return session
 
     async def get(self, session_id: str) -> "SessionRecord | None":
         async def _do(db_session):
-            result = await db_session.execute(select(SessionRow).where(SessionRow.id == session_id))
+            result = await db_session.execute(
+                select(SessionRow).where(SessionRow.id == session_id)
+            )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     async def _append_one_batch(
-        self, session: AsyncSession, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+        self,
+        session: AsyncSession,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
         # reserve the next sequence(s) inside the inserting
         # transaction -- read MAX(sequence) for the session, assign
         # contiguously, insert. Mirrors SqlAlchemyEventStore._append_one.
         result = await session.execute(
-            select(func.max(SessionMessageRow.sequence)).where(SessionMessageRow.session_id == session_id)
+            select(func.max(SessionMessageRow.sequence)).where(
+                SessionMessageRow.session_id == session_id
+            )
         )
         next_seq = (result.scalar() or 0) + 1
         persisted = []
@@ -127,21 +159,37 @@ class SqlAlchemySessionStore:
             sequence = next_seq + offset
             now = datetime.now(timezone.utc)
             row_id = str(uuid.uuid4())
-            session.add(SessionMessageRow(
-                id=row_id, session_id=session_id, sequence=sequence, role=message.role.value,
-                content_json=json.dumps(message.content), run_id=message.run_id, created_at=now,
-                metadata_json=json.dumps(dict(message.metadata)),
-            ))
-            persisted.append(SessionMessage(
-                id=row_id, session_id=session_id, sequence=sequence, role=message.role,
-                content=message.content, run_id=message.run_id, created_at=now,
-                metadata=message.metadata,
-            ))
+            session.add(
+                SessionMessageRow(
+                    id=row_id,
+                    session_id=session_id,
+                    sequence=sequence,
+                    role=message.role.value,
+                    content_json=json.dumps(message.content),
+                    run_id=message.run_id,
+                    created_at=now,
+                    metadata_json=json.dumps(dict(message.metadata)),
+                )
+            )
+            persisted.append(
+                SessionMessage(
+                    id=row_id,
+                    session_id=session_id,
+                    sequence=sequence,
+                    role=message.role,
+                    content=message.content,
+                    run_id=message.run_id,
+                    created_at=now,
+                    metadata=message.metadata,
+                )
+            )
         await session.flush()
         return tuple(persisted)
 
     async def append_messages(
-        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+        self,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
         if not messages:
             return ()
@@ -155,7 +203,9 @@ class SqlAlchemySessionStore:
             try:
                 async with self._session_factory() as session:
                     async with session.begin():
-                        return await self._append_one_batch(session, session_id, messages)
+                        return await self._append_one_batch(
+                            session, session_id, messages
+                        )
             except IntegrityError as exc:
                 # Unique (session_id, sequence) collision -- a concurrent
                 # append reserved the same sequence first. Retry to re-read MAX.
@@ -173,15 +223,21 @@ class SqlAlchemySessionStore:
             f"after repeated conflicts"
         ) from last_exc
 
-    async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
+    async def list_messages(
+        self, session_id: str, *, after_sequence: int = 0, limit: int = 1000
+    ) -> "tuple[SessionMessage, ...]":
         async def _do(db_session):
             result = await db_session.execute(
                 select(SessionMessageRow)
-                .where(SessionMessageRow.session_id == session_id, SessionMessageRow.sequence > after_sequence)
+                .where(
+                    SessionMessageRow.session_id == session_id,
+                    SessionMessageRow.sequence > after_sequence,
+                )
                 .order_by(SessionMessageRow.sequence.asc())
                 .limit(limit)
             )
             return tuple(_row_to_message(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)
 
     async def update(
@@ -192,7 +248,9 @@ class SqlAlchemySessionStore:
         metadata: "Mapping[str, Any] | None" = None,
     ) -> SessionRecord:
         async def _do(db_session):
-            result = await db_session.execute(select(SessionRow).where(SessionRow.id == session_id))
+            result = await db_session.execute(
+                select(SessionRow).where(SessionRow.id == session_id)
+            )
             row = result.scalar_one_or_none()
             if row is None:
                 raise SessionError(f"session not found: {session_id}")
@@ -204,4 +262,5 @@ class SqlAlchemySessionStore:
             row.updated_at = datetime.now(timezone.utc)
             await db_session.flush()
             return _row_to_record(row)
+
         return await self._execute_in_session(_do)

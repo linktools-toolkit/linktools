@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/resource/test_models.py"""
+
 import json
 from datetime import datetime, timezone
 

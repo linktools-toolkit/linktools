@@ -6,13 +6,13 @@ inject a custom pipeline, or disable entirely via ``SecurityBaseline(enabled=Fal
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..policy.command import DEFAULT_DENIED_COMMAND_PATTERNS
 from enum import Enum
 
 if TYPE_CHECKING:
-    from ..capability.policy import CapabilityToolExposurePolicy
+    from ..capability.exposure import CapabilityToolExposurePolicy
     from .pipeline import SecurityPipeline
 
 
@@ -22,6 +22,7 @@ class CommandPolicy:
     policy.command.DEFAULT_DENIED_COMMAND_PATTERNS -- the single source of
     truth for the default denylist -- rather than maintaining a second,
     independently-drifting pattern set here."""
+
     denied_patterns: "tuple[str, ...]" = DEFAULT_DENIED_COMMAND_PATTERNS
 
 
@@ -33,6 +34,7 @@ class SecurityAuditFailureMode(str, Enum):
 @dataclass(frozen=True)
 class SecurityBaseline:
     """Default safety baseline. Enabled by default; closable/overridable."""
+
     enabled: bool = True
     command_policy: "CommandPolicy | None" = field(default_factory=CommandPolicy)
     tool_exposure_policy: "CapabilityToolExposurePolicy | None" = None

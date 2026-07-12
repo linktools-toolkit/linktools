@@ -25,11 +25,21 @@ class LocalExecutionBackend:
     # timeout), so this only ever contains processes still in flight.
     _subprocesses: "dict[str, asyncio.subprocess.Process]" = field(default_factory=dict)
 
-    async def list_dir(self, path: str = ".", recursive: bool = False) -> "dict[str, Any]":
-        return await run_file_tool("list_dir", {"path": path, "recursive": recursive}, self.runtime_dir, self.base_dirs)
+    async def list_dir(
+        self, path: str = ".", recursive: bool = False
+    ) -> "dict[str, Any]":
+        return await run_file_tool(
+            "list_dir",
+            {"path": path, "recursive": recursive},
+            self.runtime_dir,
+            self.base_dirs,
+        )
 
     async def read_file(
-        self, path: str, selectors: "list[str] | None" = None, max_chars: int = 6000,
+        self,
+        path: str,
+        selectors: "list[str] | None" = None,
+        max_chars: int = 6000,
     ) -> "dict[str, Any]":
         return await run_file_tool(
             "read_file",
@@ -39,7 +49,10 @@ class LocalExecutionBackend:
         )
 
     async def write_file(
-        self, path: str, content: Any = None, updates: "list[dict[str, Any]] | None" = None,
+        self,
+        path: str,
+        content: Any = None,
+        updates: "list[dict[str, Any]] | None" = None,
     ) -> "dict[str, Any]":
         return await run_file_tool(
             "write_file",
@@ -49,16 +62,24 @@ class LocalExecutionBackend:
         )
 
     async def batch_files(self, operations: "list[dict[str, Any]]") -> "dict[str, Any]":
-        return await run_file_tool("batch_files", {"operations": operations}, self.runtime_dir, self.base_dirs)
+        return await run_file_tool(
+            "batch_files", {"operations": operations}, self.runtime_dir, self.base_dirs
+        )
 
-    async def run_bash(self, command: str, timeout_ms: "int | None" = None) -> "dict[str, Any]":
+    async def run_bash(
+        self, command: str, timeout_ms: "int | None" = None
+    ) -> "dict[str, Any]":
         resolved = command
         if self.base_dirs:
-            resolved = await asyncio.to_thread(resolve_base_file_paths, command, self.base_dirs)
+            resolved = await asyncio.to_thread(
+                resolve_base_file_paths, command, self.base_dirs
+            )
         args: "dict[str, Any]" = {"command": resolved}
         if timeout_ms is not None:
             args["timeout_ms"] = timeout_ms
-        return await run_bash_tool(args, self.runtime_dir, timeout_s=60.0, registry=self._subprocesses)
+        return await run_bash_tool(
+            args, self.runtime_dir, timeout_s=60.0, registry=self._subprocesses
+        )
 
     async def apply_patch(self, diff: str) -> "dict[str, Any]":
         raw_paths = _extract_patch_target_paths(diff)
@@ -70,11 +91,15 @@ class LocalExecutionBackend:
             except ValueError as exc:
                 return {"error": str(exc)}
         await asyncio.to_thread(self.runtime_dir.mkdir, parents=True, exist_ok=True)
-        return await run_patch_tool(diff, self.runtime_dir, timeout_s=APPLY_PATCH_TIMEOUT_S)
+        return await run_patch_tool(
+            diff, self.runtime_dir, timeout_s=APPLY_PATCH_TIMEOUT_S
+        )
 
     async def fork(self, branch_dir: Path) -> "LocalExecutionBackend":
         await asyncio.to_thread(branch_dir.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(shutil.copytree, self.runtime_dir, branch_dir, dirs_exist_ok=True)
+        await asyncio.to_thread(
+            shutil.copytree, self.runtime_dir, branch_dir, dirs_exist_ok=True
+        )
         return LocalExecutionBackend(runtime_dir=branch_dir, base_dirs=self.base_dirs)
 
     async def terminate(self) -> None:
@@ -102,16 +127,22 @@ class LocalExecutionBackend:
 APPLY_PATCH_TIMEOUT_S = 60.0
 
 
-async def run_patch_tool(diff: str, runtime_dir: Path, timeout_s: float) -> "dict[str, Any]":
+async def run_patch_tool(
+    diff: str, runtime_dir: Path, timeout_s: float
+) -> "dict[str, Any]":
     proc = await asyncio.create_subprocess_exec(
-        "patch", "-p1", "--no-backup-if-mismatch",
+        "patch",
+        "-p1",
+        "--no-backup-if-mismatch",
         cwd=str(runtime_dir),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(diff.encode("utf-8")), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(diff.encode("utf-8")), timeout=timeout_s
+        )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
@@ -137,7 +168,9 @@ async def run_bash_tool(
         timeout = float(args.get("timeout_ms", timeout_s * 1000)) / 1000
     except (TypeError, ValueError):
         timeout = timeout_s
-    env = {k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL"}}
+    env = {
+        k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "LANG", "LC_ALL"}
+    }
     await asyncio.to_thread(runtime_dir.mkdir, parents=True, exist_ok=True)
     proc = await asyncio.create_subprocess_shell(
         command,
@@ -174,7 +207,9 @@ async def run_file_tool(
     runtime_dir: Path,
     base_dirs: "list[Path]",
 ) -> "dict[str, Any]":
-    return await asyncio.to_thread(_run_file_tool_sync, tool_name, args, runtime_dir, base_dirs)
+    return await asyncio.to_thread(
+        _run_file_tool_sync, tool_name, args, runtime_dir, base_dirs
+    )
 
 
 def _run_file_tool_sync(
@@ -184,12 +219,17 @@ def _run_file_tool_sync(
     base_dirs: "list[Path]",
 ) -> "dict[str, Any]":
     rel_path = str(args.get("path") or ("." if tool_name == "list_dir" else ""))
-    if tool_name not in {"read_files", "write_files", "read_jsons", "batch_files"} and not rel_path:
+    if (
+        tool_name not in {"read_files", "write_files", "read_jsons", "batch_files"}
+        and not rel_path
+    ):
         return {"error": "missing 'path'"}
 
     if tool_name == "list_dir":
         try:
-            target, _, display_path = _resolve_read_path(rel_path, runtime_dir, base_dirs)
+            target, _, display_path = _resolve_read_path(
+                rel_path, runtime_dir, base_dirs
+            )
         except ValueError as exc:
             return {"error": str(exc)}
         if not target.exists():
@@ -200,17 +240,26 @@ def _run_file_tool_sync(
         iterator = target.rglob("*") if recursive else target.iterdir()
         entries = []
         for item in sorted(iterator, key=lambda p: p.relative_to(target).as_posix()):
-            entries.append({
-                "path": item.relative_to(target).as_posix(),
-                "type": "directory" if item.is_dir() else "file",
-                "size_bytes": item.stat().st_size if item.is_file() else None,
-            })
+            entries.append(
+                {
+                    "path": item.relative_to(target).as_posix(),
+                    "type": "directory" if item.is_dir() else "file",
+                    "size_bytes": item.stat().st_size if item.is_file() else None,
+                }
+            )
             if len(entries) >= 500:
                 break
-        return {"entries": entries, "truncated": len(entries) >= 500, "path": display_path, "absolute_path": str(target)}
+        return {
+            "entries": entries,
+            "truncated": len(entries) >= 500,
+            "path": display_path,
+            "absolute_path": str(target),
+        }
 
     if tool_name == "read_file":
-        selectors = args.get("selectors") if isinstance(args.get("selectors"), list) else []
+        selectors = (
+            args.get("selectors") if isinstance(args.get("selectors"), list) else []
+        )
         if selectors:
             return _run_file_tool_sync(
                 "read_json",
@@ -219,7 +268,9 @@ def _run_file_tool_sync(
                 base_dirs,
             )
         try:
-            target, _, display_path = _resolve_read_path(rel_path, runtime_dir, base_dirs)
+            target, _, display_path = _resolve_read_path(
+                rel_path, runtime_dir, base_dirs
+            )
         except ValueError as exc:
             return {"error": str(exc)}
         if not target.exists():
@@ -245,15 +296,25 @@ def _run_file_tool_sync(
         files: "list[dict[str, Any]]" = []
         for raw_path in raw_paths[:50]:
             try:
-                target, _, display_path = _resolve_read_path(str(raw_path), runtime_dir, base_dirs)
+                target, _, display_path = _resolve_read_path(
+                    str(raw_path), runtime_dir, base_dirs
+                )
             except ValueError as exc:
                 files.append({"path": str(raw_path), "error": str(exc)})
                 continue
             if not target.exists():
-                files.append({"path": str(raw_path), "error": f"file not found: {raw_path}"})
+                files.append(
+                    {"path": str(raw_path), "error": f"file not found: {raw_path}"}
+                )
                 continue
             if not target.is_file():
-                files.append({"path": display_path, "error": f"not a file: {raw_path}", "absolute_path": str(target)})
+                files.append(
+                    {
+                        "path": display_path,
+                        "error": f"not a file: {raw_path}",
+                        "absolute_path": str(target),
+                    }
+                )
                 continue
             content = target.read_text(encoding="utf-8")
             truncated = bool(max_chars_each and len(content) > max_chars_each)
@@ -266,11 +327,17 @@ def _run_file_tool_sync(
                     "original_chars": len(content),
                 }
             )
-        return {"files": files, "requested_count": len(raw_paths), "returned_count": len(files)}
+        return {
+            "files": files,
+            "requested_count": len(raw_paths),
+            "returned_count": len(files),
+        }
 
     if tool_name == "read_json":
         try:
-            target, _, display_path = _resolve_read_path(rel_path, runtime_dir, base_dirs)
+            target, _, display_path = _resolve_read_path(
+                rel_path, runtime_dir, base_dirs
+            )
         except ValueError as exc:
             return {"error": str(exc)}
         if not target.exists():
@@ -280,7 +347,11 @@ def _run_file_tool_sync(
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            return {"error": f"invalid json: {display_path}", "detail": str(exc), "path": display_path}
+            return {
+                "error": f"invalid json: {display_path}",
+                "detail": str(exc),
+                "path": display_path,
+            }
         selectors = args.get("selectors") or []
         if selectors and not isinstance(selectors, list):
             return {"error": "selectors must be a list"}
@@ -325,14 +396,21 @@ def _run_file_tool_sync(
             selectors = item.get("selectors")
             result = _run_file_tool_sync(
                 "read_json",
-                {"path": path_value, "selectors": selectors if isinstance(selectors, list) else []},
+                {
+                    "path": path_value,
+                    "selectors": selectors if isinstance(selectors, list) else [],
+                },
                 runtime_dir,
                 base_dirs,
             )
             if "path" not in result:
                 result["path"] = path_value
             results.append(result)
-        return {"files": results, "requested_count": len(raw_files), "returned_count": len(results)}
+        return {
+            "files": results,
+            "requested_count": len(raw_files),
+            "returned_count": len(results),
+        }
 
     if tool_name == "write_file":
         raw_updates = args.get("updates")
@@ -379,8 +457,14 @@ def _run_file_tool_sync(
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(str(item.get("content", "")), encoding="utf-8")
-            written.append({"ok": True, "path": path_value, "absolute_path": str(target)})
-        return {"files": written, "requested_count": len(raw_files), "written_count": sum(1 for item in written if item.get("ok"))}
+            written.append(
+                {"ok": True, "path": path_value, "absolute_path": str(target)}
+            )
+        return {
+            "files": written,
+            "requested_count": len(raw_files),
+            "written_count": sum(1 for item in written if item.get("ok")),
+        }
 
     if tool_name == "write_json":
         try:
@@ -405,7 +489,11 @@ def _run_file_tool_sync(
                 current = json.loads(target.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 return {"error": f"invalid json: {rel_path}", "detail": str(exc)}
-        elif any(str(item.get("path") or "").strip() == "" for item in raw_updates if isinstance(item, dict)):
+        elif any(
+            str(item.get("path") or "").strip() == ""
+            for item in raw_updates
+            if isinstance(item, dict)
+        ):
             current = {}
         else:
             current = {}
@@ -418,7 +506,12 @@ def _run_file_tool_sync(
             current = _json_assign(current, selector, item.get("value"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_json_dump(current), encoding="utf-8")
-        return {"ok": True, "path": rel_path, "absolute_path": str(target), "updated_count": min(len(raw_updates), 100)}
+        return {
+            "ok": True,
+            "path": rel_path,
+            "absolute_path": str(target),
+            "updated_count": min(len(raw_updates), 100),
+        }
 
     if tool_name == "batch_files":
         raw_ops = args.get("operations")
@@ -432,11 +525,19 @@ def _run_file_tool_sync(
             action = str(item.get("action") or "").strip().lower()
             if action == "read":
                 op_path = str(item.get("path") or "").strip()
-                op_selectors = item.get("selectors") if isinstance(item.get("selectors"), list) else []
+                op_selectors = (
+                    item.get("selectors")
+                    if isinstance(item.get("selectors"), list)
+                    else []
+                )
                 op_max_chars = item.get("max_chars", 4000)
                 result = _run_file_tool_sync(
                     "read_file",
-                    {"path": op_path, "selectors": op_selectors, "max_chars": op_max_chars},
+                    {
+                        "path": op_path,
+                        "selectors": op_selectors,
+                        "max_chars": op_max_chars,
+                    },
                     runtime_dir,
                     base_dirs,
                 )
@@ -457,7 +558,11 @@ def _run_file_tool_sync(
             else:
                 result = {"error": f"unknown action: {action or '<empty>'}"}
             results.append(result)
-        return {"operations": results, "requested_count": len(raw_ops), "completed_count": len(results)}
+        return {
+            "operations": results,
+            "requested_count": len(raw_ops),
+            "completed_count": len(results),
+        }
 
     return {"error": f"unknown file tool: {tool_name}"}
 
@@ -466,9 +571,13 @@ def resolve_base_file_paths(command: str, base_dirs: "list[Path]") -> str:
     for base_dir in base_dirs:
         base_dir = base_dir.resolve()
         files = (
-            f for f in base_dir.rglob("*")
+            f
+            for f in base_dir.rglob("*")
             if f.is_file()
-            and not any(part.startswith(".") or part == "__pycache__" for part in f.relative_to(base_dir).parts)
+            and not any(
+                part.startswith(".") or part == "__pycache__"
+                for part in f.relative_to(base_dir).parts
+            )
         )
         for file_path in sorted(files, key=lambda p: len(p.parts), reverse=True):
             # Keep the trace materialized path instead of resolving the symlink target
@@ -476,7 +585,9 @@ def resolve_base_file_paths(command: str, base_dirs: "list[Path]") -> str:
             # for builtin files materialized as symlinks under workspace/TRC.../capabilities.
             abs_path = str(file_path)
             rel_to_base = file_path.relative_to(base_dir).as_posix()
-            for candidate in sorted({rel_to_base, f"./{rel_to_base}", file_path.name}, key=len, reverse=True):
+            for candidate in sorted(
+                {rel_to_base, f"./{rel_to_base}", file_path.name}, key=len, reverse=True
+            ):
                 command = re.sub(
                     rf"(?<![/\w.$]){re.escape(candidate)}(?![\w/])",
                     abs_path,
@@ -488,6 +599,7 @@ def resolve_base_file_paths(command: str, base_dirs: "list[Path]") -> str:
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_patch_target_paths(diff: str) -> "list[str]":
     paths = []
@@ -523,11 +635,13 @@ def _resolve_runtime_path(rel_path: str, runtime_dir: Path) -> Path:
         raise ValueError(f"write_file path must be relative to runtime: {rel_path}")
     for forbidden in ("base/", "capabilities/"):
         if path_text == forbidden.rstrip("/") or path_text.startswith(forbidden):
-            raise ValueError(f"write_file cannot write to capability/base paths: {rel_path}")
+            raise ValueError(
+                f"write_file cannot write to capability/base paths: {rel_path}"
+            )
     if path_text == "runtime":
         path_text = "."
     elif path_text.startswith("runtime/"):
-        path_text = path_text[len("runtime/"):]
+        path_text = path_text[len("runtime/") :]
     target = (base / path_text).resolve()
     if target != base and base not in target.parents:
         raise ValueError(f"Path escape denied: {rel_path}")
@@ -541,7 +655,9 @@ def _resolve_read_path(
 ) -> "tuple[Path, str, str]":
     roots: "list[tuple[str, Path]]" = [("runtime", runtime_dir.resolve())]
     for i, base_dir in enumerate(base_dirs):
-        roots.append(("agent_dir" if i == 0 else f"agent_dir{i + 1}", base_dir.resolve()))
+        roots.append(
+            ("agent_dir" if i == 0 else f"agent_dir{i + 1}", base_dir.resolve())
+        )
 
     path_text = raw_path.strip()
     prefixed_root = ""
@@ -551,10 +667,12 @@ def _resolve_read_path(
             prefixed_root, path_text = name, "."
             break
         if path_text.startswith(prefix):
-            prefixed_root, path_text = name, path_text[len(prefix):]
+            prefixed_root, path_text = name, path_text[len(prefix) :]
             break
 
-    candidates = [(n, b) for n, b in roots if n == prefixed_root] if prefixed_root else roots
+    candidates = (
+        [(n, b) for n, b in roots if n == prefixed_root] if prefixed_root else roots
+    )
     if prefixed_root and not candidates:
         raise ValueError(f"read root unavailable: {prefixed_root}")
 
@@ -572,13 +690,21 @@ def _resolve_read_path(
         target = _logical_target(base)
         if target == base or base in target.parents:
             if prefixed_root or target.exists():
-                return target, name, str(target.relative_to(base)) if target != base else "."
+                return (
+                    target,
+                    name,
+                    str(target.relative_to(base)) if target != base else ".",
+                )
 
     if not prefixed_root and candidates:
         name, base = candidates[0]
         target = _logical_target(base)
         if target == base or base in target.parents:
-            return target, name, str(target.relative_to(base)) if target != base else "."
+            return (
+                target,
+                name,
+                str(target.relative_to(base)) if target != base else ".",
+            )
     raise ValueError(f"Path escape denied: {raw_path}")
 
 
@@ -630,12 +756,16 @@ def _json_assign(payload: Any, selector: str, value: Any) -> Any:
         return value
     root = payload if isinstance(payload, (dict, list)) else {}
     if not isinstance(root, dict):
-        raise ValueError("root json value must be an object when applying nested updates")
+        raise ValueError(
+            "root json value must be an object when applying nested updates"
+        )
     current: Any = root
     for index, part in enumerate(parts):
         is_last = index == len(parts) - 1
         if not isinstance(current, dict):
-            raise ValueError(f"selector requires object container at: {'.'.join(parts[:index])}")
+            raise ValueError(
+                f"selector requires object container at: {'.'.join(parts[:index])}"
+            )
         if is_last:
             current[part] = value
             return root
@@ -649,7 +779,9 @@ def _json_assign(payload: Any, selector: str, value: Any) -> Any:
             try:
                 next_index = int(next_part)
             except ValueError as exc:
-                raise ValueError(f"selector requires list index at: {'.'.join(parts[:index + 2])}") from exc
+                raise ValueError(
+                    f"selector requires list index at: {'.'.join(parts[: index + 2])}"
+                ) from exc
             while len(current) <= next_index:
                 current.append({})
             current = current[next_index]

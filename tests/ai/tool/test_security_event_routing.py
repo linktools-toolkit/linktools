@@ -2,8 +2,12 @@ import inspect
 import pytest
 
 from linktools.ai.errors import ToolDeniedError, ToolSecurityAuditError
-from linktools.ai.security.descriptor import ToolDescriptor
-from linktools.ai.security.pipeline import PipelineAction, PipelineDecision, SecurityPipeline
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.security.pipeline import (
+    PipelineAction,
+    PipelineDecision,
+    SecurityPipeline,
+)
 from linktools.ai.tool.managed import ManagedToolAdapter
 
 
@@ -40,7 +44,8 @@ async def test_policy_resolved_routes_to_security_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_event_emitter=em)
+        descriptor=_descriptor(), handler=handler, security_event_emitter=em
+    )
     await adapter.invoke(x="hi")
 
     assert "ToolPolicyResolved" in _types(em.security)
@@ -54,7 +59,8 @@ async def test_lifecycle_events_route_to_observability_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_event_emitter=em)
+        descriptor=_descriptor(), handler=handler, security_event_emitter=em
+    )
     await adapter.invoke(x="hi")
 
     obs = _types(em.observability)
@@ -71,6 +77,7 @@ async def test_pipeline_decision_routes_to_security_channel():
     class _AllowPipeline(SecurityPipeline):
         async def before_tool(self, e):
             return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def after_tool(self, e):
             return PipelineDecision(action=PipelineAction.ALLOW)
 
@@ -79,8 +86,11 @@ async def test_pipeline_decision_routes_to_security_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
-        security_pipeline=_AllowPipeline(), security_event_emitter=em)
+        descriptor=_descriptor(),
+        handler=handler,
+        security_pipeline=_AllowPipeline(),
+        security_event_emitter=em,
+    )
     await adapter.invoke(x="hi")
 
     assert "ToolPipelineDecision" in _types(em.security)
@@ -106,9 +116,12 @@ async def test_security_degraded_routes_to_security_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
-        policy_provider=_BoomProvider(), security_event_emitter=em,
-        run_context=SimpleNamespace(run_id="r1"))
+        descriptor=_descriptor(),
+        handler=handler,
+        policy_provider=_BoomProvider(),
+        security_event_emitter=em,
+        run_context=SimpleNamespace(run_id="r1"),
+    )
     with pytest.raises(ToolDeniedError):
         await adapter.invoke(x="hi")
 
@@ -140,8 +153,11 @@ async def test_security_audit_failure_is_fail_closed_via_store():
         return "ok"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
-        event_store=_FailingStore(), security_audit_failure_mode="fail_closed")
+        descriptor=_descriptor(),
+        handler=handler,
+        event_store=_FailingStore(),
+        security_audit_failure_mode="fail_closed",
+    )
     # The first event is the ToolPolicyResolved security audit; fail_closed
     # turns the store failure into ToolSecurityAuditError before execution.
     with pytest.raises(ToolSecurityAuditError):

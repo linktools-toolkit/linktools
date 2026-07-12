@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/middleware/test_loop_guard.py"""
+
 import pytest
 
 from linktools.ai.errors import ToolDeniedError
@@ -15,13 +16,21 @@ async def test_allows_first_two_failures_then_blocks_third_repeat():
 
     for _ in range(2):
         await middleware.before_tool(context=None, request=request)
-        await middleware.after_tool(context=None, request=request, result={"error": "failed"})
+        await middleware.after_tool(
+            context=None, request=request, result={"error": "failed"}
+        )
 
-    await middleware.before_tool(context=None, request=request)  # 3rd attempt still allowed
-    await middleware.after_tool(context=None, request=request, result={"error": "failed"})
+    await middleware.before_tool(
+        context=None, request=request
+    )  # 3rd attempt still allowed
+    await middleware.after_tool(
+        context=None, request=request, result={"error": "failed"}
+    )
 
     with pytest.raises(ToolDeniedError):
-        await middleware.before_tool(context=None, request=request)  # 4th attempt blocked
+        await middleware.before_tool(
+            context=None, request=request
+        )  # 4th attempt blocked
 
 
 @pytest.mark.asyncio
@@ -30,13 +39,19 @@ async def test_success_clears_the_failure_counter():
     request = ToolRequest(tool_name="terminal", arguments={"command": "flaky"})
 
     await middleware.before_tool(context=None, request=request)
-    await middleware.after_tool(context=None, request=request, result={"error": "failed"})
+    await middleware.after_tool(
+        context=None, request=request, result={"error": "failed"}
+    )
     await middleware.before_tool(context=None, request=request)
-    await middleware.after_tool(context=None, request=request, result={"ok": True})  # success clears it
+    await middleware.after_tool(
+        context=None, request=request, result={"ok": True}
+    )  # success clears it
 
     for _ in range(3):
         await middleware.before_tool(context=None, request=request)
-        await middleware.after_tool(context=None, request=request, result={"error": "failed"})
+        await middleware.after_tool(
+            context=None, request=request, result={"error": "failed"}
+        )
     # Counter was cleared by the success above, so we're back to only 3 consecutive
     # failures here -- the 4th call is the one that should be blocked, not this loop's calls.
     with pytest.raises(ToolDeniedError):
@@ -50,6 +65,10 @@ async def test_different_arguments_are_tracked_independently():
     request_b = ToolRequest(tool_name="terminal", arguments={"command": "b"})
 
     await middleware.before_tool(context=None, request=request_a)
-    await middleware.after_tool(context=None, request=request_a, result={"error": "failed"})
+    await middleware.after_tool(
+        context=None, request=request_a, result={"error": "failed"}
+    )
 
-    await middleware.before_tool(context=None, request=request_b)  # different args, not blocked
+    await middleware.before_tool(
+        context=None, request=request_b
+    )  # different args, not blocked

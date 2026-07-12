@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/test_errors.py"""
+
 import pytest
 
 from linktools.ai.errors import (

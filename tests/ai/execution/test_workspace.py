@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/execution/test_workspace.py"""
+
 import pytest
 
 from linktools.ai.execution.workspace import (
@@ -15,8 +16,14 @@ from linktools.ai.run.models import RunnableType
 
 def _run_context(run_id="run-1") -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id="session-1",
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT, user_id=None, tenant_id="tenant-1",
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id="tenant-1",
         workspace=None,
     )
 

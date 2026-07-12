@@ -23,9 +23,26 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
 
-from .models import Depth, Found, IdempotencyRecord, Masked, Missing, MoveResult, Resource, ResourceInfo, ResourceKind, ResourceLookupInfo, ResourcePage, WriteOptions
+from .models import (
+    Depth,
+    Found,
+    IdempotencyRecord,
+    Masked,
+    Missing,
+    MoveResult,
+    Resource,
+    ResourceInfo,
+    ResourceKind,
+    ResourceLookupInfo,
+    ResourcePage,
+    WriteOptions,
+)
 from .path import ResourcePath
-from ...errors import IdempotencyConflictError, InvalidResourcePathError, ResourcePreconditionFailedError
+from ...errors import (
+    IdempotencyConflictError,
+    InvalidResourcePathError,
+    ResourcePreconditionFailedError,
+)
 
 
 class SymlinkPolicy(str, Enum):
@@ -45,7 +62,13 @@ def _path_from_filename(stem: str) -> ResourcePath:
 
 
 class FileResourceBackend:
-    def __init__(self, *, root: Path, readonly: bool = False, symlink_policy: SymlinkPolicy = SymlinkPolicy.DENY) -> None:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        readonly: bool = False,
+        symlink_policy: SymlinkPolicy = SymlinkPolicy.DENY,
+    ) -> None:
         self.readonly = readonly
         self._symlink_policy = symlink_policy
         self._root = Path(root)
@@ -66,19 +89,29 @@ class FileResourceBackend:
         # event loop is never blocked either by the I/O or by another worker
         # waiting on this lock.
         self._lock = threading.Lock()
-        for d in (self._data_dir, self._meta_dir, self._whiteout_dir, self._idempotency_dir):
+        for d in (
+            self._data_dir,
+            self._meta_dir,
+            self._whiteout_dir,
+            self._idempotency_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
     def _resolve(self, directory: Path, filename: str) -> Path:
         resolved = (directory / filename).resolve()
         if self._symlink_policy == SymlinkPolicy.DENY and resolved.is_symlink():
             raise InvalidResourcePathError(f"symlink not allowed: {resolved}")
-        if directory.resolve() not in resolved.parents and resolved != directory.resolve():
+        if (
+            directory.resolve() not in resolved.parents
+            and resolved != directory.resolve()
+        ):
             raise InvalidResourcePathError(f"path escapes backend root: {resolved}")
         return resolved
 
     def _atomic_write(self, path: Path, content: bytes) -> None:
-        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(content)
@@ -152,7 +185,9 @@ class FileResourceBackend:
         return Missing()
 
     async def raw_get(self, path: ResourcePath, *, include_content: bool = True):
-        return await asyncio.to_thread(self._raw_get_sync, path, include_content=include_content)
+        return await asyncio.to_thread(
+            self._raw_get_sync, path, include_content=include_content
+        )
 
     async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
         """Metadata-only stat: read only the metadata sidecar,
@@ -161,7 +196,9 @@ class FileResourceBackend:
         without touching the (potentially large) content blob."""
         return await asyncio.to_thread(self._load_info, path)
 
-    def _raw_propfind_sync(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+    def _raw_propfind_sync(
+        self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None"
+    ) -> ResourcePage:
         """Keyset pagination: metadata files are iterated in sorted
         order (so the global path order is stable), filtered by prefix, by
         ``path > cursor`` (resume point), and by depth, collecting limit+1 items
@@ -175,7 +212,7 @@ class FileResourceBackend:
                 continue
             if cursor is not None and candidate.value <= cursor:
                 continue
-            rest = candidate.value[len(prefix):]
+            rest = candidate.value[len(prefix) :]
             if depth == Depth.ONE and "/" in rest:
                 continue
             items.append(self._load_info(candidate))
@@ -184,12 +221,25 @@ class FileResourceBackend:
         next_cursor = items[limit].path.value if len(items) > limit else None
         return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
-    async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+    async def raw_propfind(
+        self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None"
+    ) -> ResourcePage:
         return await asyncio.to_thread(
-            self._raw_propfind_sync, path, depth=depth, limit=limit, cursor=cursor,
+            self._raw_propfind_sync,
+            path,
+            depth=depth,
+            limit=limit,
+            cursor=cursor,
         )
 
-    def _raw_put_sync(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+    def _raw_put_sync(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        content_type: "str | None",
+        metadata: "Mapping[str, object]",
+    ):
         prior = self._load_info(path)
         whiteout_path = self._whiteout_path(path)
         prior_whiteout_version = 0
@@ -214,9 +264,20 @@ class FileResourceBackend:
         self._bump_revision()
         return info
 
-    async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+    async def raw_put(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        content_type: "str | None",
+        metadata: "Mapping[str, object]",
+    ):
         return await asyncio.to_thread(
-            self._raw_put_sync, path, content, content_type=content_type, metadata=metadata,
+            self._raw_put_sync,
+            path,
+            content,
+            content_type=content_type,
+            metadata=metadata,
         )
 
     def _raw_delete_sync(self, path: ResourcePath) -> "ResourceInfo | None":
@@ -230,7 +291,9 @@ class FileResourceBackend:
         if whiteout_path.exists():
             existing_whiteout_version = json.loads(whiteout_path.read_text())["version"]
         new_version = max(prior_version, existing_whiteout_version) + 1
-        self._atomic_write(whiteout_path, json.dumps({"version": new_version}).encode("utf-8"))
+        self._atomic_write(
+            whiteout_path, json.dumps({"version": new_version}).encode("utf-8")
+        )
         self._bump_revision()
         return info
 
@@ -258,7 +321,9 @@ class FileResourceBackend:
                 modified_at=datetime.fromisoformat(r["modified_at"]),
                 metadata=r["metadata"],
             )
-        return IdempotencyRecord(key=raw["key"], request_hash=raw["request_hash"], result=result)
+        return IdempotencyRecord(
+            key=raw["key"], request_hash=raw["request_hash"], result=result
+        )
 
     def _write_idempotency_sync(self, record: IdempotencyRecord) -> None:
         result = None
@@ -274,7 +339,9 @@ class FileResourceBackend:
                 "metadata": dict(record.result.metadata),
             }
         raw = {"key": record.key, "request_hash": record.request_hash, "result": result}
-        self._atomic_write(self._idempotency_path(record.key), json.dumps(raw).encode("utf-8"))
+        self._atomic_write(
+            self._idempotency_path(record.key), json.dumps(raw).encode("utf-8")
+        )
 
     async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
         return await asyncio.to_thread(self._read_idempotency_sync, key)
@@ -292,10 +359,12 @@ class FileResourceBackend:
     ) -> Resource:
         """Precondition + idempotency + put under self._lock (best-effort
         in-process atomicity; see self._lock docstring). Mirrors what
-        ResourceStore.put does in the legacy 3-step path, but the three steps
+        ResourceStore.put does in the prior 3-step path, but the three steps
         run without interleaving from another in-process caller."""
         with self._lock:
-            idem_key = f"put:{options.idempotency_key}" if options.idempotency_key else None
+            idem_key = (
+                f"put:{options.idempotency_key}" if options.idempotency_key else None
+            )
             if idem_key is not None:
                 record = self._read_idempotency_sync(idem_key)
                 if record is not None:
@@ -305,30 +374,54 @@ class FileResourceBackend:
                         )
                     cached_info = record.result
                     current = self._load_info(path)
-                    content_bytes = self._data_path(path).read_bytes() if current is not None else content
+                    content_bytes = (
+                        self._data_path(path).read_bytes()
+                        if current is not None
+                        else content
+                    )
                     return Resource(info=cached_info, content=content_bytes)
             info = self._load_info(path)
             if options.if_none_match and info is not None:
-                raise ResourcePreconditionFailedError(f"resource already exists: {path}")
+                raise ResourcePreconditionFailedError(
+                    f"resource already exists: {path}"
+                )
             if options.if_match is not None:
                 if info is None or info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                    raise ResourcePreconditionFailedError(
+                        f"if-match precondition failed: {path}"
+                    )
             if info is not None:
                 existing_content = self._data_path(path).read_bytes()
                 # content_type must be part of the no-op comparison --
                 # a PUT that only changes content_type (same bytes, same
                 # metadata) is still a real change and must bump version/etag,
                 # not be silently dropped as a no-op.
-                if (existing_content == content
-                        and dict(info.metadata) == dict(options.metadata)
-                        and info.content_type == options.content_type):
+                if (
+                    existing_content == content
+                    and dict(info.metadata) == dict(options.metadata)
+                    and info.content_type == options.content_type
+                ):
                     new_info = info
                 else:
-                    new_info = self._raw_put_sync(path, content, content_type=options.content_type, metadata=options.metadata)
+                    new_info = self._raw_put_sync(
+                        path,
+                        content,
+                        content_type=options.content_type,
+                        metadata=options.metadata,
+                    )
             else:
-                new_info = self._raw_put_sync(path, content, content_type=options.content_type, metadata=options.metadata)
+                new_info = self._raw_put_sync(
+                    path,
+                    content,
+                    content_type=options.content_type,
+                    metadata=options.metadata,
+                )
             if idem_key is not None:
-                self._write_idempotency_sync(IdempotencyRecord(key=idem_key, request_hash=request_hash, result=new_info))
+                self._write_idempotency_sync(
+                    IdempotencyRecord(
+                        key=idem_key, request_hash=request_hash, result=new_info
+                    )
+                )
             return Resource(info=new_info, content=content)
 
     async def raw_put_checked(
@@ -340,7 +433,11 @@ class FileResourceBackend:
         request_hash: str,
     ) -> Resource:
         return await asyncio.to_thread(
-            self._raw_put_checked_sync, path, content, options=options, request_hash=request_hash,
+            self._raw_put_checked_sync,
+            path,
+            content,
+            options=options,
+            request_hash=request_hash,
         )
 
     def _raw_delete_checked_sync(
@@ -352,7 +449,9 @@ class FileResourceBackend:
     ) -> None:
         """Precondition + idempotency + delete under self._lock."""
         with self._lock:
-            idem_key = f"delete:{options.idempotency_key}" if options.idempotency_key else None
+            idem_key = (
+                f"delete:{options.idempotency_key}" if options.idempotency_key else None
+            )
             if idem_key is not None:
                 record = self._read_idempotency_sync(idem_key)
                 if record is not None:
@@ -364,7 +463,9 @@ class FileResourceBackend:
             info = self._load_info(path)
             if options.if_match is not None:
                 if info is None or info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                    raise ResourcePreconditionFailedError(
+                        f"if-match precondition failed: {path}"
+                    )
             self._raw_delete_sync(path)
 
     async def raw_delete_checked(
@@ -375,7 +476,10 @@ class FileResourceBackend:
         request_hash: str,
     ) -> None:
         return await asyncio.to_thread(
-            self._raw_delete_checked_sync, path, options=options, request_hash=request_hash,
+            self._raw_delete_checked_sync,
+            path,
+            options=options,
+            request_hash=request_hash,
         )
 
     def _raw_move_sync(
@@ -407,23 +511,37 @@ class FileResourceBackend:
         with self._lock:
             source_info = self._load_info(source)
             if source_info is None:
-                raise ResourcePreconditionFailedError(f"cannot move missing resource: {source}")
+                raise ResourcePreconditionFailedError(
+                    f"cannot move missing resource: {source}"
+                )
             source_data_path = self._data_path(source)
             source_content = source_data_path.read_bytes()
 
             # Target precondition check (mirror raw_put_checked's logic).
             target_info = self._load_info(target)
             if options.if_none_match and target_info is not None:
-                raise ResourcePreconditionFailedError(f"resource already exists: {target}")
+                raise ResourcePreconditionFailedError(
+                    f"resource already exists: {target}"
+                )
             if options.if_match is not None:
                 if target_info is None or target_info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {target}")
+                    raise ResourcePreconditionFailedError(
+                        f"if-match precondition failed: {target}"
+                    )
 
             target_whiteout_path = self._whiteout_path(target)
             prior_target_whiteout_version = 0
             if target_whiteout_path.exists():
-                prior_target_whiteout_version = json.loads(target_whiteout_path.read_text())["version"]
-            new_target_version = max(target_info.version if target_info else 0, prior_target_whiteout_version) + 1
+                prior_target_whiteout_version = json.loads(
+                    target_whiteout_path.read_text()
+                )["version"]
+            new_target_version = (
+                max(
+                    target_info.version if target_info else 0,
+                    prior_target_whiteout_version,
+                )
+                + 1
+            )
             new_info = ResourceInfo(
                 path=target,
                 kind=source_info.kind,
@@ -451,9 +569,14 @@ class FileResourceBackend:
             source_whiteout_path = self._whiteout_path(source)
             existing_sw_version = 0
             if source_whiteout_path.exists():
-                existing_sw_version = json.loads(source_whiteout_path.read_text())["version"]
+                existing_sw_version = json.loads(source_whiteout_path.read_text())[
+                    "version"
+                ]
             sw_version = max(source_info.version, existing_sw_version) + 1
-            self._atomic_write(source_whiteout_path, json.dumps({"version": sw_version}).encode("utf-8"))
+            self._atomic_write(
+                source_whiteout_path,
+                json.dumps({"version": sw_version}).encode("utf-8"),
+            )
 
             # One revision bump for the whole move.
             self._bump_revision()
@@ -466,4 +589,6 @@ class FileResourceBackend:
         *,
         options: WriteOptions,
     ) -> MoveResult:
-        return await asyncio.to_thread(self._raw_move_sync, source, target, options=options)
+        return await asyncio.to_thread(
+            self._raw_move_sync, source, target, options=options
+        )

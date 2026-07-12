@@ -10,7 +10,9 @@ from .provider import SkillProvider
 from .toolset import build_skill_toolset
 
 __all__ = [
-    "SkillSummary", "SkillContent",
-    "render_skill_catalog", "build_skill_toolset",
+    "SkillSummary",
+    "SkillContent",
+    "render_skill_catalog",
+    "build_skill_toolset",
     "SkillProvider",
 ]

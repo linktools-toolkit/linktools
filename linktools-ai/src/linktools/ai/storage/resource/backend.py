@@ -7,7 +7,16 @@ put_idempotency."""
 
 from typing import Mapping, Protocol, runtime_checkable
 
-from .models import Depth, IdempotencyRecord, MoveResult, Resource, ResourceInfo, ResourceLookupInfo, ResourcePage, WriteOptions
+from .models import (
+    Depth,
+    IdempotencyRecord,
+    MoveResult,
+    Resource,
+    ResourceInfo,
+    ResourceLookupInfo,
+    ResourcePage,
+    WriteOptions,
+)
 from .path import ResourcePath
 
 
@@ -15,8 +24,7 @@ from .path import ResourcePath
 class ResourceBackend(Protocol):
     readonly: bool
 
-    async def raw_get(self, path: ResourcePath, *, include_content: bool = True):
-        ...
+    async def raw_get(self, path: ResourcePath, *, include_content: bool = True): ...
 
     async def raw_propfind(
         self,
@@ -25,8 +33,7 @@ class ResourceBackend(Protocol):
         depth: Depth,
         limit: int,
         cursor: "str | None",
-    ) -> ResourcePage:
-        ...
+    ) -> ResourcePage: ...
 
     async def raw_put(
         self,
@@ -35,20 +42,15 @@ class ResourceBackend(Protocol):
         *,
         content_type: "str | None",
         metadata: "Mapping[str, object]",
-    ) -> ResourceInfo:
-        ...
+    ) -> ResourceInfo: ...
 
-    async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None":
-        ...
+    async def raw_delete(self, path: ResourcePath) -> "ResourceInfo | None": ...
 
-    async def revision(self) -> int:
-        ...
+    async def revision(self) -> int: ...
 
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
-        ...
+    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None": ...
 
-    async def put_idempotency(self, record: IdempotencyRecord) -> None:
-        ...
+    async def put_idempotency(self, record: IdempotencyRecord) -> None: ...
 
     # -- OPTIONAL atomic checked operations (TOCTOU fix) --
     # These fold precondition-check + idempotency-reservation + mutate into ONE
@@ -59,7 +61,7 @@ class ResourceBackend(Protocol):
     # implements them under an in-process lock (the best a non-transactional
     # filesystem can do). The Memory backend does NOT implement them:
     # ResourceStore probes with hasattr() and, when absent, falls back to the
-    # legacy 3-step orchestration -- so Memory keeps today's behavior unchanged.
+    # prior 3-step orchestration -- so Memory keeps today's behavior unchanged.
     # `request_hash` is computed by ResourceStore (which owns the hash recipe)
     # and passed in so the backend can do the idempotency comparison atomically.
 
@@ -70,8 +72,7 @@ class ResourceBackend(Protocol):
         *,
         options: WriteOptions,
         request_hash: str,
-    ) -> Resource:
-        ...
+    ) -> Resource: ...
 
     async def raw_delete_checked(
         self,
@@ -79,8 +80,7 @@ class ResourceBackend(Protocol):
         *,
         options: WriteOptions,
         request_hash: str,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     # -- OPTIONAL atomic MOVE --
     # MOVE is a single domain operation: the backend must NOT decompose it into
@@ -91,7 +91,7 @@ class ResourceBackend(Protocol):
     # ONE transaction. The File backend implements it under self._lock with an
     # os.replace for the data file. The Memory backend does NOT implement it:
     # ResourceStore probes with hasattr() and, when absent, falls back to the
-    # legacy put+delete orchestration -- so Memory keeps today's behavior.
+    # prior put+delete orchestration -- so Memory keeps today's behavior.
 
     async def raw_move(
         self,
@@ -99,8 +99,7 @@ class ResourceBackend(Protocol):
         target: ResourcePath,
         *,
         options: WriteOptions,
-    ) -> MoveResult:
-        ...
+    ) -> MoveResult: ...
 
     # -- OPTIONAL metadata-only stat --
     # Returns the resource metadata (path/version/etag/content_type/metadata/
@@ -110,5 +109,4 @@ class ResourceBackend(Protocol):
     # that only need metadata. ResourceStore.stat() delegates when available
     # and otherwise falls back to get() + .info.
 
-    async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None":
-        ...
+    async def raw_stat(self, path: ResourcePath) -> "ResourceLookupInfo | None": ...

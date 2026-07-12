@@ -15,17 +15,23 @@ async def _store_with(prefix_files: "dict[str, str]") -> ResourceStore:
     backend = MemoryResourceBackend()
     store = ResourceStore(primary=backend)
     for path, text in prefix_files.items():
-        await backend.raw_put(ResourcePath(path), text.encode("utf-8"),
-                              content_type="text/markdown", metadata={})
+        await backend.raw_put(
+            ResourcePath(path),
+            text.encode("utf-8"),
+            content_type="text/markdown",
+            metadata={},
+        )
     return store
 
 
 @pytest.mark.asyncio
 async def test_from_resources_reads_via_resourcepath():
-    store = await _store_with({
-        "/specs/agents/writer.md": "---\nname: writer\n---\nbody\n",
-        "/specs/agents/minimal.md": "---\nname: minimal\n---\nbody\n",
-    })
+    store = await _store_with(
+        {
+            "/specs/agents/writer.md": "---\nname: writer\n---\nbody\n",
+            "/specs/agents/minimal.md": "---\nname: minimal\n---\nbody\n",
+        }
+    )
     loader = SpecLoader.from_resources(store, prefix="specs/agents")
     text = await loader.read("writer.md")
     assert "writer" in text
@@ -33,11 +39,13 @@ async def test_from_resources_reads_via_resourcepath():
 
 @pytest.mark.asyncio
 async def test_from_resources_list_ids_uses_propfind():
-    store = await _store_with({
-        "/specs/skills/sql.md": "x",
-        "/specs/skills/audit.md": "y",
-        "/specs/skills/sub/ignored.md": "z",  # depth.ONE must not recurse
-    })
+    store = await _store_with(
+        {
+            "/specs/skills/sql.md": "x",
+            "/specs/skills/audit.md": "y",
+            "/specs/skills/sub/ignored.md": "z",  # depth.ONE must not recurse
+        }
+    )
     loader = SpecLoader.from_resources(store, prefix="specs/skills")
     ids = await loader.list_ids(".md")
     assert set(ids) == {"audit", "sql"}

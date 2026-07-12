@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """EventEnvelope[TEvent]: the strongly-typed wrapper every event payload travels
-in. Generic (not PEP-695 `class Foo[T]`) for 3.10 compatibility."""
+in. Generic (not PEP-695 `class Foo[T]`) for Python 3.10 support."""
 
 from dataclasses import dataclass
 from datetime import datetime

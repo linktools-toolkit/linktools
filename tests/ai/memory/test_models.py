@@ -22,6 +22,7 @@ from linktools.ai.memory.store import MemoryStore, _UNSET
 
 # --- MemoryRecord ------------------------------------------------------------
 
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -107,6 +108,7 @@ def test_memory_record_inequality():
 
 # --- MemorySearchHit ---------------------------------------------------------
 
+
 def test_memory_search_hit_construct():
     hit = MemorySearchHit(memory_id="m1", score=1.0)
     assert hit.memory_id == "m1"
@@ -125,6 +127,7 @@ def test_memory_search_hit_equality():
 
 
 # --- MemoryError family ------------------------------------------------------
+
 
 def test_memory_error_is_linktools_ai_error():
     assert issubclass(MemoryError, LinktoolsAIError)
@@ -147,22 +150,26 @@ def test_memory_conflict_raises_as_memory_error():
 
 # --- MemoryStore Protocol ----------------------------------------------------
 
+
 class _StubStore:
-    async def get(self, memory_id):
-        ...
+    async def get(self, memory_id): ...
 
-    async def search(self, query, *, owner_id=None, category=None, limit=10):
-        ...
+    async def search(self, query, *, owner_id=None, category=None, limit=10): ...
 
-    async def remember(self, record):
-        ...
+    async def remember(self, record): ...
 
-    async def update(self, memory_id, *, expected_version, content=_UNSET,
-                     category=_UNSET, confidence=_UNSET, metadata=_UNSET):
-        ...
+    async def update(
+        self,
+        memory_id,
+        *,
+        expected_version,
+        content=_UNSET,
+        category=_UNSET,
+        confidence=_UNSET,
+        metadata=_UNSET,
+    ): ...
 
-    async def forget(self, memory_id, *, expected_version):
-        ...
+    async def forget(self, memory_id, *, expected_version): ...
 
 
 def test_memory_store_is_runtime_checkable():
@@ -171,23 +178,20 @@ def test_memory_store_is_runtime_checkable():
 
 def test_memory_store_rejects_non_implementor():
     class _Incomplete:
-        async def get(self, memory_id):
-            ...
+        async def get(self, memory_id): ...
 
     assert not isinstance(_Incomplete(), MemoryStore)
 
 
 # --- MemoryIndex Protocol ----------------------------------------------------
 
+
 class _StubIndex:
-    async def index(self, record):
-        ...
+    async def index(self, record): ...
 
-    async def remove(self, memory_id):
-        ...
+    async def remove(self, memory_id): ...
 
-    async def search(self, query, *, limit=10):
-        ...
+    async def search(self, query, *, limit=10): ...
 
 
 def test_memory_index_is_runtime_checkable():
@@ -196,13 +200,13 @@ def test_memory_index_is_runtime_checkable():
 
 def test_memory_index_rejects_non_implementor():
     class _Incomplete:
-        async def index(self, record):
-            ...
+        async def index(self, record): ...
 
     assert not isinstance(_Incomplete(), MemoryIndex)
 
 
 # --- _UNSET sentinel ---------------------------------------------------------
+
 
 def test_unset_sentinel_is_distinct_from_none():
     assert _UNSET is not None

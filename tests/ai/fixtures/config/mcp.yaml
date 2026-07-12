@@ -1,0 +1,5 @@
+name: search
+transport: stdio
+command: ["python", "-m", "search_server"]
+env:
+  API_KEY: xxx

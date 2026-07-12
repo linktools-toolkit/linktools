@@ -7,15 +7,12 @@ merging prompt sections in stable order."""
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability import (
-    BuiltinProvider,
-    CapabilityAssembler,
-    CapabilityBundle,
-    CapabilityContext,
-    CapabilityProvider,
-    CapabilityToolExposurePolicy,
-)
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability import CapabilityProvider
+from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.builtin import BuiltinProvider
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.errors import CapabilityConflictError, CapabilityResolutionError
 from linktools.ai.execution.local import LocalExecutionBackend
 from linktools.ai.model.policy import ModelPolicy
@@ -23,7 +20,8 @@ from linktools.ai.model.policy import ModelPolicy
 
 def _ctx(execution, policy=None, agent_id="a1"):
     return CapabilityContext(
-        agent_id=agent_id, exposure_policy=policy or CapabilityToolExposurePolicy(),
+        agent_id=agent_id,
+        exposure_policy=policy or CapabilityToolExposurePolicy(),
         execution=execution,
     )
 
@@ -43,8 +41,11 @@ def _contrib_names(bundle):
 
 def _spec(tools):
     return AgentSpec(
-        id="a1", name="a1", model=ModelPolicy(primary="gpt-4"),
-        instructions=PromptSpec(instructions="hi"), tools=tools,
+        id="a1",
+        name="a1",
+        model=ModelPolicy(primary="gpt-4"),
+        instructions=PromptSpec(instructions="hi"),
+        tools=tools,
     )
 
 
@@ -66,7 +67,9 @@ async def test_assemble_builtin_file_execution_tools_allowed_exposes_writes(tmp_
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
-    bundle = await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend, policy=policy))
+    bundle = await asm.assemble(
+        _spec((ToolRef(name="file"),)), _ctx(backend, policy=policy)
+    )
     names = _contrib_names(bundle)
     assert {"read_file", "write_file", "batch_files", "apply_patch"} <= names
 
@@ -91,7 +94,7 @@ async def test_assemble_kindname_terminal_hidden_by_default(tmp_path):
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     spec = _spec((ToolRef(name="terminal", kind="builtin"),))
     bundle = await asm.assemble(spec, _ctx(backend))
-    assert bundle.toolsets == () and bundle.tool_contributions == ()
+    assert bundle.tool_contributions == ()
 
 
 @pytest.mark.asyncio
@@ -99,7 +102,7 @@ async def test_assemble_empty_tools_yields_empty_bundle(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     bundle = await asm.assemble(_spec(()), _ctx(backend))
-    assert bundle.toolsets == () and dict(bundle.prompt_sections) == {}
+    assert dict(bundle.prompt_sections) == {}
 
 
 @pytest.mark.asyncio
@@ -111,7 +114,9 @@ async def test_unknown_kind_raises_resolution_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(tmp_path):
+async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(
+    tmp_path,
+):
     """contract: validity is entirely provider-registration-driven -- there
     is no separate hardcoded kind allowlist. A completely made-up kind like
     "bogus" fails exactly like a recognized-but-unwired kind (e.g. "skill"
@@ -171,36 +176,29 @@ async def test_register_multi_kind_provider_under_all_kinds():
     assert {"alpha", "beta", "gamma"} <= set(asm.providers)
 
 
-@pytest.mark.asyncio
-async def test_descriptor_without_matching_handler_fails_at_assembly(tmp_path):
-    """A descriptor that names a tool not present in an introspectable toolset
-    is rejected at assembly (not left to fail-closed at call time)."""
-    from linktools.ai.security.descriptor import ToolDescriptor
-    from linktools.ai.tool.contribution import ToolContribution
+def test_declared_tool_definitions_rejects_descriptor_without_matching_handler():
+    """A descriptor naming a tool not present in an introspectable toolset is
+    rejected at the provider boundary (not left to fail at call time)."""
+    from pydantic_ai.toolsets import FunctionToolset
 
-    class _Mismatch:
-        kind = "mcp"
+    from linktools.ai.tool.models import ToolDescriptor
+    from linktools.ai.tool.models import declared_tool_definitions
 
-        async def resolve(self, ref, context):
-            from pydantic_ai.toolsets import FunctionToolset
-            ts = FunctionToolset()
+    ts = FunctionToolset()
 
-            async def real_tool(): return "ok"
-            ts.add_function(real_tool)
-            # Declare a descriptor for a tool that does NOT exist in the toolset.
-            return CapabilityBundle(
-                toolsets=(ts,),
-                tool_contributions=(ToolContribution(
-                    toolset=ts,
-                    descriptors=(ToolDescriptor(
-                        name="ghost_tool", source="mcp", category="mcp-write",
-                        risk="high", mutating=True),),
-                ),),
-            )
+    async def real_tool():
+        return "ok"
 
-    asm = CapabilityAssembler({"mcp": _Mismatch()})
-    with pytest.raises(CapabilityResolutionError, match="ManagedToolDefinition"):
-        await asm.assemble(_spec((ToolRef(name="x", kind="mcp"),)), _ctx(None))
+    ts.add_function(real_tool)
+    ghost = ToolDescriptor(
+        name="ghost_tool",
+        source="mcp",
+        category="mcp-write",
+        risk="high",
+        mutating=True,
+    )
+    with pytest.raises(ValueError, match="tool descriptor mismatch"):
+        declared_tool_definitions(ts, (ghost,))
 
 
 @pytest.mark.asyncio
@@ -225,7 +223,8 @@ async def test_duplicate_ref_raises_conflict(tmp_path):
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="duplicate"):
         await asm.assemble(
-            _spec((ToolRef(name="file"), ToolRef(name="file"))), _ctx(backend),
+            _spec((ToolRef(name="file"), ToolRef(name="file"))),
+            _ctx(backend),
         )
 
 
@@ -236,36 +235,63 @@ class _CollidingProvider:
     kind = "mcp"
 
     async def resolve(self, ref, context):
-        from linktools.ai.execution.toolset import BuiltinToolContext, build_builtin_toolset
-        from linktools.ai.security.descriptor import ToolDescriptor
-        from linktools.ai.tool.legacy import LegacyToolsetAdapter
+        from linktools.ai.execution.toolset import (
+            BuiltinToolContext,
+            build_builtin_toolset,
+        )
+        from linktools.ai.tool.models import ToolDescriptor
+        from linktools.ai.tool.models import ToolContribution, declared_tool_definitions
+
         ts = build_builtin_toolset(
-            BuiltinToolContext(backend=context.execution, enabled_tools={"file"}))
-        descriptors = tuple(ToolDescriptor(
-            name=name, source="mcp", category="custom", risk="high", mutating=True,
-            capability_kind="mcp", capability_name=ref.name,
-        ) for name in ("list_dir", "read_file", "write_file", "batch_files", "apply_patch"))
-        return CapabilityBundle(toolsets=(LegacyToolsetAdapter(ts, descriptors),))
+            BuiltinToolContext(backend=context.execution, enabled_tools={"file"})
+        )
+        descriptors = tuple(
+            ToolDescriptor(
+                name=name,
+                source="mcp",
+                category="custom",
+                risk="high",
+                mutating=True,
+                capability_kind="mcp",
+                capability_name=ref.name,
+            )
+            for name in (
+                "list_dir",
+                "read_file",
+                "write_file",
+                "batch_files",
+                "apply_patch",
+            )
+        )
+        definitions = declared_tool_definitions(ts, descriptors)
+        return CapabilityBundle(
+            tool_contributions=(ToolContribution(tools=definitions),)
+        )
 
 
 @pytest.mark.asyncio
 async def test_cross_capability_tool_name_conflict_detected(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
-    asm = CapabilityAssembler({"builtin": BuiltinProvider(), "mcp": _CollidingProvider()})
+    asm = CapabilityAssembler(
+        {"builtin": BuiltinProvider(), "mcp": _CollidingProvider()}
+    )
     # Allow execution tools so both providers' full tool sets (including the
     # auto-generated conservative mcp descriptors) are exposed and can collide.
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
     # builtin:file and mcp:x both emit the file tools -> conflict, no silent overwrite.
     with pytest.raises(CapabilityConflictError, match="produced by both"):
         await asm.assemble(
-            _spec((ToolRef(name="file"), ToolRef(name="x", kind="mcp"))), _ctx(backend, policy=policy),
+            _spec((ToolRef(name="file"), ToolRef(name="x", kind="mcp"))),
+            _ctx(backend, policy=policy),
         )
 
 
 @pytest.mark.asyncio
 async def test_total_tool_cap_enforced(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
-    policy = CapabilityToolExposurePolicy(max_tools_total=2, expose_execution_tools=True)
+    policy = CapabilityToolExposurePolicy(
+        max_tools_total=2, expose_execution_tools=True
+    )
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     # builtin:file alone exposes 5 tools -> exceeds max_tools_total=2.
     with pytest.raises(CapabilityConflictError, match="max_tools_total"):
@@ -275,7 +301,9 @@ async def test_total_tool_cap_enforced(tmp_path):
 @pytest.mark.asyncio
 async def test_per_capability_cap_enforced(tmp_path):
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
-    policy = CapabilityToolExposurePolicy(max_tools_per_capability=2, expose_execution_tools=True)
+    policy = CapabilityToolExposurePolicy(
+        max_tools_per_capability=2, expose_execution_tools=True
+    )
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
         await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend, policy=policy))
@@ -288,28 +316,6 @@ class _PromptProvider:
         return CapabilityBundle(prompt_sections={"skills": f"section-{ref.name}"})
 
 
-class _PipelineProvider:
-    """Declares a SecurityPipeline in its bundle -- a stable CapabilityBundle
-    field that must be collected, not silently dropped."""
-    kind = "skill"
-
-    def __init__(self):
-        self.pipeline = object()
-
-    async def resolve(self, ref, context):
-        return CapabilityBundle(pipelines=(self.pipeline,))
-
-
-@pytest.mark.asyncio
-async def test_declared_pipelines_are_merged_into_bundle(tmp_path):
-    """A capability declaring pipelines must have them collected into the
-    assembled bundle (a stable field never silently dropped)."""
-    asm = CapabilityAssembler({"skill": _PipelineProvider()})
-    spec = _spec((ToolRef(name="a", kind="skill"), ToolRef(name="b", kind="skill")))
-    bundle = await asm.assemble(spec, _ctx(None))
-    assert len(bundle.pipelines) == 2
-
-
 @pytest.mark.asyncio
 async def test_prompt_sections_merged_in_stable_order(tmp_path):
     asm = CapabilityAssembler({"skill": _PromptProvider()})
@@ -317,11 +323,6 @@ async def test_prompt_sections_merged_in_stable_order(tmp_path):
     bundle = await asm.assemble(spec, _ctx(None))
     assert "section-a" in bundle.prompt_sections["skills"]
     assert "section-b" in bundle.prompt_sections["skills"]
-
-
-def test_capability_resolver_is_assembler_alias():
-    from linktools.ai.capability import CapabilityResolver
-    assert CapabilityResolver is CapabilityAssembler
 
 
 def test_capability_provider_protocol_matches_builtin():

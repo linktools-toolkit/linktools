@@ -14,8 +14,12 @@ from ._assertions import assert_spec_provider_contract
 
 
 def _agent(i):
-    return AgentSpec(id=i, name=i, model=ModelPolicy(primary="m"),
-                     instructions=PromptSpec(instructions="hi"))
+    return AgentSpec(
+        id=i,
+        name=i,
+        model=ModelPolicy(primary="m"),
+        instructions=PromptSpec(instructions="hi"),
+    )
 
 
 class _BusinessAgentProvider:
@@ -45,23 +49,27 @@ class _BusinessMcpProvider:
     async def get(self, sid):
         if sid != "risk":
             raise KeyError(sid)
-        return MCPServerSpec(id=sid, name=sid, transport="stdio", command_or_url="python -m r",
-                             command=("python", "-m", "r"))
+        return MCPServerSpec(
+            id=sid, name=sid, transport="stdio", command=("python", "-m", "r")
+        )
 
 
 @pytest.mark.asyncio
 async def test_business_agent_provider_contract():
     await assert_spec_provider_contract(
-        _BusinessAgentProvider(), sample_id="audit-reviewer", expected_type=AgentSpec)
+        _BusinessAgentProvider(), sample_id="audit-reviewer", expected_type=AgentSpec
+    )
 
 
 @pytest.mark.asyncio
 async def test_business_skill_provider_contract():
     await assert_spec_provider_contract(
-        _BusinessSkillProvider(), sample_id="sql", expected_type=SkillSpec)
+        _BusinessSkillProvider(), sample_id="sql", expected_type=SkillSpec
+    )
 
 
 @pytest.mark.asyncio
 async def test_business_mcp_provider_contract():
     await assert_spec_provider_contract(
-        _BusinessMcpProvider(), sample_id="risk", expected_type=MCPServerSpec)
+        _BusinessMcpProvider(), sample_id="risk", expected_type=MCPServerSpec
+    )

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/agent/test_compiler.py"""
+
 import pytest
 from pydantic_ai import Agent as PydanticAgent
 
@@ -15,8 +16,14 @@ from linktools.ai.model.router import ModelRouter
 
 def _config(model_type: str) -> RuntimeModelConfig:
     return RuntimeModelConfig(
-        model_type=model_type, protocol="openai", model="gpt-4", base_url="http://localhost",
-        api_key="test-key", auth_token=None, timeout_seconds=30, raw={},
+        model_type=model_type,
+        protocol="openai",
+        model="gpt-4",
+        base_url="http://localhost",
+        api_key="test-key",
+        auth_token=None,
+        timeout_seconds=30,
+        raw={},
     )
 
 
@@ -28,7 +35,9 @@ async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     compiler = AgentCompiler(model_router=router)
 
     spec = AgentSpec(
-        id="agent-1", name="test-agent", model=ModelPolicy(primary="test-model"),
+        id="agent-1",
+        name="test-agent",
+        model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="You are a test agent."),
     )
     compiled = await compiler.compile(spec)
@@ -54,7 +63,9 @@ async def test_compile_reuses_model_router_fallback():
     compiler = AgentCompiler(model_router=router)
 
     spec = AgentSpec(
-        id="agent-2", name="test-agent-2", model=ModelPolicy(primary="missing", fallbacks=("fallback-model",)),
+        id="agent-2",
+        name="test-agent-2",
+        model=ModelPolicy(primary="missing", fallbacks=("fallback-model",)),
         instructions=PromptSpec(instructions="hi"),
     )
     compiled = await compiler.compile(spec)
@@ -72,7 +83,9 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
     pipeline = MiddlewarePipeline(middlewares=())
     compiler = AgentCompiler(model_router=router, middleware_pipeline=pipeline)
     spec = AgentSpec(
-        id="agent-mw", name="mw-agent", model=ModelPolicy(primary="test-model"),
+        id="agent-mw",
+        name="mw-agent",
+        model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
     )
     compiled = await compiler.compile(spec)
@@ -80,7 +93,9 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
     assert not hasattr(compiled.middleware_capability, "current_context")
     # Both capabilities must end up on the pydantic-ai Agent. In pydantic-ai
     # 1.107 capabilities are nested under root_capability.capabilities (a list).
-    capability_types = {type(c).__name__ for c in compiled.pydantic_agent.root_capability.capabilities}
+    capability_types = {
+        type(c).__name__ for c in compiled.pydantic_agent.root_capability.capabilities
+    }
     assert "PolicyCapability" in capability_types
     assert "MiddlewareCapability" in capability_types
 
@@ -92,7 +107,9 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     router = ModelRouter(registry=registry)
     compiler = AgentCompiler(model_router=router)
     spec = AgentSpec(
-        id="agent-nomw", name="nomw-agent", model=ModelPolicy(primary="test-model"),
+        id="agent-nomw",
+        name="nomw-agent",
+        model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
     )
     compiled = await compiler.compile(spec)

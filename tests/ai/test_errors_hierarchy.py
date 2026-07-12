@@ -10,16 +10,31 @@ from linktools.ai import errors as E
 from linktools.ai.errors import LinktoolsAIError
 
 
-@pytest.mark.parametrize("exc_cls", [
-    E.CapabilityResolutionError, E.CapabilityNotFoundError, E.CapabilityConflictError,
-    E.SkillNotFoundError, E.MCPServerNotFoundError, E.MCPConnectionError, E.MCPToolError,
-    E.PackageNotFoundError, E.PackageResourceNotFoundError, E.PackageResourceAccessDeniedError,
-    E.PackageEntrypointNotFoundError, E.PackageEntrypointDeniedError,
-    E.SubagentNotFoundError, E.SubagentDepthExceededError, E.SubagentExecutionError,
-    E.ModelOutputValidationError, E.ModelTurnLimitExceededError,
-    E.StorageTransactionNotSupportedError, E.StorageConcurrencyNotSupportedError,
-    E.StorageLeaseNotSupportedError,
-])
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        E.CapabilityResolutionError,
+        E.CapabilityNotFoundError,
+        E.CapabilityConflictError,
+        E.SkillNotFoundError,
+        E.MCPServerNotFoundError,
+        E.MCPConnectionError,
+        E.MCPToolError,
+        E.PackageNotFoundError,
+        E.PackageResourceNotFoundError,
+        E.PackageResourceAccessDeniedError,
+        E.PackageEntrypointNotFoundError,
+        E.PackageEntrypointDeniedError,
+        E.SubagentNotFoundError,
+        E.SubagentDepthExceededError,
+        E.SubagentExecutionError,
+        E.ModelOutputValidationError,
+        E.ModelTurnLimitExceededError,
+        E.StorageTransactionNotSupportedError,
+        E.StorageConcurrencyNotSupportedError,
+        E.StorageLeaseNotSupportedError,
+    ],
+)
 def test_all_errors_are_linktools_ai_errors(exc_cls):
     assert issubclass(exc_cls, LinktoolsAIError)
 
@@ -27,25 +42,35 @@ def test_all_errors_are_linktools_ai_errors(exc_cls):
 def test_capability_tree():
     assert issubclass(E.CapabilityNotFoundError, E.CapabilityResolutionError)
     assert issubclass(E.CapabilityConflictError, E.CapabilityResolutionError)
-    for leaf in (E.SkillNotFoundError, E.MCPServerNotFoundError, E.PackageNotFoundError,
-                 E.PackageResourceNotFoundError, E.PackageEntrypointNotFoundError,
-                 E.SubagentNotFoundError):
+    for leaf in (
+        E.SkillNotFoundError,
+        E.MCPServerNotFoundError,
+        E.PackageNotFoundError,
+        E.PackageResourceNotFoundError,
+        E.PackageEntrypointNotFoundError,
+        E.SubagentNotFoundError,
+    ):
         assert issubclass(leaf, E.CapabilityNotFoundError)
 
 
 def test_policy_backed_errors():
     # Denied / depth-exceeded are policy decisions, not resolution misses.
-    for leaf in (E.PackageResourceAccessDeniedError, E.PackageEntrypointDeniedError,
-                 E.SubagentDepthExceededError):
+    for leaf in (
+        E.PackageResourceAccessDeniedError,
+        E.PackageEntrypointDeniedError,
+        E.SubagentDepthExceededError,
+    ):
         assert issubclass(leaf, E.PolicyError)
     assert issubclass(E.PolicyError, LinktoolsAIError)
 
 
 def test_storage_capability_tree():
     base = E.StorageCapabilityError
-    for leaf in (E.StorageTransactionNotSupportedError,
-                 E.StorageConcurrencyNotSupportedError,
-                 E.StorageLeaseNotSupportedError):
+    for leaf in (
+        E.StorageTransactionNotSupportedError,
+        E.StorageConcurrencyNotSupportedError,
+        E.StorageLeaseNotSupportedError,
+    ):
         assert issubclass(leaf, base)
     assert issubclass(base, E.StorageError)
 

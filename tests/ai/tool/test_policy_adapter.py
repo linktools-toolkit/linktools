@@ -8,16 +8,23 @@ clamped by a phantom concrete default (contract/contract)."""
 import pytest
 
 from linktools.ai.policy.rule import (
-    ApprovalMode, Permission, RiskLevel, SideEffectKind, ToolPolicyMetadata,
+    ApprovalMode,
+    Permission,
+    RiskLevel,
+    SideEffectKind,
+    ToolPolicyMetadata,
 )
-from linktools.ai.security.descriptor import ToolDescriptor
-from linktools.ai.tool.policy_adapter import MetadataBackedPolicyProvider
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.policy import MetadataBackedPolicyProvider
 
 
 def _descriptor(name="my_tool"):
     return ToolDescriptor(
-        name=name, source="builtin", category="file-read",
-        risk="low", mutating=False,
+        name=name,
+        source="builtin",
+        category="file-read",
+        risk="low",
+        mutating=False,
     )
 
 

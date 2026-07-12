@@ -64,7 +64,9 @@ def _request_to_json(request: ApprovalRequest) -> dict:
         "status": request.status.value,
         "version": request.version,
         "created_at": request.created_at.isoformat(),
-        "resolved_at": None if request.resolved_at is None else request.resolved_at.isoformat(),
+        "resolved_at": None
+        if request.resolved_at is None
+        else request.resolved_at.isoformat(),
         "resolved_by": request.resolved_by,
         "metadata": dict(request.metadata),
     }
@@ -81,7 +83,9 @@ def _request_from_json(raw: dict) -> ApprovalRequest:
         status=ApprovalStatus(raw["status"]),
         version=raw["version"],
         created_at=datetime.fromisoformat(raw["created_at"]),
-        resolved_at=None if raw["resolved_at"] is None else datetime.fromisoformat(raw["resolved_at"]),
+        resolved_at=None
+        if raw["resolved_at"] is None
+        else datetime.fromisoformat(raw["resolved_at"]),
         resolved_by=raw["resolved_by"],
         metadata=raw["metadata"],
     )
@@ -105,7 +109,10 @@ class FileApprovalStore:
     # -- paths ---------------------------------------------------------
 
     def _path(self, approval_id: str) -> Path:
-        return self._requests_dir / f"{_validate_id_segment(approval_id, kind='approval_id')}.json"
+        return (
+            self._requests_dir
+            / f"{_validate_id_segment(approval_id, kind='approval_id')}.json"
+        )
 
     # -- read ----------------------------------------------------------
 
@@ -165,8 +172,14 @@ class FileApprovalStore:
         return await asyncio.to_thread(self._create_sync, request)
 
     def _create_or_get_pending_sync(
-        self, *, run_id: str, tool_call_id: str, tool_name: str,
-        reason: "str | None", arguments: dict, approval_id: str,
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        reason: "str | None",
+        arguments: dict,
+        approval_id: str,
     ) -> ApprovalRequest:
         # dedup on (run_id, tool_call_id) BEFORE
         # creating -- a retry, a duplicate model drive, or a re-entrant pause
@@ -180,23 +193,39 @@ class FileApprovalStore:
         if existing:
             # same dedupe key reused with a different
             # tool_name/arguments is a conflict, not a replay.
-            check_dedupe_conflict(existing[-1], tool_name=tool_name, arguments=arguments)
+            check_dedupe_conflict(
+                existing[-1], tool_name=tool_name, arguments=arguments
+            )
             return existing[-1]
         request = build_approval_request(
-            run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
-            reason=reason, arguments=arguments, approval_id=approval_id,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            reason=reason,
+            arguments=arguments,
+            approval_id=approval_id,
         )
         return self._create_sync(request)
 
     async def create_or_get_pending(
-        self, *, run_id: str, tool_call_id: str, tool_name: str,
-        reason: "str | None", arguments: dict, approval_id: str,
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        reason: "str | None",
+        arguments: dict,
+        approval_id: str,
     ) -> ApprovalRequest:
         async with self._lock:
             return await asyncio.to_thread(
                 self._create_or_get_pending_sync,
-                run_id=run_id, tool_call_id=tool_call_id, tool_name=tool_name,
-                reason=reason, arguments=arguments, approval_id=approval_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                reason=reason,
+                arguments=arguments,
+                approval_id=approval_id,
             )
 
     async def approve(
@@ -288,7 +317,10 @@ class FileApprovalStore:
         # blocking I/O.
         async with self._lock:
             return await asyncio.to_thread(
-                self._resolve_sync, approval_id,
-                target=target, expected_version=expected_version,
-                resolved_by=resolved_by, rejection_reason=rejection_reason,
+                self._resolve_sync,
+                approval_id,
+                target=target,
+                expected_version=expected_version,
+                resolved_by=resolved_by,
+                rejection_reason=rejection_reason,
             )

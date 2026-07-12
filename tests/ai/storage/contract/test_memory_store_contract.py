@@ -10,6 +10,7 @@ engine off the test loop); ``Base.metadata.create_all`` already covers
 
 Uses the ``def test_x(store_factory):`` + ``asyncio.run(_run())`` style (sync
 test wrapper driving its own event loop) — no pytest-asyncio mode config needed."""
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -101,7 +102,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/mem-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/mem-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -190,15 +193,30 @@ def test_search_filters_substring_and_limit(store_factory):
     store = store_factory()
 
     async def _run():
-        await store.remember(make_record(
-            memory_id="m1", owner_id="alice", content="hello world", category="fact",
-        ))
-        await store.remember(make_record(
-            memory_id="m2", owner_id="alice", content="goodbye world", category="note",
-        ))
-        await store.remember(make_record(
-            memory_id="m3", owner_id="bob", content="hello bob", category="fact",
-        ))
+        await store.remember(
+            make_record(
+                memory_id="m1",
+                owner_id="alice",
+                content="hello world",
+                category="fact",
+            )
+        )
+        await store.remember(
+            make_record(
+                memory_id="m2",
+                owner_id="alice",
+                content="goodbye world",
+                category="note",
+            )
+        )
+        await store.remember(
+            make_record(
+                memory_id="m3",
+                owner_id="bob",
+                content="hello bob",
+                category="fact",
+            )
+        )
         # Substring + owner filter narrows to alice's "hello" hit only.
         alice_hello = await store.search("hello", owner_id="alice")
         assert {r.id for r in alice_hello} == {"m1"}
@@ -243,13 +261,15 @@ def test_update_bumps_version_applies_fields_and_clears_category(store_factory):
     store = store_factory()
 
     async def _run():
-        await store.remember(make_record(
-            memory_id="u-1",
-            content="orig",
-            category="fact",
-            confidence=0.5,
-            metadata={"k": "v"},
-        ))
+        await store.remember(
+            make_record(
+                memory_id="u-1",
+                content="orig",
+                category="fact",
+                confidence=0.5,
+                metadata={"k": "v"},
+            )
+        )
         # Pass content/confidence/metadata but NOT category -> category stays.
         updated = await store.update(
             "u-1",

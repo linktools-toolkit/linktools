@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/events/test_payloads_run_model_tool.py"""
+
 from linktools.ai.events.payloads import (
-    ModelCompleted, ModelFailed, ModelStarted,
-    RunCancelled, RunCompleted, RunFailed, RunPaused, RunResumed, RunStarted,
-    ToolCompleted, ToolFailed, ToolStarted,
+    ModelCompleted,
+    ModelFailed,
+    ModelStarted,
+    RunCancelled,
+    RunCompleted,
+    RunFailed,
+    RunPaused,
+    RunResumed,
+    RunStarted,
+    ToolCompleted,
+    ToolFailed,
+    ToolStarted,
 )
 
 
@@ -20,10 +30,21 @@ def test_run_lifecycle_payloads():
 def test_model_lifecycle_payloads():
     assert ModelStarted(model_type="gpt-4").model_type == "gpt-4"
     assert dict(ModelCompleted(model_type="gpt-4").token_usage) == {}
-    assert ModelFailed(model_type="gpt-4", error_message="timeout").error_message == "timeout"
+    assert (
+        ModelFailed(model_type="gpt-4", error_message="timeout").error_message
+        == "timeout"
+    )
 
 
 def test_tool_lifecycle_payloads():
     assert ToolStarted(tool_name="file", tool_call_id="call-1").tool_name == "file"
-    assert ToolCompleted(tool_name="file", tool_call_id="call-1", success=True).success is True
-    assert ToolFailed(tool_name="file", tool_call_id="call-1", error_message="denied").error_message == "denied"
+    assert (
+        ToolCompleted(tool_name="file", tool_call_id="call-1", success=True).success
+        is True
+    )
+    assert (
+        ToolFailed(
+            tool_name="file", tool_call_id="call-1", error_message="denied"
+        ).error_message
+        == "denied"
+    )

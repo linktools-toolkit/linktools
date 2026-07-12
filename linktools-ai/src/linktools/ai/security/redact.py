@@ -16,8 +16,16 @@ from typing import Any, Mapping
 # credential field names; a real value under e.g. "command" stays visible so an
 # approver can still see what a terminal tool will run.
 _SECRET_KEY_MARKERS = (
-    "authorization", "api_key", "apikey", "token", "access_token",
-    "refresh_token", "password", "secret", "cookie", "set-cookie",
+    "authorization",
+    "api_key",
+    "apikey",
+    "token",
+    "access_token",
+    "refresh_token",
+    "password",
+    "secret",
+    "cookie",
+    "set-cookie",
 )
 
 _MASK = "***REDACTED***"
@@ -46,7 +54,9 @@ def redact_for_audit(arguments: "Mapping[str, Any] | None") -> "dict[str, Any]":
         redacted = _redact_value(value)
         total += len(str(redacted))
         if total > _MAX_TOTAL_CHARS:
-            out[str(key)] = f"***TRUNCATED: total audit size cap {_MAX_TOTAL_CHARS} reached***"
+            out[str(key)] = (
+                f"***TRUNCATED: total audit size cap {_MAX_TOTAL_CHARS} reached***"
+            )
             break
         out[str(key)] = redacted
     return out
@@ -68,8 +78,10 @@ _SECRET_PATTERNS = (
 
 def _redact_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): (_MASK if _looks_secret(str(key)) else _redact_value(item))
-                for key, item in value.items()}
+        return {
+            str(key): (_MASK if _looks_secret(str(key)) else _redact_value(item))
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
     if isinstance(value, tuple):

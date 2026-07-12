@@ -47,7 +47,10 @@ class SwarmStore(Protocol):
         ...
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *,
+        self,
+        task_id: str,
+        result: RunResult,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
@@ -61,11 +64,14 @@ class SwarmStore(Protocol):
         task's current ``active_run_id`` -- a second fencing dimension so a
         worker driving a since-superseded child Run cannot complete the task
         even if it somehow still held a matching version. There is no more
-        ``expected_version=None`` legacy bypass."""
+        ``expected_version=None`` prior bypass."""
         ...
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *,
+        self,
+        task_id: str,
+        error: RunErrorInfo,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
@@ -77,7 +83,9 @@ class SwarmStore(Protocol):
         self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
     ) -> "tuple[SwarmTask, ...]": ...
 
-    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]": ...
+    async def reclaim_expired_tasks(
+        self, swarm_run_id: str
+    ) -> "tuple[SwarmTask, ...]": ...
 
     # -- attempts ---------------------------------------------------------
     #

@@ -72,7 +72,7 @@ class RuntimeModelConfig:
     raw: "dict[str, Any]"
     # base_url is passed through literally by default. Some OpenAI-compatible
     # gateways use custom paths that any normalization would corrupt, so the
-    # legacy "ensure trailing /v1" behavior is opt-in via append_v1_if_missing.
+    # prior "ensure trailing /v1" behavior is opt-in via append_v1_if_missing.
     base_url_mode: "Literal['literal', 'append_v1_if_missing']" = "literal"
 
     @property
@@ -116,12 +116,20 @@ class ModelRegistry:
         else:
             bundle = ModelBundle(
                 config=RuntimeModelConfig(
-                    model_type=model_type, protocol="prebuilt", model=None,
-                    base_url=None, api_key=None, auth_token=None,
-                    timeout_seconds=300, raw={},
+                    model_type=model_type,
+                    protocol="prebuilt",
+                    model=None,
+                    base_url=None,
+                    api_key=None,
+                    auth_token=None,
+                    timeout_seconds=300,
+                    raw={},
                 ),
                 model=model,
-                settings=settings or ModelSettings(max_tokens=4096, timeout=300.0, parallel_tool_calls=True),
+                settings=settings
+                or ModelSettings(
+                    max_tokens=4096, timeout=300.0, parallel_tool_calls=True
+                ),
                 usage_limits=usage_limits or UsageLimits(request_limit=10),
             )
         self._bundles[model_type] = bundle
@@ -130,7 +138,9 @@ class ModelRegistry:
         try:
             return self._bundles[model_type]
         except KeyError:
-            raise ModelClientUnavailable(f"no model registered for model_type '{model_type}'") from None
+            raise ModelClientUnavailable(
+                f"no model registered for model_type '{model_type}'"
+            ) from None
 
 
 model_registry = ModelRegistry()
@@ -140,9 +150,10 @@ model_registry = ModelRegistry()
 # pydantic-ai model factory
 # ---------------------------------------------------------------------------
 
+
 def _resolve_base_url(config: RuntimeModelConfig) -> str:
     """Resolve the OpenAI provider base_url. Literal pass-through by default;
-    the legacy auto-append ``/v1`` is opt-in via ``base_url_mode``. Never strips
+    the prior auto-append ``/v1`` is opt-in via ``base_url_mode``. Never strips
     a user-supplied path or suffix -- some gateways rely on custom paths."""
     if not config.base_url:
         raise ModelClientUnavailable(
@@ -157,9 +168,7 @@ def _resolve_base_url(config: RuntimeModelConfig) -> str:
         if base.endswith("/v1"):
             return base
         return f"{base}/v1"
-    raise ModelClientUnavailable(
-        f"{config.model_type}: invalid base_url_mode {mode!r}"
-    )
+    raise ModelClientUnavailable(f"{config.model_type}: invalid base_url_mode {mode!r}")
 
 
 def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
@@ -189,4 +198,6 @@ def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
     # onto pydantic-ai's request limit (one request per turn).
     max_turns = int(raw.get("max_turns", 10))
     usage_limits = UsageLimits(request_limit=max(1, max_turns))
-    return ModelBundle(config=config, model=model, settings=settings, usage_limits=usage_limits)
+    return ModelBundle(
+        config=config, model=model, settings=settings, usage_limits=usage_limits
+    )

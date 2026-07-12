@@ -56,7 +56,14 @@ from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
 from ..session.models import SessionRecord, SessionStatus
 from .aggregation import aggregate
 from .limits import SwarmLimits
-from .models import AttemptStatus, SwarmRun, SwarmTask, SwarmTaskAttempt, SwarmTaskStatus, TaskInput
+from .models import (
+    AttemptStatus,
+    SwarmRun,
+    SwarmTask,
+    SwarmTaskAttempt,
+    SwarmTaskStatus,
+    TaskInput,
+)
 from .spec import SwarmSpec, SwarmStrategySpec
 from .store import SwarmStore
 
@@ -77,6 +84,7 @@ TaskFactory = Callable[[RunInput], "Tuple[TaskInput, ...]"]
 
 # --- SwarmExecutionContext ---------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class SwarmExecutionContext:
     """The bundle a strategy consumes: the spec, the driving swarm run, the
@@ -92,12 +100,13 @@ class SwarmExecutionContext:
     compiler: AgentCompiler
     agents: "Mapping[str, CompiledAgent]"
     swarm_store: SwarmStore
-    run_store: Any   # RunStore Protocol (typed loosely to avoid a cycle with run.store)
+    run_store: Any  # RunStore Protocol (typed loosely to avoid a cycle with run.store)
     session_store: Any  # SessionStore Protocol
     event_store: Any  # EventStore Protocol
 
 
 # --- SwarmStrategy Protocol + registry --------------------------------------
+
 
 @runtime_checkable
 class SwarmStrategy(Protocol):
@@ -109,9 +118,11 @@ _STRATEGY_REGISTRY: "dict[str, type]" = {}
 
 def register_strategy(kind: str) -> "Callable[[type], type]":
     """Class decorator: register ``kind`` -> the decorated strategy class."""
+
     def _decorator(cls: type) -> type:
         _STRATEGY_REGISTRY[kind] = cls
         return cls
+
     return _decorator
 
 
@@ -127,12 +138,14 @@ def build_strategy(spec: SwarmStrategySpec) -> "SwarmStrategy":
 
 # --- shared worker-pool helper ----------------------------------------------
 
+
 def _worker_pool(ctx: SwarmExecutionContext) -> "tuple[str, ...]":
     """Agent ids eligible for task assignment = spec.agents minus the
     coordinator. Falls back to all agents when the coordinator is the only
     member (coordinator-as-worker)."""
     workers = tuple(
-        a.agent_id for a in ctx.spec.agents
+        a.agent_id
+        for a in ctx.spec.agents
         if a.agent_id != ctx.spec.coordinator.agent_id
     )
     if not workers:
@@ -176,7 +189,9 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
 
 
 async def _retry_fencing_conflict_once(
-    ctx: SwarmExecutionContext, claimed: SwarmTask, *,
+    ctx: SwarmExecutionContext,
+    claimed: SwarmTask,
+    *,
     still_owned: "Callable[[SwarmTask], bool]",
     op: "Callable[[int], Awaitable[SwarmTask]]",
 ) -> "SwarmTask | None":
@@ -216,7 +231,9 @@ async def _retry_fencing_conflict_once(
         if fresh is None or not still_owned(fresh):
             _LOGGER.warning(
                 "swarm task %s lost a fencing race (reclaimed or "
-                "cancelled) -- discarding: %s", claimed.id, exc,
+                "cancelled) -- discarding: %s",
+                claimed.id,
+                exc,
             )
             return None
         try:
@@ -226,12 +243,16 @@ async def _retry_fencing_conflict_once(
         except SwarmConflictError as retry_exc:
             _LOGGER.warning(
                 "swarm task %s lost a fencing race on retry with the "
-                "fresh version -- discarding: %s", claimed.id, retry_exc,
+                "fresh version -- discarding: %s",
+                claimed.id,
+                retry_exc,
             )
             return None
 
 
-async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_retries: int = 0) -> "RunResult | None":
+async def _run_task(
+    ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_retries: int = 0
+) -> "RunResult | None":
     """Run a single SwarmTask against its assigned worker agent.
 
     Sequence:
@@ -317,7 +338,9 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # to lose by simply giving up.
         try:
             claimed = await ctx.swarm_store.set_active_run(
-                claimed.id, child_run_id, expected_version=claimed.version,
+                claimed.id,
+                child_run_id,
+                expected_version=claimed.version,
             )
         except asyncio.CancelledError:
             raise
@@ -325,16 +348,24 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             _LOGGER.warning(
                 "swarm task %s lost set_active_run's fencing race before "
                 "attempt %d started -- discarding: %s",
-                claimed.id, base_attempt + _attempt, exc,
+                claimed.id,
+                base_attempt + _attempt,
+                exc,
             )
             return None
 
         scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
         now = _now()
-        await ctx.session_store.create(SessionRecord(
-            id=scratch_session_id, parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=now, updated_at=now,
-        ))
+        await ctx.session_store.create(
+            SessionRecord(
+                id=scratch_session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
         child_context = RunContext(
             run_id=child_run_id,
@@ -374,21 +405,25 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # retry or an eventual fail_task() call.
         try:
             result = await ctx.agent_runner.run(
-                compiled, RunInput(prompt=claimed.input.prompt), child_context,
+                compiled,
+                RunInput(prompt=claimed.input.prompt),
+                child_context,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             last_exc = exc
-            await ctx.swarm_store.record_attempt(replace(
-                current_attempt,
-                status=AttemptStatus.FAILED,
-                finished_at=_now(),
-                error=RunErrorInfo(
-                    error_type=type(exc).__name__,
-                    message=str(exc),
-                ),
-            ))
+            await ctx.swarm_store.record_attempt(
+                replace(
+                    current_attempt,
+                    status=AttemptStatus.FAILED,
+                    finished_at=_now(),
+                    error=RunErrorInfo(
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    ),
+                )
+            )
             continue
 
         # The worker succeeded. A genuine fencing conflict here (ownership
@@ -399,13 +434,15 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
         # a lease renewal) is retried once with the fresh version instead of
         # being discarded, since the worker's result is already in hand.
         completed = await _retry_fencing_conflict_once(
-            ctx, claimed,
+            ctx,
+            claimed,
             still_owned=lambda t: (
-                t.status is SwarmTaskStatus.CLAIMED
-                and t.active_run_id == child_run_id
+                t.status is SwarmTaskStatus.CLAIMED and t.active_run_id == child_run_id
             ),
             op=lambda v: ctx.swarm_store.complete_task(
-                claimed.id, result, expected_version=v,
+                claimed.id,
+                result,
+                expected_version=v,
                 active_run_id=child_run_id,
             ),
         )
@@ -421,36 +458,42 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             # FAILED with an error_type that distinguishes "superseded" from
             # an actual worker error for anyone reading the trail.
             try:
-                await ctx.swarm_store.record_attempt(replace(
-                    current_attempt,
-                    status=AttemptStatus.FAILED,
-                    finished_at=_now(),
-                    error=RunErrorInfo(
-                        error_type="Superseded",
-                        message=(
-                            "worker succeeded but complete_task lost a "
-                            "fencing race (task reclaimed or cancelled by "
-                            "another owner) before this attempt's "
-                            "completion could be recorded"
+                await ctx.swarm_store.record_attempt(
+                    replace(
+                        current_attempt,
+                        status=AttemptStatus.FAILED,
+                        finished_at=_now(),
+                        error=RunErrorInfo(
+                            error_type="Superseded",
+                            message=(
+                                "worker succeeded but complete_task lost a "
+                                "fencing race (task reclaimed or cancelled by "
+                                "another owner) before this attempt's "
+                                "completion could be recorded"
+                            ),
                         ),
-                    ),
-                ))
+                    )
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "swarm task %s: failed to close out the superseded "
-                    "attempt's audit row: %s", claimed.id, exc,
+                    "attempt's audit row: %s",
+                    claimed.id,
+                    exc,
                 )
             return None
         claimed = completed
 
         try:
-            await ctx.swarm_store.record_attempt(replace(
-                current_attempt,
-                status=AttemptStatus.SUCCEEDED,
-                finished_at=_now(),
-            ))
+            await ctx.swarm_store.record_attempt(
+                replace(
+                    current_attempt,
+                    status=AttemptStatus.SUCCEEDED,
+                    finished_at=_now(),
+                )
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -460,7 +503,9 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
             # real result rather than treating this as a failed attempt.
             _LOGGER.warning(
                 "swarm task %s completed but recording its SUCCEEDED "
-                "attempt audit row failed: %s", claimed.id, exc,
+                "attempt audit row failed: %s",
+                claimed.id,
+                exc,
             )
         return result
 
@@ -471,16 +516,21 @@ async def _run_task(ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_ret
     # cancelling caller owns the task's real terminal status now, so this
     # call must not overwrite it).
     await _retry_fencing_conflict_once(
-        ctx, claimed,
+        ctx,
+        claimed,
         still_owned=lambda t: (
-            t.status is SwarmTaskStatus.CLAIMED
-            and t.active_run_id == child_run_id
+            t.status is SwarmTaskStatus.CLAIMED and t.active_run_id == child_run_id
         ),
         op=lambda v: ctx.swarm_store.fail_task(
-            claimed.id, RunErrorInfo(
-                error_type=type(last_exc).__name__ if last_exc is not None else "Unknown",
+            claimed.id,
+            RunErrorInfo(
+                error_type=type(last_exc).__name__
+                if last_exc is not None
+                else "Unknown",
                 message=str(last_exc) if last_exc is not None else "",
-            ), expected_version=v, active_run_id=child_run_id,
+            ),
+            expected_version=v,
+            active_run_id=child_run_id,
         ),
     )
     return None
@@ -509,6 +559,7 @@ def _make_task(ctx: SwarmExecutionContext, ti: TaskInput, agent_id: str) -> Swar
 
 
 # --- CoordinatorDelegationStrategy ------------------------------------------
+
 
 @register_strategy("coordinator_delegation")
 class CoordinatorDelegationStrategy:
@@ -541,11 +592,14 @@ class CoordinatorDelegationStrategy:
         request_prompt = ctx.request.prompt
         seen: "list[bool]" = [False]
 
-        async def _default(swarm_run: SwarmRun, completed: "tuple[SwarmTask, ...]", limits: SwarmLimits) -> "tuple[TaskInput, ...]":
+        async def _default(
+            swarm_run: SwarmRun, completed: "tuple[SwarmTask, ...]", limits: SwarmLimits
+        ) -> "tuple[TaskInput, ...]":
             if not seen[0] and not completed:
                 seen[0] = True
                 return (TaskInput(prompt=request_prompt),)
             return ()
+
         return _default
 
     async def run(self, ctx: SwarmExecutionContext) -> RunResult:
@@ -560,7 +614,8 @@ class CoordinatorDelegationStrategy:
         round_num = 0
         while True:
             completed = await ctx.swarm_store.list_tasks(
-                ctx.swarm_run.id, status=SwarmTaskStatus.SUCCEEDED,
+                ctx.swarm_run.id,
+                status=SwarmTaskStatus.SUCCEEDED,
             )
             new_inputs = await coordinator_fn(ctx.swarm_run, completed, ctx.spec.limits)
             if not new_inputs:
@@ -594,6 +649,7 @@ class CoordinatorDelegationStrategy:
 
 
 # --- ParallelFanOutStrategy -------------------------------------------------
+
 
 @register_strategy("parallel_fan_out")
 class ParallelFanOutStrategy:

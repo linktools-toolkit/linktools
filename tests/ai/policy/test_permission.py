@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/policy/test_permission.py"""
+
 import asyncio
 
 from linktools.ai.policy.permission import PermissionRule

@@ -4,8 +4,8 @@
 
 import pytest
 
-from linktools.ai.providers import ProviderBundle, ProviderPrefixes
-from linktools.ai.registry.parser import SpecLoader
+from linktools.ai.providers import ProviderBundle
+from linktools.ai.providers.bundle import ProviderPrefixes
 from linktools.ai.storage.resource.memory import MemoryResourceBackend
 from linktools.ai.storage.resource.path import ResourcePath
 from linktools.ai.storage.resource.store import ResourceStore
@@ -19,8 +19,12 @@ async def _store():
         "/specs/mcp/search.yaml": "name: search\ntransport: stdio\ncommand: python\n",
     }
     for path, text in files.items():
-        await backend.raw_put(ResourcePath(path), text.encode("utf-8"),
-                              content_type="text/plain", metadata={})
+        await backend.raw_put(
+            ResourcePath(path),
+            text.encode("utf-8"),
+            content_type="text/plain",
+            metadata={},
+        )
     return ResourceStore(primary=backend)
 
 

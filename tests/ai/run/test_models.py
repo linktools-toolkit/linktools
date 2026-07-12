@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/run/test_models.py"""
+
 from datetime import datetime, timezone
 
 from linktools.ai.run.models import (
@@ -35,19 +36,36 @@ def test_allowed_transitions_match_spec():
     # test seed -- no live asyncio.Task to actually stop). See run/models.py
     # for the rationale.
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.PENDING] == frozenset({RunStatus.RUNNING})
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.RUNNING] == frozenset({
-        RunStatus.WAITING_APPROVAL, RunStatus.PAUSED, RunStatus.SUCCEEDED,
-        RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    })
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.WAITING_APPROVAL] == frozenset({
-        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    })
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.PAUSED] == frozenset({
-        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    })
-    assert ALLOWED_RUN_TRANSITIONS[RunStatus.CANCELLING] == frozenset({
-        RunStatus.CANCELLED, RunStatus.FAILED,
-    })
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.RUNNING] == frozenset(
+        {
+            RunStatus.WAITING_APPROVAL,
+            RunStatus.PAUSED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    )
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.WAITING_APPROVAL] == frozenset(
+        {
+            RunStatus.RUNNING,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    )
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.PAUSED] == frozenset(
+        {
+            RunStatus.RUNNING,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    )
+    assert ALLOWED_RUN_TRANSITIONS[RunStatus.CANCELLING] == frozenset(
+        {
+            RunStatus.CANCELLED,
+            RunStatus.FAILED,
+        }
+    )
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.SUCCEEDED] == frozenset()
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.FAILED] == frozenset()
     assert ALLOWED_RUN_TRANSITIONS[RunStatus.CANCELLED] == frozenset()
@@ -81,10 +99,20 @@ def test_run_error_info():
 def test_run_record_construction():
     now = datetime.now(timezone.utc)
     record = RunRecord(
-        id="run-1", root_run_id="run-1", parent_run_id=None, session_id="session-1",
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT, status=RunStatus.PENDING,
-        input=RunInput(prompt="hi"), result=None, error=None, version=1,
-        created_at=now, started_at=None, finished_at=None,
+        id="run-1",
+        root_run_id="run-1",
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        status=RunStatus.PENDING,
+        input=RunInput(prompt="hi"),
+        result=None,
+        error=None,
+        version=1,
+        created_at=now,
+        started_at=None,
+        finished_at=None,
     )
     assert record.id == "run-1"
     assert record.status == RunStatus.PENDING

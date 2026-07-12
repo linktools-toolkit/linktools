@@ -8,7 +8,11 @@ and a max_bytes read clamp."""
 from pathlib import Path
 from typing import Mapping
 
-from ..errors import PackageNotFoundError, PackageResourceAccessDeniedError, PackageResourceNotFoundError
+from ..errors import (
+    PackageNotFoundError,
+    PackageResourceAccessDeniedError,
+    PackageResourceNotFoundError,
+)
 from ..providers.package import PackageResourceProvider
 from .resource import (
     ResourceContent,
@@ -40,12 +44,20 @@ class DirectoryPackageResourceProvider:
         self._roots: "dict[str, Path]" = {pid: Path(p) for pid, p in roots.items()}
         # Extension allow/deny lists, normalized lowercase with
         # a leading dot. When set, read_resource refuses disallowed extensions.
-        self._allow_ext = tuple(e.lower() for e in allow_extensions) if allow_extensions else None
+        self._allow_ext = (
+            tuple(e.lower() for e in allow_extensions) if allow_extensions else None
+        )
         self._deny_ext = tuple(e.lower() for e in deny_extensions)
 
     @staticmethod
-    def _ext_ok(path: str, allow: "tuple[str, ...] | None", deny: "tuple[str, ...]") -> bool:
-        ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    def _ext_ok(
+        path: str, allow: "tuple[str, ...] | None", deny: "tuple[str, ...]"
+    ) -> bool:
+        ext = (
+            "." + path.rsplit(".", 1)[-1].lower()
+            if "." in path.rsplit("/", 1)[-1]
+            else ""
+        )
         if deny and ext in deny:
             return False
         if allow is not None and ext not in allow:
@@ -96,8 +108,10 @@ class DirectoryPackageResourceProvider:
             files.append(p.relative_to(root).as_posix())
         files.sort()
         offset = int(cursor) if cursor else 0
-        page = files[offset:offset + max(1, limit)]
-        next_cursor = str(offset + len(page)) if offset + len(page) < len(files) else None
+        page = files[offset : offset + max(1, limit)]
+        next_cursor = (
+            str(offset + len(page)) if offset + len(page) < len(files) else None
+        )
         items = [
             ResourceInfo(path=p, kind="file", size_bytes=(root / p).stat().st_size)
             for p in page

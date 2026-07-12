@@ -19,7 +19,7 @@ from ..swarm.spec import (
     SwarmStrategySpec,
 )
 from .agent import _parse_middleware_refs
-from .parser import SpecLoader, parse_yaml_text
+from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
 
 
 def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
@@ -32,21 +32,28 @@ def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
             agent_id=str(item["agent_id"]),
             role=str(role_raw) if role_raw is not None else None,
         )
-    raise InvalidSpecError(
-        f"swarm {swarm_id}: invalid {kind} ref: {item!r}"
-    )
+    raise InvalidSpecError(f"swarm {swarm_id}: invalid {kind} ref: {item!r}")
 
 
 def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
     """Build a SwarmSpec from a parsed YAML dict."""
-    name = payload.get("name") or swarm_id
+    allowed = {
+        "name",
+        "agents",
+        "coordinator",
+        "strategy",
+        "limits",
+        "aggregation",
+        "middleware",
+        "metadata",
+    }
+    reader = StrictConfigReader(payload, allowed=allowed, context=f"swarm {swarm_id}")
+    name = reader.optional_str("name") or swarm_id
 
     # agents — required, non-empty.
     agents_raw = payload.get("agents")
     if not agents_raw:
-        raise InvalidSpecError(
-            f"swarm {swarm_id}: 'agents' must be a non-empty list"
-        )
+        raise InvalidSpecError(f"swarm {swarm_id}: 'agents' must be a non-empty list")
     if not isinstance(agents_raw, (list, tuple)):
         raise InvalidSpecError(f"swarm {swarm_id}: 'agents' must be a list")
     agents = tuple(
@@ -66,9 +73,7 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
     elif isinstance(strat_raw, dict):
         kind = strat_raw.get("kind")
         if not kind:
-            raise InvalidSpecError(
-                f"swarm {swarm_id}: 'strategy.kind' is required"
-            )
+            raise InvalidSpecError(f"swarm {swarm_id}: 'strategy.kind' is required")
         strategy = SwarmStrategySpec(
             kind=str(kind),
             config=dict(strat_raw.get("config") or {}),
@@ -81,6 +86,7 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
     if limits_raw is None:
         limits = DEFAULT_SWARM_LIMITS
     elif isinstance(limits_raw, dict):
+
         def _int_field(key: str) -> "int | None":
             v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
             return None if v is None else int(v)
@@ -118,9 +124,7 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
                 f"swarm {swarm_id}: invalid 'context_policy': {exc}"
             ) from exc
     else:
-        raise InvalidSpecError(
-            f"swarm {swarm_id}: 'context_policy' must be a mapping"
-        )
+        raise InvalidSpecError(f"swarm {swarm_id}: 'context_policy' must be a mapping")
 
     # aggregation — string or {mode: ...}, default CONCAT.
     agg_raw = payload.get("aggregation")

@@ -18,6 +18,7 @@
    exactly once via successive cursors, terminating with cursor=None. Verified
    across all three backends (memory/file/sqlalchemy) since cursor handling
    lives in each backend's raw_propfind."""
+
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -30,13 +31,16 @@ from linktools.ai.storage.sqlalchemy.resource import SqlAlchemyResourceBackend
 
 # ---- shared backend_factory (mirrors test_store.py's parametrization) ----
 
+
 def _memory_backend(**kwargs):
     from linktools.ai.storage.resource.memory import MemoryResourceBackend
+
     return MemoryResourceBackend(**kwargs)
 
 
 def _file_backend(tmp_path, **kwargs):
     from linktools.ai.storage.resource.file import FileResourceBackend
+
     return FileResourceBackend(root=tmp_path, **kwargs)
 
 
@@ -77,7 +81,9 @@ def backend_factory(request, tmp_path):
 
     def sqlalchemy_factory(**kw):
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -111,6 +117,7 @@ async def _make_sqlalchemy_store(tmp_path, db_name: str = "phase4a.db"):
 # Test 1: Atomic MOVE in ONE transaction (contract)
 # ----------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
     """contract atomic-MOVE guard: a MOVE on a primary-resident source must bump
@@ -122,7 +129,11 @@ async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
     source masked while target missing = data loss)."""
     engine, backend, store = await _make_sqlalchemy_store(tmp_path)
     try:
-        await store.put(ResourcePath("/src.txt"), b"payload", options=WriteOptions(metadata={"k": "v"}))
+        await store.put(
+            ResourcePath("/src.txt"),
+            b"payload",
+            options=WriteOptions(metadata={"k": "v"}),
+        )
         before = await backend.revision()
 
         moved = await store.move(ResourcePath("/src.txt"), ResourcePath("/dst.txt"))
@@ -156,19 +167,31 @@ async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
     engine, backend, store = await _make_sqlalchemy_store(tmp_path)
     try:
         # Stand up a readonly overlay carrying the source.
-        overlay_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/overlay.db")
+        overlay_engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/overlay.db"
+        )
         async with overlay_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        overlay_session_factory = async_sessionmaker(overlay_engine, expire_on_commit=False)
-        overlay = SqlAlchemyResourceBackend(session_factory=overlay_session_factory, readonly=True)
-        await overlay.raw_put(ResourcePath("/src.md"), b"overlay content", content_type=None, metadata={})
+        overlay_session_factory = async_sessionmaker(
+            overlay_engine, expire_on_commit=False
+        )
+        overlay = SqlAlchemyResourceBackend(
+            session_factory=overlay_session_factory, readonly=True
+        )
+        await overlay.raw_put(
+            ResourcePath("/src.md"), b"overlay content", content_type=None, metadata={}
+        )
         store_with_overlay = ResourceStore(primary=backend, overlays=(overlay,))
 
-        moved = await store_with_overlay.move(ResourcePath("/src.md"), ResourcePath("/dst.md"))
+        moved = await store_with_overlay.move(
+            ResourcePath("/src.md"), ResourcePath("/dst.md")
+        )
         assert moved.content == b"overlay content"
         # Source is masked in primary -> overlay hidden via whiteout.
         assert await store_with_overlay.get(ResourcePath("/src.md")) is None
-        assert (await store_with_overlay.get(ResourcePath("/dst.md"))).content == b"overlay content"
+        assert (
+            await store_with_overlay.get(ResourcePath("/dst.md"))
+        ).content == b"overlay content"
         await overlay_engine.dispose()
     finally:
         await engine.dispose()
@@ -178,6 +201,7 @@ async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
 # Test 2: stat() is metadata-only (contract)
 # ----------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_stat_returns_metadata_without_content_field(backend_factory):
     """contract behavioral guard: stat() returns a ResourceLookupInfo (= alias of
@@ -186,7 +210,11 @@ async def test_stat_returns_metadata_without_content_field(backend_factory):
     exposes raw_stat -- the result type itself proves content was not pulled
     into the returned object."""
     store = ResourceStore(primary=backend_factory())
-    await store.put(ResourcePath("/a.txt"), b"large-payload", options=WriteOptions(metadata={"k": "v"}))
+    await store.put(
+        ResourcePath("/a.txt"),
+        b"large-payload",
+        options=WriteOptions(metadata={"k": "v"}),
+    )
 
     info = await store.stat(ResourcePath("/a.txt"))
 
@@ -225,6 +253,7 @@ async def test_stat_on_sqlalchemy_does_not_select_content_column(tmp_path):
         stat_selects = [s for s in captured if s.upper().startswith("SELECT")]
         assert stat_selects, "stat() should have issued at least one SELECT"
         import re
+
         content_col = re.compile(r"\bcontent\b", re.IGNORECASE)
         for stmt in stat_selects:
             assert not content_col.search(stmt), (
@@ -237,6 +266,7 @@ async def test_stat_on_sqlalchemy_does_not_select_content_column(tmp_path):
 # ----------------------------------------------------------------------
 # Test 3: Cursor pagination covers every item exactly once (contract)
 # ----------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
@@ -254,7 +284,9 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
     cursor: "str | None" = None
     pages = 0
     while True:
-        page = await store.propfind(ResourcePath("/r"), depth=Depth.ONE, limit=2, cursor=cursor)
+        page = await store.propfind(
+            ResourcePath("/r"), depth=Depth.ONE, limit=2, cursor=cursor
+        )
         pages += 1
         seen_paths.extend(info.path.value for info in page.items)
         cursor = page.cursor
@@ -267,7 +299,9 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
     assert seen_paths == [f"/r/{i}.txt" for i in range(5)], (
         f"pagination must cover every item in sorted order, got {seen_paths}"
     )
-    assert len(seen_paths) == len(set(seen_paths)), "pagination must not return duplicates"
+    assert len(seen_paths) == len(set(seen_paths)), (
+        "pagination must not return duplicates"
+    )
     # limit=2 over 5 items -> 3 pages (2 + 2 + 1).
     assert pages == 3, f"expected 3 pages for 5 items at limit=2, got {pages}"
 
@@ -281,6 +315,8 @@ async def test_propfind_cursor_none_when_results_fit_one_page(backend_factory):
     await store.put(ResourcePath("/r/a.txt"), b"a")
     await store.put(ResourcePath("/r/b.txt"), b"b")
 
-    page = await store.propfind(ResourcePath("/r"), depth=Depth.ONE, limit=100, cursor=None)
+    page = await store.propfind(
+        ResourcePath("/r"), depth=Depth.ONE, limit=100, cursor=None
+    )
     assert page.cursor is None
     assert {info.path.value for info in page.items} == {"/r/a.txt", "/r/b.txt"}

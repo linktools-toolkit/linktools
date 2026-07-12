@@ -16,7 +16,9 @@ from typing import AsyncIterator, Callable
 
 try:  # optional dependency -- give a clear install hint instead of a raw ImportError
     from sqlalchemy.ext.asyncio import AsyncSession
-except ModuleNotFoundError as exc:  # pragma: no cover - exercised via import-blocking test
+except (
+    ModuleNotFoundError
+) as exc:  # pragma: no cover - exercised via import-blocking test
     if exc.name and exc.name.split(".")[0] in {"sqlalchemy", "aiosqlite"}:
         raise ImportError(
             "SqlAlchemyStorage requires optional SQLAlchemy dependencies. "
@@ -82,7 +84,9 @@ class SqlAlchemyStorage(Storage):
         resource_coordinator: "object | None" = None,
     ) -> None:
         super().__init__(
-            resources=ResourceStore(primary=SqlAlchemyResourceBackend(session_factory=session_factory)),
+            resources=ResourceStore(
+                primary=SqlAlchemyResourceBackend(session_factory=session_factory)
+            ),
             sessions=SqlAlchemySessionStore(session_factory=session_factory),
             runs=SqlAlchemyRunStore(session_factory=session_factory),
             events=SqlAlchemyEventStore(session_factory=session_factory),
@@ -106,13 +110,29 @@ class SqlAlchemyStorage(Storage):
             async with session.begin():
                 tx = _UnitOfWork(
                     session=session,
-                    runs=SqlAlchemyRunStore(session_factory=self._session_factory, session=session),
-                    events=SqlAlchemyEventStore(session_factory=self._session_factory, session=session),
-                    checkpoints=SqlAlchemyCheckpointStore(session_factory=self._session_factory, session=session),
-                    approvals=SqlAlchemyApprovalStore(session_factory=self._session_factory, session=session),
-                    sessions=SqlAlchemySessionStore(session_factory=self._session_factory, session=session),
-                    swarms=SqlAlchemySwarmStore(session_factory=self._session_factory, session=session),
-                    memories=SqlAlchemyMemoryStore(session_factory=self._session_factory, session=session),
-                    idempotency=SqlAlchemyIdempotencyStore(session_factory=self._session_factory, session=session),
+                    runs=SqlAlchemyRunStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    events=SqlAlchemyEventStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    checkpoints=SqlAlchemyCheckpointStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    approvals=SqlAlchemyApprovalStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    sessions=SqlAlchemySessionStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    swarms=SqlAlchemySwarmStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    memories=SqlAlchemyMemoryStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    idempotency=SqlAlchemyIdempotencyStore(
+                        session_factory=self._session_factory, session=session
+                    ),
                 )
                 yield tx

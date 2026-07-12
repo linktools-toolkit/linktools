@@ -88,6 +88,7 @@ class SqlAlchemyMemoryStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     async def search(
@@ -107,23 +108,27 @@ class SqlAlchemyMemoryStore:
             stmt = stmt.order_by(MemoryRow.created_at).limit(limit)
             result = await session.execute(stmt)
             return tuple(_row_to_record(row) for row in result.scalars())
+
         return await self._execute_in_session(_do)
 
     # -- write ---------------------------------------------------------
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord:
         async def _do(session):
-            session.add(MemoryRow(
-                id=record.id,
-                owner_id=record.owner_id,
-                content=record.content,
-                category=record.category,
-                confidence=record.confidence,
-                version=record.version,
-                created_at=record.created_at,
-                updated_at=record.updated_at,
-                metadata_json=json.dumps(dict(record.metadata)),
-            ))
+            session.add(
+                MemoryRow(
+                    id=record.id,
+                    owner_id=record.owner_id,
+                    content=record.content,
+                    category=record.category,
+                    confidence=record.confidence,
+                    version=record.version,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    metadata_json=json.dumps(dict(record.metadata)),
+                )
+            )
+
         try:
             await self._execute_in_session(_do)
         except IntegrityError as exc:
@@ -169,6 +174,7 @@ class SqlAlchemyMemoryStore:
             row.updated_at = datetime.now(timezone.utc)
             await session.flush()
             return _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None:
@@ -184,4 +190,5 @@ class SqlAlchemyMemoryStore:
                     f"expected version {expected_version}, found {row.version}"
                 )
             await session.delete(row)
+
         await self._execute_in_session(_do)

@@ -11,14 +11,14 @@ from .models import NewSessionMessage, SessionMessage, SessionRecord, SessionSta
 
 @runtime_checkable
 class SessionStore(Protocol):
-    async def create(self, session: SessionRecord) -> SessionRecord:
-        ...
+    async def create(self, session: SessionRecord) -> SessionRecord: ...
 
-    async def get(self, session_id: str) -> "SessionRecord | None":
-        ...
+    async def get(self, session_id: str) -> "SessionRecord | None": ...
 
     async def append_messages(
-        self, session_id: str, messages: "tuple[NewSessionMessage, ...]",
+        self,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
         """Persist ``messages``, assigning ``id``/``sequence``/``created_at``
         for each (the store is the SOLE sequence authority,
@@ -27,8 +27,9 @@ class SessionStore(Protocol):
         session's current max sequence."""
         ...
 
-    async def list_messages(self, session_id: str, *, after_sequence: int = 0, limit: int = 1000) -> "tuple[SessionMessage, ...]":
-        ...
+    async def list_messages(
+        self, session_id: str, *, after_sequence: int = 0, limit: int = 1000
+    ) -> "tuple[SessionMessage, ...]": ...
 
     async def update(
         self,
@@ -36,5 +37,4 @@ class SessionStore(Protocol):
         *,
         status: "SessionStatus | None" = None,
         metadata: "Mapping[str, Any] | None" = None,
-    ) -> SessionRecord:
-        ...
+    ) -> SessionRecord: ...

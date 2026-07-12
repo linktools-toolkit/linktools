@@ -156,8 +156,9 @@ def test_update_bumps_version_and_applies_content(tmp_path):
 def test_update_category_none_clears_category_and_omitted_fields_unchanged(tmp_path):
     async def _run_case():
         store = FileMemoryStore(root=tmp_path)
-        rec = _record(content="keep", category="note", confidence=0.8,
-                      metadata={"k": "v"})
+        rec = _record(
+            content="keep", category="note", confidence=0.8, metadata={"k": "v"}
+        )
         await store.remember(rec)
         # category=None with the sentinel means EXPLICIT clear.
         updated = await store.update(rec.id, expected_version=1, category=None)

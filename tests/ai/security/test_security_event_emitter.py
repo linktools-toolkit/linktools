@@ -40,15 +40,19 @@ def test_oversized_event_sanitizes_to_dataclass_not_dict():
 
 
 @pytest.mark.asyncio
-async def test_oversized_security_event_persists_via_file_store_fail_closed(tmp_path: Path):
+async def test_oversized_security_event_persists_via_file_store_fail_closed(
+    tmp_path: Path,
+):
     store = FileEventStore(root=tmp_path)
     emitter = EventStoreSecurityEventEmitter(
-        store, context=_ctx(), failure_mode="fail_closed")
+        store, context=_ctx(), failure_mode="fail_closed"
+    )
 
     # Would raise TypeError -> ToolSecurityAuditError before the fix, because the
     # sanitizer returned a plain dict that FileEventStore.asdict() cannot handle.
     await emitter.emit_security(
-        RunCompleted(run_id="run-1", result_summary=_oversized_mapping()))
+        RunCompleted(run_id="run-1", result_summary=_oversized_mapping())
+    )
 
     page = await store.list("run-1")
     assert len(page.items) == 1
@@ -61,10 +65,12 @@ async def test_oversized_security_event_persists_via_file_store_fail_closed(tmp_
 async def test_oversized_security_event_persists_best_effort(tmp_path: Path):
     store = FileEventStore(root=tmp_path)
     emitter = EventStoreSecurityEventEmitter(
-        store, context=_ctx(), failure_mode="best_effort")
+        store, context=_ctx(), failure_mode="best_effort"
+    )
 
     await emitter.emit_security(
-        RunCompleted(run_id="run-1", result_summary=_oversized_mapping()))
+        RunCompleted(run_id="run-1", result_summary=_oversized_mapping())
+    )
 
     page = await store.list("run-1")
     # best_effort must not silently drop a valid (truncated) audit event.

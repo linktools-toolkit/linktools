@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/test_capabilities.py"""
+
 from linktools.ai.storage.capabilities import (
     StorageCapabilities,
     FILE_STORAGE_CAPABILITIES,
@@ -34,5 +35,6 @@ def test_sqlalchemy_storage_capabilities_match_spec():
 
 def test_is_frozen():
     import pytest
+
     with pytest.raises(Exception):
         FILE_STORAGE_CAPABILITIES.cross_store_transactions = True

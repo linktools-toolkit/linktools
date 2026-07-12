@@ -6,122 +6,59 @@ ModelRouter; Runtime.run(spec, prompt) compiles the spec, resolves (or creates)
 a Session, mints a RunContext, and delegates to AgentRunner (AgentSpec) or
 SwarmRunner (SwarmSpec).
 
-Capability Runtime: build() also accepts spec Providers (a
-ProviderBundle or the expanded agent/skill/mcp/... params) + CapabilityRuntimeOptions,
+Capability Runtime: build() accepts a ProviderBundle + CapabilityRuntimeOptions,
 from which it builds a CapabilityAssembler wired into AgentRunner. Declared
 AgentSpec.tools are then resolved into prompt sections + toolsets via the
-registered capability providers; an unconfigured spec keeps the legacy default
-builtin toolset behavior. Runtime is an async context manager that releases MCP
-connections on close."""
+registered capability providers. Runtime is an async context manager that
+releases MCP connections on close."""
 
-import asyncio
-import contextlib
-import dataclasses
 import uuid
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
 # generator below; the function itself is an ``async def`` that ``yield``s.
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+from ._runtime.build import RuntimeBuildConfig, build_runtime_components
 from .agent.compiler import AgentCompiler
 from .agent.runner import AgentRunner
 from .agent.spec import AgentSpec
 from .capability.assembler import CapabilityAssembler
-from .capability.builtin import BuiltinProvider
-from .capability.options import CapabilityRuntimeOptions
-from .errors import CapabilityResolutionError, SessionError, SwarmError
+from .capability.models import CapabilityRuntimeOptions
+from .errors import SwarmError
 from .execution.protocols import ExecutionBackend
 from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
 from .mcp.client import MCPConnectionManager
-from .mcp.provider import MCPProvider
-from .package.capability_provider import PackageProvider
-from .package.resolver import EntrypointResolver
 from .providers.bundle import ProviderBundle
-from .providers.mcp import MCPServerSpecProvider
-from .providers.subagent import SubagentSpecProvider
-from .run.context import RunContext
 from .run.controller import RunController
 from .run.models import RunInput, RunnableType
-from .session.models import SessionRecord, SessionStatus
-from .skill.provider import SkillProvider
 from .storage.facade import Storage
-from .subagent.models import SubagentResult
-from .subagent.provider import SubagentProvider
 from .swarm.runner import SwarmRunner
 from .swarm.spec import SwarmSpec
 from .tool.executor import ToolExecutor
 
 if TYPE_CHECKING:
+    from .capability.models import CapabilityInspection
     from .knowledge.retriever import Retriever
 
 
-def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, ...]":
-    """Turn collected SecurityDegraded events into human-readable inspection
-    warnings. Only SecurityDegraded is surfaced -- and only its (already
-    sanitizer-redacted) reason -- so inspection never leaks a secret or exposes
-    the raw event objects."""
-    warnings: "list[str]" = []
-    from .events.payloads import SecurityDegraded
-    for event in events:
-        if isinstance(event, SecurityDegraded):
-            warnings.append(f"security degraded: {event.reason}")
-    return tuple(warnings)
-
-
-def _build_capability_providers(
-    bundle: ProviderBundle,
-    execution: "ExecutionBackend | None",
-    options: CapabilityRuntimeOptions,
-    mcp_manager: "MCPConnectionManager | None",
-    subagent_executor: Any = None,
-) -> "dict[str, Any]":
-    """Map the declaration bundle onto the kind -> CapabilityProvider dict the
-    assembler consumes. Builtin is registered only when an execution backend
-    exists (it cannot resolve without one). The subagent executor is passed in
-    so both SubagentProvider and PackageProvider receive it at construction."""
-    providers: "dict[str, Any]" = {}
-    if execution is not None:
-        providers["builtin"] = BuiltinProvider()
-    if bundle.skills is not None:
-        providers["skill"] = SkillProvider(bundle.skills)
-    if bundle.mcp_servers is not None:
-        providers["mcp"] = MCPProvider(
-            bundle.mcp_servers, mcp_manager,
-            allow_mcp_wildcard=bool(options.allow_mcp_wildcard),
-        )
-    if bundle.entrypoints is not None or bundle.subagents is not None:
-        providers["subagent"] = SubagentProvider(
-            subagent_provider=bundle.subagents,
-            entrypoint_resolver=bundle.entrypoints,
-            executor=subagent_executor,
-        )
-    if bundle.package_resources is not None or bundle.entrypoints is not None:
-        # PackageProvider declares every kind it handles via supported_kinds;
-        # register the one instance under all of them (no manual alias hack).
-        from .capability.provider import provider_kinds
-        pkg = PackageProvider(
-            resource_provider=bundle.package_resources,
-            entrypoint_resolver=bundle.entrypoints,
-            entrypoint_executor=subagent_executor,
-        )
-        for k in provider_kinds(pkg):
-            providers[k] = pkg
-    return providers
-
-
 class Runtime:
-    def __init__(self, *, storage: Storage, compiler: AgentCompiler,
-                 runner: AgentRunner, swarm_runner: SwarmRunner,
-                 model_router: ModelRouter,
-                 run_controller: "RunController | None" = None,
-                 capability_assembler: "CapabilityAssembler | None" = None,
-                 mcp_connection_manager: "MCPConnectionManager | None" = None,
-                 options: "CapabilityRuntimeOptions | None" = None,
-                 provider_bundle: "ProviderBundle | None" = None) -> None:
+    def __init__(
+        self,
+        *,
+        storage: Storage,
+        compiler: AgentCompiler,
+        runner: AgentRunner,
+        swarm_runner: SwarmRunner,
+        model_router: ModelRouter,
+        run_controller: "RunController | None" = None,
+        capability_assembler: "CapabilityAssembler | None" = None,
+        mcp_connection_manager: "MCPConnectionManager | None" = None,
+        options: "CapabilityRuntimeOptions | None" = None,
+        provider_bundle: "ProviderBundle | None" = None,
+    ) -> None:
         self.storage = storage
         self.compiler = compiler
         self.runner = runner
@@ -135,265 +72,79 @@ class Runtime:
         self._capability_assembler = capability_assembler
         self._mcp_connection_manager = mcp_connection_manager
         self._options = options or CapabilityRuntimeOptions()
-        # The declaration bundle: consumed by resolve_swarm /
-        # resolve_agent for by-id lookups so the swarm/agent providers are not
-        # dead inputs.
+        # The declaration bundle wired at build time; held so the runtime can
+        # resolve capabilities against the configured providers.
         self._provider_bundle = provider_bundle
 
     @classmethod
-    def build(cls, *, storage: Storage,
-              model_router: "ModelRouter | None" = None,
-              middleware_pipeline: "MiddlewarePipeline | None" = None,
-              retriever: "Retriever | None" = None,
-              execution: "ExecutionBackend | None" = None,
-              tool_executor: "ToolExecutor | None" = None,
-              pause_on_approval: bool = False,
-              agents: "Any | None" = None,
-              skills: "Any | None" = None,
-              mcp_servers: "MCPServerSpecProvider | None" = None,
-              tool_policies: "Any | None" = None,
-              swarms: "Any | None" = None,
-              subagents: "SubagentSpecProvider | None" = None,
-              packages: "Any | None" = None,
-              package_resources: "Any | None" = None,
-              providers: "ProviderBundle | None" = None,
-              options: "CapabilityRuntimeOptions | None" = None,
-              allow_mcp_wildcard: bool = False,
-              security: Any = None) -> "Runtime":
-        """Assemble a Runtime from optional sub-components + capability providers.
+    def build(
+        cls,
+        *,
+        storage: Storage,
+        model_router: "ModelRouter | None" = None,
+        middleware_pipeline: "MiddlewarePipeline | None" = None,
+        retriever: "Retriever | None" = None,
+        execution: "ExecutionBackend | None" = None,
+        tool_executor: "ToolExecutor | None" = None,
+        pause_on_approval: bool = False,
+        mcp_connection_manager: "MCPConnectionManager | None" = None,
+        providers: "ProviderBundle | None" = None,
+        options: "CapabilityRuntimeOptions | None" = None,
+        allow_mcp_wildcard: bool = False,
+        security: Any = None,
+    ) -> "Runtime":
+        """Assemble a Runtime from optional sub-components + a ProviderBundle.
 
-        Capability providers may be passed either as a ``ProviderBundle`` or as
-        the expanded ``agents``/``skills``/``mcp_servers``/... params -- never
-        both (mixing raises ValueError to avoid silent override).
-        All provider params are optional; the direct ``Runtime.run(spec, ...)``
-        path stays the shortest and needs no providers configured."""
-        expanded = (agents, skills, mcp_servers, tool_policies, swarms,
-                    subagents, packages, package_resources)
-        if providers is not None and any(v is not None for v in expanded):
-            raise ValueError(
-                "pass either `providers=...` or the expanded provider params "
-                "(agents/skills/mcp_servers/...), not both"
-            )
-        base_options = options or CapabilityRuntimeOptions()
-        # The build-level allow_mcp_wildcard flag is the documented mcp:* opt-in
-        # Fold it into the options so MCPProvider honors it.
-        from .security.baseline import SecurityBaseline
-        baseline = security if security is not None else SecurityBaseline()
-        from .capability.policy import CapabilityToolExposurePolicy
-        if options is not None and options.tool_exposure is not None:
-            effective_exposure = options.tool_exposure
-        elif baseline.enabled and baseline.tool_exposure_policy is not None:
-            effective_exposure = baseline.tool_exposure_policy
-        else:
-            effective_exposure = CapabilityToolExposurePolicy()
-        resolved_options = dataclasses.replace(
-            base_options,
-            tool_exposure=effective_exposure,
-            allow_mcp_wildcard=(base_options.allow_mcp_wildcard or allow_mcp_wildcard),
-        )
-
-        # Resolve the effective SecurityBaseline once -- the single source every
-        # consumer (compiler executor, runner policy/pipeline, exposure policy)
-        # reads from. Resolved here, before any consumer, so SecurityBaseline
-        # (enabled=False) genuinely reaches all of them.
-
-        bundle = providers if providers is not None else ProviderBundle(
-            agents=agents, skills=skills, mcp_servers=mcp_servers,
-            tool_policies=tool_policies, swarms=swarms, subagents=subagents,
-            packages=packages, package_resources=package_resources,
-        )
-
-        router = model_router or ModelRouter()
-
-        # ``baseline`` was resolved above (before the exposure-policy merge) so
-        # SecurityBaseline(enabled=False) reaches every consumer: the compiler's
-        # ToolExecutor, the runner's policy/pipeline, and the exposure policy.
-
-        resolved_executor = tool_executor
-        if tool_executor is None:
-            from .policy.engine import PolicyEngine
-
-            rules: "list[Any]" = []
-            if baseline.enabled and baseline.command_policy is not None:
-                from .policy.command import CommandRule
-                rules.append(CommandRule(
-                    denied_patterns=baseline.command_policy.denied_patterns))
-            resolved_executor = ToolExecutor(
-                policy=PolicyEngine(rules=tuple(rules)),
-                approval_store=storage.approvals,
-                event_store=storage.events,
-                # Wire the IdempotencyStore so policy.idempotent tools actually
-                # persist + replay through ToolExecutor.execute -- without this,
-                # every idempotent tool fail-closes (StorageCapabilityError) even
-                # though the store is sitting unused in storage.idempotency.
-                idempotency_store=storage.idempotency,
-                pause_on_approval=pause_on_approval,
-                security_audit_failure_mode=getattr(baseline, "audit_failure_mode", "fail_closed"),
-            )
-        compiler = AgentCompiler(
-            model_router=router,
+        Capability providers come exclusively via ``providers`` (a
+        ProviderBundle); the direct ``Runtime.run(spec, ...)`` path stays the
+        shortest and needs no providers configured."""
+        config = RuntimeBuildConfig(
+            storage=storage,
+            providers=providers or ProviderBundle(),
+            model_router=model_router,
             middleware_pipeline=middleware_pipeline,
-            tool_executor=resolved_executor,
-        )
-        uow_factory = (
-            storage.transaction
-            if storage.capabilities.cross_store_transactions else None
-        )
-        run_controller = RunController()
-        runner_pipeline = getattr(baseline, "pipeline", None)
-        from .tool.policy import ResolvedToolPolicy
-        runner_baseline_policy = ResolvedToolPolicy() if baseline.enabled else None
-
-        # Wrap the old-style tool policy provider (get_metadata_map) into the
-        # new ToolPolicyProvider Protocol (resolve descriptor -> ResolvedToolPolicy).
-        runner_policy_provider = None
-        if bundle.tool_policies is not None:
-            from .tool.policy_adapter import MetadataBackedPolicyProvider
-            runner_policy_provider = MetadataBackedPolicyProvider(bundle.tool_policies)
-
-        # Capability providers + assembler are built BEFORE the runner so the
-        # runner can be constructed with its assembler + managed executor wired
-        # in (no post-build private-field mutation). The subagent executor
-        # resolves the runner lazily via runner_provider, breaking the
-        # runner→assembler→provider→executor→runner cycle.
-        mcp_manager = MCPConnectionManager() if bundle.mcp_servers is not None else None
-        sub_executor = None
-        if bundle.entrypoints is not None or bundle.subagents is not None:
-            # ``runner`` is assigned below; the lambda resolves it at call time
-            # (only during a real subagent execute, long after build returns).
-            sub_executor = _make_runtime_subagent_executor(
-                storage=storage, compiler=compiler,
-                runner_provider=lambda: runner,
-            )
-        capability_providers = _build_capability_providers(
-            bundle, execution, resolved_options, mcp_manager, sub_executor,
-        )
-        assembler = (
-            CapabilityAssembler(capability_providers) if capability_providers else None
-        )
-
-        runner = AgentRunner(
-            run_store=storage.runs, session_store=storage.sessions,
-            event_store=storage.events, checkpoint_store=storage.checkpoints,
-            middleware_pipeline=middleware_pipeline,
-            memory_store=storage.memories,
             retriever=retriever,
-            uow_factory=uow_factory,
-            run_controller=run_controller,
             execution=execution,
-            approval_store=storage.approvals,
-            capability_options=resolved_options,
-            capability_assembler=assembler,
-            security_pipeline=runner_pipeline,
-            baseline_policy=runner_baseline_policy,
-            tool_policy_provider=runner_policy_provider,
-            managed_tool_executor=resolved_executor,
-            security_audit_failure_mode=getattr(baseline, "audit_failure_mode", "fail_closed"),
+            tool_executor=tool_executor,
+            security=security,
+            capability_options=options,
+            pause_on_approval=pause_on_approval,
+            allow_mcp_wildcard=allow_mcp_wildcard,
+            mcp_connection_manager=mcp_connection_manager,
         )
-        swarm_runner = SwarmRunner(
-            swarm_store=storage.swarms,
-            run_store=storage.runs,
-            session_store=storage.sessions,
-            event_store=storage.events,
-            compiler=compiler,
-            agent_runner=runner,
-            run_controller=run_controller,
-        )
-
+        c = build_runtime_components(config)
         return cls(
-            storage=storage, compiler=compiler, runner=runner,
-            swarm_runner=swarm_runner, model_router=router,
-            run_controller=run_controller,
-            capability_assembler=assembler,
-            mcp_connection_manager=mcp_manager,
-            options=resolved_options,
-            provider_bundle=bundle,
+            storage=c.storage,
+            compiler=c.compiler,
+            runner=c.runner,
+            swarm_runner=c.swarm_runner,
+            model_router=c.model_router,
+            run_controller=c.run_controller,
+            capability_assembler=c.capability_assembler,
+            mcp_connection_manager=c.mcp_connection_manager,
+            options=c.options,
+            provider_bundle=c.provider_bundle,
         )
 
-    @property
-    def providers(self) -> "ProviderBundle | None":
-        """The declaration bundle wired at build time. Canonical entry point for
-        spec-by-id lookups (``runtime.providers.agents.get(id)``)."""
-        return self._provider_bundle
-
-    async def _assemble_internal(
-        self, spec: AgentSpec, *, execution: "ExecutionBackend | None",
-        security_event_emitter: Any = None,
-    ) -> Any:
-        """Resolve ``spec.tools`` into a CapabilityBundle (prompt sections +
-        tool contributions) under this runtime's exposure policy. Returns an
-        empty bundle when no capability providers are configured.
-
-        ``security_event_emitter`` is wired into the CapabilityContext so a
-        resolution that degrades (e.g. MCP best-effort discovery) can emit its
-        SecurityDegraded event instead of failing for want of an emitter."""
-        from .capability.provider import CapabilityContext
-
-        if self._capability_assembler is None:
-            from .capability.bundle import CapabilityBundle
-            return CapabilityBundle.empty()
-        context = CapabilityContext(
-            agent_id=spec.id,
-            exposure_policy=self._options.tool_exposure,
-            execution=execution,
-            security_event_emitter=security_event_emitter,
-        )
-        return await self._capability_assembler.assemble(spec, context)
-
-    async def assemble(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> Any:
-        """Return the safe public inspection snapshot for a capability spec."""
-        return await self.inspect(spec, execution=execution)
-
-    async def inspect(self, spec: AgentSpec, *, execution: "ExecutionBackend | None") -> "CapabilityInspection":
+    async def inspect(
+        self, spec: AgentSpec, *, execution: "ExecutionBackend | None"
+    ) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
-        tool descriptors, merged prompt sections, and any warnings. Unlike
-        :meth:`assemble` (which returns the internal CapabilityBundle), this
-        leaks no mutable internal state -- downstream tooling can rely on the
-        shape.
+        tool descriptors, merged prompt sections, and any warnings. Leaks no
+        mutable internal state (no handlers); a capability that degrades during
+        resolution surfaces as a warning. See :mod:`linktools.ai._runtime.inspection`."""
+        from ._runtime.inspection import inspect_capabilities
 
-        A capability that degrades during resolution (e.g. MCP best-effort
-        discovery) emits a SecurityDegraded event into an in-memory collector
-        rather than an EventStore (inspection must not have audit side effects);
-        those events are surfaced as warnings so inspection reflects the same
-        degradation a real run would observe."""
-        from .capability.inspection import CapabilityInspection
-        from .security.collecting_emitter import CollectingSecurityEventEmitter
-        from .security.emitter import DefaultSecurityEventSanitizer
-
-        collector = CollectingSecurityEventEmitter(
-            sanitizer=DefaultSecurityEventSanitizer())
-        bundle = await self._assemble_internal(
-            spec, execution=execution, security_event_emitter=collector)
-        inspection = CapabilityInspection.from_bundle(
-            bundle, exposure_policy=self._options.tool_exposure)
-        return dataclasses.replace(
-            inspection,
-            warnings=(
-                *inspection.warnings,
-                *_inspection_warnings_from_events(collector.security_events),
-            ),
+        return await inspect_capabilities(
+            assembler=self._capability_assembler,
+            options=self._options,
+            spec=spec,
+            execution=execution,
         )
-
-    async def resolve_swarm(self, swarm_id: str) -> "SwarmSpec":
-        """Resolve a swarm id to its SwarmSpec via the configured
-        SwarmSpecProvider. Raises SwarmError when no swarm provider is
-        configured."""
-        bundle = self._provider_bundle
-        if bundle is None or bundle.swarms is None:
-            raise SwarmError("no SwarmSpecProvider configured")
-        return await bundle.swarms.get(swarm_id)
-
-    async def resolve_agent(self, agent_id: str) -> AgentSpec:
-        """Resolve an agent id to its AgentSpec via the configured
-        AgentSpecProvider. Raises CapabilityResolutionError when no agent
-        provider is configured."""
-        bundle = self._provider_bundle
-        if bundle is None or bundle.agents is None:
-            raise CapabilityResolutionError("no AgentSpecProvider configured")
-        return await bundle.agents.get(agent_id)
 
     async def __aenter__(self) -> "Runtime":
         return self
+
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.aclose()
 
@@ -403,43 +154,49 @@ class Runtime:
             await self._mcp_connection_manager.close()
             self._mcp_connection_manager = None
 
-    async def run(self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
-                  session_id: "str | None" = None,
-                  run_id: "str | None" = None,
-                  user_id: "str | None" = None,
-                  tenant_id: "str | None" = None,
-                  agents: "Mapping[str, AgentSpec] | None" = None):
-        resolved_session_id = session_id or str(uuid.uuid4())
-        if session_id is not None:
-            existing = await self.storage.sessions.get(session_id)
-            if existing is None:
-                raise SessionError(f"session not found: {session_id}")
-        else:
-            now = datetime.now(timezone.utc)
-            await self.storage.sessions.create(SessionRecord(
-                id=resolved_session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1,
-                created_at=now, updated_at=now))
+    async def run(
+        self,
+        spec: "AgentSpec | SwarmSpec",
+        prompt: str,
+        *,
+        session_id: "str | None" = None,
+        run_id: "str | None" = None,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
+        agents: "Mapping[str, AgentSpec] | None" = None,
+    ):
+        from ._runtime.lifecycle import create_run_context, resolve_session
 
+        resolved_session_id = await resolve_session(self.storage, session_id)
         resolved_run_id = run_id or str(uuid.uuid4())
 
         if isinstance(spec, SwarmSpec):
             if agents is None:
-                raise SwarmError(
-                    "agents mapping is required to run a SwarmSpec"
-                )
-            context = RunContext(
-                run_id=resolved_run_id, root_run_id=resolved_run_id, parent_run_id=None,
-                session_id=resolved_session_id, runnable_id=spec.id, runnable_type=RunnableType.SWARM,
-                user_id=user_id, tenant_id=tenant_id, workspace=None)
+                raise SwarmError("agents mapping is required to run a SwarmSpec")
+            context = create_run_context(
+                run_id=resolved_run_id,
+                session_id=resolved_session_id,
+                runnable_id=spec.id,
+                runnable_type=RunnableType.SWARM,
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
             return await self.swarm_runner.run(
-                spec, RunInput(prompt=prompt), context, agents=agents,
+                spec,
+                RunInput(prompt=prompt),
+                context,
+                agents=agents,
             )
 
         compiled = await self.compiler.compile(spec)
-        context = RunContext(
-            run_id=resolved_run_id, root_run_id=resolved_run_id, parent_run_id=None,
-            session_id=resolved_session_id, runnable_id=spec.id, runnable_type=RunnableType.AGENT,
-            user_id=user_id, tenant_id=tenant_id, workspace=None)
+        context = create_run_context(
+            run_id=resolved_run_id,
+            session_id=resolved_session_id,
+            runnable_id=spec.id,
+            runnable_type=RunnableType.AGENT,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
         return await self.runner.run(compiled, RunInput(prompt=prompt), context)
 
     async def cancel(self, run_id: str) -> None:
@@ -472,7 +229,9 @@ class Runtime:
         if record is None:
             raise RunNotFoundError(f"run not found: {run_id}")
         if record.status in (
-            RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
         ):
             return
 
@@ -487,7 +246,8 @@ class Runtime:
 
             try:
                 await self.storage.runs.transition(
-                    run_id, RunStatus.CANCELLING,
+                    run_id,
+                    RunStatus.CANCELLING,
                     expected_version=record.version,
                 )
             except RunConflictError:
@@ -495,7 +255,9 @@ class Runtime:
                 if fresh is None:
                     raise RunNotFoundError(f"run not found: {run_id}")
                 if fresh.status in (
-                    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED,
+                    RunStatus.SUCCEEDED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
                 ):
                     return
                 if fresh.status == RunStatus.CANCELLING:
@@ -506,11 +268,16 @@ class Runtime:
             await self.run_controller.cancel(run_id)
         else:
             await self.storage.runs.transition(
-                run_id, RunStatus.CANCELLED, expected_version=record.version,
+                run_id,
+                RunStatus.CANCELLED,
+                expected_version=record.version,
             )
 
     async def run_stream(
-        self, spec: "AgentSpec | SwarmSpec", prompt: str, *,
+        self,
+        spec: "AgentSpec | SwarmSpec",
+        prompt: str,
+        *,
         session_id: "str | None" = None,
         run_id: "str | None" = None,
         user_id: "str | None" = None,
@@ -519,32 +286,33 @@ class Runtime:
         """Streaming variant of :meth:`run`. Only ``AgentSpec`` is supported --
         a ``SwarmSpec`` raises :class:`SwarmError` because swarm streaming is not
         implemented. Session resolution mirrors :meth:`run` exactly."""
-        resolved_session_id = session_id or str(uuid.uuid4())
-        if session_id is not None:
-            existing = await self.storage.sessions.get(session_id)
-            if existing is None:
-                raise SessionError(f"session not found: {session_id}")
-        else:
-            now = datetime.now(timezone.utc)
-            await self.storage.sessions.create(SessionRecord(
-                id=resolved_session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1,
-                created_at=now, updated_at=now))
+        from ._runtime.lifecycle import create_run_context, resolve_session
 
+        resolved_session_id = await resolve_session(self.storage, session_id)
         resolved_run_id = run_id or str(uuid.uuid4())
 
         if isinstance(spec, SwarmSpec):
             raise SwarmError("run_stream does not support SwarmSpec")
 
         compiled = await self.compiler.compile(spec)
-        context = RunContext(
-            run_id=resolved_run_id, root_run_id=resolved_run_id, parent_run_id=None,
-            session_id=resolved_session_id, runnable_id=spec.id, runnable_type=RunnableType.AGENT,
-            user_id=user_id, tenant_id=tenant_id, workspace=None)
-        async for event in self.runner.run_stream(compiled, RunInput(prompt=prompt), context):
+        context = create_run_context(
+            run_id=resolved_run_id,
+            session_id=resolved_session_id,
+            runnable_id=spec.id,
+            runnable_type=RunnableType.AGENT,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        async for event in self.runner.run_stream(
+            compiled, RunInput(prompt=prompt), context
+        ):
             yield event
 
     async def resume(
-        self, run_id: str, spec: "AgentSpec", *,
+        self,
+        run_id: str,
+        spec: "AgentSpec",
+        *,
         user_id: "str | None" = None,
         tenant_id: "str | None" = None,
     ) -> "AsyncIterator[dict]":
@@ -556,7 +324,7 @@ class Runtime:
         dict-event shape ``run_stream`` yields. Raises :class:`RunNotFoundError`
         when the run/checkpoint does not exist; :class:`InvalidRunTransitionError`
         when the run is not WAITING_APPROVAL."""
-        from .agent.checkpoint_io import deserialize_messages
+        from .agent.checkpoint import deserialize_messages
         from .errors import InvalidRunTransitionError, RunNotFoundError
         from .run.models import RunStatus
 
@@ -572,115 +340,31 @@ class Runtime:
             raise RunNotFoundError(f"no checkpoint for run: {run_id}")
         messages = deserialize_messages(checkpoint.payload)
         await self.storage.runs.transition(
-            run_id, RunStatus.RUNNING, expected_version=record.version,
+            run_id,
+            RunStatus.RUNNING,
+            expected_version=record.version,
         )
         compiled = await self.compiler.compile(spec)
-        context = RunContext(
-            run_id=run_id, root_run_id=record.root_run_id,
-            parent_run_id=record.parent_run_id, session_id=record.session_id,
-            runnable_id=record.runnable_id, runnable_type=record.runnable_type,
-            user_id=user_id, tenant_id=tenant_id, workspace=None,
+        from ._runtime.lifecycle import create_run_context
+
+        context = create_run_context(
+            run_id=run_id,
+            session_id=record.session_id,
+            runnable_id=record.runnable_id,
+            runnable_type=record.runnable_type,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            root_run_id=record.root_run_id,
+            parent_run_id=record.parent_run_id,
         )
         yield {"type": "resumed", "run_id": run_id}
         async for event in self.runner.run_stream(
-            compiled, RunInput(prompt=""), context, message_history=messages,
+            compiled,
+            RunInput(prompt=""),
+            context,
+            message_history=messages,
         ):
             yield event
-
-
-def _make_runtime_subagent_executor(*, storage: Storage, compiler: AgentCompiler,
-                                    runner_provider: "Callable[[], AgentRunner]"):
-    """Build a SubagentExecutor that runs a resolved child AgentSpec under a
-    parent run: creates a child session (parent_id = parent session), mints a
-    child run recording parent_run_id / root_run_id, delegates to the runner
-    (bounded by timeout_seconds), and returns a structured SubagentResult.
-
-    ``runner_provider`` resolves the runner LAZILY (called inside ``execute``)
-    so Runtime.build can construct the runner with its assembler before the
-    subagent executor references it -- breaking the
-    runner→assembler→provider→executor→runner cycle without post-build private
-    mutation. Depth is tracked via the ``_CURRENT_DEPTH`` contextvar: the child
-    run sees parent_depth + 1, so SubagentProvider.enforce_depth bounds the full
-    chain (the token is reset on return so parallel/sibling calls are
-    unaffected)."""
-    from .subagent.runner import _CURRENT_DEPTH
-
-    async def execute(*, agent_spec, task, context, parent, scope, timeout_seconds):
-        parent_run_id = parent.run_id if parent is not None else None
-        parent_session_id = parent.session_id if parent is not None else None
-        child_session = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        await storage.sessions.create(SessionRecord(
-            id=child_session, parent_id=parent_session_id,
-            status=SessionStatus.ACTIVE, version=1,
-            created_at=now, updated_at=now,
-        ))
-        child_run = str(uuid.uuid4())
-        effective_root = (parent.root_run_id if parent is not None else None) or parent_run_id or child_run
-        run_ctx = RunContext(
-            run_id=child_run, root_run_id=effective_root, parent_run_id=parent_run_id,
-            session_id=child_session, runnable_id=agent_spec.id,
-            runnable_type=RunnableType.AGENT,
-            user_id=parent.user_id if parent is not None else None,
-            tenant_id=parent.tenant_id if parent is not None else None,
-            workspace=parent.workspace if parent is not None else None,
-        )
-        scope_dict = None
-        if scope is not None:
-            scope_dict = {
-                "package_id": scope.package_id,
-                "package_kind": scope.package_kind,
-            }
-
-        async def _drive():
-            compiled = await compiler.compile(agent_spec)
-            return await runner_provider().run(compiled, RunInput(prompt=task), run_ctx)
-
-        # Increment depth for the child run; reset on return so siblings/parents
-        # keep their own depth value.
-        from .events.payloads import SubagentCompleted, SubagentErrored, SubagentStarted
-
-        async def _evt(payload):
-            await storage.events.append(
-                stream_id=child_run, run_id=child_run, root_run_id=effective_root,
-                parent_run_id=parent_run_id, session_id=child_session,
-                runnable_id=agent_spec.id, payload=payload,
-            )
-
-        token = _CURRENT_DEPTH.set(_CURRENT_DEPTH.get() + 1)
-        await _evt(SubagentStarted(
-            agent_id=agent_spec.id, parent_run_id=parent_run_id,
-            scope=scope_dict.get("package_id") if scope_dict else None,
-        ))
-        try:
-            if timeout_seconds is not None:
-                result = await asyncio.wait_for(_drive(), timeout=timeout_seconds)
-            else:
-                result = await _drive()
-            await _evt(SubagentCompleted(agent_id=agent_spec.id, run_id=child_run, status="succeeded"))
-            return SubagentResult(
-                agent_id=agent_spec.id, scope=scope_dict,
-                session_id=child_session, run_id=child_run,
-                status="succeeded", output=getattr(result, "output", None),
-            )
-        except asyncio.TimeoutError:
-            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=f"timeout after {timeout_seconds}s"))
-            return SubagentResult(
-                agent_id=agent_spec.id, scope=scope_dict,
-                session_id=child_session, run_id=child_run,
-                status="failed", error={"reason": f"timeout after {timeout_seconds}s"},
-            )
-        except Exception as exc:  # child failures surface as structured errors
-            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=str(exc)))
-            return SubagentResult(
-                agent_id=agent_spec.id, scope=scope_dict,
-                session_id=child_session, run_id=child_run,
-                status="failed", error={"reason": str(exc)},
-            )
-        finally:
-            _CURRENT_DEPTH.reset(token)
-
-    return execute
 
 
 # re-export for tooling that imports Runtime alongside these types

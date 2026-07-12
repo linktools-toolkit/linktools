@@ -26,7 +26,9 @@ def load_yaml_file(path: Path, *, resolve_env: bool = False) -> "dict[str, objec
     return load_yaml_text(text, source=str(path), resolve_env=resolve_env)
 
 
-def load_yaml_text(text: str, source: str = "<yaml>", *, resolve_env: bool = False) -> "dict[str, object]":
+def load_yaml_text(
+    text: str, source: str = "<yaml>", *, resolve_env: bool = False
+) -> "dict[str, object]":
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{source} must contain a YAML object")
@@ -35,7 +37,9 @@ def load_yaml_text(text: str, source: str = "<yaml>", *, resolve_env: bool = Fal
     return data
 
 
-def load_markdown_text(text: str, source: str = "<md>") -> "tuple[dict[str, object], str]":
+def load_markdown_text(
+    text: str, source: str = "<md>"
+) -> "tuple[dict[str, object], str]":
     """Parse Markdown text with optional YAML frontmatter."""
     if text.startswith("---\n"):
         splits = text.split("---", 2)

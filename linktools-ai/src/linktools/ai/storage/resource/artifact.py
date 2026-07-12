@@ -28,16 +28,28 @@ class ArtifactService:
         content_type: "str | None" = None,
         metadata: "Mapping[str, object] | None" = None,
     ) -> Resource:
-        path = self._path(tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name)
+        path = self._path(
+            tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name
+        )
         return await self._resources.put(
-            path, content, options=WriteOptions(content_type=content_type, metadata=metadata or {})
+            path,
+            content,
+            options=WriteOptions(content_type=content_type, metadata=metadata or {}),
         )
 
-    async def get(self, *, tenant_id: str, run_id: str, artifact_name: str) -> "Resource | None":
-        path = self._path(tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name)
+    async def get(
+        self, *, tenant_id: str, run_id: str, artifact_name: str
+    ) -> "Resource | None":
+        path = self._path(
+            tenant_id=tenant_id, run_id=run_id, artifact_name=artifact_name
+        )
         return await self._resources.get(path)
 
-    async def list_for_run(self, *, tenant_id: str, run_id: str) -> "tuple[ResourceInfo, ...]":
+    async def list_for_run(
+        self, *, tenant_id: str, run_id: str
+    ) -> "tuple[ResourceInfo, ...]":
         prefix = ResourcePath(f"/artifacts/{tenant_id}/{run_id}")
-        page = await self._resources.propfind(prefix, depth=Depth.ONE, limit=1000, cursor=None)
+        page = await self._resources.propfind(
+            prefix, depth=Depth.ONE, limit=1000, cursor=None
+        )
         return page.items

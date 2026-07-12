@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/policy/test_engine.py"""
+
 import pytest
 
-from linktools.ai.policy.engine import PolicyDecision, PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
+from linktools.ai.policy.engine import (
+    PolicyDecision,
+    PolicyDecisionKind,
+    PolicyEngine,
+    ToolContext,
+    ToolRequest,
+)
 
 
 class _AllowRule:
     async def evaluate(self, request, context):
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="allow-rule", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="allow-rule", reason=None
+        )
 
 
 class _DenyRule:
     async def evaluate(self, request, context):
-        return PolicyDecision(kind=PolicyDecisionKind.DENY, rule_id="deny-rule", reason="blocked")
+        return PolicyDecision(
+            kind=PolicyDecisionKind.DENY, rule_id="deny-rule", reason="blocked"
+        )
 
 
 class _ApprovalRule:
     async def evaluate(self, request, context):
-        return PolicyDecision(kind=PolicyDecisionKind.REQUIRE_APPROVAL, rule_id="approval-rule", reason="risky")
+        return PolicyDecision(
+            kind=PolicyDecisionKind.REQUIRE_APPROVAL,
+            rule_id="approval-rule",
+            reason="risky",
+        )
 
 
 def _request() -> ToolRequest:

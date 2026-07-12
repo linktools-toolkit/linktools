@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Policy package: enums, ToolPolicyMetadata, the PolicyRule Protocol and its
 decision/request/context types, plus the rule modules (permission/risk/path/
-network/approval/command) composed by PolicyEngine. """
+network/approval/command) composed by PolicyEngine."""
 
 from .approval import ApprovalRule
 from .command import CommandRule

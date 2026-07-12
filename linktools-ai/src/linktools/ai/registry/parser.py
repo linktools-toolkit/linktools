@@ -22,7 +22,9 @@ def parse_yaml_text(text: str, *, source: str = "<yaml>") -> "dict[str, Any]":
         raise RegistryParseError(f"{source}: malformed YAML: {exc}") from exc
 
 
-def parse_markdown_text(text: str, *, source: str = "<md>") -> "tuple[dict[str, Any], str]":
+def parse_markdown_text(
+    text: str, *, source: str = "<md>"
+) -> "tuple[dict[str, Any], str]":
     try:
         return load_markdown_text(text, source)
     except Exception as exc:
@@ -175,8 +177,13 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
             config = item.get("config") or {}
             if not isinstance(config, dict):
                 raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
-            refs.append(ToolRef(name=str(item["name"]), kind=str(kind) if kind else None,
-                                config=config))
+            refs.append(
+                ToolRef(
+                    name=str(item["name"]),
+                    kind=str(kind) if kind else None,
+                    config=config,
+                )
+            )
         else:
             raise InvalidSpecError(f"invalid tool ref: {item!r}")
     return tuple(refs)
@@ -184,7 +191,7 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
 
 def _tool_ref_from_string(text: str) -> Any:
     """Split a 'kind:name' tool string; a bare name keeps kind None (resolver
-    treats it as builtin) so legacy ``tools: [file, terminal]`` is unchanged."""
+    treats it as builtin) so prior ``tools: [file, terminal]`` is unchanged."""
     from ..agent.spec import ToolRef
 
     if ":" in text:
@@ -198,3 +205,89 @@ def _tool_ref_from_string(text: str) -> Any:
     if not name:
         raise InvalidSpecError(f"invalid tool ref: {text!r}")
     return ToolRef(name=name)
+
+
+class StrictConfigReader:
+    """Strict, unknown-field-rejecting reader over a parsed config mapping (spec
+    §13.1). Centralizes the primitive parsing every registry entity needs
+    (bool / int / str / string-tuple / mapping) so each entity stops rolling its
+    own ``_parse_bool`` / ``_validate_unknown``. Init rejects unknown keys."""
+
+    def __init__(self, payload, *, allowed, context):
+        self._payload = payload
+        self._context = context
+        unknown = sorted(set(payload) - set(allowed))
+        if unknown:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{context}: unknown fields: {', '.join(unknown)}")
+
+    def required_str(self, name):
+        value = self._payload[name]
+        if not isinstance(value, str):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a string")
+        return value
+
+    def optional_str(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a string")
+        return value
+
+    def bool(self, name, default=None):
+        if name not in self._payload:
+            return default
+        value = self._payload[name]
+        if not isinstance(value, bool):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a boolean")
+        return value
+
+    def non_negative_int(self, name, default=None):
+        if name not in self._payload:
+            return default
+        value = self._payload[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(
+                f"{self._context}: {name} must be a non-negative integer"
+            )
+        return value
+
+    def positive_number(self, name, default=None):
+        if name not in self._payload:
+            return default
+        value = self._payload[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a positive number")
+        return float(value)
+
+    def string_tuple(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return ()
+        if not isinstance(value, (list, tuple)):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a list")
+        return tuple(str(item) for item in value)
+
+    def mapping(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a mapping")
+        return dict(value)

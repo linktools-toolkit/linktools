@@ -14,7 +14,6 @@ RunController.cancel within the same event loop. Cross-process cancellation
 goes through the database (CANCELLING status) and is observed by the worker
 polling ``raise_if_cancelled()`` -- the token is the in-process fast path."""
 
-
 import asyncio
 
 

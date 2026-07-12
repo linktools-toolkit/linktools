@@ -95,6 +95,7 @@ class SqlAlchemyIdempotencyStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+
         return await self._execute_in_session(_do)
 
     # -- write ---------------------------------------------------------
@@ -147,8 +148,10 @@ class SqlAlchemyIdempotencyStore:
                 self._session.add(_row())
                 await self._session.flush()
             else:
+
                 async def _insert(session):
                     session.add(_row())
+
                 await self._execute_in_session(_insert)
             return None
         except IntegrityError as exc:
@@ -185,6 +188,7 @@ class SqlAlchemyIdempotencyStore:
             row.result_json = json.dumps(result, default=str)
             row.error_text = None
             row.completed_at = datetime.now(timezone.utc)
+
         await self._execute_in_session(_do)
 
     async def fail(self, scope: str, key: str, error: str) -> None:
@@ -202,4 +206,5 @@ class SqlAlchemyIdempotencyStore:
             row.result_json = None
             row.error_text = error
             row.completed_at = datetime.now(timezone.utc)
+
         await self._execute_in_session(_do)

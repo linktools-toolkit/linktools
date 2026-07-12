@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/resource/test_path.py"""
+
 import pytest
 
 from linktools.ai.errors import InvalidResourcePathError
@@ -8,7 +9,10 @@ from linktools.ai.storage.resource.path import ResourcePath
 
 
 def test_normalizes_repeated_and_trailing_slashes():
-    assert ResourcePath("//agents//security//agent.md/").value == "/agents/security/agent.md"
+    assert (
+        ResourcePath("//agents//security//agent.md/").value
+        == "/agents/security/agent.md"
+    )
 
 
 def test_equality_and_hash_based_on_normalized_value():

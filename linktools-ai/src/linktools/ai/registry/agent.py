@@ -9,6 +9,7 @@ from typing import Any
 from ..agent.spec import AgentSpec, MiddlewareRef, PromptSpec
 from ..errors import InvalidSpecError, RegistryNotFoundError
 from .parser import (
+    StrictConfigReader,
     SpecLoader,
     parse_markdown_text,
     parse_model_policy,
@@ -40,7 +41,9 @@ def _parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
 
 def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> AgentSpec:
     """Build an AgentSpec from a parsed frontmatter dict + markdown body."""
-    name = payload.get("name") or agent_id
+    allowed = {"name", "model", "tools", "sections", "middleware", "metadata"}
+    reader = StrictConfigReader(payload, allowed=allowed, context=f"agent {agent_id}")
+    name = reader.optional_str("name") or agent_id
     model_payload = payload.get("model")
     if not isinstance(model_payload, dict):
         raise InvalidSpecError(f"agent {agent_id}: 'model' must be a mapping")

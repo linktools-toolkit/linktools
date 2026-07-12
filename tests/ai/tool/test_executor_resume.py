@@ -14,6 +14,7 @@ Covers three branches:
    ``ToolApprovalRequiredError``.
 3. Matching tool_call_id but status PENDING (not yet approved) -> ``check()``
    still raises (resume must wait for an actual approve())."""
+
 import asyncio
 import dataclasses
 
@@ -132,9 +133,7 @@ def test_check_allows_through_when_already_approved():
     (run_id, tool_call_id) is in the store, so ``check()`` returns without
     raising AND does not persist a new PENDING request."""
     store = _Store()
-    approved = _approved_request(
-        run_id="run-123", tool_call_id="tcid-XYZ"
-    )
+    approved = _approved_request(run_id="run-123", tool_call_id="tcid-XYZ")
     store._by_id[approved.id] = approved
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(_Require(),)),
@@ -158,8 +157,8 @@ def test_check_allows_through_when_already_approved():
 
 def test_check_raises_when_no_matching_approval():
     """Branch 2: no matching approval at all -> ``check()`` still raises
-    ``ToolApprovalRequiredError`` and persists a PENDING request (the normal
-   require-approval flow)."""
+     ``ToolApprovalRequiredError`` and persists a PENDING request (the normal
+    require-approval flow)."""
     store = _Store()
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(_Require(),)),

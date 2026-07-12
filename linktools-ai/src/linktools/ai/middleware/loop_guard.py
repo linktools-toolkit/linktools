@@ -13,7 +13,10 @@ from .base import Middleware
 
 
 def _signature(request: Any) -> str:
-    return json.dumps({"tool_name": request.tool_name, "arguments": dict(request.arguments)}, sort_keys=True)
+    return json.dumps(
+        {"tool_name": request.tool_name, "arguments": dict(request.arguments)},
+        sort_keys=True,
+    )
 
 
 class LoopGuardMiddleware(Middleware):

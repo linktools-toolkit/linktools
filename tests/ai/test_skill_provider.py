@@ -5,8 +5,9 @@ authorization boundary that never leaks unauthorized skill content."""
 
 import pytest
 
-from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.errors import SkillNotFoundError
 from linktools.ai.skill import SkillProvider
 
@@ -33,15 +34,25 @@ class _SkillSrc:
 
 
 def _src():
-    return _SkillSrc({
-        "sql-analysis": _Spec("sql-analysis", "Analyze SQL logic.", "FULL SQL INSTRUCTIONS",
-                              metadata={"tags": ["audit"]}),
-        "incident-review": _Spec("incident-review", "Review incidents.", "FULL INCIDENT INSTRUCTIONS"),
-    })
+    return _SkillSrc(
+        {
+            "sql-analysis": _Spec(
+                "sql-analysis",
+                "Analyze SQL logic.",
+                "FULL SQL INSTRUCTIONS",
+                metadata={"tags": ["audit"]},
+            ),
+            "incident-review": _Spec(
+                "incident-review", "Review incidents.", "FULL INCIDENT INSTRUCTIONS"
+            ),
+        }
+    )
 
 
 def _ctx():
-    return CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy())
+    return CapabilityContext(
+        agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+    )
 
 
 @pytest.mark.asyncio
@@ -60,8 +71,12 @@ async def test_skill_wildcard_injects_catalog_without_full_content():
 async def test_skill_wildcard_read_skill_allowed_for_all():
     provider = SkillProvider(_src())
     bundle = await provider.resolve(CapabilityRef("skill", "*"), _ctx())
-    read_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
-                   if md.descriptor.name == "read_skill")
+    read_fn = next(
+        md.handler
+        for c in bundle.tool_contributions
+        for md in c.tools
+        if md.descriptor.name == "read_skill"
+    )
     out = await read_fn("sql-analysis")
     assert out["content"] == "FULL SQL INSTRUCTIONS"
 
@@ -70,8 +85,12 @@ async def test_skill_wildcard_read_skill_allowed_for_all():
 async def test_skill_single_id_only_authorized_for_that_skill():
     provider = SkillProvider(_src())
     bundle = await provider.resolve(CapabilityRef("skill", "sql-analysis"), _ctx())
-    list_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
-                   if md.descriptor.name == "list_skills")
+    list_fn = next(
+        md.handler
+        for c in bundle.tool_contributions
+        for md in c.tools
+        if md.descriptor.name == "list_skills"
+    )
     listing = await list_fn()
     ids = {s["id"] for s in listing["skills"]}
     assert ids == {"sql-analysis"}
@@ -81,8 +100,12 @@ async def test_skill_single_id_only_authorized_for_that_skill():
 async def test_skill_unauthorized_read_does_not_leak():
     provider = SkillProvider(_src())
     bundle = await provider.resolve(CapabilityRef("skill", "sql-analysis"), _ctx())
-    read_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
-                   if md.descriptor.name == "read_skill")
+    read_fn = next(
+        md.handler
+        for c in bundle.tool_contributions
+        for md in c.tools
+        if md.descriptor.name == "read_skill"
+    )
     with pytest.raises(SkillNotFoundError):
         await read_fn("incident-review")
 
@@ -96,21 +119,30 @@ async def test_skill_single_does_not_inject_catalog():
 
 @pytest.mark.asyncio
 async def test_skill_catalog_disabled_when_prompt_catalog_off():
-    ctx = CapabilityContext(agent_id="a1",
-                            exposure_policy=CapabilityToolExposurePolicy(expose_prompt_catalog=False))
+    ctx = CapabilityContext(
+        agent_id="a1",
+        exposure_policy=CapabilityToolExposurePolicy(expose_prompt_catalog=False),
+    )
     provider = SkillProvider(_src())
     bundle = await provider.resolve(CapabilityRef("skill", "*"), ctx)
     assert "skills" not in bundle.prompt_sections
     # Tools are still exposed (they are Level-1 discovery, gated separately).
-    assert any(md.descriptor.name == "list_skills"
-               for c in bundle.tool_contributions for md in c.tools)
+    assert any(
+        md.descriptor.name == "list_skills"
+        for c in bundle.tool_contributions
+        for md in c.tools
+    )
 
 
 @pytest.mark.asyncio
 async def test_skill_list_filters_by_query():
     provider = SkillProvider(_src())
     bundle = await provider.resolve(CapabilityRef("skill", "*"), _ctx())
-    list_fn = next(md.handler for c in bundle.tool_contributions for md in c.tools
-                   if md.descriptor.name == "list_skills")
+    list_fn = next(
+        md.handler
+        for c in bundle.tool_contributions
+        for md in c.tools
+        if md.descriptor.name == "list_skills"
+    )
     listing = await list_fn(query="sql")
     assert {s["id"] for s in listing["skills"]} == {"sql-analysis"}

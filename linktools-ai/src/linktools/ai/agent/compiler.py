@@ -20,7 +20,7 @@ from ..middleware.capability import build_middleware_capability
 from ..middleware.pipeline import MiddlewarePipeline
 from ..model.router import ModelRouter
 from ..policy.engine import PolicyEngine
-from ..tool.capability import build_policy_capability
+from ..tool.pydantic import build_policy_capability
 from ..tool.executor import ToolExecutor
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
@@ -42,7 +42,7 @@ class AgentCompiler:
         # ``pause_on_approval`` threads through so a directly-constructed
         # compiler can opt into the pause path when it also builds its own
         # (rule-less) executor below -- note, however, that pausing without an
-        # ``approval_store`` wired falls through to the legacy
+        # ``approval_store`` wired falls through to the prior
         # ToolApprovalRequiredError raise. When ``tool_executor`` is explicit
         # the flag is purely informational: the supplied executor already
         # carries its own setting.
@@ -58,7 +58,9 @@ class AgentCompiler:
         capability = build_policy_capability(self._tool_executor)
         capabilities = [capability]
         if self._middleware_pipeline is not None:
-            middleware_capability = build_middleware_capability(self._middleware_pipeline)
+            middleware_capability = build_middleware_capability(
+                self._middleware_pipeline
+            )
             capabilities.append(middleware_capability)
         else:
             middleware_capability = None

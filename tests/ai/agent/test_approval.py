@@ -20,6 +20,7 @@ from linktools.ai.agent.approval import (
 
 # --- ApprovalStatus enum ----------------------------------------------------
 
+
 def test_approval_status_values():
     assert ApprovalStatus.PENDING.value == "pending"
     assert ApprovalStatus.APPROVED.value == "approved"
@@ -35,11 +36,14 @@ def test_approval_status_is_str_enum():
 
 # --- ALLOWED_APPROVAL_TRANSITIONS -------------------------------------------
 
+
 def test_allowed_transitions_pending():
-    assert ALLOWED_APPROVAL_TRANSITIONS[ApprovalStatus.PENDING] == frozenset({
-        ApprovalStatus.APPROVED,
-        ApprovalStatus.REJECTED,
-    })
+    assert ALLOWED_APPROVAL_TRANSITIONS[ApprovalStatus.PENDING] == frozenset(
+        {
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.REJECTED,
+        }
+    )
 
 
 @pytest.mark.parametrize("status", [ApprovalStatus.APPROVED, ApprovalStatus.REJECTED])
@@ -53,6 +57,7 @@ def test_allowed_transitions_values_are_frozensets():
 
 
 # --- ApprovalRequest --------------------------------------------------------
+
 
 def _full_request():
     now = datetime.now(timezone.utc)
@@ -118,6 +123,7 @@ def test_approval_request_frozen():
 
 # --- build_approval_request -------------------------------------------------
 
+
 def test_build_approval_request_defaults():
     req = build_approval_request(
         run_id="r1", tool_call_id="c1", tool_name="terminal", reason="rm -rf"
@@ -162,29 +168,32 @@ def test_build_approval_request_distinct_ids():
 
 # --- ApprovalStore Protocol -------------------------------------------------
 
+
 class _StubStore:
-    async def create(self, request):
-        ...
+    async def create(self, request): ...
 
     async def create_or_get_pending(
-        self, *, run_id, tool_call_id, tool_name, reason, arguments, approval_id,
-    ):
-        ...
+        self,
+        *,
+        run_id,
+        tool_call_id,
+        tool_name,
+        reason,
+        arguments,
+        approval_id,
+    ): ...
 
-    async def get(self, approval_id):
-        ...
+    async def get(self, approval_id): ...
 
-    async def approve(self, approval_id, *, expected_version, resolved_by):
-        ...
+    async def approve(self, approval_id, *, expected_version, resolved_by): ...
 
-    async def reject(self, approval_id, *, expected_version, resolved_by, reason=None):
-        ...
+    async def reject(
+        self, approval_id, *, expected_version, resolved_by, reason=None
+    ): ...
 
-    async def list_pending(self, run_id):
-        ...
+    async def list_pending(self, run_id): ...
 
-    async def list_for_run(self, run_id):
-        ...
+    async def list_for_run(self, run_id): ...
 
 
 def test_approval_store_is_runtime_checkable():
@@ -193,8 +202,7 @@ def test_approval_store_is_runtime_checkable():
 
 def test_approval_store_rejects_non_implementor():
     class _Incomplete:
-        async def create(self, request):
-            ...
+        async def create(self, request): ...
 
     assert not isinstance(_Incomplete(), ApprovalStore)
 
@@ -205,5 +213,12 @@ def test_approval_store_stub_methods_are_async():
     import inspect
 
     stub = _StubStore()
-    for method_name in ("create", "get", "approve", "reject", "list_pending", "list_for_run"):
+    for method_name in (
+        "create",
+        "get",
+        "approve",
+        "reject",
+        "list_pending",
+        "list_for_run",
+    ):
         assert inspect.iscoroutinefunction(getattr(stub, method_name)), method_name

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ..errors import InvalidSpecError, RegistryNotFoundError
-from .parser import SpecLoader, parse_yaml_text
+from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
 
 
 _VALID_TRANSPORTS = ("stdio", "sse", "http")
@@ -20,10 +20,8 @@ class MCPServerSpec:
     id: str
     name: str
     transport: str  # "stdio" | "sse" | "http"
-    command_or_url: str
     discovery_mode: str = "strict"  # "strict" | "best_effort"
-    # Structured transport fields. ``command_or_url`` is kept as a
-    # backward-compatible derivation; new code should read command/url directly.
+    # Structured transport fields: stdio carries `command`; sse/http carry `url`.
     command: "tuple[str, ...] | None" = None
     url: "str | None" = None
     cwd: "str | None" = None
@@ -47,13 +45,29 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
     """Build an MCPServerSpec from a parsed YAML dict.
 
     - name falls back to mcp_id when omitted.
-    - transport comes from `transport` (or legacy `type`), defaulting to stdio;
-      it must be one of {stdio, sse, http}.
-    - stdio requires `command`; sse/http require `url`. ``command_or_url`` is
-      kept as a backward-compatible string derivation.
+    - transport comes from `transport`, defaulting to stdio; it must be one of
+      {stdio, sse, http}.
+    - stdio requires `command`; sse/http require `url`.
     """
-    name = payload.get("name") or mcp_id
-    transport = str(payload.get("transport") or payload.get("type") or "stdio")
+    allowed = {
+        "name",
+        "transport",
+        "command",
+        "url",
+        "cwd",
+        "env",
+        "headers",
+        "timeout_seconds",
+        "tool_prefix",
+        "enabled_tools",
+        "disabled_tools",
+        "discovery_mode",
+        "metadata",
+    }
+    reader = StrictConfigReader(payload, allowed=allowed, context=f"mcp {mcp_id}")
+
+    name = reader.optional_str("name") or mcp_id
+    transport = reader.optional_str("transport") or "stdio"
     if transport not in _VALID_TRANSPORTS:
         raise InvalidSpecError(
             f"mcp {mcp_id}: unknown transport: {transport!r} "
@@ -61,36 +75,28 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
         )
 
     command_raw = payload.get("command")
-    url_raw = payload.get("url")
     command = _as_command_tuple(command_raw) if command_raw is not None else None
-    url = str(url_raw) if url_raw is not None else None
+    url = reader.optional_str("url")
 
     # Transport validation: stdio needs a command; sse/http need a url.
     if transport == "stdio":
         if not command:
-            raise InvalidSpecError(
-                f"mcp {mcp_id}: stdio transport requires 'command'"
-            )
-        command_or_url = " ".join(command)
+            raise InvalidSpecError(f"mcp {mcp_id}: stdio transport requires 'command'")
     else:
         if not url:
             raise InvalidSpecError(
                 f"mcp {mcp_id}: {transport} transport requires 'url'"
             )
-        command_or_url = url
 
-    env = dict(payload.get("env") or {})
-    headers = dict(payload.get("headers") or {})
-    metadata = dict(payload.get("metadata") or {})
-    cwd = payload.get("cwd")
-    timeout_raw = payload.get("timeout_seconds")
-    timeout_seconds = float(timeout_raw) if timeout_raw is not None else None
-    tool_prefix = payload.get("tool_prefix", None)
-    enabled_raw = payload.get("enabled_tools")
-    enabled_tools = tuple(str(t) for t in enabled_raw) if enabled_raw else None
-    disabled_raw = payload.get("disabled_tools") or ()
-    disabled_tools = tuple(str(t) for t in disabled_raw)
-    discovery_mode = str(payload.get("discovery_mode") or "strict")
+    env = reader.mapping("env") or {}
+    headers = reader.mapping("headers") or {}
+    metadata = reader.mapping("metadata") or {}
+    cwd = reader.optional_str("cwd")
+    timeout_seconds = reader.positive_number("timeout_seconds")
+    tool_prefix = payload.get("tool_prefix")
+    enabled_tools = reader.string_tuple("enabled_tools") or None
+    disabled_tools = reader.string_tuple("disabled_tools")
+    discovery_mode = reader.optional_str("discovery_mode") or "strict"
     if discovery_mode not in ("strict", "best_effort"):
         raise InvalidSpecError(
             f"mcp {mcp_id}: unknown discovery_mode: {discovery_mode!r} "
@@ -99,18 +105,17 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
 
     return MCPServerSpec(
         id=mcp_id,
-        name=str(name),
+        name=name,
         transport=transport,
-        command_or_url=command_or_url,
         discovery_mode=discovery_mode,
         command=command,
         url=url,
-        cwd=str(cwd) if cwd is not None else None,
+        cwd=cwd,
         env=env,
         headers=headers,
         timeout_seconds=timeout_seconds,
         tool_prefix=tool_prefix,
-        enabled_tools=enabled_tools,
+        enabled_tools=enabled_tools if enabled_tools else None,
         disabled_tools=disabled_tools,
         metadata=metadata,
     )

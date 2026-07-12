@@ -52,13 +52,22 @@ class AttemptStatus(str, Enum):
 
 ALLOWED_SWARM_TRANSITIONS: "Mapping[SwarmStatus, frozenset[SwarmStatus]]" = {
     SwarmStatus.PENDING: frozenset({SwarmStatus.RUNNING}),
-    SwarmStatus.RUNNING: frozenset({
-        SwarmStatus.PAUSED, SwarmStatus.SUCCEEDED, SwarmStatus.FAILED,
-        SwarmStatus.CANCELLING, SwarmStatus.CANCELLED,
-    }),
-    SwarmStatus.PAUSED: frozenset({
-        SwarmStatus.RUNNING, SwarmStatus.CANCELLING, SwarmStatus.CANCELLED,
-    }),
+    SwarmStatus.RUNNING: frozenset(
+        {
+            SwarmStatus.PAUSED,
+            SwarmStatus.SUCCEEDED,
+            SwarmStatus.FAILED,
+            SwarmStatus.CANCELLING,
+            SwarmStatus.CANCELLED,
+        }
+    ),
+    SwarmStatus.PAUSED: frozenset(
+        {
+            SwarmStatus.RUNNING,
+            SwarmStatus.CANCELLING,
+            SwarmStatus.CANCELLED,
+        }
+    ),
     SwarmStatus.CANCELLING: frozenset({SwarmStatus.CANCELLED, SwarmStatus.FAILED}),
     SwarmStatus.SUCCEEDED: frozenset(),
     SwarmStatus.FAILED: frozenset(),

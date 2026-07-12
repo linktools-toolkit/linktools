@@ -7,6 +7,7 @@ in-process dict. Same (scope, key) + same request hash -> handler runs
 once and the cached result is returned on subsequent calls; same (scope,
 key) + different request hash -> IdempotencyConflictError; no store
 (default None) -> no caching, the legacy per-call behavior."""
+
 import asyncio
 
 import pytest
@@ -52,7 +53,9 @@ def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_p
         return first, second
 
     first, second = asyncio.run(_run())
-    assert calls["n"] == 1, "handler must run exactly once for a repeated idempotency key"
+    assert calls["n"] == 1, (
+        "handler must run exactly once for a repeated idempotency key"
+    )
     assert first == 42 and second == 42, "both calls return the (cached) result"
 
 
@@ -131,6 +134,7 @@ def test_idempotency_key_without_store_fails_closed():
     Storage with no IdempotencyStore must fail closed -- it must NOT silently
     run non-idempotently (which would let a replayed call execute twice)."""
     from linktools.ai.errors import StorageCapabilityError
+
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
 
     async def _handler(value: int) -> int:
@@ -367,7 +371,9 @@ def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path
             )
 
     asyncio.run(_run())
-    assert calls["n"] == 1, "the conflicting (new-schema) call must not invoke the handler"
+    assert calls["n"] == 1, (
+        "the conflicting (new-schema) call must not invoke the handler"
+    )
 
 
 def test_completed_record_survives_executor_replacement(tmp_path):

@@ -1,19 +1,20 @@
-import pytest
 from types import SimpleNamespace
 
-from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.mcp.client import MCPConnectionManager
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.providers.mcp import MCPServerSpecProvider
 from linktools.ai.registry.mcp import parse_mcp_spec
-from linktools.ai.security.descriptor import ToolDescriptor
-from linktools.ai.tool.contribution import ManagedToolDefinition
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.models import ManagedToolDefinition
 
 
 def _descriptor() -> ToolDescriptor:
     return ToolDescriptor(
-        name="t", source="test", category="c", risk="low", mutating=False)
+        name="t", source="test", category="c", risk="low", mutating=False
+    )
 
 
 async def _handler(**arguments):
@@ -24,7 +25,8 @@ def test_managed_tool_definition_has_optional_description():
     md = ManagedToolDefinition(descriptor=_descriptor(), handler=_handler)
     assert md.description is None
     md2 = ManagedToolDefinition(
-        descriptor=_descriptor(), handler=_handler, description="real desc")
+        descriptor=_descriptor(), handler=_handler, description="real desc"
+    )
     assert md2.description == "real desc"
 
 
@@ -32,7 +34,8 @@ def test_toolset_uses_definition_description_when_present():
     from linktools.ai.agent.runner import _toolset_for_definition
 
     md = ManagedToolDefinition(
-        descriptor=_descriptor(), handler=_handler,
+        descriptor=_descriptor(),
+        handler=_handler,
         parameters_json_schema={"type": "object", "properties": {}},
         description="A tool that does a thing",
     )
@@ -45,7 +48,8 @@ def test_toolset_falls_back_to_descriptor_name_without_description():
     from linktools.ai.agent.runner import _toolset_for_definition
 
     md = ManagedToolDefinition(
-        descriptor=_descriptor(), handler=_handler,
+        descriptor=_descriptor(),
+        handler=_handler,
         parameters_json_schema={"type": "object", "properties": {}},
         description=None,
     )
@@ -81,6 +85,7 @@ class _InfoManager:
 
     async def get_toolset(self, spec):
         from pydantic_ai.toolsets import FunctionToolset
+
         return FunctionToolset()
 
     async def list_tools_result(self, spec):
@@ -97,7 +102,9 @@ def _resolve_bundle(manager, spec):
     async def run():
         return await provider.resolve(
             CapabilityRef("mcp", "risk"),
-            CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()),
+            CapabilityContext(
+                agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+            ),
         )
 
     return asyncio.run(run())
@@ -105,7 +112,8 @@ def _resolve_bundle(manager, spec):
 
 def test_mcp_description_flows_into_managed_definition():
     spec = parse_mcp_spec(
-        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
+        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
+    )
     info = MCPToolInfo(
         name="query_user",
         parameters_json_schema={"type": "object", "properties": {}},
@@ -120,14 +128,16 @@ def test_mcp_description_flows_into_managed_definition():
 
 def test_mcp_read_only_hint_marks_descriptor_non_mutating():
     spec = parse_mcp_spec(
-        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
+        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
+    )
 
-    ro = MCPToolInfo(name="get_user",
-                     parameters_json_schema={"type": "object"}, read_only=True)
-    rw = MCPToolInfo(name="set_user",
-                     parameters_json_schema={"type": "object"}, read_only=False)
-    unknown = MCPToolInfo(name="mystery",
-                          parameters_json_schema={"type": "object"})
+    ro = MCPToolInfo(
+        name="get_user", parameters_json_schema={"type": "object"}, read_only=True
+    )
+    rw = MCPToolInfo(
+        name="set_user", parameters_json_schema={"type": "object"}, read_only=False
+    )
+    unknown = MCPToolInfo(name="mystery", parameters_json_schema={"type": "object"})
 
     bundle = _resolve_bundle(_InfoManager([ro, rw, unknown]), spec)
     by_name = {md.descriptor.name: md for md in bundle.tool_contributions[0].tools}
@@ -142,12 +152,18 @@ def test_mcp_read_only_hint_marks_descriptor_non_mutating():
 
 
 def _live_tool(*, name="t", read_only_hint="__absent__"):
-    annotations = (None if read_only_hint == "__absent__"
-                   else SimpleNamespace(readOnlyHint=read_only_hint))
+    annotations = (
+        None
+        if read_only_hint == "__absent__"
+        else SimpleNamespace(readOnlyHint=read_only_hint)
+    )
     return SimpleNamespace(
-        name=name, description="d",
+        name=name,
+        description="d",
         inputSchema={"type": "object", "properties": {}},
-        annotations=annotations, metadata={})
+        annotations=annotations,
+        metadata={},
+    )
 
 
 def test_convert_tool_info_reads_read_only_hint_true():

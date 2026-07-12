@@ -72,13 +72,17 @@ _NOW = datetime.now(timezone.utc)
 
 # --- helpers ----------------------------------------------------------------
 
+
 def _make_model(output_text: str) -> FunctionModel:
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(content=output_text)])
+
     return FunctionModel(_fn)
 
 
-def _make_model_with_usage(output_text: str, *, input_tokens: int, output_tokens: int) -> FunctionModel:
+def _make_model_with_usage(
+    output_text: str, *, input_tokens: int, output_tokens: int
+) -> FunctionModel:
     """Variant of _make_model that also reports token usage on each response --
     needed for max_total_tokens enforcement (the swarm accumulates
     RunResult.token_usage which AgentRunner populates from run_result.usage)."""
@@ -88,6 +92,7 @@ def _make_model_with_usage(output_text: str, *, input_tokens: int, output_tokens
 
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(content=output_text)], usage=usage)
+
     return FunctionModel(_fn)
 
 
@@ -103,7 +108,8 @@ def _build_compiler(*outputs: str) -> AgentCompiler:
 
 def _agent_spec(agent_id: str, model_type: str) -> AgentSpec:
     return AgentSpec(
-        id=agent_id, name=agent_id,
+        id=agent_id,
+        name=agent_id,
         model=ModelPolicy(primary=model_type),
         instructions=PromptSpec(instructions=f"you are {agent_id}"),
         output_schema=str,
@@ -112,8 +118,14 @@ def _agent_spec(agent_id: str, model_type: str) -> AgentSpec:
 
 def _limits(**overrides) -> SwarmLimits:
     base = dict(
-        max_rounds=10, max_tasks=50, max_delegations=20, max_depth=5,
-        max_concurrency=4, max_total_tokens=None, max_total_cost=None, timeout_seconds=None,
+        max_rounds=10,
+        max_tasks=50,
+        max_delegations=20,
+        max_depth=5,
+        max_concurrency=4,
+        max_total_tokens=None,
+        max_total_cost=None,
+        timeout_seconds=None,
     )
     base.update(overrides)
     return SwarmLimits(**base)
@@ -128,7 +140,10 @@ def _spec(
     config: "dict[str, Any] | None" = None,
 ) -> SwarmSpec:
     return SwarmSpec(
-        id="swarm-spec-1", name="test-swarm", agents=agents, coordinator=coordinator,
+        id="swarm-spec-1",
+        name="test-swarm",
+        agents=agents,
+        coordinator=coordinator,
         strategy=SwarmStrategySpec(kind=kind, config=config or {}),
         limits=limits or _limits(),
         context_policy=SwarmContextPolicy(),
@@ -150,27 +165,44 @@ class _Stores:
         self.swarm_store = FileSwarmStore(root=tmp_path / "swarm")
         self.run_controller = RunController()
         self.agent_runner = AgentRunner(
-            run_store=self.run_store, session_store=self.session_store,
-            event_store=self.event_store, checkpoint_store=self.checkpoint_store,
+            run_store=self.run_store,
+            session_store=self.session_store,
+            event_store=self.event_store,
+            checkpoint_store=self.checkpoint_store,
             run_controller=self.run_controller,
         )
 
     def seed_shared_session(self, session_id: str) -> None:
-        asyncio.run(self.session_store.create(SessionRecord(
-            id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=_NOW, updated_at=_NOW,
-        )))
+        asyncio.run(
+            self.session_store.create(
+                SessionRecord(
+                    id=session_id,
+                    parent_id=None,
+                    status=SessionStatus.ACTIVE,
+                    version=1,
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
+        )
 
 
 def _driving_context(run_id: str, session_id: str) -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None,
-        session_id=session_id, runnable_id="swarm-spec-1",
-        runnable_type=RunnableType.SWARM, user_id=None, tenant_id=None, workspace=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="swarm-spec-1",
+        runnable_type=RunnableType.SWARM,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
 # --- 1. End-to-end run() with ParallelFanOutStrategy ------------------------
+
 
 def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
     from linktools.ai.swarm.runner import SwarmRunner
@@ -183,9 +215,12 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     spec = _spec(
@@ -203,7 +238,10 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
     context = _driving_context("drive-run-1", "shared-session")
 
     async def _run():
-        return await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+        return await runner.run(
+            spec, RunInput(prompt="do the work"), context, agents=agents
+        )
+
     result = asyncio.run(_run())
 
     # aggregate contains BOTH workers' distinct strings (CONCAT).
@@ -217,6 +255,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
         messages = await stores.session_store.list_messages(context.session_id)
         events = await stores.event_store.list(context.run_id, limit=100)
         return driving, children, messages, events
+
     driving, children, messages, events = asyncio.run(_verify())
 
     # driving Run is SUCCEEDED with runnable_type=SWARM.
@@ -240,6 +279,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
 
 # --- 2. cancel(swarm_run_id) ------------------------------------------------
 
+
 def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
     from linktools.ai.swarm.runner import SwarmRunner
 
@@ -251,46 +291,93 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
     now = _NOW
 
     async def _seed():
-        await stores.run_store.create(RunRecord(
-            id="drive-run-1", root_run_id="drive-run-1", parent_run_id=None,
-            session_id="shared", runnable_id="swarm-spec-1",
-            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
-            input=RunInput(prompt="x"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_run(SwarmRun(
-            id="swarm-1", run_id="drive-run-1", round=1, status=SwarmStatus.RUNNING,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=now, updated_at=now,
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-run-1",
+                root_run_id="drive-run-1",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="x"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=1,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
         # child RunRecord in RUNNING state. Phase-5A: its id is DIFFERENT from
         # the task's id -- cancel() must locate it via task.active_run_id.
-        await stores.run_store.create(RunRecord(
-            id="child-run-1", root_run_id="drive-run-1", parent_run_id="drive-run-1",
-            session_id="swarm:swarm-1:task-1", runnable_id="worker-a",
-            runnable_type=RunnableType.AGENT, status=RunStatus.RUNNING,
-            input=RunInput(prompt="sub"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_task(SwarmTask(
-            id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
-            assigned_agent_id="worker-a", description="x", status=SwarmTaskStatus.CLAIMED,
-            dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
-            attempts=1, version=1, claimed_at=now, lease_expires_at=None,
-            created_at=now, updated_at=now,
-            active_run_id="child-run-1",
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="child-run-1",
+                root_run_id="drive-run-1",
+                parent_run_id="drive-run-1",
+                session_id="swarm:swarm-1:task-1",
+                runnable_id="worker-a",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="sub"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_task(
+            SwarmTask(
+                id="task-1",
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id="worker-a",
+                description="x",
+                status=SwarmTaskStatus.CLAIMED,
+                dependencies=(),
+                input=TaskInput(prompt="sub"),
+                result=None,
+                error=None,
+                attempts=1,
+                version=1,
+                claimed_at=now,
+                lease_expires_at=None,
+                created_at=now,
+                updated_at=now,
+                active_run_id="child-run-1",
+            )
+        )
+
     asyncio.run(_seed())
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
         agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
     async def _cancel():
         await runner.cancel("swarm-1")
+
     asyncio.run(_cancel())
 
     async def _verify():
@@ -299,6 +386,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
         # and the task.id RunRecord was never created -> cancel must NOT have
         # tried to transition it (proves cancel used active_run_id, not task.id).
         return swarm, child
+
     swarm, child = asyncio.run(_verify())
 
     assert swarm.status is SwarmStatus.CANCELLED
@@ -321,48 +409,98 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
     now = _NOW
 
     async def _seed():
-        await stores.run_store.create(RunRecord(
-            id="drive-run-2", root_run_id="drive-run-2", parent_run_id=None,
-            session_id="shared", runnable_id="swarm-spec-1",
-            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
-            input=RunInput(prompt="x"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_run(SwarmRun(
-            id="swarm-2", run_id="drive-run-2", round=1, status=SwarmStatus.RUNNING,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=now, updated_at=now,
-        ))
-        await stores.run_store.create(RunRecord(
-            id="child-run-2", root_run_id="drive-run-2", parent_run_id="drive-run-2",
-            session_id="swarm:swarm-2:task-2", runnable_id="worker-a",
-            runnable_type=RunnableType.AGENT, status=RunStatus.RUNNING,
-            input=RunInput(prompt="sub"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_task(SwarmTask(
-            id="task-2", swarm_run_id="swarm-2", parent_task_id=None,
-            assigned_agent_id="worker-a", description="x", status=SwarmTaskStatus.CLAIMED,
-            dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
-            attempts=1, version=1, claimed_at=now, lease_expires_at=None,
-            created_at=now, updated_at=now,
-            active_run_id="child-run-2",
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-run-2",
+                root_run_id="drive-run-2",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="x"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-2",
+                run_id="drive-run-2",
+                round=1,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await stores.run_store.create(
+            RunRecord(
+                id="child-run-2",
+                root_run_id="drive-run-2",
+                parent_run_id="drive-run-2",
+                session_id="swarm:swarm-2:task-2",
+                runnable_id="worker-a",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="sub"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_task(
+            SwarmTask(
+                id="task-2",
+                swarm_run_id="swarm-2",
+                parent_task_id=None,
+                assigned_agent_id="worker-a",
+                description="x",
+                status=SwarmTaskStatus.CLAIMED,
+                dependencies=(),
+                input=TaskInput(prompt="sub"),
+                result=None,
+                error=None,
+                attempts=1,
+                version=1,
+                claimed_at=now,
+                lease_expires_at=None,
+                created_at=now,
+                updated_at=now,
+                active_run_id="child-run-2",
+            )
+        )
         # Register both the driving run and the active child as "in-flight"
         # with the SAME RunController -- exactly what Runtime.build()-wired
         # SwarmRunner.run()/AgentRunner.execute() do for real runs.
         driving_task = asyncio.ensure_future(asyncio.sleep(100))
         child_task = asyncio.ensure_future(asyncio.sleep(100))
-        await stores.run_controller.register("drive-run-2", driving_task, CancellationToken())
-        await stores.run_controller.register("child-run-2", child_task, CancellationToken())
+        await stores.run_controller.register(
+            "drive-run-2", driving_task, CancellationToken()
+        )
+        await stores.run_controller.register(
+            "child-run-2", child_task, CancellationToken()
+        )
         return driving_task, child_task
 
     driving_task, child_task = asyncio.run(_seed())
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -374,6 +512,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
                 await t
             except asyncio.CancelledError:
                 pass
+
     asyncio.run(_cancel())
 
     async def _verify():
@@ -381,6 +520,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
         driving = await stores.run_store.get("drive-run-2")
         child = await stores.run_store.get("child-run-2")
         return swarm, driving, child
+
     swarm, driving, child = asyncio.run(_verify())
 
     # Real cancellation was signaled: the registered asyncio.Tasks were
@@ -406,33 +546,58 @@ def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
     now = _NOW
 
     async def _seed():
-        await stores.run_store.create(RunRecord(
-            id="drive-run-3", root_run_id="drive-run-3", parent_run_id=None,
-            session_id="shared", runnable_id="swarm-spec-1",
-            runnable_type=RunnableType.SWARM, status=RunStatus.SUCCEEDED,
-            input=RunInput(prompt="x"), result=RunResult(output="done"), error=None,
-            version=2, created_at=now, started_at=now, finished_at=now,
-        ))
-        await stores.swarm_store.create_run(SwarmRun(
-            id="swarm-3", run_id="drive-run-3", round=1, status=SwarmStatus.SUCCEEDED,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=now, updated_at=now,
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-run-3",
+                root_run_id="drive-run-3",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.SUCCEEDED,
+                input=RunInput(prompt="x"),
+                result=RunResult(output="done"),
+                error=None,
+                version=2,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-3",
+                run_id="drive-run-3",
+                round=1,
+                status=SwarmStatus.SUCCEEDED,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
     asyncio.run(_seed())
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
 
     async def _cancel():
         await runner.cancel("swarm-3")  # must be a no-op, not raise
+
     asyncio.run(_cancel())
 
     async def _verify():
         return await stores.swarm_store.get_run("swarm-3")
+
     swarm = asyncio.run(_verify())
     assert swarm.status is SwarmStatus.SUCCEEDED  # unchanged
 
@@ -446,9 +611,12 @@ def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
 
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
     assert runner._agent_runner is stores.agent_runner
@@ -460,19 +628,23 @@ def test_cancel_unknown_swarm_run_raises(tmp_path):
 
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
         agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
     async def _cancel():
         await runner.cancel("no-such-swarm")
+
     with pytest.raises(SwarmRunNotFoundError):
         asyncio.run(_cancel())
 
 
 # --- 3. Strategy exceeding max_rounds surfaces failure ----------------------
+
 
 def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
     from linktools.ai.swarm.runner import SwarmRunner
@@ -482,9 +654,12 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     # coordinator that ALWAYS emits a task -> blows past max_rounds=1.
@@ -506,6 +681,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
 
     async def _run():
         await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+
     with pytest.raises(SwarmLimitExceededError):
         asyncio.run(_run())
 
@@ -517,6 +693,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
 
 
 # --- 4. resume(swarm_run_id) after partial failure --------------------------
+
 
 def test_resume_after_partial_failure_completes(tmp_path):
     from linktools.ai.swarm.runner import SwarmRunner
@@ -531,32 +708,68 @@ def test_resume_after_partial_failure_completes(tmp_path):
     # SUCCEEDED), so resume re-enters the round loop, runs one new worker task
     # to success, then aggregates and completes.
     async def _seed():
-        await stores.run_store.create(RunRecord(
-            id="drive-run-1", root_run_id="drive-run-1", parent_run_id=None,
-            session_id="shared", runnable_id="swarm-spec-1",
-            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
-            input=RunInput(prompt="do the work"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_run(SwarmRun(
-            id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=now, updated_at=now,
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-run-1",
+                root_run_id="drive-run-1",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="do the work"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
         # one FAILED task from the interrupted attempt.
-        await stores.swarm_store.create_task(SwarmTask(
-            id="task-failed", swarm_run_id="swarm-1", parent_task_id=None,
-            assigned_agent_id="worker-a", description="crashed", status=SwarmTaskStatus.FAILED,
-            dependencies=(), input=TaskInput(prompt="crashed"), result=None,
-            error=None, attempts=1, version=1, claimed_at=now, lease_expires_at=None,
-            created_at=now, updated_at=now,
-        ))
+        await stores.swarm_store.create_task(
+            SwarmTask(
+                id="task-failed",
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id="worker-a",
+                description="crashed",
+                status=SwarmTaskStatus.FAILED,
+                dependencies=(),
+                input=TaskInput(prompt="crashed"),
+                result=None,
+                error=None,
+                attempts=1,
+                version=1,
+                claimed_at=now,
+                lease_expires_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
     asyncio.run(_seed())
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     spec = _spec(
@@ -572,6 +785,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
 
     async def _resume():
         return await runner.resume("swarm-1", spec, agents=agents)
+
     result = asyncio.run(_resume())
 
     # the new worker task ran to success -> aggregate carries its output.
@@ -582,6 +796,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
         swarm = await stores.swarm_store.get_run("swarm-1")
         tasks = await stores.swarm_store.list_tasks("swarm-1")
         return driving, swarm, tasks
+
     driving, swarm, tasks = asyncio.run(_verify())
 
     assert driving.status is RunStatus.SUCCEEDED
@@ -597,23 +812,28 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
 
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
         agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
     spec = _spec(
         kind="parallel_fan_out",
-        agents=(AgentRef("coord"),), coordinator=AgentRef("coord"),
+        agents=(AgentRef("coord"),),
+        coordinator=AgentRef("coord"),
     )
 
     async def _resume():
         await runner.resume("no-such-swarm", spec, agents={})
+
     with pytest.raises(SwarmRunNotFoundError):
         asyncio.run(_resume())
 
 
 # --- 5. SwarmLimits.timeout_seconds wraps strategy.run ----------------------
+
 
 def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
     """SwarmLimits.timeout_seconds wraps strategy.run(ctx) in asyncio.wait_for.
@@ -626,9 +846,12 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     async def slow_coordinator(swarm_run, completed, limits):
@@ -651,12 +874,14 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
 
     async def _run():
         await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+
     with pytest.raises(Exception):
         asyncio.run(_run())
 
     async def _verify():
         driving = await stores.run_store.get(context.run_id)
         return driving
+
     driving = asyncio.run(_verify())
     assert driving.status is RunStatus.FAILED
     assert driving.error is not None
@@ -681,9 +906,12 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, run_controller=stores.run_controller,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
         compiler=compiler,
     )
 
@@ -720,7 +948,9 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
         # CANCELLING FIRST, then signal the controller.
         driving = await stores.run_store.get(context.run_id)
         await stores.run_store.transition(
-            context.run_id, RunStatus.CANCELLING, expected_version=driving.version,
+            context.run_id,
+            RunStatus.CANCELLING,
+            expected_version=driving.version,
         )
         await stores.run_controller.cancel(context.run_id)
 
@@ -732,6 +962,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
     async def _verify():
         driving = await stores.run_store.get(context.run_id)
         return driving
+
     driving = asyncio.run(_verify())
     assert driving.status is RunStatus.CANCELLED, (
         f"driving run stuck at {driving.status} -- must reach CANCELLED "
@@ -740,6 +971,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
 
 
 # --- 6. SwarmLimits.max_total_tokens accumulation ---------------------------
+
 
 def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     """Two worker tasks each report input=100 + output=100 = 200 tokens; with
@@ -750,17 +982,22 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     # model-0 = coord (never runs as a worker); model-1 = worker producing usage.
     registry = ModelRegistry()
     registry.register("model-0", model=_make_model("coord-out"))
-    registry.register("model-1", model=_make_model_with_usage(
-        "worker-out", input_tokens=100, output_tokens=100))
+    registry.register(
+        "model-1",
+        model=_make_model_with_usage("worker-out", input_tokens=100, output_tokens=100),
+    )
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
 
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     spec = _spec(
@@ -778,6 +1015,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
 
     async def _run():
         await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+
     with pytest.raises(SwarmLimitExceededError) as exc_info:
         asyncio.run(_run())
     assert exc_info.value.kind == "max_total_tokens"
@@ -785,6 +1023,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     async def _verify():
         driving = await stores.run_store.get(context.run_id)
         return driving
+
     driving = asyncio.run(_verify())
     assert driving.status is RunStatus.FAILED
 
@@ -796,17 +1035,22 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
 
     registry = ModelRegistry()
     registry.register("model-0", model=_make_model("coord-out"))
-    registry.register("model-1", model=_make_model_with_usage(
-        "worker-out", input_tokens=50, output_tokens=50))
+    registry.register(
+        "model-1",
+        model=_make_model_with_usage("worker-out", input_tokens=50, output_tokens=50),
+    )
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
 
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     spec = _spec(
@@ -823,7 +1067,10 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     context = _driving_context("drive-ok", "shared-session")
 
     async def _run():
-        return await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+        return await runner.run(
+            spec, RunInput(prompt="do the work"), context, agents=agents
+        )
+
     result = asyncio.run(_run())
 
     # 2 tasks * (50 + 50) = 200 tokens accumulated, under the 1000 cap.
@@ -834,6 +1081,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
 
 
 # --- 7. Phase-5A: end-to-end active_run_id decoupling (real FileSwarmStore) ---
+
 
 def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     """End-to-end through the real FileSwarmStore: after runner.run() completes,
@@ -847,9 +1095,12 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=compiler,
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
     )
 
     spec = _spec(
@@ -867,7 +1118,10 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     context = _driving_context("drive-5a", "shared-session")
 
     async def _run():
-        return await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+        return await runner.run(
+            spec, RunInput(prompt="do the work"), context, agents=agents
+        )
+
     asyncio.run(_run())
 
     async def _verify():
@@ -879,6 +1133,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
         tasks = await stores.swarm_store.list_tasks(swarm_run_id)
         children = await stores.run_store.list_children(context.run_id)
         return tasks, children
+
     tasks, children = asyncio.run(_verify())
 
     child_ids = {c.id for c in children}
@@ -913,44 +1168,91 @@ def _seed_recover_state(
 
     async def _seed():
         # driving RunRecord (the swarm run's parent).
-        await stores.run_store.create(RunRecord(
-            id="drive-run-1", root_run_id="drive-run-1", parent_run_id=None,
-            session_id="shared", runnable_id="swarm-spec-1",
-            runnable_type=RunnableType.SWARM, status=RunStatus.RUNNING,
-            input=RunInput(prompt="x"), result=None, error=None, version=1,
-            created_at=now, started_at=now, finished_at=None,
-        ))
-        await stores.swarm_store.create_run(SwarmRun(
-            id="swarm-1", run_id="drive-run-1", round=1, status=SwarmStatus.RUNNING,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=now, updated_at=now,
-        ))
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-run-1",
+                root_run_id="drive-run-1",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.RUNNING,
+                input=RunInput(prompt="x"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=1,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
         if child_run_id is not None:
-            await stores.run_store.create(RunRecord(
-                id=child_run_id, root_run_id="drive-run-1", parent_run_id="drive-run-1",
-                session_id=f"swarm:swarm-1:{task_id}", runnable_id="worker-a",
-                runnable_type=RunnableType.AGENT, status=child_status or RunStatus.SUCCEEDED,
-                input=RunInput(prompt="sub"), result=child_result, error=child_error, version=1,
-                created_at=now, started_at=now, finished_at=now,
-            ))
-        await stores.swarm_store.create_task(SwarmTask(
-            id=task_id, swarm_run_id="swarm-1", parent_task_id=None,
-            assigned_agent_id="worker-a", description="x",
-            status=SwarmTaskStatus.CLAIMED,
-            dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
-            attempts=1, version=1, claimed_at=now, lease_expires_at=expired,
-            created_at=now, updated_at=now,
-            active_run_id=child_run_id,
-        ))
+            await stores.run_store.create(
+                RunRecord(
+                    id=child_run_id,
+                    root_run_id="drive-run-1",
+                    parent_run_id="drive-run-1",
+                    session_id=f"swarm:swarm-1:{task_id}",
+                    runnable_id="worker-a",
+                    runnable_type=RunnableType.AGENT,
+                    status=child_status or RunStatus.SUCCEEDED,
+                    input=RunInput(prompt="sub"),
+                    result=child_result,
+                    error=child_error,
+                    version=1,
+                    created_at=now,
+                    started_at=now,
+                    finished_at=now,
+                )
+            )
+        await stores.swarm_store.create_task(
+            SwarmTask(
+                id=task_id,
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id="worker-a",
+                description="x",
+                status=SwarmTaskStatus.CLAIMED,
+                dependencies=(),
+                input=TaskInput(prompt="sub"),
+                result=None,
+                error=None,
+                attempts=1,
+                version=1,
+                claimed_at=now,
+                lease_expires_at=expired,
+                created_at=now,
+                updated_at=now,
+                active_run_id=child_run_id,
+            )
+        )
+
     asyncio.run(_seed())
 
 
 def _make_runner(stores: _Stores):
     from linktools.ai.swarm.runner import SwarmRunner
+
     return SwarmRunner(
-        swarm_store=stores.swarm_store, run_store=stores.run_store,
-        session_store=stores.session_store, event_store=stores.event_store,
-        agent_runner=stores.agent_runner, compiler=_build_compiler("ok"),
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=_build_compiler("ok"),
     )
 
 
@@ -961,17 +1263,22 @@ def test_recover_completes_task_when_child_run_succeeded(tmp_path):
     stores = _Stores(tmp_path)
     child_result = RunResult(output="done", token_usage={}, metadata={})
     _seed_recover_state(
-        stores, task_id="task-1", child_run_id="child-1",
-        child_status=RunStatus.SUCCEEDED, child_result=child_result,
+        stores,
+        task_id="task-1",
+        child_run_id="child-1",
+        child_status=RunStatus.SUCCEEDED,
+        child_result=child_result,
     )
     runner = _make_runner(stores)
 
     async def _recover():
         await runner.recover("swarm-1")
+
     asyncio.run(_recover())
 
     async def _verify():
         return await stores.swarm_store.list_tasks("swarm-1")
+
     tasks = asyncio.run(_verify())
     assert tasks[0].status is SwarmTaskStatus.SUCCEEDED
     assert tasks[0].result == child_result
@@ -983,17 +1290,22 @@ def test_recover_fails_task_when_child_run_failed(tmp_path):
     stores = _Stores(tmp_path)
     child_error = RunErrorInfo(error_type="ValueError", message="boom", detail={})
     _seed_recover_state(
-        stores, task_id="task-1", child_run_id="child-1",
-        child_status=RunStatus.FAILED, child_error=child_error,
+        stores,
+        task_id="task-1",
+        child_run_id="child-1",
+        child_status=RunStatus.FAILED,
+        child_error=child_error,
     )
     runner = _make_runner(stores)
 
     async def _recover():
         await runner.recover("swarm-1")
+
     asyncio.run(_recover())
 
     async def _verify():
         return await stores.swarm_store.list_tasks("swarm-1")
+
     tasks = asyncio.run(_verify())
     assert tasks[0].status is SwarmTaskStatus.FAILED
     assert tasks[0].error == child_error
@@ -1005,17 +1317,21 @@ def test_recover_leaves_task_alone_when_child_run_still_running(tmp_path):
     re-run a side-effecting task)."""
     stores = _Stores(tmp_path)
     _seed_recover_state(
-        stores, task_id="task-1", child_run_id="child-1",
+        stores,
+        task_id="task-1",
+        child_run_id="child-1",
         child_status=RunStatus.RUNNING,
     )
     runner = _make_runner(stores)
 
     async def _recover():
         await runner.recover("swarm-1")
+
     asyncio.run(_recover())
 
     async def _verify():
         return await stores.swarm_store.list_tasks("swarm-1")
+
     tasks = asyncio.run(_verify())
     assert tasks[0].status is SwarmTaskStatus.CLAIMED
 
@@ -1024,10 +1340,13 @@ def test_recover_skips_task_with_unexpired_lease(tmp_path):
     """A task whose lease is still live is presumed being worked -- recover()
     must not touch it (contract: don't blindly re-run)."""
     from datetime import timedelta
+
     stores = _Stores(tmp_path)
     future = _NOW + timedelta(seconds=300)
     _seed_recover_state(
-        stores, task_id="task-1", child_run_id="child-1",
+        stores,
+        task_id="task-1",
+        child_run_id="child-1",
         child_status=RunStatus.SUCCEEDED,
         child_result=RunResult(output="done", token_usage={}, metadata={}),
         lease_expires_at=future,
@@ -1036,10 +1355,12 @@ def test_recover_skips_task_with_unexpired_lease(tmp_path):
 
     async def _recover():
         await runner.recover("swarm-1")
+
     asyncio.run(_recover())
 
     async def _verify():
         return await stores.swarm_store.list_tasks("swarm-1")
+
     tasks = asyncio.run(_verify())
     # Lease not expired -> recover skipped it; task is still CLAIMED.
     assert tasks[0].status is SwarmTaskStatus.CLAIMED
@@ -1047,11 +1368,13 @@ def test_recover_skips_task_with_unexpired_lease(tmp_path):
 
 def test_recover_unknown_swarm_run_raises(tmp_path):
     from linktools.ai.errors import SwarmRunNotFoundError
+
     stores = _Stores(tmp_path)
     runner = _make_runner(stores)
 
     async def _recover():
         await runner.recover("nope")
+
     with pytest.raises(SwarmRunNotFoundError):
         asyncio.run(_recover())
 
@@ -1083,27 +1406,50 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
 
     async def _scenario():
         async with _swarm_store() as swarm_store:
-            await swarm_store.create_run(SwarmRun(
-                id="swarm-1", run_id="drive-run-1", round=1, status=SwarmStatus.RUNNING,
-                version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-                created_at=now, updated_at=now,
-            ))
-            await swarm_store.create_task(SwarmTask(
-                id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
-                assigned_agent_id="worker-a", description="x",
-                status=SwarmTaskStatus.CLAIMED,
-                dependencies=(), input=TaskInput(prompt="sub"), result=None, error=None,
-                attempts=1, version=1, claimed_at=now, lease_expires_at=expired,
-                created_at=now, updated_at=now,
-                active_run_id=None,
-            ))
+            await swarm_store.create_run(
+                SwarmRun(
+                    id="swarm-1",
+                    run_id="drive-run-1",
+                    round=1,
+                    status=SwarmStatus.RUNNING,
+                    version=1,
+                    token_usage=TokenUsage(),
+                    cost=Decimal("0"),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await swarm_store.create_task(
+                SwarmTask(
+                    id="task-1",
+                    swarm_run_id="swarm-1",
+                    parent_task_id=None,
+                    assigned_agent_id="worker-a",
+                    description="x",
+                    status=SwarmTaskStatus.CLAIMED,
+                    dependencies=(),
+                    input=TaskInput(prompt="sub"),
+                    result=None,
+                    error=None,
+                    attempts=1,
+                    version=1,
+                    claimed_at=now,
+                    lease_expires_at=expired,
+                    created_at=now,
+                    updated_at=now,
+                    active_run_id=None,
+                )
+            )
             # File-backed RunStore is fine here: recover() only reads via
             # run_store.get(), and there's no child RunRecord to look up
             # (active_run_id is None -> the recover loop skips run_store.get).
             runner = SwarmRunner(
-                swarm_store=swarm_store, run_store=stores.run_store,
-                session_store=stores.session_store, event_store=stores.event_store,
-                agent_runner=stores.agent_runner, compiler=_build_compiler("ok"),
+                swarm_store=swarm_store,
+                run_store=stores.run_store,
+                session_store=stores.session_store,
+                event_store=stores.event_store,
+                agent_runner=stores.agent_runner,
+                compiler=_build_compiler("ok"),
             )
             await runner.recover("swarm-1")
             return await swarm_store.list_tasks("swarm-1")

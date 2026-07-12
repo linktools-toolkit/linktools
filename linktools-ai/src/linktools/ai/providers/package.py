@@ -22,11 +22,9 @@ if TYPE_CHECKING:
 class PackageSpecProvider(Protocol):
     """Provides CapabilityPackageSpec objects from any configuration source."""
 
-    async def list_ids(self) -> "tuple[str, ...]":
-        ...
+    async def list_ids(self) -> "tuple[str, ...]": ...
 
-    async def get(self, package_id: str) -> "CapabilityPackageSpec":
-        ...
+    async def get(self, package_id: str) -> "CapabilityPackageSpec": ...
 
 
 @runtime_checkable
@@ -41,13 +39,11 @@ class PackageResourceProvider(Protocol):
         *,
         limit: int = 50,
         cursor: "str | None" = None,
-    ) -> "ResourceListResult":
-        ...
+    ) -> "ResourceListResult": ...
 
     async def read_resource(
         self,
         ref: "ResourceRef",
         *,
         max_bytes: "int | None" = None,
-    ) -> "ResourceContent":
-        ...
+    ) -> "ResourceContent": ...

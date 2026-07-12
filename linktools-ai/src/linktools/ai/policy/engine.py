@@ -29,14 +29,21 @@ class PolicyEngine:
     def __init__(self, *, rules: "tuple[PolicyRule, ...]") -> None:
         self._rules = rules
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         approval_decision: "PolicyDecision | None" = None
         for rule in self._rules:
             decision = await rule.evaluate(request, context)
             if decision.kind == PolicyDecisionKind.DENY:
                 return decision
-            if decision.kind == PolicyDecisionKind.REQUIRE_APPROVAL and approval_decision is None:
+            if (
+                decision.kind == PolicyDecisionKind.REQUIRE_APPROVAL
+                and approval_decision is None
+            ):
                 approval_decision = decision
         if approval_decision is not None:
             return approval_decision
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="default", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="default", reason=None
+        )

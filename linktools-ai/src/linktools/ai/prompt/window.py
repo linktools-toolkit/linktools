@@ -22,8 +22,7 @@ class SessionWindowPolicy(Protocol):
         self,
         messages: "Sequence[SessionMessage]",
         model_policy: "ModelPolicy",
-    ) -> "Sequence[SessionMessage]":
-        ...
+    ) -> "Sequence[SessionMessage]": ...
 
 
 class NoopWindowPolicy:
@@ -44,7 +43,7 @@ class RecentWindowPolicy:
     async def select_messages(self, messages, model_policy):  # type: ignore[no-untyped-def]
         if len(messages) <= self._max:
             return list(messages)
-        return list(messages[-self._max:])
+        return list(messages[-self._max :])
 
 
 class TokenBudgetWindowPolicy:
@@ -52,7 +51,9 @@ class TokenBudgetWindowPolicy:
     implementation is deferred until a token estimator is wired in."""
 
     def __init__(self, *args, **kwargs) -> None:
-        raise NotImplementedError("TokenBudgetWindowPolicy is reserved for a later phase")
+        raise NotImplementedError(
+            "TokenBudgetWindowPolicy is reserved for a later phase"
+        )
 
     async def select_messages(self, messages, model_policy):  # pragma: no cover
         raise NotImplementedError

@@ -45,16 +45,30 @@ class RunnableType(str, Enum):
 # (those runs never have an in-flight task). Document and keep them.
 ALLOWED_RUN_TRANSITIONS: "Mapping[RunStatus, frozenset]" = {
     RunStatus.PENDING: frozenset({RunStatus.RUNNING}),
-    RunStatus.RUNNING: frozenset({
-        RunStatus.WAITING_APPROVAL, RunStatus.PAUSED, RunStatus.SUCCEEDED,
-        RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    }),
-    RunStatus.WAITING_APPROVAL: frozenset({
-        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    }),
-    RunStatus.PAUSED: frozenset({
-        RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED,
-    }),
+    RunStatus.RUNNING: frozenset(
+        {
+            RunStatus.WAITING_APPROVAL,
+            RunStatus.PAUSED,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    ),
+    RunStatus.WAITING_APPROVAL: frozenset(
+        {
+            RunStatus.RUNNING,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    ),
+    RunStatus.PAUSED: frozenset(
+        {
+            RunStatus.RUNNING,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+        }
+    ),
     RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED}),
     RunStatus.SUCCEEDED: frozenset(),
     RunStatus.FAILED: frozenset(),

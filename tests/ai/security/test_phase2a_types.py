@@ -6,21 +6,24 @@ governance tests."""
 import asyncio
 import pytest
 
-from linktools.ai.security.descriptor import ToolDescriptor, default_risk_for_category
+from linktools.ai.tool.models import ToolDescriptor, default_risk_for_category
 from linktools.ai.security.pipeline import (
-    PipelineAction, PipelineDecision, SecurityPipeline,
-    ToolInvocationEvent, ToolResultEvent,
+    PipelineAction,
+    PipelineDecision,
 )
 from linktools.ai.errors import RunPaused, ToolDeniedError, ToolTimeoutError
-from linktools.ai.tool.contribution import ToolContribution
+from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.tool.policy import (
-    EffectiveToolPolicy, ResolvedToolPolicy, ToolInvocationContext,
-    ToolPolicyProvider, finalize_policy, merge_policies,
+    EffectiveToolPolicy,
+    ResolvedToolPolicy,
+    finalize_policy,
+    merge_policies,
 )
 
 
 # --- ToolDescriptor ---
+
 
 def test_descriptor_known_category_risk():
     assert default_risk_for_category("terminal") == "high"
@@ -34,14 +37,20 @@ def test_descriptor_unknown_category_conservative():
 
 def test_descriptor_with_capability_fields():
     d = ToolDescriptor(
-        name="read_file", source="builtin", category="file-read",
-        risk="low", mutating=False, capability_kind="builtin", capability_name="file-read",
+        name="read_file",
+        source="builtin",
+        category="file-read",
+        risk="low",
+        mutating=False,
+        capability_kind="builtin",
+        capability_name="file-read",
     )
     assert d.capability_kind == "builtin"
     assert d.capability_name == "file-read"
 
 
 # --- ResolvedToolPolicy validation ---
+
 
 def test_policy_validates_timeout():
     with pytest.raises(ValueError, match="timeout"):
@@ -77,6 +86,7 @@ def test_finalize_undeclared_policy_defaults_open_but_not_unsafe():
 
 
 # --- merge_policies ---
+
 
 def test_merge_enabled_any_false():
     result = merge_policies(
@@ -143,7 +153,9 @@ def test_merge_max_retries_survives_undeclared_layers():
 def test_merge_idempotent_survives_undeclared_layers():
     """Same regression for idempotent: an undeclared baseline layer must not
     force idempotent back to False when the provider explicitly declares True."""
-    result = merge_policies(None, ResolvedToolPolicy(), ResolvedToolPolicy(idempotent=True))
+    result = merge_policies(
+        None, ResolvedToolPolicy(), ResolvedToolPolicy(idempotent=True)
+    )
     assert result.idempotent is True
     assert finalize_policy(result).idempotent is True
 
@@ -159,9 +171,11 @@ def test_merge_metadata_not_silently_dropped():
 
 # --- ManagedToolAdapter ---
 
+
 def _descriptor(name="test_tool", category="discovery", risk="low", mutating=False):
-    return ToolDescriptor(name=name, source="builtin", category=category,
-                          risk=risk, mutating=mutating)
+    return ToolDescriptor(
+        name=name, source="builtin", category=category, risk=risk, mutating=mutating
+    )
 
 
 @pytest.mark.asyncio
@@ -177,17 +191,27 @@ async def test_adapter_success():
 @pytest.mark.asyncio
 async def test_adapter_pipeline_deny():
     class _DenyPipeline:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def before_tool(self, e):
             return PipelineDecision(action=PipelineAction.DENY, reason="blocked")
-        async def after_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
-    async def handler(): return "should not reach"
+        async def after_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+
+    async def handler():
+        return "should not reach"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         security_pipeline=_DenyPipeline(),
     )
     with pytest.raises(ToolDeniedError, match="blocked"):
@@ -197,17 +221,27 @@ async def test_adapter_pipeline_deny():
 @pytest.mark.asyncio
 async def test_adapter_pipeline_require_approval():
     class _ApprovalPipeline:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def before_tool(self, e):
             return PipelineDecision(action=PipelineAction.REQUIRE_APPROVAL)
-        async def after_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
-    async def handler(): return "should not reach"
+        async def after_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+
+    async def handler():
+        return "should not reach"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         security_pipeline=_ApprovalPipeline(),
     )
     with pytest.raises(RunPaused, match="approval"):
@@ -217,18 +251,29 @@ async def test_adapter_pipeline_require_approval():
 @pytest.mark.asyncio
 async def test_adapter_pipeline_modify_args():
     class _ModifyPipeline:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def before_tool(self, e):
-            return PipelineDecision(action=PipelineAction.MODIFY, modified_payload={"x": "modified"})
-        async def after_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+            return PipelineDecision(
+                action=PipelineAction.MODIFY, modified_payload={"x": "modified"}
+            )
+
+        async def after_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
     async def handler(x: str = "") -> str:
         return f"got:{x}"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         security_pipeline=_ModifyPipeline(),
     )
     result = await adapter.invoke(x="original")
@@ -239,23 +284,40 @@ async def test_adapter_pipeline_modify_args():
 async def test_adapter_modify_revalidates_against_schema_and_denies_invalid():
     """A pipeline MODIFY that produces schema-invalid arguments is rejected
     (fail closed) -- a misbehaving pipeline cannot inject an unsafe payload."""
+
     class _BadModify:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def before_tool(self, e):
             # `count` must be an integer per the schema; inject a string.
-            return PipelineDecision(action=PipelineAction.MODIFY, modified_payload={"count": "not-an-int"})
-        async def after_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+            return PipelineDecision(
+                action=PipelineAction.MODIFY, modified_payload={"count": "not-an-int"}
+            )
+
+        async def after_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
     async def handler(count: int = 0) -> int:
         return count
 
     # Schema: count must be an integer.
-    schema = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": []}
+    schema = {
+        "type": "object",
+        "properties": {"count": {"type": "integer"}},
+        "required": [],
+    }
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_pipeline=_BadModify())
+        descriptor=_descriptor(), handler=handler, security_pipeline=_BadModify()
+    )
     from linktools.ai.errors import ToolSchemaValidationError
+
     with pytest.raises(ToolSchemaValidationError, match="schema validation"):
         await adapter.invoke(parameter_schema=schema, count=1)
 
@@ -263,19 +325,34 @@ async def test_adapter_modify_revalidates_against_schema_and_denies_invalid():
 @pytest.mark.asyncio
 async def test_adapter_modify_allows_schema_valid_payload():
     class _GoodModify:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
         async def before_tool(self, e):
-            return PipelineDecision(action=PipelineAction.MODIFY, modified_payload={"count": 42})
-        async def after_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+            return PipelineDecision(
+                action=PipelineAction.MODIFY, modified_payload={"count": 42}
+            )
+
+        async def after_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
     async def handler(count: int = 0) -> int:
         return count
 
-    schema = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": []}
+    schema = {
+        "type": "object",
+        "properties": {"count": {"type": "integer"}},
+        "required": [],
+    }
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_pipeline=_GoodModify())
+        descriptor=_descriptor(), handler=handler, security_pipeline=_GoodModify()
+    )
     assert await adapter.invoke(parameter_schema=schema, count=1) == 42
 
 
@@ -286,7 +363,8 @@ async def test_adapter_timeout():
         return "done"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler if False else slow_handler,
+        descriptor=_descriptor(),
+        handler=slow_handler,
         baseline_policy=ResolvedToolPolicy(timeout_seconds=0.01),
     )
     with pytest.raises(ToolTimeoutError):
@@ -295,10 +373,12 @@ async def test_adapter_timeout():
 
 @pytest.mark.asyncio
 async def test_adapter_policy_disabled():
-    async def handler(): return "done"
+    async def handler():
+        return "done"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         baseline_policy=ResolvedToolPolicy(enabled=False),
     )
     with pytest.raises(ToolDeniedError, match="disabled"):
@@ -308,17 +388,29 @@ async def test_adapter_policy_disabled():
 @pytest.mark.asyncio
 async def test_adapter_after_tool_deny():
     class _AfterDenyPipeline:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def before_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_tool(self, e):
-            return PipelineDecision(action=PipelineAction.DENY_RESULT, reason="result blocked")
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
 
-    async def handler(): return "executed"
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def before_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_tool(self, e):
+            return PipelineDecision(
+                action=PipelineAction.DENY_RESULT, reason="result blocked"
+            )
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+
+    async def handler():
+        return "executed"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         security_pipeline=_AfterDenyPipeline(),
     )
     with pytest.raises(ToolDeniedError, match="result denied"):
@@ -329,18 +421,31 @@ async def test_adapter_after_tool_deny():
 async def test_adapter_after_tool_modify_result_replaces_result():
     """after_tool MODIFY_RESULT replaces the tool's result (previously the
     after_tool MODIFY payload was silently ignored)."""
-    class _AfterModifyPipeline:
-        async def before_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_model(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def before_tool(self, e): return PipelineDecision(action=PipelineAction.ALLOW)
-        async def after_tool(self, e):
-            return PipelineDecision(action=PipelineAction.MODIFY_RESULT, modified_payload="redacted")
-        async def on_security_event(self, e): return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
 
-    async def handler(): return "secret-output"
+    class _AfterModifyPipeline:
+        async def before_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_model(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def before_tool(self, e):
+            return PipelineDecision(action=PipelineAction.ALLOW)
+
+        async def after_tool(self, e):
+            return PipelineDecision(
+                action=PipelineAction.MODIFY_RESULT, modified_payload="redacted"
+            )
+
+        async def on_security_event(self, e):
+            return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+
+    async def handler():
+        return "secret-output"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         security_pipeline=_AfterModifyPipeline(),
     )
     assert await adapter.invoke() == "redacted"
@@ -350,39 +455,56 @@ async def test_adapter_after_tool_modify_result_replaces_result():
 async def test_adapter_provider_failure_emits_degraded_event_and_denies():
     """A ToolPolicyProvider failure fails closed (deny) AND emits a
     SecurityDegraded event so the silent fallback is observable."""
-    from linktools.ai.tool.policy import ToolPolicyProvider as _Proto
 
     class _BoomProvider:
         async def resolve(self, descriptor, context):
             raise RuntimeError("provider down")
 
     class _RecordingStore:
-        def __init__(self): self.events = []
-        async def append(self, **kw): self.events.append(kw)
+        def __init__(self):
+            self.events = []
 
-    async def handler(): return "should not reach"
+        async def append(self, **kw):
+            self.events.append(kw)
+
+    async def handler():
+        return "should not reach"
 
     store = _RecordingStore()
     from linktools.ai.run.context import RunContext
     from linktools.ai.run.models import RunnableType
+
     ctx = RunContext(
-        run_id="r1", root_run_id="r1", parent_run_id=None, session_id="s1",
-        runnable_id="a1", runnable_type=RunnableType.AGENT,
-        user_id=None, tenant_id=None, workspace=None,
+        run_id="r1",
+        root_run_id="r1",
+        parent_run_id=None,
+        session_id="s1",
+        runnable_id="a1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
-        policy_provider=_BoomProvider(), event_store=store, run_context=ctx,
+        descriptor=_descriptor(),
+        handler=handler,
+        policy_provider=_BoomProvider(),
+        event_store=store,
+        run_context=ctx,
     )
     with pytest.raises(ToolDeniedError, match="policy resolution failed"):
         await adapter.invoke()
-    assert any(e["payload"].__class__.__name__ == "SecurityDegraded" for e in store.events)
+    assert any(
+        e["payload"].__class__.__name__ == "SecurityDegraded" for e in store.events
+    )
 
 
 # --- ToolContribution ---
 
+
 def test_tool_contribution():
     d = _descriptor()
-    tc = ToolContribution(toolset=object(), descriptors=(d,))
-    assert len(tc.descriptors) == 1
-    assert tc.descriptors[0].name == "test_tool"
+    md = ManagedToolDefinition(descriptor=d, handler=lambda **kw: None)
+    tc = ToolContribution(tools=(md,))
+    assert len(tc.tools) == 1
+    assert tc.tools[0].descriptor.name == "test_tool"

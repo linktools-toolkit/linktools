@@ -18,13 +18,14 @@ The per-Run ToolContext now arrives via
 ``ctx.deps.tool_context`` (pydantic-ai dependency injection), not a mutable
 ``current_context`` field. The RunContext stub below carries a real
 ``AgentDependencies(tool_context=...)`` on its ``.deps``."""
+
 import pytest
 from pydantic_ai.messages import ToolCallPart
 
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.errors import RunPaused
 from linktools.ai.policy.engine import ToolContext
-from linktools.ai.tool.capability import PolicyCapability
+from linktools.ai.tool.pydantic import PolicyCapability
 
 
 class _ExecutorThatPauses:
@@ -55,13 +56,16 @@ def _build_call_kwargs(tool_context: ToolContext) -> "tuple[_RunContext, dict]":
     ``args`` is passed through verbatim. ``before_tool_execute``'s signature is
     ``(ctx, *, call, tool_def, args)`` -- ``call``/``tool_def``/``args`` are
     keyword-only. The positional ``ctx`` carries ``deps`` for DI."""
+
     class _ToolDef:
         name = "rm"
 
     return (
         _RunContext(deps=AgentDependencies(tool_context=tool_context)),
         {
-            "call": ToolCallPart(tool_name="rm", args={"path": "/"}, tool_call_id="tc-1"),
+            "call": ToolCallPart(
+                tool_name="rm", args={"path": "/"}, tool_call_id="tc-1"
+            ),
             "tool_def": _ToolDef(),
             "args": {"path": "/"},
         },

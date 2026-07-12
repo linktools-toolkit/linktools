@@ -28,7 +28,13 @@ class _RecordingSink:
         self.events: list[tuple[str, dict]] = []
         self.ended: list[Span] = []
 
-    def start_span(self, name: str, *, attributes: "Mapping[str, Any] | None" = None, parent: "Span | None" = None) -> Span:
+    def start_span(
+        self,
+        name: str,
+        *,
+        attributes: "Mapping[str, Any] | None" = None,
+        parent: "Span | None" = None,
+    ) -> Span:
         span = Span(
             name=name,
             span_id=f"id-{len(self.started)}",
@@ -39,7 +45,9 @@ class _RecordingSink:
         self.started.append(span)
         return span
 
-    def record_event(self, name: str, *, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def record_event(
+        self, name: str, *, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         self.events.append((name, dict(attributes or {})))
 
     def end_span(self, span: Span) -> None:

@@ -7,7 +7,15 @@ covers both live and deleted state."""
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -78,7 +86,9 @@ class RunRow(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     root_run_id: Mapped[str] = mapped_column(String(128), index=True)
-    parent_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True, index=True)
+    parent_run_id: Mapped["str | None"] = mapped_column(
+        String(128), nullable=True, index=True
+    )
     session_id: Mapped[str] = mapped_column(String(128), index=True)
     runnable_id: Mapped[str] = mapped_column(String(255))
     runnable_type: Mapped[str] = mapped_column(String(32))
@@ -95,7 +105,9 @@ class RunRow(Base):
 
 class RunCheckpointRow(Base):
     __tablename__ = "ai_run_checkpoints"
-    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_checkpoint_run_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_run_checkpoint_run_sequence"),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -121,7 +133,11 @@ class SessionRow(Base):
 
 class SessionMessageRow(Base):
     __tablename__ = "ai_session_messages"
-    __table_args__ = (UniqueConstraint("session_id", "sequence", name="uq_session_message_session_sequence"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "sequence", name="uq_session_message_session_sequence"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -141,7 +157,9 @@ class EventRow(Base):
     # without colliding on (run_id, sequence). Every current caller still
     # passes stream_id == run_id, so this is a schema formalization, not a
     # behavior change.
-    __table_args__ = (UniqueConstraint("stream_id", "sequence", name="uq_event_stream_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("stream_id", "sequence", name="uq_event_stream_sequence"),
+    )
 
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     stream_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -192,7 +210,7 @@ class SwarmTaskRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
     # Phase-5A: child RunRecord id of the current/most-recent execution.
-    # nullable for backward compat with rows written before this column existed.
+    # nullable for rows written before this column existed (data migration).
     active_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
@@ -219,7 +237,9 @@ class MemoryRow(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     owner_id: Mapped[str] = mapped_column(String(128), index=True)
     content: Mapped[str] = mapped_column(Text)
-    category: Mapped["str | None"] = mapped_column(String(64), nullable=True, index=True)
+    category: Mapped["str | None"] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     confidence: Mapped["float | None"] = mapped_column(Float, nullable=True)
     version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime)

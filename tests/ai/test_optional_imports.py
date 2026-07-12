@@ -55,13 +55,18 @@ _SUBPROCESS = textwrap.dedent(
 def test_core_imports_without_sqlalchemy():
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [os.path.join(_ROOT, "linktools", "src"),
-         os.path.join(_ROOT, "linktools-ai", "src")]
+        [
+            os.path.join(_ROOT, "linktools", "src"),
+            os.path.join(_ROOT, "linktools-ai", "src"),
+        ]
     )
     import subprocess
+
     result = subprocess.run(
         [sys.executable, "-c", _SUBPROCESS],
-        capture_output=True, text=True, env=env,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert result.returncode == 0, (
         f"subprocess failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"

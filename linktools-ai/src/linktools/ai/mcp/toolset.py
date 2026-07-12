@@ -10,7 +10,9 @@ from ..errors import CapabilityConflictError
 
 
 def final_tool_name(
-    server_id: str, tool_name: str, tool_prefix: "str | bool | None",
+    server_id: str,
+    tool_name: str,
+    tool_prefix: "str | bool | None",
 ) -> str:
     """Compute the exposed tool name for one MCP tool.
 

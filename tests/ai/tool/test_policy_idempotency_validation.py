@@ -73,7 +73,9 @@ def test_resolved_idempotent_false_with_explicit_exact_call_is_rejected():
 
 def test_resolved_strips_key_field_whitespace():
     p = ResolvedToolPolicy(
-        idempotent=True, idempotency_strategy=BUSINESS, idempotency_key_field="  ext_id  "
+        idempotent=True,
+        idempotency_strategy=BUSINESS,
+        idempotency_key_field="  ext_id  ",
     )
     assert p.idempotency_key_field == "ext_id"
 

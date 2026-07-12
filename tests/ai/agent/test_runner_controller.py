@@ -9,6 +9,7 @@ requested" is distinct from "actually cancelled".
 These tests wrap the FileRunStore with a recorder so the sequence of
 ``transition()`` target statuses is observable, then assert both CANCELLING
 and CANCELLED appear in order."""
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -46,9 +47,14 @@ def _registry():
 
 def _run_context(run_id="run-ctrl-1", session_id="session-ctrl-1") -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None,
-        session_id=session_id, runnable_id="agent-1",
-        runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
         workspace=None,
     )
 
@@ -70,7 +76,9 @@ class _RecordingRunStore:
         return await self._inner.transition(run_id, target, **kwargs)
 
 
-def _make_runner(tmp_path, controller, pipeline=None) -> "tuple[AgentRunner, _RecordingRunStore]":
+def _make_runner(
+    tmp_path, controller, pipeline=None
+) -> "tuple[AgentRunner, _RecordingRunStore]":
     inner_store = FileRunStore(root=tmp_path / "runs")
     recording = _RecordingRunStore(inner_store)
     runner = AgentRunner(
@@ -86,13 +94,20 @@ def _make_runner(tmp_path, controller, pipeline=None) -> "tuple[AgentRunner, _Re
 
 async def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    await store.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    ))
+    await store.create(
+        SessionRecord(
+            id=session_id,
+            parent_id=None,
+            status=SessionStatus.ACTIVE,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
 
 
 # 1. A run cancelled via the controller transitions CANCELLING then CANCELLED.
+
 
 @pytest.mark.asyncio
 async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
@@ -122,11 +137,14 @@ async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
     await _seed_session(runner._session_store, "session-ctrl-1")
 
     compiler = AgentCompiler(model_router=ModelRouter(registry=_registry()))
-    compiled = await compiler.compile(AgentSpec(
-        id="agent-1", name="a",
-        model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"),
-    ))
+    compiled = await compiler.compile(
+        AgentSpec(
+            id="agent-1",
+            name="a",
+            model=ModelPolicy(primary="test-model"),
+            instructions=PromptSpec(instructions="hi"),
+        )
+    )
 
     task = asyncio.create_task(
         runner.run(compiled, RunInput(prompt="x"), _run_context())
@@ -164,6 +182,7 @@ async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
 
 
 # 2. Real cancellation via Runtime.cancel goes through CANCELLING.
+
 
 @pytest.mark.asyncio
 async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
@@ -212,14 +231,13 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     )
 
     spec = AgentSpec(
-        id="agent-runtime-cancel", name="a",
+        id="agent-runtime-cancel",
+        name="a",
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
     )
 
-    run_task = asyncio.create_task(
-        runtime.run(spec, "x", run_id="run-runtime-cancel")
-    )
+    run_task = asyncio.create_task(runtime.run(spec, "x", run_id="run-runtime-cancel"))
     await ready.wait()
 
     # The runner has registered the driving task with the controller. Now
@@ -235,6 +253,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
 
 
 # 3. Default-None controller preserves the no-token-checks behavior.
+
 
 @pytest.mark.asyncio
 async def test_runner_without_controller_still_transitions_on_external_cancel(tmp_path):
@@ -271,15 +290,21 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
     await _seed_session(runner._session_store, "session-noctrl")
 
     compiler = AgentCompiler(model_router=ModelRouter(registry=_registry()))
-    compiled = await compiler.compile(AgentSpec(
-        id="agent-2", name="a",
-        model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"),
-    ))
+    compiled = await compiler.compile(
+        AgentSpec(
+            id="agent-2",
+            name="a",
+            model=ModelPolicy(primary="test-model"),
+            instructions=PromptSpec(instructions="hi"),
+        )
+    )
 
     task = asyncio.create_task(
-        runner.run(compiled, RunInput(prompt="x"),
-                   _run_context(run_id="run-noctrl", session_id="session-noctrl"))
+        runner.run(
+            compiled,
+            RunInput(prompt="x"),
+            _run_context(run_id="run-noctrl", session_id="session-noctrl"),
+        )
     )
     await ready.wait()
     task.cancel()

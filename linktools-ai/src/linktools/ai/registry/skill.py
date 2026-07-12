@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ..errors import RegistryNotFoundError
-from .parser import SpecLoader, parse_markdown_text
+from .parser import SpecLoader, StrictConfigReader, parse_markdown_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,17 +25,19 @@ def parse_skill_spec(skill_id: str, payload: "dict[str, Any]", body: str) -> Ski
     """Build a SkillSpec from a parsed frontmatter dict + markdown body.
 
     - name falls back to skill_id when the frontmatter omits it.
-    - description defaults to "" (any non-str truthy value is stringified).
+    - description defaults to "".
     - instructions is the stripped markdown body.
     - metadata is copied through from the optional `metadata` mapping.
     """
-    name = payload.get("name") or skill_id
-    description = str(payload.get("description", ""))
+    allowed = {"name", "description", "metadata"}
+    reader = StrictConfigReader(payload, allowed=allowed, context=f"skill {skill_id}")
+    name = reader.optional_str("name") or skill_id
+    description = reader.optional_str("description") or ""
     instructions = body.strip()
-    metadata = dict(payload.get("metadata") or {})
+    metadata = reader.mapping("metadata") or {}
     return SkillSpec(
         id=skill_id,
-        name=str(name),
+        name=name,
         description=description,
         instructions=instructions,
         metadata=metadata,

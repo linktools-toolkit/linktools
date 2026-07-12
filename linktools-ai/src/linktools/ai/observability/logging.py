@@ -55,14 +55,18 @@ class LoggingObservabilitySink:
             attributes=dict(attributes or {}),
         )
 
-    def record_event(self, name: str, *, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def record_event(
+        self, name: str, *, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         self._logger.debug("event name=%s attrs=%s", name, dict(attributes or {}))
 
     def end_span(self, span: Span) -> None:
         started = self._started_at.pop(span.span_id, None)
         duration_ms: "float | None" = None
         if started is not None:
-            duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2)
+            duration_ms = round(
+                (datetime.now(timezone.utc) - started).total_seconds() * 1000, 2
+            )
         self._logger.debug(
             "span.end name=%s span_id=%s duration_ms=%s",
             span.name,
@@ -72,11 +76,27 @@ class LoggingObservabilitySink:
 
     # --- ObservabilityMetrics --------------------------------------------
 
-    def counter(self, name: str, *, value: int = 1, attributes: "Mapping[str, Any] | None" = None) -> None:
-        self._logger.info("counter name=%s value=%s attrs=%s", name, value, dict(attributes or {}))
+    def counter(
+        self,
+        name: str,
+        *,
+        value: int = 1,
+        attributes: "Mapping[str, Any] | None" = None,
+    ) -> None:
+        self._logger.info(
+            "counter name=%s value=%s attrs=%s", name, value, dict(attributes or {})
+        )
 
-    def histogram(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
-        self._logger.info("histogram name=%s value=%s attrs=%s", name, value, dict(attributes or {}))
+    def histogram(
+        self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
+        self._logger.info(
+            "histogram name=%s value=%s attrs=%s", name, value, dict(attributes or {})
+        )
 
-    def gauge(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
-        self._logger.info("gauge name=%s value=%s attrs=%s", name, value, dict(attributes or {}))
+    def gauge(
+        self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
+        self._logger.info(
+            "gauge name=%s value=%s attrs=%s", name, value, dict(attributes or {})
+        )

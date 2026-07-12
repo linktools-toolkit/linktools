@@ -63,10 +63,12 @@ def test_search_basic():
 
 
 def _run_filter_overrides_owner():
-    store = _StubStore([
-        _make_record(id="m-1", owner_id="u1", content="hello a"),
-        _make_record(id="m-2", owner_id="u2", content="hello b"),
-    ])
+    store = _StubStore(
+        [
+            _make_record(id="m-1", owner_id="u1", content="hello a"),
+            _make_record(id="m-2", owner_id="u2", content="hello b"),
+        ]
+    )
     retriever = MemoryRetriever(store, owner_id="u1")
     docs = asyncio.run(retriever.search("hello", filters={"owner_id": "u2"}))
     assert len(docs) == 1
@@ -79,10 +81,12 @@ def test_filter_overrides_owner():
 
 
 def _run_limit_honored():
-    store = _StubStore([
-        _make_record(id=f"m-{i}", owner_id="u1", content=f"hello {i}")
-        for i in range(5)
-    ])
+    store = _StubStore(
+        [
+            _make_record(id=f"m-{i}", owner_id="u1", content=f"hello {i}")
+            for i in range(5)
+        ]
+    )
     retriever = MemoryRetriever(store, owner_id="u1")
     docs = asyncio.run(retriever.search("hello", limit=2))
     assert len(docs) == 2

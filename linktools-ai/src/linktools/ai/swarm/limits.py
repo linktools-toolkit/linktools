@@ -19,6 +19,12 @@ class SwarmLimits:
 
 
 DEFAULT_SWARM_LIMITS = SwarmLimits(
-    max_rounds=10, max_tasks=50, max_delegations=20, max_depth=5,
-    max_concurrency=4, max_total_tokens=None, max_total_cost=None, timeout_seconds=None,
+    max_rounds=10,
+    max_tasks=50,
+    max_delegations=20,
+    max_depth=5,
+    max_concurrency=4,
+    max_total_tokens=None,
+    max_total_cost=None,
+    timeout_seconds=None,
 )

@@ -5,6 +5,7 @@ Agent runs. Mirrors SwarmRunner.cancel's store-only approach: flips the
 RunRecord to CANCELLED without cancelling any live asyncio.Task driving the run
 (the caller cancels that separately; AgentRunner catches CancelledError and
 lands in the same CANCELLED state)."""
+
 import asyncio
 import contextlib
 from datetime import datetime, timezone
@@ -31,28 +32,46 @@ def _seed_run(store, run_id: str, status: RunStatus) -> None:
     -> {SUCCEEDED, FAILED, CANCELLED, ...}, so non-PENDING targets are reached
     by chaining two transitions -- this reproduces a realistic version (the
     terminal record ends up at version 3) without bypassing the store."""
+
     async def _seed():
-        await store.runs.create(RunRecord(
-            id=run_id, root_run_id=run_id, parent_run_id=None,
-            session_id="session-x", runnable_id="agent-x",
-            runnable_type=RunnableType.AGENT, status=RunStatus.PENDING,
-            input=RunInput(prompt="seed"), result=None, error=None, version=1,
-            created_at=_NOW, started_at=None, finished_at=None,
-        ))
+        await store.runs.create(
+            RunRecord(
+                id=run_id,
+                root_run_id=run_id,
+                parent_run_id=None,
+                session_id="session-x",
+                runnable_id="agent-x",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.PENDING,
+                input=RunInput(prompt="seed"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=_NOW,
+                started_at=None,
+                finished_at=None,
+            )
+        )
         if status is RunStatus.PENDING:
             return
         await store.runs.transition(
-            run_id, RunStatus.RUNNING, expected_version=1,
+            run_id,
+            RunStatus.RUNNING,
+            expected_version=1,
         )
         if status is RunStatus.RUNNING:
             return
         await store.runs.transition(
-            run_id, status, expected_version=2,
+            run_id,
+            status,
+            expected_version=2,
         )
+
     asyncio.run(_seed())
 
 
 # 1. cancel(run_id) on a RUNNING run -> transitions to CANCELLED.
+
 
 def test_cancel_running_run_transitions_to_cancelled(tmp_path):
     storage = FileStorage(root=tmp_path)
@@ -61,16 +80,19 @@ def test_cancel_running_run_transitions_to_cancelled(tmp_path):
 
     async def _cancel():
         await runtime.cancel("run-running")
+
     asyncio.run(_cancel())
 
     async def _verify():
         return await storage.runs.get("run-running")
+
     record = asyncio.run(_verify())
     assert record is not None
     assert record.status is RunStatus.CANCELLED
 
 
 # 2. cancel(run_id) on a SUCCEEDED run -> no-op (already terminal).
+
 
 def test_cancel_succeeded_run_is_noop(tmp_path):
     storage = FileStorage(root=tmp_path)
@@ -79,17 +101,20 @@ def test_cancel_succeeded_run_is_noop(tmp_path):
 
     async def _cancel():
         await runtime.cancel("run-done")
+
     # already terminal -- cancel must not raise and must not change status.
     asyncio.run(_cancel())
 
     async def _verify():
         return await storage.runs.get("run-done")
+
     record = asyncio.run(_verify())
     assert record is not None
     assert record.status is RunStatus.SUCCEEDED
 
 
 # 2b. cancel(run_id) on an already-CANCELLED run -> also no-op (idempotent).
+
 
 def test_cancel_already_cancelled_run_is_noop(tmp_path):
     storage = FileStorage(root=tmp_path)
@@ -98,10 +123,12 @@ def test_cancel_already_cancelled_run_is_noop(tmp_path):
 
     async def _cancel():
         await runtime.cancel("run-cancelled")
+
     asyncio.run(_cancel())
 
     async def _verify():
         return await storage.runs.get("run-cancelled")
+
     record = asyncio.run(_verify())
     assert record is not None
     assert record.status is RunStatus.CANCELLED
@@ -109,12 +136,14 @@ def test_cancel_already_cancelled_run_is_noop(tmp_path):
 
 # 3. cancel(run_id) on a missing run -> RunNotFoundError.
 
+
 def test_cancel_missing_run_raises_not_found(tmp_path):
     storage = FileStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage)
 
     async def _cancel():
         await runtime.cancel("does-not-exist")
+
     with pytest.raises(RunNotFoundError):
         asyncio.run(_cancel())
 
@@ -125,6 +154,7 @@ def test_cancel_missing_run_raises_not_found(tmp_path):
 #    CANCELLING -> CANCELLED finalization) must NOT attempt the illegal
 #    CANCELLING -> CANCELLING edge, and must re-signal the controller instead
 #    (idempotent, matches RunController.cancel's own idempotency).
+
 
 def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
     storage = FileStorage(root=tmp_path)
@@ -162,6 +192,7 @@ def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
 #    treat it the same as the idempotent repeat-cancel path above instead of
 #    propagating RunConflictError.
 
+
 def test_cancel_handles_conflict_when_fresh_status_is_cancelling(tmp_path, monkeypatch):
     storage = FileStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage)
@@ -185,11 +216,17 @@ def test_cancel_handles_conflict_when_fresh_status_is_cancelling(tmp_path, monke
                 # Simulate a concurrent winner landing RUNNING -> CANCELLING
                 # first, then this caller's own CAS losing the version race.
                 await original_transition(
-                    run_id, target, expected_version=expected_version, **kwargs,
+                    run_id,
+                    target,
+                    expected_version=expected_version,
+                    **kwargs,
                 )
                 raise RunConflictError("simulated concurrent cancel")
             return await original_transition(
-                run_id, target, expected_version=expected_version, **kwargs,
+                run_id,
+                target,
+                expected_version=expected_version,
+                **kwargs,
             )
 
         monkeypatch.setattr(storage.runs, "transition", _flaky_transition)

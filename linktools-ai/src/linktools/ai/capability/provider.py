@@ -11,9 +11,9 @@ backend, the active exposure policy, identity for diagnostics)."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .bundle import CapabilityBundle
-from .policy import CapabilityToolExposurePolicy
-from .ref import CapabilityRef
+from .models import CapabilityBundle
+from .exposure import CapabilityToolExposurePolicy
+from .models import CapabilityRef
 
 if TYPE_CHECKING:
     from ..execution.protocols import ExecutionBackend
@@ -59,8 +59,7 @@ class CapabilityProvider(Protocol):
         self,
         ref: CapabilityRef,
         context: CapabilityContext,
-    ) -> CapabilityBundle:
-        ...
+    ) -> CapabilityBundle: ...
 
 
 def provider_kinds(provider: "CapabilityProvider") -> "frozenset[str]":
@@ -87,16 +86,18 @@ def make_event_emitter(context: "CapabilityContext | None"):
         return context.security_event_emitter.emit_observability
     store = context.event_store
     run_id = context.run_id
-    root_run_id = context.root_run_id or run_id
-    parent_run_id = context.parent_run_id
-    session_id = context.session_id or run_id
-    agent_id = context.agent_id
+    from ..events.context import EventContext, append_event
+
+    evt_ctx = EventContext(
+        stream_id=run_id,
+        run_id=run_id,
+        root_run_id=context.root_run_id or run_id,
+        parent_run_id=context.parent_run_id,
+        session_id=context.session_id or run_id,
+        runnable_id=context.agent_id,
+    )
 
     async def emit(payload: Any) -> None:
-        await store.append(
-            stream_id=run_id, run_id=run_id, root_run_id=root_run_id,
-            parent_run_id=parent_run_id, session_id=session_id, runnable_id=agent_id,
-            payload=payload,
-        )
+        await append_event(store, evt_ctx, payload)
 
     return emit

@@ -19,6 +19,7 @@ to ``AgentRunner``.
 
 Default ``pause_on_approval=False`` is unchanged: still persists via
 ``_record_approval`` before raising ``ToolApprovalRequiredError``."""
+
 import asyncio
 
 import pytest
@@ -58,7 +59,14 @@ class _Store:
         return request
 
     async def create_or_get_pending(
-        self, *, run_id, tool_call_id, tool_name, reason, arguments, approval_id,
+        self,
+        *,
+        run_id,
+        tool_call_id,
+        tool_name,
+        reason,
+        arguments,
+        approval_id,
     ) -> ApprovalRequest:
         raise NotImplementedError  # not exercised by ToolExecutor anymore
 

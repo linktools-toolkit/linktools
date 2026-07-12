@@ -23,6 +23,7 @@ These tests assert the invariant both ways:
    code the second ``current_context`` assignment would clobber the first and
    both calls would see the same run_id; under deps-based DI they cannot.
 """
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -66,7 +67,11 @@ def _tool_then_text_model_fn(messages, info: AgentInfo) -> ModelResponse:
     """Emit one ToolCallPart on the first turn, a final TextPart on the next so
     the run terminates. The tool call is what drives ``before_tool`` (and thus
     the recording middleware)."""
-    if not any(getattr(p, "part_kind", None) == "tool-return" for m in messages for p in m.parts):
+    if not any(
+        getattr(p, "part_kind", None) == "tool-return"
+        for m in messages
+        for p in m.parts
+    ):
         return ModelResponse(parts=[ToolCallPart(tool_name="ping", args={})])
     return ModelResponse(parts=[TextPart(content="done")])
 
@@ -86,7 +91,8 @@ async def _compiled(pipeline: MiddlewarePipeline):
         middleware_pipeline=pipeline,
     )
     spec = AgentSpec(
-        id="reuse-agent", name="reuse",
+        id="reuse-agent",
+        name="reuse",
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
         output_schema=str,
@@ -102,10 +108,16 @@ async def _compiled(pipeline: MiddlewarePipeline):
 
 async def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    await store.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    ))
+    await store.create(
+        SessionRecord(
+            id=session_id,
+            parent_id=None,
+            status=SessionStatus.ACTIVE,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
 
 
 def _make_runner(tmp_path, pipeline) -> AgentRunner:
@@ -120,9 +132,15 @@ def _make_runner(tmp_path, pipeline) -> AgentRunner:
 
 def _ai_run_context(run_id, session_id) -> AiRunContext:
     return AiRunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-        runnable_id="reuse-agent", runnable_type=RunnableType.AGENT,
-        user_id=None, tenant_id=None, workspace=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="reuse-agent",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
@@ -142,9 +160,11 @@ async def test_sequential_reuse_each_run_sees_own_tool_context(tmp_path):
     await _seed_session(runner._session_store, "session-seq")
 
     await runner.run(
-        compiled, RunInput(prompt="ping"), _ai_run_context("run-A", "session-seq"))
+        compiled, RunInput(prompt="ping"), _ai_run_context("run-A", "session-seq")
+    )
     await runner.run(
-        compiled, RunInput(prompt="ping"), _ai_run_context("run-B", "session-seq"))
+        compiled, RunInput(prompt="ping"), _ai_run_context("run-B", "session-seq")
+    )
 
     assert mw.observed == ["run-A", "run-B"], (
         f"expected each run to observe its own run_id in order, got {mw.observed!r}"
@@ -196,7 +216,8 @@ async def test_concurrent_reuse_each_run_sees_own_tool_context_no_pollution(tmp_
         return await compiled.pydantic_agent.run(
             "ping",
             deps=AgentDependencies(
-                tool_context=ToolContext(run_id=run_id, session_id="session-cc")),
+                tool_context=ToolContext(run_id=run_id, session_id="session-cc")
+            ),
         )
 
     # Drive both calls concurrently on the SAME compiled agent.

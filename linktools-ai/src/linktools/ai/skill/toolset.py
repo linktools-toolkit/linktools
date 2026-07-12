@@ -4,7 +4,7 @@
 An agent may only read skills it declared; unauthorized
 reads raise SkillNotFoundError so existence is not leaked."""
 
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Iterable
 
 from pydantic_ai.toolsets import FunctionToolset
 

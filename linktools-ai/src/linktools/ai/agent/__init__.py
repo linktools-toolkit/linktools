@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.agent: Agent declaration (AgentSpec) + the compiler/runner that
-turn it into executable Runs. Re-exports the public surface so callers can use
-short imports (``from linktools.ai.agent import AgentSpec, ToolRef``)."""
+"""linktools.ai.agent: the agent domain's public model (spec §18.2). AgentSpec
+is the declaration surface; the compiler/runner that turn it into Runs live in
+their submodules (``agent.compiler``, ``agent.runner``). A run's result is
+``RunResult`` (from ``linktools.ai.run``), not an agent-local type."""
 
-from .compiler import AgentCompiler
-from .models import CompiledAgent
-from .runner import AgentRunner
-from .spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
+from .spec import AgentSpec
 
-__all__ = [
-    "AgentSpec", "PromptSpec", "ToolRef", "MiddlewareRef",
-    "AgentCompiler", "CompiledAgent", "AgentRunner",
-]
+__all__ = ["AgentSpec"]

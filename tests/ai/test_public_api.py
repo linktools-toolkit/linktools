@@ -1,67 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Public API contract: ``linktools.ai`` exports only ``Runtime`` at the root
+(spec §18.1). Every other type lives behind its domain submodule; old root
+imports (AgentSpec, Storage, SwarmSpec, ModelPolicy, ...) must FAIL so a stale
+caller is caught at import time rather than silently binding to a moved symbol."""
+
 import linktools.ai as ai
 
 
-def test_public_api_exports_agent_spec():
-    from linktools.ai.agent.spec import AgentSpec as _Real
-    assert ai.AgentSpec is _Real
+def test_root_exports_only_runtime():
+    assert ai.Runtime is not None
+    assert ai.__all__ == ["Runtime"]
 
 
-def test_public_api_exports_runtime():
-    from linktools.ai.runtime import Runtime as _Real
-    assert ai.Runtime is _Real
+def test_old_root_exports_are_gone():
+    # These used to be re-exported at the root; the simplified API moved them
+    # behind their domain submodules, so they must no longer be reachable here.
+    for gone in (
+        "AgentSpec",
+        "PromptSpec",
+        "ToolRef",
+        "MiddlewareRef",
+        "ModelPolicy",
+        "ModelRouter",
+        "RuntimeModelConfig",
+        "Storage",
+        "FileStorage",
+        "SwarmSpec",
+    ):
+        assert not hasattr(ai, gone), f"linktools.ai should no longer export {gone}"
 
 
-def test_public_api_exports_file_storage():
-    from linktools.ai.storage.facade import FileStorage as _Real
-    assert ai.FileStorage is _Real
+def test_domain_imports_succeed():
+    # The types that left the root are reachable via their domain submodules.
+    from linktools.ai.agent import AgentSpec
+    from linktools.ai.capability import CapabilityRuntimeOptions
+    from linktools.ai.model.policy import ModelPolicy
+    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.storage import FileStorage, Storage
+    from linktools.ai.swarm import SwarmSpec
 
-
-def test_public_api_exports_storage():
-    from linktools.ai.storage.facade import Storage as _Real
-    assert ai.Storage is _Real
-
-
-def test_public_api_exports_swarm_spec():
-    from linktools.ai.swarm.spec import SwarmSpec as _Real
-    assert ai.SwarmSpec is _Real
-
-
-def test_public_api_exports_model_hot_types():
-    # contract: ModelPolicy / ModelRouter / RuntimeModelConfig are root exports.
-    from linktools.ai.model import ModelPolicy, ModelRouter, RuntimeModelConfig
-    assert ai.ModelPolicy is ModelPolicy
-    assert ai.ModelRouter is ModelRouter
-    assert ai.RuntimeModelConfig is RuntimeModelConfig
-
-
-def test_public_api_exports_prompt_and_refs():
-    from linktools.ai.agent.spec import PromptSpec, ToolRef, MiddlewareRef
-    assert ai.PromptSpec is PromptSpec
-    assert ai.ToolRef is ToolRef
-    assert ai.MiddlewareRef is MiddlewareRef
+    assert AgentSpec and CapabilityRuntimeOptions and ModelPolicy and ModelRouter
+    assert Storage and FileStorage and SwarmSpec
 
 
 def test_root_does_not_re_export_sqlalchemy_storage():
-    # contract: SqlAlchemyStorage is NOT a root export (optional dependency).
+    # SqlAlchemyStorage is NOT a root export (optional dependency).
     assert not hasattr(ai, "SqlAlchemyStorage")
-
-
-def test_sqlalchemy_storage_accessible_lazily_from_storage_package():
-    # contract: lazy __getattr__ keeps the short import working on demand.
-    from linktools.ai.storage import SqlAlchemyStorage
-    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage as _Real
-    assert SqlAlchemyStorage is _Real
-
-
-def test_public_api_does_not_re_export_internals():
-    for internal in ("AgentCompiler", "AgentRunner", "CompiledAgent", "Middleware",
-                     "MiddlewarePipeline", "PolicyEngine", "ToolExecutor", "RunStore",
-                     "SessionStore", "EventStore", "ResourceStore",
-                     "SwarmRunner", "SwarmStore",
-                     "CoordinatorDelegationStrategy", "ParallelFanOutStrategy"):
-        assert not hasattr(ai, internal), f"linktools.ai should not export {internal}"
 
 
 def test_registry_error_hierarchy():
@@ -73,27 +58,9 @@ def test_registry_error_hierarchy():
         RegistryParseError,
         InvalidSpecError,
     )
+
     assert issubclass(RegistryError, LinktoolsAIError)
     assert issubclass(RegistryNotFoundError, RegistryError)
     assert issubclass(RegistryConflictError, RegistryError)
     assert issubclass(RegistryParseError, RegistryError)
     assert issubclass(InvalidSpecError, RegistryError)
-
-
-def test_approval_error_hierarchy():
-    from linktools.ai.errors import (
-        LinktoolsAIError,
-        ApprovalError,
-        ApprovalNotFoundError,
-        ApprovalConflictError,
-        InvalidApprovalTransitionError,
-    )
-    assert issubclass(ApprovalError, LinktoolsAIError)
-    assert issubclass(ApprovalNotFoundError, ApprovalError)
-    assert issubclass(ApprovalConflictError, ApprovalError)
-    assert issubclass(InvalidApprovalTransitionError, ApprovalError)
-
-
-def test_tool_approval_required_error_still_tool_error():
-    from linktools.ai.errors import ToolError, ToolApprovalRequiredError
-    assert issubclass(ToolApprovalRequiredError, ToolError)

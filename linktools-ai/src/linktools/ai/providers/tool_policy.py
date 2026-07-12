@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolPolicyProvider: source-agnostic surface for tool policy metadata. The
+"""ToolPolicyMetadataSource: source-agnostic surface for tool policy metadata. The
 Runtime consumes the metadata map to enforce Permission/Risk/Approval rules;
 the map can originate from a YAML ToolRegistry, a DB, or any business source."""
 
@@ -13,8 +13,7 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class ToolPolicyProvider(Protocol):
+class ToolPolicyMetadataSource(Protocol):
     """Provides a tool-name -> ToolPolicyMetadata map from any source."""
 
-    async def get_metadata_map(self) -> "Mapping[str, ToolPolicyMetadata]":
-        ...
+    async def get_metadata_map(self) -> "Mapping[str, ToolPolicyMetadata]": ...

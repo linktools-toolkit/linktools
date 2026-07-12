@@ -114,14 +114,7 @@ def test_apply_patch_rejects_path_escape(backend, tmp_path):
 
 def test_apply_patch_reports_failed_hunk(backend, tmp_path):
     (tmp_path / "foo.txt").write_text("line1\nline2\n")
-    diff = (
-        "--- a/foo.txt\n"
-        "+++ b/foo.txt\n"
-        "@@ -1,2 +1,2 @@\n"
-        " line1\n"
-        "-nomatch\n"
-        "+xxx\n"
-    )
+    diff = "--- a/foo.txt\n+++ b/foo.txt\n@@ -1,2 +1,2 @@\n line1\n-nomatch\n+xxx\n"
     result = asyncio.run(backend.apply_patch(diff))
     assert "error" in result
     assert (tmp_path / "foo.txt").read_text() == "line1\nline2\n"

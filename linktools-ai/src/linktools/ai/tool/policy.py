@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-from ..security.descriptor import ToolDescriptor
+from .models import ToolDescriptor
+from ..errors import ToolPolicyResolutionError
 from ..utils.freeze import freeze_value
 
 
@@ -23,15 +24,19 @@ class IdempotencyStrategy(str, Enum):
     BUSINESS_KEY = "business_key"
 
 
-def parse_idempotency_strategy(value: "str | IdempotencyStrategy | None") -> "IdempotencyStrategy | None":
+def parse_idempotency_strategy(
+    value: "str | IdempotencyStrategy | None",
+) -> "IdempotencyStrategy | None":
     if value is None or isinstance(value, IdempotencyStrategy):
         return value
     try:
         return IdempotencyStrategy(value)
     except (TypeError, ValueError) as exc:
         from ..errors import ToolPolicyResolutionError
+
         raise ToolPolicyResolutionError(
-            f"invalid idempotency strategy: {value!r}") from exc
+            f"invalid idempotency strategy: {value!r}"
+        ) from exc
 
 
 def validate_idempotency_policy(
@@ -80,6 +85,7 @@ class ResolvedToolPolicy:
     tri-state (``None`` = not declared by this layer) so a layer that omits a
     field never overrides a more specific layer's explicit 0/False -- only
     finalize_policy() collapses the merged result to concrete values."""
+
     enabled: "bool | None" = None
     timeout_seconds: "float | None" = None
     max_retries: "int | None" = None
@@ -93,7 +99,9 @@ class ResolvedToolPolicy:
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError(f"timeout_seconds must be > 0 or None, got {self.timeout_seconds}")
+            raise ValueError(
+                f"timeout_seconds must be > 0 or None, got {self.timeout_seconds}"
+            )
         if self.max_retries is not None and self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
         strategy = parse_idempotency_strategy(self.idempotency_strategy)
@@ -108,8 +116,11 @@ class ResolvedToolPolicy:
                 raise ValueError("schema_version must be non-empty")
             object.__setattr__(self, "schema_version", version)
         validate_idempotency_policy(
-            idempotent=self.idempotent, strategy=strategy,
-            key_field=key_field, effective=False)
+            idempotent=self.idempotent,
+            strategy=strategy,
+            key_field=key_field,
+            effective=False,
+        )
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
@@ -118,6 +129,7 @@ class EffectiveToolPolicy:
     """The merged tri-state ResolvedToolPolicy collapsed to concrete values --
     what the execution chain (ManagedToolAdapter, ToolExecutor) actually acts
     on. Produced only by finalize_policy()."""
+
     enabled: bool = True
     timeout_seconds: "float | None" = None
     max_retries: int = 0
@@ -143,8 +155,11 @@ class EffectiveToolPolicy:
         object.__setattr__(self, "schema_version", version)
         object.__setattr__(self, "idempotency_strategy", strategy)
         validate_idempotency_policy(
-            idempotent=self.idempotent, strategy=strategy,
-            key_field=key_field, effective=True)
+            idempotent=self.idempotent,
+            strategy=strategy,
+            key_field=key_field,
+            effective=True,
+        )
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
@@ -152,6 +167,7 @@ class EffectiveToolPolicy:
 class ToolInvocationContext:
     """Everything the governance chain (pipeline, executor, middleware, events)
     needs for one tool call."""
+
     descriptor: ToolDescriptor
     arguments: "Mapping[str, Any]"
     run_context: "RunContext"
@@ -168,11 +184,11 @@ class ToolPolicyProvider(Protocol):
         self,
         descriptor: ToolDescriptor,
         context: "RunContext",
-    ) -> ResolvedToolPolicy:
-        ...
+    ) -> ResolvedToolPolicy: ...
 
 
 # --- Policy merge ---
+
 
 def merge_policies(
     descriptor_default: "ResolvedToolPolicy | None",
@@ -195,7 +211,9 @@ def merge_policies(
     - metadata: shallow-merged across layers (later layers win per key) so no
       layer's metadata is silently dropped
     """
-    layers = [l for l in (descriptor_default, baseline, provider) if l is not None]
+    layers = [
+        layer for layer in (descriptor_default, baseline, provider) if layer is not None
+    ]
     if not layers:
         return ResolvedToolPolicy()
 
@@ -204,27 +222,33 @@ def merge_policies(
             return None
         return True if any(values) else False
 
-    declared_enabled = [l.enabled for l in layers if l.enabled is not None]
+    declared_enabled = [layer.enabled for layer in layers if layer.enabled is not None]
     enabled = None
     if declared_enabled:
         enabled = False if any(v is False for v in declared_enabled) else True
 
-    timeouts = [l.timeout_seconds for l in layers if l.timeout_seconds is not None]
+    timeouts = [
+        layer.timeout_seconds for layer in layers if layer.timeout_seconds is not None
+    ]
     timeout = min(timeouts) if timeouts else None
 
-    retries = [l.max_retries for l in layers if l.max_retries is not None]
+    retries = [layer.max_retries for layer in layers if layer.max_retries is not None]
     max_retries = min(retries) if retries else None
 
-    declared_idempotent = [l.idempotent for l in layers if l.idempotent is not None]
+    declared_idempotent = [
+        layer.idempotent for layer in layers if layer.idempotent is not None
+    ]
     idempotent = None
     if declared_idempotent:
         idempotent = all(declared_idempotent)
 
-    declared_approval = [l.require_approval for l in layers if l.require_approval is not None]
+    declared_approval = [
+        layer.require_approval for layer in layers if layer.require_approval is not None
+    ]
     require_approval = _merge_bool_any_true(declared_approval)
 
     risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-    risks = [l.risk for l in layers if l.risk]
+    risks = [layer.risk for layer in layers if layer.risk]
     risk = max(risks, key=lambda r: risk_order.get(r, 2)) if risks else None
 
     # schema_version: explicit priority, NOT string sort. Layers are ordered
@@ -233,14 +257,14 @@ def merge_policies(
     # never does. No max()/min() -- that would do lexicographic string sort
     # ("10" < "2") which is semantically wrong for versions.
     schema_version = None
-    for l in layers:
-        if l.schema_version:
-            schema_version = l.schema_version
+    for layer in layers:
+        if layer.schema_version:
+            schema_version = layer.schema_version
 
     metadata: "dict[str, Any]" = {}
-    for l in layers:
-        if l.metadata:
-            metadata.update(l.metadata)
+    for layer in layers:
+        if layer.metadata:
+            metadata.update(layer.metadata)
 
     return ResolvedToolPolicy(
         enabled=enabled,
@@ -250,10 +274,22 @@ def merge_policies(
         require_approval=require_approval,
         risk=risk,
         schema_version=schema_version,
-        idempotency_strategy=next((l.idempotency_strategy for l in reversed(layers)
-                                   if l.idempotency_strategy is not None), None),
-        idempotency_key_field=next((l.idempotency_key_field for l in reversed(layers)
-                                    if l.idempotency_key_field is not None), None),
+        idempotency_strategy=next(
+            (
+                layer.idempotency_strategy
+                for layer in reversed(layers)
+                if layer.idempotency_strategy is not None
+            ),
+            None,
+        ),
+        idempotency_key_field=next(
+            (
+                layer.idempotency_key_field
+                for layer in reversed(layers)
+                if layer.idempotency_key_field is not None
+            ),
+            None,
+        ),
         metadata=metadata,
     )
 
@@ -275,7 +311,71 @@ def finalize_policy(resolved: "ResolvedToolPolicy | None") -> EffectiveToolPolic
         require_approval=bool(resolved.require_approval),
         risk=resolved.risk or "medium",
         schema_version=resolved.schema_version or "1",
-        idempotency_strategy=resolved.idempotency_strategy or IdempotencyStrategy.EXACT_CALL,
+        idempotency_strategy=resolved.idempotency_strategy
+        or IdempotencyStrategy.EXACT_CALL,
         idempotency_key_field=resolved.idempotency_key_field,
         metadata=resolved.metadata,
     )
+
+
+class MetadataBackedPolicyProvider:
+    """Wraps an old-style ``get_metadata_map()`` provider and resolves a
+    ToolDescriptor into a ResolvedToolPolicy by looking up the tool's metadata.
+    Tools not in the metadata map get default policy (enabled, no approval).
+    Provider errors fail closed."""
+
+    def __init__(self, metadata_provider: Any) -> None:
+        self._provider = metadata_provider
+
+    async def resolve(
+        self, descriptor: ToolDescriptor, context: "RunContext"
+    ) -> ResolvedToolPolicy:
+        # Fail closed: if the underlying metadata source is unavailable, raise
+        # so the ManagedToolAdapter emits a SecurityDegraded event and denies
+        # the call -- never run a tool ungoverned because its policy couldn't
+        # be resolved.
+        try:
+            metadata_map = await self._provider.get_metadata_map()
+        except Exception as exc:
+            raise ToolPolicyResolutionError(
+                f"tool policy metadata source unavailable for {descriptor.name!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        meta = metadata_map.get(descriptor.name)
+        if meta is None:
+            return ResolvedToolPolicy()
+        risk_val = getattr(meta, "risk", None)
+        if isinstance(risk_val, str):
+            risk = risk_val.lower()
+        elif risk_val is not None:
+            risk = risk_val.name.lower()
+        else:
+            risk = "medium"
+        approval = getattr(meta, "approval", None)
+        from ..policy.rule import ApprovalMode
+
+        require_approval = approval not in (None, ApprovalMode.NEVER)
+        side_effect = getattr(meta, "side_effect", None)
+        idempotent = getattr(meta, "idempotent", None)
+        timeout = getattr(meta, "timeout_seconds", None)
+        meta_extra = dict(getattr(meta, "metadata", {}) or {})
+        namespaced: "dict[str, Any]" = {
+            "permissions": [str(p) for p in getattr(meta, "permissions", frozenset())],
+            "side_effect": str(side_effect) if side_effect is not None else "read_only",
+        }
+        if meta_extra:
+            namespaced["source_metadata"] = meta_extra
+        return ResolvedToolPolicy(
+            enabled=getattr(meta, "enabled", True),
+            timeout_seconds=float(timeout) if timeout is not None else None,
+            max_retries=getattr(meta, "max_retries", None),
+            idempotent=idempotent,
+            require_approval=require_approval,
+            risk=risk,
+            schema_version=str(getattr(meta, "schema_version", "1")) or None,
+            idempotency_strategy=parse_idempotency_strategy(
+                getattr(meta, "idempotency_strategy", None)
+            ),
+            idempotency_key_field=getattr(meta, "idempotency_key_field", None),
+            metadata=namespaced,
+        )

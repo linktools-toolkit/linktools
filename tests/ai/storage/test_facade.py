@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.errors import StorageCapabilityError
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.capabilities import FILE_STORAGE_CAPABILITIES, SQLALCHEMY_STORAGE_CAPABILITIES
+from linktools.ai.storage.capabilities import (
+    FILE_STORAGE_CAPABILITIES,
+    SQLALCHEMY_STORAGE_CAPABILITIES,
+)
 from linktools.ai.storage import SqlAlchemyStorage
 from linktools.ai.storage.facade import FileStorage, Storage
 from linktools.ai.storage.resource.models import WriteOptions
@@ -20,18 +23,32 @@ from linktools.ai.storage.sqlalchemy.models import Base
 def _session_record(session_id="session-1") -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1,
-        created_at=now, updated_at=now,
+        id=session_id,
+        parent_id=None,
+        status=SessionStatus.ACTIVE,
+        version=1,
+        created_at=now,
+        updated_at=now,
     )
 
 
 def _run_record(run_id="run-1") -> RunRecord:
     now = datetime.now(timezone.utc)
     return RunRecord(
-        id=run_id, root_run_id=run_id, parent_run_id=None, session_id="session-1",
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT, status=RunStatus.PENDING,
-        input=RunInput(prompt="hi"), result=None, error=None, version=1,
-        created_at=now, started_at=None, finished_at=None,
+        id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id="session-1",
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        status=RunStatus.PENDING,
+        input=RunInput(prompt="hi"),
+        result=None,
+        error=None,
+        version=1,
+        created_at=now,
+        started_at=None,
+        finished_at=None,
     )
 
 
@@ -55,7 +72,9 @@ def test_file_storage_runs_end_to_end(tmp_path):
         fetched = await storage.sessions.get("session-1")
         run = await storage.runs.get("run-1")
         path = ResourcePath("/artifacts/tenant-1/run-1/draft.txt")
-        await storage.resources.put(path, b"hello", options=WriteOptions(content_type="text/plain", metadata={}))
+        await storage.resources.put(
+            path, b"hello", options=WriteOptions(content_type="text/plain", metadata={})
+        )
         resource = await storage.resources.get(path)
         return fetched, run, resource
 
@@ -122,6 +141,7 @@ def test_sqlalchemy_storage_transaction_yields_a_unit_of_work(tmp_path):
     async def _run():
         async with storage.transaction() as tx:
             from sqlalchemy import text
+
             # tx.session is the shared AsyncSession all stores bind to.
             result = await tx.session.execute(text("SELECT 1"))
             return result.scalar()
@@ -148,7 +168,15 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
 
     bound = asyncio.run(_run())
     shared = bound["session"]
-    for name in ("runs", "events", "checkpoints", "approvals", "sessions", "swarms", "memories"):
+    for name in (
+        "runs",
+        "events",
+        "checkpoints",
+        "approvals",
+        "sessions",
+        "swarms",
+        "memories",
+    ):
         assert bound[name] is shared, f"{name} does not share the UoW session"
 
 
@@ -158,6 +186,7 @@ def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):
     unique-(session_id, sequence) retry loop in append_messages resolves the
     race, so N concurrent appends each get a distinct, gapless sequence."""
     from linktools.ai.session.models import MessageRole, NewSessionMessage
+
     storage, _ = _sqlalchemy_storage(tmp_path)
 
     async def _run():
@@ -165,13 +194,21 @@ def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):
 
         async def _append(i: int):
             return await storage.sessions.append_messages(
-                "session-1", (NewSessionMessage(role=MessageRole.USER, content=f"m{i}", run_id=None),),
+                "session-1",
+                (
+                    NewSessionMessage(
+                        role=MessageRole.USER, content=f"m{i}", run_id=None
+                    ),
+                ),
             )
+
         return await asyncio.gather(*(_append(i) for i in range(10)))
 
     results = asyncio.run(_run())
     sequences = sorted(batch[0].sequence for batch in results)
-    assert sequences == list(range(1, 11)), f"expected 1..10 with no duplicates, got {sequences}"
+    assert sequences == list(range(1, 11)), (
+        f"expected 1..10 with no duplicates, got {sequences}"
+    )
 
 
 def test_sqlalchemy_session_append_in_uow_single_writer(tmp_path):
@@ -180,13 +217,15 @@ def test_sqlalchemy_session_append_in_uow_single_writer(tmp_path):
     CONCURRENT UoW-mode writers to the same session, not UoW-mode append
     itself)."""
     from linktools.ai.session.models import MessageRole, NewSessionMessage
+
     storage, _ = _sqlalchemy_storage(tmp_path)
 
     async def _run():
         await storage.sessions.create(_session_record())
         async with storage.transaction() as tx:
             persisted = await tx.sessions.append_messages(
-                "session-1", (NewSessionMessage(role=MessageRole.USER, content="hi", run_id=None),),
+                "session-1",
+                (NewSessionMessage(role=MessageRole.USER, content="hi", run_id=None),),
             )
         return persisted
 
@@ -200,10 +239,15 @@ def test_sqlalchemy_session_append_in_uow_single_writer(tmp_path):
 def test_sqlalchemy_storage_uow_commits_all_stores_on_success(tmp_path):
     """A clean exit commits every tx.* write -- both stores persist."""
     from linktools.ai.agent.approval import build_approval_request
+
     storage, _ = _sqlalchemy_storage(tmp_path)
     run = _run_record()
     approval = build_approval_request(
-        run_id=run.id, tool_call_id="call-1", tool_name="tool-1", reason="ok", arguments={},
+        run_id=run.id,
+        tool_call_id="call-1",
+        tool_name="tool-1",
+        reason="ok",
+        arguments={},
     )
 
     async def _run():
@@ -223,10 +267,15 @@ def test_sqlalchemy_storage_uow_rolls_back_all_stores_on_failure(tmp_path):
     """An exception inside the UoW rolls back EVERY store -- neither the run
     nor the approval persists. This is the atomicity guarantee."""
     from linktools.ai.agent.approval import build_approval_request
+
     storage, _ = _sqlalchemy_storage(tmp_path)
     run = _run_record()
     approval = build_approval_request(
-        run_id=run.id, tool_call_id="call-1", tool_name="tool-1", reason="ok", arguments={},
+        run_id=run.id,
+        tool_call_id="call-1",
+        tool_name="tool-1",
+        reason="ok",
+        arguments={},
     )
 
     async def _run():
@@ -285,12 +334,14 @@ def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_pa
 
 def test_file_storage_exposes_file_swarm_store(tmp_path):
     from linktools.ai.storage.file.swarm import FileSwarmStore
+
     storage = FileStorage(root=tmp_path)
     assert isinstance(storage.swarms, FileSwarmStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_swarm_store(tmp_path):
     from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.swarms, SqlAlchemySwarmStore)
 
@@ -303,9 +354,15 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
     storage = FileStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
     swarm_run = SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.PENDING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=now, updated_at=now,
+        id="swarm-1",
+        run_id="drive-run-1",
+        round=0,
+        status=SwarmStatus.PENDING,
+        version=1,
+        token_usage=TokenUsage(),
+        cost=Decimal("0"),
+        created_at=now,
+        updated_at=now,
     )
 
     async def _run():
@@ -321,24 +378,33 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
 
 def test_file_storage_exposes_file_memory_store(tmp_path):
     from linktools.ai.storage.file.memory import FileMemoryStore
+
     storage = FileStorage(root=tmp_path)
     assert isinstance(storage.memories, FileMemoryStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
     from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
+
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.memories, SqlAlchemyMemoryStore)
 
 
 def test_file_storage_memories_round_trips_a_record(tmp_path):
     from linktools.ai.memory.models import MemoryRecord
+
     storage = FileStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
     record = MemoryRecord(
-        id="mem-1", owner_id="user-1", content="prefers terse answers",
-        category="preference", confidence=0.8, version=1,
-        created_at=now, updated_at=now, metadata={},
+        id="mem-1",
+        owner_id="user-1",
+        content="prefers terse answers",
+        category="preference",
+        confidence=0.8,
+        version=1,
+        created_at=now,
+        updated_at=now,
+        metadata={},
     )
 
     async def _run():
@@ -355,6 +421,7 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
 def test_file_storage_exposes_file_approval_store(tmp_path):
     from linktools.ai.agent.approval import ApprovalStore
     from linktools.ai.storage.file.approval import FileApprovalStore
+
     storage = FileStorage(root=tmp_path)
     assert isinstance(storage.approvals, FileApprovalStore)
     assert isinstance(storage.approvals, ApprovalStore)
@@ -363,13 +430,18 @@ def test_file_storage_exposes_file_approval_store(tmp_path):
 def test_sqlalchemy_storage_exposes_sqlalchemy_approval_store(tmp_path):
     from linktools.ai.agent.approval import ApprovalStore
     from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
+
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.approvals, SqlAlchemyApprovalStore)
     assert isinstance(storage.approvals, ApprovalStore)
 
 
 def test_file_storage_approvals_round_trips_a_request(tmp_path):
-    from linktools.ai.agent.approval import ApprovalRequest, ApprovalStatus, build_approval_request
+    from linktools.ai.agent.approval import (
+        ApprovalStatus,
+        build_approval_request,
+    )
+
     storage = FileStorage(root=tmp_path)
     request = build_approval_request(
         run_id="run-1",
@@ -391,4 +463,3 @@ def test_file_storage_approvals_round_trips_a_request(tmp_path):
     assert fetched.tool_name == "browser.search"
     assert fetched.reason == "needs human confirmation"
     assert fetched.status is ApprovalStatus.PENDING
-

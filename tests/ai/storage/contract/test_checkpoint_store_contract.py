@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_checkpoint_store_contract.py"""
+
 from datetime import datetime, timezone
 
 import pytest
@@ -11,8 +12,13 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 
 def _checkpoint(run_id="run-1", sequence=1) -> RunCheckpoint:
     return RunCheckpoint(
-        id=f"{run_id}-{sequence}", run_id=run_id, sequence=sequence, format="msgpack",
-        schema_version=1, payload=b"snapshot-bytes", created_at=datetime.now(timezone.utc),
+        id=f"{run_id}-{sequence}",
+        run_id=run_id,
+        sequence=sequence,
+        format="msgpack",
+        schema_version=1,
+        payload=b"snapshot-bytes",
+        created_at=datetime.now(timezone.utc),
     )
 
 
@@ -60,7 +66,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/checkpoints-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/checkpoints-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():

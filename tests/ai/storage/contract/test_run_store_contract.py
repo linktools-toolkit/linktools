@@ -2,22 +2,46 @@
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_run_store_contract.py — runs the same RunStore
 contract against both FileRunStore and SqlAlchemyRunStore."""
+
 from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.errors import InvalidRunTransitionError, RunConflictError, RunNotFoundError
-from linktools.ai.run.models import RunErrorInfo, RunInput, RunnableType, RunRecord, RunResult, RunStatus
+from linktools.ai.errors import (
+    InvalidRunTransitionError,
+    RunConflictError,
+    RunNotFoundError,
+)
+from linktools.ai.run.models import (
+    RunErrorInfo,
+    RunInput,
+    RunnableType,
+    RunRecord,
+    RunResult,
+    RunStatus,
+)
 from linktools.ai.storage.file.run import FileRunStore
 
 
-def _record(run_id="run-1", parent_run_id=None, status=RunStatus.PENDING, version=1) -> RunRecord:
+def _record(
+    run_id="run-1", parent_run_id=None, status=RunStatus.PENDING, version=1
+) -> RunRecord:
     now = datetime.now(timezone.utc)
     return RunRecord(
-        id=run_id, root_run_id=run_id if parent_run_id is None else "run-1", parent_run_id=parent_run_id,
-        session_id="session-1", runnable_id="agent-1", runnable_type=RunnableType.AGENT, status=status,
-        input=RunInput(prompt="hi"), result=None, error=None, version=version,
-        created_at=now, started_at=None, finished_at=None,
+        id=run_id,
+        root_run_id=run_id if parent_run_id is None else "run-1",
+        parent_run_id=parent_run_id,
+        session_id="session-1",
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        status=status,
+        input=RunInput(prompt="hi"),
+        result=None,
+        error=None,
+        version=version,
+        created_at=now,
+        started_at=None,
+        finished_at=None,
     )
 
 
@@ -65,7 +89,9 @@ def store_factory(request, tmp_path):
 
     def sqlalchemy_factory():
         counter["n"] += 1
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/runs-db-{counter['n']}.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/runs-db-{counter['n']}.db"
+        )
         engines.append(engine)
 
         async def _create():
@@ -150,7 +176,10 @@ async def test_transition_to_succeeded_stores_result(store_factory):
     await store.create(_record())
     await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
     done = await store.transition(
-        "run-1", RunStatus.SUCCEEDED, expected_version=2, result=RunResult(output={"ok": True}),
+        "run-1",
+        RunStatus.SUCCEEDED,
+        expected_version=2,
+        result=RunResult(output={"ok": True}),
     )
     assert done.status == RunStatus.SUCCEEDED
     assert done.result.output == {"ok": True}
@@ -162,7 +191,10 @@ async def test_transition_to_failed_stores_error(store_factory):
     await store.create(_record())
     await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
     failed = await store.transition(
-        "run-1", RunStatus.FAILED, expected_version=2, error=RunErrorInfo(error_type="X", message="boom"),
+        "run-1",
+        RunStatus.FAILED,
+        expected_version=2,
+        error=RunErrorInfo(error_type="X", message="boom"),
     )
     assert failed.status == RunStatus.FAILED
     assert failed.error.message == "boom"
@@ -180,7 +212,9 @@ async def test_list_children_returns_only_direct_children(store_factory):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_transitions_with_same_expected_version_only_one_succeeds(store_factory):
+async def test_concurrent_transitions_with_same_expected_version_only_one_succeeds(
+    store_factory,
+):
     """P0-4/P1-6: N coroutines race to transition the SAME run from PENDING
     to RUNNING using the SAME expected_version. Exactly one may succeed;
     every other one must observe a conflict (RunConflictError) rather than
@@ -197,7 +231,9 @@ async def test_concurrent_transitions_with_same_expected_version_only_one_succee
 
     async def _attempt():
         try:
-            updated = await store.transition("run-1", RunStatus.RUNNING, expected_version=1)
+            updated = await store.transition(
+                "run-1", RunStatus.RUNNING, expected_version=1
+            )
             successes.append(updated)
         except RunConflictError:
             conflicts.append(1)

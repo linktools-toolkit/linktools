@@ -8,7 +8,17 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Mapping
 
-from .models import Depth, Found, IdempotencyRecord, Masked, Missing, Resource, ResourceInfo, ResourceKind, ResourcePage
+from .models import (
+    Depth,
+    Found,
+    IdempotencyRecord,
+    Masked,
+    Missing,
+    Resource,
+    ResourceInfo,
+    ResourceKind,
+    ResourcePage,
+)
 from .path import ResourcePath
 
 
@@ -31,11 +41,13 @@ class MemoryResourceBackend:
             return Masked(path=path, version=self._whiteouts[key])
         return Missing()
 
-    async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+    async def raw_propfind(
+        self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None"
+    ) -> ResourcePage:
         # Keyset pagination: entries iterate in sorted key order;
         # ``key > cursor`` is the resume point. Collect limit+1 so the
         # (limit+1)th path becomes next_cursor. Memory does NOT implement
-        # raw_move / raw_stat -- ResourceStore falls back to the legacy path
+        # raw_move / raw_stat -- ResourceStore falls back to the prior path
         # for this backend, exercising the hasattr() probe.
         prefix = path.value.rstrip("/") + "/"
         items = []
@@ -44,7 +56,7 @@ class MemoryResourceBackend:
                 continue
             if cursor is not None and key <= cursor:
                 continue
-            rest = key[len(prefix):]
+            rest = key[len(prefix) :]
             if depth == Depth.ONE and "/" in rest:
                 continue
             items.append(info)
@@ -53,7 +65,14 @@ class MemoryResourceBackend:
         next_cursor = items[limit].path.value if len(items) > limit else None
         return ResourcePage(items=tuple(items[:limit]), cursor=next_cursor)
 
-    async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+    async def raw_put(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        content_type: "str | None",
+        metadata: "Mapping[str, object]",
+    ):
         key = path.value
         self._revision += 1
         prior_entry_version = self._entries.get(key, (b"", None))[1]

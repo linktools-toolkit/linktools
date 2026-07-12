@@ -14,14 +14,13 @@ from ..errors import (
     PipelineExecutionError,
     ToolApprovalRequiredError,
     ToolDeniedError,
-    ToolError,
     ToolPolicyResolutionError,
     ToolSchemaValidationError,
     TransientToolError,
 )
 
 if TYPE_CHECKING:
-    from ..security.descriptor import ToolDescriptor
+    from ..tool.models import ToolDescriptor
     from .policy import EffectiveToolPolicy
 
 # Errors that can NEVER succeed on retry -- retrying them is wasted work and,
@@ -51,8 +50,7 @@ class RetryPolicy(Protocol):
         attempt: int,
         policy: "EffectiveToolPolicy",
         descriptor: "ToolDescriptor",
-    ) -> bool:
-        ...
+    ) -> bool: ...
 
 
 def backoff_delay(attempt: int, base: float = 0.1, cap: float = 5.0) -> float:

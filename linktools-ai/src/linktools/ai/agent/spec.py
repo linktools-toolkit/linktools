@@ -22,8 +22,8 @@ class ToolRef:
     name: str
     # kind identifies the capability provider ("builtin", "skill", "mcp",
     # "subagent", "package", "package-resource", "package-entrypoint"). When
-    # None the resolver treats a bare name as a builtin tool (backward compat
-    # with ``tools: [file, terminal]``). A "kind:name" string (e.g. "skill:sql")
+    # None the resolver treats a bare name as a builtin tool (e.g.
+    # ``tools: [file, terminal]``). A "kind:name" string (e.g. "skill:sql")
     # is split into kind + name by parse_tool_refs.
     kind: "str | None" = None
     config: "Mapping[str, Any]" = field(default_factory=dict)

@@ -32,22 +32,61 @@ if TYPE_CHECKING:
 class MiddlewareCapability(AbstractCapability[None]):
     pipeline: MiddlewarePipeline
 
-    async def before_model_request(self, ctx: "RunContext[Any]", request_context: "ModelRequestContext") -> "ModelRequestContext":
-        return await self.pipeline.run_before_model(ctx.deps.tool_context, request_context)
+    async def before_model_request(
+        self, ctx: "RunContext[Any]", request_context: "ModelRequestContext"
+    ) -> "ModelRequestContext":
+        return await self.pipeline.run_before_model(
+            ctx.deps.tool_context, request_context
+        )
 
-    async def after_model_request(self, ctx: "RunContext[Any]", *, request_context: "ModelRequestContext", response: "ModelResponse") -> "ModelResponse":
+    async def after_model_request(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        request_context: "ModelRequestContext",
+        response: "ModelResponse",
+    ) -> "ModelResponse":
         return await self.pipeline.run_after_model(ctx.deps.tool_context, response)
 
-    async def before_tool_execute(self, ctx: "RunContext[Any]", *, call: "ToolCallPart", tool_def: "ToolDefinition", args: Any) -> Any:
-        request = ToolRequest(tool_name=tool_def.name, arguments=args if isinstance(args, dict) else {})
+    async def before_tool_execute(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        call: "ToolCallPart",
+        tool_def: "ToolDefinition",
+        args: Any,
+    ) -> Any:
+        request = ToolRequest(
+            tool_name=tool_def.name, arguments=args if isinstance(args, dict) else {}
+        )
         await self.pipeline.run_before_tool(ctx.deps.tool_context, request)
         return args
 
-    async def after_tool_execute(self, ctx: "RunContext[Any]", *, call: "ToolCallPart", tool_def: "ToolDefinition", args: Any, result: Any) -> Any:
-        request = ToolRequest(tool_name=tool_def.name, arguments=args if isinstance(args, dict) else {})
-        return await self.pipeline.run_after_tool(ctx.deps.tool_context, request, result)
+    async def after_tool_execute(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        call: "ToolCallPart",
+        tool_def: "ToolDefinition",
+        args: Any,
+        result: Any,
+    ) -> Any:
+        request = ToolRequest(
+            tool_name=tool_def.name, arguments=args if isinstance(args, dict) else {}
+        )
+        return await self.pipeline.run_after_tool(
+            ctx.deps.tool_context, request, result
+        )
 
-    async def on_tool_execute_error(self, ctx: "RunContext[Any]", *, call: "ToolCallPart", tool_def: "ToolDefinition", args: Any, error: Exception) -> None:
+    async def on_tool_execute_error(
+        self,
+        ctx: "RunContext[Any]",
+        *,
+        call: "ToolCallPart",
+        tool_def: "ToolDefinition",
+        args: Any,
+        error: Exception,
+    ) -> None:
         await self.pipeline.run_on_error(ctx.deps.tool_context, error)
         raise error
 

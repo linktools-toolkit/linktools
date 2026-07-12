@@ -31,7 +31,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ResourceRow, IdempotencyRow, RevisionRow
-from ..resource.models import Depth, Found, IdempotencyRecord, Masked, Missing, MoveResult, Resource, ResourceInfo, ResourceLookupInfo, ResourceKind, ResourcePage, WriteOptions
+from ..resource.models import (
+    Depth,
+    Found,
+    IdempotencyRecord,
+    Masked,
+    Missing,
+    MoveResult,
+    Resource,
+    ResourceInfo,
+    ResourceLookupInfo,
+    ResourceKind,
+    ResourcePage,
+    WriteOptions,
+)
 from ..resource.path import ResourcePath
 from ...errors import IdempotencyConflictError, ResourcePreconditionFailedError
 
@@ -90,12 +103,18 @@ _CONFLICT_RETRIES = 8
 
 
 class SqlAlchemyResourceBackend:
-    def __init__(self, *, session_factory: "Callable[[], AsyncSession]", readonly: bool = False) -> None:
+    def __init__(
+        self, *, session_factory: "Callable[[], AsyncSession]", readonly: bool = False
+    ) -> None:
         self.readonly = readonly
         self._session_factory = session_factory
 
-    async def _get_row(self, session: AsyncSession, path: ResourcePath) -> "ResourceRow | None":
-        result = await session.execute(select(ResourceRow).where(ResourceRow.path == path.value))
+    async def _get_row(
+        self, session: AsyncSession, path: ResourcePath
+    ) -> "ResourceRow | None":
+        result = await session.execute(
+            select(ResourceRow).where(ResourceRow.path == path.value)
+        )
         return result.scalar_one_or_none()
 
     async def raw_get(self, path: ResourcePath, *, include_content: bool = True):
@@ -117,8 +136,13 @@ class SqlAlchemyResourceBackend:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(
-                    ResourceRow.path, ResourceRow.kind, ResourceRow.etag, ResourceRow.version,
-                    ResourceRow.content_type, ResourceRow.size, ResourceRow.modified_at,
+                    ResourceRow.path,
+                    ResourceRow.kind,
+                    ResourceRow.etag,
+                    ResourceRow.version,
+                    ResourceRow.content_type,
+                    ResourceRow.size,
+                    ResourceRow.modified_at,
                     ResourceRow.metadata_json,
                 )
                 .where(ResourceRow.path == path.value)
@@ -129,7 +153,9 @@ class SqlAlchemyResourceBackend:
             return None
         return _dict_to_info(row._asdict())
 
-    async def raw_propfind(self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None") -> ResourcePage:
+    async def raw_propfind(
+        self, path: ResourcePath, *, depth: Depth, limit: int, cursor: "str | None"
+    ) -> ResourcePage:
         """Keyset pagination: ``WHERE path > :cursor ORDER BY path
         LIMIT :limit+1``. Pushing the depth=ONE filter into SQL (``NOT LIKE
         prefix + '%/%'``) keeps the LIMIT honest -- a Python-side depth filter
@@ -137,7 +163,9 @@ class SqlAlchemyResourceBackend:
         lets us detect "more available" without a second count query: when we
         get limit+1, the (limit+1)th path becomes next_cursor."""
         prefix = path.value.rstrip("/") + "/"
-        escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        escaped_prefix = (
+            prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
         conditions = [
             ResourceRow.path.like(f"{escaped_prefix}%", escape="\\"),
             ResourceRow.deleted_at.is_(None),
@@ -147,7 +175,9 @@ class SqlAlchemyResourceBackend:
             # `/agents/%` but NOT `/agents/%/%` (which requires at least one
             # further slash). The leading prefix is already escaped; the
             # trailing `%/` are wildcards/escaped-slash per LIKE-with-escape.
-            conditions.append(~ResourceRow.path.like(f"{escaped_prefix}%/%", escape="\\"))
+            conditions.append(
+                ~ResourceRow.path.like(f"{escaped_prefix}%/%", escape="\\")
+            )
         if cursor is not None:
             conditions.append(ResourceRow.path > cursor)
         async with self._session_factory() as session:
@@ -229,7 +259,10 @@ class SqlAlchemyResourceBackend:
         attributes -- so the caller would see stale (pre-update) values. READS
         via individual columns bypass the identity map entirely.
         """
-        conditions = [ResourceRow.path == path.value, ResourceRow.version == expected_version]
+        conditions = [
+            ResourceRow.path == path.value,
+            ResourceRow.version == expected_version,
+        ]
         if if_match is not None:
             # push the etag precondition into the UPDATE WHERE so the DB
             # -- not a Python pre-read -- enforces it. Two concurrent writers
@@ -252,8 +285,13 @@ class SqlAlchemyResourceBackend:
                 whiteout_version=None,
             )
             .returning(
-                ResourceRow.path, ResourceRow.kind, ResourceRow.etag, ResourceRow.version,
-                ResourceRow.content_type, ResourceRow.size, ResourceRow.modified_at,
+                ResourceRow.path,
+                ResourceRow.kind,
+                ResourceRow.etag,
+                ResourceRow.version,
+                ResourceRow.content_type,
+                ResourceRow.size,
+                ResourceRow.modified_at,
                 ResourceRow.metadata_json,
             )
             .execution_options(synchronize_session=False)
@@ -328,11 +366,15 @@ class SqlAlchemyResourceBackend:
         if row is None:
             if if_match is not None:
                 # If-Match on a missing resource is a precondition failure.
-                raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                raise ResourcePreconditionFailedError(
+                    f"if-match precondition failed: {path}"
+                )
             # INSERT path: unique-path constraint is the atomicity backstop.
             try:
                 async with session.begin_nested():
-                    new_row = await self._insert_new_row(session, path, content, content_type, metadata)
+                    new_row = await self._insert_new_row(
+                        session, path, content, content_type, metadata
+                    )
                     if bump_revision:
                         await self._bump_revision(session)
                 return _row_to_info(new_row)
@@ -341,12 +383,16 @@ class SqlAlchemyResourceBackend:
                 # is a precondition failure (resource now exists); otherwise the
                 # caller retries via the UPDATE-existing path.
                 if if_none_match:
-                    raise ResourcePreconditionFailedError(f"resource already exists: {path}")
+                    raise ResourcePreconditionFailedError(
+                        f"resource already exists: {path}"
+                    )
                 return None
         else:
             # Row exists. If-None-Match demands it not exist.
             if if_none_match and row.deleted_at is None:
-                raise ResourcePreconditionFailedError(f"resource already exists: {path}")
+                raise ResourcePreconditionFailedError(
+                    f"resource already exists: {path}"
+                )
             # no-op short-circuit: identical content + content_type +
             # metadata + live state is an idempotent no-op PUT, which must NOT
             # bump version/revision. Python comparison is a tiny race window
@@ -364,7 +410,9 @@ class SqlAlchemyResourceBackend:
                 # surfaced as a precondition failure regardless of
                 # whether the PUT would have changed anything.
                 if if_match is not None and row.etag != if_match:
-                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                    raise ResourcePreconditionFailedError(
+                        f"if-match precondition failed: {path}"
+                    )
                 return _row_to_info(row)
             # conditional UPDATE on version. new_version is computed in
             # Python from the SELECTed row, but the conditional WHERE makes the
@@ -373,13 +421,21 @@ class SqlAlchemyResourceBackend:
             expected_version = row.version
             new_version = max(row.version or 0, row.whiteout_version or 0) + 1
             updated = await self._conditional_update_row(
-                session, path, expected_version, content, content_type, metadata,
-                new_version=new_version, if_match=if_match,
+                session,
+                path,
+                expected_version,
+                content,
+                content_type,
+                metadata,
+                new_version=new_version,
+                if_match=if_match,
             )
             if updated is None:
                 if if_match is not None:
                     # the etag precondition failed inside the DB WHERE.
-                    raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                    raise ResourcePreconditionFailedError(
+                        f"if-match precondition failed: {path}"
+                    )
                 return None  # retry-able conflict
             if bump_revision:
                 await self._bump_revision(session)
@@ -406,8 +462,13 @@ class SqlAlchemyResourceBackend:
         revision bump themselves."""
         for _ in range(_CONFLICT_RETRIES):
             info = await self._put_once(
-                session, path, content, content_type, metadata,
-                if_match=if_match, if_none_match=if_none_match,
+                session,
+                path,
+                content,
+                content_type,
+                metadata,
+                if_match=if_match,
+                if_none_match=if_none_match,
                 bump_revision=bump_revision,
             )
             if info is not None:
@@ -419,12 +480,24 @@ class SqlAlchemyResourceBackend:
             f"resource update conflict after {_CONFLICT_RETRIES} retries: {path}"
         )
 
-    async def raw_put(self, path: ResourcePath, content: bytes, *, content_type: "str | None", metadata: "Mapping[str, object]"):
+    async def raw_put(
+        self,
+        path: ResourcePath,
+        content: bytes,
+        *,
+        content_type: "str | None",
+        metadata: "Mapping[str, object]",
+    ):
         async with self._session_factory() as session:
             async with session.begin():
                 info = await self._put_with_retry(
-                    session, path, content, content_type, metadata,
-                    if_match=None, if_none_match=False,
+                    session,
+                    path,
+                    content,
+                    content_type,
+                    metadata,
+                    if_match=None,
+                    if_none_match=False,
                 )
             return info
 
@@ -452,23 +525,38 @@ class SqlAlchemyResourceBackend:
             async with self._session_factory() as session:
                 async with session.begin():
                     if idem_key is not None:
-                        idem_result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == idem_key))
+                        idem_result = await session.execute(
+                            select(IdempotencyRow).where(IdempotencyRow.key == idem_key)
+                        )
                         idem_row = idem_result.scalar_one_or_none()
                         if idem_row is not None:
                             if idem_row.request_hash != request_hash:
                                 raise IdempotencyConflictError(
                                     f"idempotency key {options.idempotency_key!r} reused with a different request"
                                 )
-                            cached_info = _idempotency_result_to_info(idem_row.result_json)
+                            cached_info = _idempotency_result_to_info(
+                                idem_row.result_json
+                            )
                             row = await self._get_row(session, path)
-                            content_bytes = row.content if (row is not None and row.deleted_at is None) else content
+                            content_bytes = (
+                                row.content
+                                if (row is not None and row.deleted_at is None)
+                                else content
+                            )
                             return Resource(info=cached_info, content=content_bytes)
                     info = await self._put_with_retry(
-                        session, path, content, options.content_type, options.metadata,
-                        if_match=options.if_match, if_none_match=options.if_none_match,
+                        session,
+                        path,
+                        content,
+                        options.content_type,
+                        options.metadata,
+                        if_match=options.if_match,
+                        if_none_match=options.if_none_match,
                     )
                     if idem_key is not None:
-                        await self._save_idempotency_row(session, idem_key, request_hash, info)
+                        await self._save_idempotency_row(
+                            session, idem_key, request_hash, info
+                        )
                     return Resource(info=info, content=content)
         except IntegrityError as exc:
             # Concurrent put won the path race between our (empty) precondition
@@ -515,8 +603,10 @@ class SqlAlchemyResourceBackend:
         result = await session.execute(stmt)
         return result.rowcount > 0
 
-    async def _apply_delete_unconditional(self, session: AsyncSession, path: ResourcePath) -> "ResourceInfo | None":
-        """Unconditional delete used by the legacy raw_delete path. Loops:
+    async def _apply_delete_unconditional(
+        self, session: AsyncSession, path: ResourcePath
+    ) -> "ResourceInfo | None":
+        """Unconditional delete used by the prior raw_delete path. Loops:
         SELECT then mask-the-live-row via conditional UPDATE on version. If a
         concurrent writer bumps version first, our UPDATE misses and we retry
         against the new committed state. A row that is already masked gets its
@@ -526,19 +616,32 @@ class SqlAlchemyResourceBackend:
             row = await self._get_row(session, path)
             if row is None:
                 # No row at all: seed a tombstone so future reads see Masked.
-                session.add(ResourceRow(
-                    path=path.value, kind="file", etag="", version=0, content_type=None, size=0,
-                    content=b"", modified_at=datetime.now(timezone.utc), metadata_json="{}",
-                    deleted_at=datetime.now(timezone.utc), whiteout_version=1,
-                ))
+                session.add(
+                    ResourceRow(
+                        path=path.value,
+                        kind="file",
+                        etag="",
+                        version=0,
+                        content_type=None,
+                        size=0,
+                        content=b"",
+                        modified_at=datetime.now(timezone.utc),
+                        metadata_json="{}",
+                        deleted_at=datetime.now(timezone.utc),
+                        whiteout_version=1,
+                    )
+                )
                 await self._bump_revision(session)
                 return None
             if row.deleted_at is not None:
                 # Already masked: atomically bump the whiteout counter so the
-                # lineage version keeps advancing (matches legacy semantics).
+                # lineage version keeps advancing (matches prior semantics).
                 stmt = (
                     update(ResourceRow)
-                    .where(ResourceRow.path == path.value, ResourceRow.version == row.version)
+                    .where(
+                        ResourceRow.path == path.value,
+                        ResourceRow.version == row.version,
+                    )
                     .values(whiteout_version=(ResourceRow.whiteout_version or 0) + 1)
                     .execution_options(synchronize_session=False)
                 )
@@ -548,7 +651,9 @@ class SqlAlchemyResourceBackend:
             # Live row: conditional mask on version.If a concurrent writer bumps
             # version first, our UPDATE matches 0 rows and we retry.
             removed_info = _row_to_info(row)
-            masked = await self._conditional_delete_row(session, path, row.version, if_match=None)
+            masked = await self._conditional_delete_row(
+                session, path, row.version, if_match=None
+            )
             if masked:
                 await self._bump_revision(session)
                 return removed_info
@@ -573,11 +678,15 @@ class SqlAlchemyResourceBackend:
         is pushed into the UPDATE WHERE (consistent with raw_put_checked):
         two concurrent deletes holding the same stale If-Match cannot
         both succeed."""
-        idem_key = f"delete:{options.idempotency_key}" if options.idempotency_key else None
+        idem_key = (
+            f"delete:{options.idempotency_key}" if options.idempotency_key else None
+        )
         async with self._session_factory() as session:
             async with session.begin():
                 if idem_key is not None:
-                    idem_result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == idem_key))
+                    idem_result = await session.execute(
+                        select(IdempotencyRow).where(IdempotencyRow.key == idem_key)
+                    )
                     idem_row = idem_result.scalar_one_or_none()
                     if idem_row is not None:
                         if idem_row.request_hash != request_hash:
@@ -595,15 +704,27 @@ class SqlAlchemyResourceBackend:
                     if row is None or row.deleted_at is not None:
                         # Missing or already masked. If-Match requires a live row.
                         if options.if_match is not None:
-                            raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                            raise ResourcePreconditionFailedError(
+                                f"if-match precondition failed: {path}"
+                            )
                         # No-op for the caller, but ensure a tombstone exists so
-                        # subsequent reads see Masked (matches legacy semantics).
+                        # subsequent reads see Masked (matches prior semantics).
                         if row is None:
-                            session.add(ResourceRow(
-                                path=path.value, kind="file", etag="", version=0, content_type=None,
-                                size=0, content=b"", modified_at=datetime.now(timezone.utc),
-                                metadata_json="{}", deleted_at=datetime.now(timezone.utc), whiteout_version=1,
-                            ))
+                            session.add(
+                                ResourceRow(
+                                    path=path.value,
+                                    kind="file",
+                                    etag="",
+                                    version=0,
+                                    content_type=None,
+                                    size=0,
+                                    content=b"",
+                                    modified_at=datetime.now(timezone.utc),
+                                    metadata_json="{}",
+                                    deleted_at=datetime.now(timezone.utc),
+                                    whiteout_version=1,
+                                )
+                            )
                             await self._bump_revision(session)
                         masked_any = True
                         break
@@ -618,14 +739,18 @@ class SqlAlchemyResourceBackend:
                     # Conflict: either if_match failed (precondition failure) or
                     # a concurrent writer bumped version first (retry).
                     if options.if_match is not None:
-                        raise ResourcePreconditionFailedError(f"if-match precondition failed: {path}")
+                        raise ResourcePreconditionFailedError(
+                            f"if-match precondition failed: {path}"
+                        )
                     session.expire_all()
                 if not masked_any:
                     raise ResourcePreconditionFailedError(
                         f"resource delete conflict after {_CONFLICT_RETRIES} retries: {path}"
                     )
                 if idem_key is not None:
-                    await self._save_idempotency_row(session, idem_key, request_hash, removed_info)
+                    await self._save_idempotency_row(
+                        session, idem_key, request_hash, removed_info
+                    )
 
     # ------------------------------------------------------------------
     # MOVE: ONE transaction
@@ -655,7 +780,9 @@ class SqlAlchemyResourceBackend:
             async with session.begin():
                 source_row = await self._get_row(session, source)
                 if source_row is None or source_row.deleted_at is not None:
-                    raise ResourcePreconditionFailedError(f"cannot move missing resource: {source}")
+                    raise ResourcePreconditionFailedError(
+                        f"cannot move missing resource: {source}"
+                    )
                 source_content = source_row.content
                 source_info = _row_to_info(source_row)
 
@@ -666,8 +793,13 @@ class SqlAlchemyResourceBackend:
                 # target write and source mask together count as ONE state
                 # change, so the counter advances exactly once.
                 target_info = await self._put_with_retry(
-                    session, target, source_content, source_info.content_type, dict(source_info.metadata),
-                    if_match=options.if_match, if_none_match=options.if_none_match,
+                    session,
+                    target,
+                    source_content,
+                    source_info.content_type,
+                    dict(source_info.metadata),
+                    if_match=options.if_match,
+                    if_none_match=options.if_none_match,
                     bump_revision=False,
                 )
 
@@ -675,9 +807,13 @@ class SqlAlchemyResourceBackend:
                 # Inside one transaction the source row cannot have changed
                 # since our SELECT, so the conditional UPDATE always matches;
                 # masked=False would indicate a bug or external mutation.
-                masked = await self._conditional_delete_row(session, source, source_row.version, if_match=None)
+                masked = await self._conditional_delete_row(
+                    session, source, source_row.version, if_match=None
+                )
                 if not masked:
-                    raise ResourcePreconditionFailedError(f"source changed during move: {source}")
+                    raise ResourcePreconditionFailedError(
+                        f"source changed during move: {source}"
+                    )
 
                 # One revision bump for the whole move.
                 await self._bump_revision(session)
@@ -696,16 +832,28 @@ class SqlAlchemyResourceBackend:
     ) -> None:
         result_json = None
         if info is not None:
-            result_json = json.dumps({
-                "path": info.path.value, "kind": info.kind.value, "etag": info.etag,
-                "version": info.version, "content_type": info.content_type,
-                "size": info.size, "modified_at": info.modified_at.isoformat(),
-                "metadata": dict(info.metadata),
-            })
-        result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == key))
+            result_json = json.dumps(
+                {
+                    "path": info.path.value,
+                    "kind": info.kind.value,
+                    "etag": info.etag,
+                    "version": info.version,
+                    "content_type": info.content_type,
+                    "size": info.size,
+                    "modified_at": info.modified_at.isoformat(),
+                    "metadata": dict(info.metadata),
+                }
+            )
+        result = await session.execute(
+            select(IdempotencyRow).where(IdempotencyRow.key == key)
+        )
         row = result.scalar_one_or_none()
         if row is None:
-            session.add(IdempotencyRow(key=key, request_hash=request_hash, result_json=result_json))
+            session.add(
+                IdempotencyRow(
+                    key=key, request_hash=request_hash, result_json=result_json
+                )
+            )
         else:
             row.request_hash = request_hash
             row.result_json = result_json
@@ -717,7 +865,9 @@ class SqlAlchemyResourceBackend:
 
     async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
         async with self._session_factory() as session:
-            result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == key))
+            result = await session.execute(
+                select(IdempotencyRow).where(IdempotencyRow.key == key)
+            )
             row = result.scalar_one_or_none()
             if row is None:
                 return None
@@ -725,27 +875,48 @@ class SqlAlchemyResourceBackend:
             if row.result_json is not None:
                 raw = json.loads(row.result_json)
                 result_info = ResourceInfo(
-                    path=ResourcePath(raw["path"]), kind=ResourceKind(raw["kind"]), etag=raw["etag"],
-                    version=raw["version"], content_type=raw["content_type"], size=raw["size"],
-                    modified_at=datetime.fromisoformat(raw["modified_at"]), metadata=raw["metadata"],
+                    path=ResourcePath(raw["path"]),
+                    kind=ResourceKind(raw["kind"]),
+                    etag=raw["etag"],
+                    version=raw["version"],
+                    content_type=raw["content_type"],
+                    size=raw["size"],
+                    modified_at=datetime.fromisoformat(raw["modified_at"]),
+                    metadata=raw["metadata"],
                 )
-            return IdempotencyRecord(key=row.key, request_hash=row.request_hash, result=result_info)
+            return IdempotencyRecord(
+                key=row.key, request_hash=row.request_hash, result=result_info
+            )
 
     async def put_idempotency(self, record: IdempotencyRecord) -> None:
         result_json = None
         if record.result is not None:
-            result_json = json.dumps({
-                "path": record.result.path.value, "kind": record.result.kind.value, "etag": record.result.etag,
-                "version": record.result.version, "content_type": record.result.content_type,
-                "size": record.result.size, "modified_at": record.result.modified_at.isoformat(),
-                "metadata": dict(record.result.metadata),
-            })
+            result_json = json.dumps(
+                {
+                    "path": record.result.path.value,
+                    "kind": record.result.kind.value,
+                    "etag": record.result.etag,
+                    "version": record.result.version,
+                    "content_type": record.result.content_type,
+                    "size": record.result.size,
+                    "modified_at": record.result.modified_at.isoformat(),
+                    "metadata": dict(record.result.metadata),
+                }
+            )
         async with self._session_factory() as session:
             async with session.begin():
-                result = await session.execute(select(IdempotencyRow).where(IdempotencyRow.key == record.key))
+                result = await session.execute(
+                    select(IdempotencyRow).where(IdempotencyRow.key == record.key)
+                )
                 row = result.scalar_one_or_none()
                 if row is None:
-                    session.add(IdempotencyRow(key=record.key, request_hash=record.request_hash, result_json=result_json))
+                    session.add(
+                        IdempotencyRow(
+                            key=record.key,
+                            request_hash=record.request_hash,
+                            result_json=result_json,
+                        )
+                    )
                 else:
                     row.request_hash = record.request_hash
                     row.result_json = result_json

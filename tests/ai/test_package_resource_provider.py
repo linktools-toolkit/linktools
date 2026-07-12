@@ -35,7 +35,9 @@ async def test_list_resources_paginates(provider):
     page1 = await p.list_resources(SCOPE, "references", limit=1)
     assert len(page1.items) == 1
     assert page1.next_cursor is not None
-    page2 = await p.list_resources(SCOPE, "references", limit=1, cursor=page1.next_cursor)
+    page2 = await p.list_resources(
+        SCOPE, "references", limit=1, cursor=page1.next_cursor
+    )
     assert len(page2.items) == 1
     names = {i.path for i in page1.items + page2.items}
     assert names == {"references/a.md", "references/b.md"}
@@ -45,6 +47,7 @@ async def test_list_resources_paginates(provider):
 async def test_list_resources_unknown_package_raises(provider):
     p, _ = provider
     from linktools.ai.errors import PackageNotFoundError
+
     with pytest.raises(PackageNotFoundError):
         await p.list_resources(PackageScope("nope"), "")
 
@@ -53,7 +56,11 @@ async def test_list_resources_unknown_package_raises(provider):
 async def test_read_resource_returns_content(provider):
     p, _ = provider
     content = await p.read_resource(ResourceRef(scope=SCOPE, path="SKILL.md"))
-    assert b"skill" in (content.content if isinstance(content.content, bytes) else content.content.encode())
+    assert b"skill" in (
+        content.content
+        if isinstance(content.content, bytes)
+        else content.content.encode()
+    )
     assert content.size_bytes > 0
 
 
@@ -61,7 +68,9 @@ async def test_read_resource_returns_content(provider):
 async def test_read_resource_clamps_to_max_bytes(provider):
     p, root = provider
     (root / "big.txt").write_text("x" * 1000, encoding="utf-8")
-    content = await p.read_resource(ResourceRef(scope=SCOPE, path="big.txt"), max_bytes=10)
+    content = await p.read_resource(
+        ResourceRef(scope=SCOPE, path="big.txt"), max_bytes=10
+    )
     assert len(content.content) == 10
     assert content.size_bytes == 1000
     assert content.metadata.get("truncated") is True
@@ -72,14 +81,16 @@ async def test_read_resource_bounds_io_not_just_payload(tmp_path):
     # A resource larger than max_bytes must not be fully read into memory just to
     # be truncated -- size_bytes reflects cap+1 (the read bound), not the file.
     from linktools.ai.package.provider import DirectoryPackageResourceProvider
+
     root = tmp_path / "pkg"
     root.mkdir()
     (root / "huge.txt").write_text("y" * 100_000, encoding="utf-8")
     prov = DirectoryPackageResourceProvider({"pkg": root})
-    content = await prov.read_resource(ResourceRef(scope=PackageScope("pkg"), path="huge.txt"),
-                                       max_bytes=16)
-    assert len(content.content) == 16           # payload bounded to max_bytes
-    assert content.size_bytes == 100_000        # true file size (stat), not bytes read
+    content = await prov.read_resource(
+        ResourceRef(scope=PackageScope("pkg"), path="huge.txt"), max_bytes=16
+    )
+    assert len(content.content) == 16  # payload bounded to max_bytes
+    assert content.size_bytes == 100_000  # true file size (stat), not bytes read
     assert content.metadata.get("truncated") is True
 
 
@@ -113,6 +124,7 @@ async def test_read_resource_requires_scope(provider):
 
 def test_sanitize_rejects_null_byte_and_drive():
     from linktools.ai.package.resource import sanitize_package_path
+
     with pytest.raises(ValueError):
         sanitize_package_path("a\x00b")
     with pytest.raises(ValueError):
@@ -121,6 +133,7 @@ def test_sanitize_rejects_null_byte_and_drive():
 
 def test_sanitize_collapses_dot_and_rejects_parent():
     from linktools.ai.package.resource import sanitize_package_path
+
     assert sanitize_package_path("a/./b/") == "a/b"
     with pytest.raises(ValueError):
         sanitize_package_path("a/../b")
@@ -130,6 +143,7 @@ def test_sanitize_collapses_dot_and_rejects_parent():
 async def test_read_resource_extension_allow_deny(tmp_path):
     from linktools.ai.errors import PackageResourceAccessDeniedError
     from linktools.ai.package.provider import DirectoryPackageResourceProvider
+
     root = tmp_path / "pkg"
     root.mkdir()
     (root / "a.md").write_text("md", encoding="utf-8")

@@ -1,0 +1,15 @@
+name: research
+agents:
+  - agent_id: searcher
+  - agent_id: writer
+    role: synthesizer
+coordinator:
+  agent_id: planner
+strategy:
+  kind: parallel_fan_out
+  config:
+    task_count: 2
+limits:
+  max_rounds: 5
+  max_tasks: 20
+aggregation: concat

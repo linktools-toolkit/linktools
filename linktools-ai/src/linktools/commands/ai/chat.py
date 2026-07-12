@@ -14,7 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from linktools.cli import BaseCommandGroup, CommandError, subcommand, subcommand_argument
+from linktools.cli import (
+    BaseCommandGroup,
+    CommandError,
+    subcommand,
+    subcommand_argument,
+)
 from linktools.core import environ
 from linktools.ai.agent.approval import ApprovalStatus
 from linktools.ai.model.registry import (
@@ -54,20 +59,41 @@ class Command(BaseCommandGroup):
     @property
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
-            ModelClientUnavailable, ModelOutputError, ModelTurnLimitExceeded,
+            ModelClientUnavailable,
+            ModelOutputError,
+            ModelTurnLimitExceeded,
         ]
 
     # ------------------------------------------------------------------ chat
 
     @subcommand("chat", help="interactive agent chat session")
-    @subcommand_argument("--model", default=None, help="model name (default: $OPENAI_MODEL)")
-    @subcommand_argument("--base-url", default=None, help="OpenAI-compatible base url (default: $OPENAI_BASE_URL)")
-    @subcommand_argument("--api-key", default=None, help="api key (default: $OPENAI_API_KEY)")
+    @subcommand_argument(
+        "--model", default=None, help="model name (default: $OPENAI_MODEL)"
+    )
+    @subcommand_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible base url (default: $OPENAI_BASE_URL)",
+    )
+    @subcommand_argument(
+        "--api-key", default=None, help="api key (default: $OPENAI_API_KEY)"
+    )
     @subcommand_argument("--session", default="main", help="session id (default: main)")
-    @subcommand_argument("--workdir", default=None, help="agent working directory (default: current directory)")
-    def on_chat(self, model=None, base_url=None, api_key=None, session="main", workdir=None):
-        args = _namespace(model=model, base_url=base_url, api_key=api_key,
-                          session=session, workdir=workdir)
+    @subcommand_argument(
+        "--workdir",
+        default=None,
+        help="agent working directory (default: current directory)",
+    )
+    def on_chat(
+        self, model=None, base_url=None, api_key=None, session="main", workdir=None
+    ):
+        args = _namespace(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            session=session,
+            workdir=workdir,
+        )
         return asyncio.run(self._chat_async(args))
 
     async def _chat_async(self, args: "Namespace") -> "int | None":
@@ -102,23 +128,49 @@ class Command(BaseCommandGroup):
             if event["type"] == "text":
                 print(event["text"], end="", flush=True)
             elif event["type"] == "tool":
-                print(f"\n[tool: {event['name']} {event['phase']}"
-                      f"{' ok' if event.get('ok') else ''}]")
+                print(
+                    f"\n[tool: {event['name']} {event['phase']}"
+                    f"{' ok' if event.get('ok') else ''}]"
+                )
         print()
 
     # ------------------------------------------------------------------- run
 
     @subcommand("run", help="run agent with a single prompt")
     @subcommand_argument("prompt", help="the prompt")
-    @subcommand_argument("--model", default=None, help="model name (default: $OPENAI_MODEL)")
-    @subcommand_argument("--base-url", default=None, help="OpenAI-compatible base url (default: $OPENAI_BASE_URL)")
-    @subcommand_argument("--api-key", default=None, help="api key (default: $OPENAI_API_KEY)")
+    @subcommand_argument(
+        "--model", default=None, help="model name (default: $OPENAI_MODEL)"
+    )
+    @subcommand_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible base url (default: $OPENAI_BASE_URL)",
+    )
+    @subcommand_argument(
+        "--api-key", default=None, help="api key (default: $OPENAI_API_KEY)"
+    )
     @subcommand_argument("--session", default="main", help="session id (default: main)")
-    @subcommand_argument("--workdir", default=None, help="agent working directory (default: current directory)")
-    def on_run(self, prompt: str, model=None, base_url=None, api_key=None,
-               session="main", workdir=None):
-        args = _namespace(model=model, base_url=base_url, api_key=api_key,
-                          session=session, workdir=workdir)
+    @subcommand_argument(
+        "--workdir",
+        default=None,
+        help="agent working directory (default: current directory)",
+    )
+    def on_run(
+        self,
+        prompt: str,
+        model=None,
+        base_url=None,
+        api_key=None,
+        session="main",
+        workdir=None,
+    ):
+        args = _namespace(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            session=session,
+            workdir=workdir,
+        )
         return asyncio.run(self._run_async(args, prompt))
 
     async def _run_async(self, args: "Namespace", prompt: str) -> "int | None":
@@ -161,8 +213,9 @@ class Command(BaseCommandGroup):
         if record is None:
             raise CommandError(f'session "{session_id}" not found')
         messages = await storage.sessions.list_messages(session_id)
-        self.logger.info(f"session: {record.id} ({record.status.value}, "
-                         f"{len(messages)} messages)")
+        self.logger.info(
+            f"session: {record.id} ({record.status.value}, {len(messages)} messages)"
+        )
         for msg in messages:
             content = msg.content if isinstance(msg.content, str) else repr(msg.content)
             self.logger.info(f"[{msg.role.value}] {content}")
@@ -181,9 +234,7 @@ class Command(BaseCommandGroup):
             self.logger.info("no pending approvals")
             return 0
         for req in requests:
-            self.logger.info(
-                f"{req.id}\trun={req.run_id}\ttool={req.tool_name}"
-            )
+            self.logger.info(f"{req.id}\trun={req.run_id}\ttool={req.tool_name}")
         return 0
 
     @subcommand("approve", help="approve a pending request")
@@ -203,8 +254,9 @@ class Command(BaseCommandGroup):
             self._resolve_async(storage, approval_id, approved=False, reason=reason)
         )
 
-    async def _resolve_async(self, storage, approval_id: str, *,
-                             approved: bool, reason: "str | None") -> "int | None":
+    async def _resolve_async(
+        self, storage, approval_id: str, *, approved: bool, reason: "str | None"
+    ) -> "int | None":
         request = await storage.approvals.get(approval_id)
         if request is None:
             raise CommandError(f'approval "{approval_id}" not found')
@@ -215,20 +267,24 @@ class Command(BaseCommandGroup):
         resolved_by = get_user() or "cli"
         if approved:
             await storage.approvals.approve(
-                approval_id, expected_version=request.version,
+                approval_id,
+                expected_version=request.version,
                 resolved_by=resolved_by,
             )
             self.logger.info(f"approved {approval_id}")
         else:
             await storage.approvals.reject(
-                approval_id, expected_version=request.version,
-                resolved_by=resolved_by, reason=reason,
+                approval_id,
+                expected_version=request.version,
+                resolved_by=resolved_by,
+                reason=reason,
             )
             self.logger.info(f"rejected {approval_id}")
         return 0
 
 
 # ---- module helpers --------------------------------------------------------
+
 
 def _namespace(**kwargs) -> SimpleNamespace:
     """Build an args-like object from subcommand kwargs (cntr pattern)."""

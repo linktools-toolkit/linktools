@@ -34,7 +34,9 @@ def _digest_mapping(values: "Mapping[str, str]") -> str:
     secret VALUES (or keys) produce different digests, but the secret plaintext
     never enters the fingerprint, logs, or exceptions."""
     canonical = json.dumps(
-        sorted(values.items()), ensure_ascii=False, separators=(",", ":"),
+        sorted(values.items()),
+        ensure_ascii=False,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -50,7 +52,7 @@ def _config_fingerprint(spec: MCPServerSpec) -> str:
     plaintext ever entering the key, logs, or exceptions."""
     parts = [
         spec.transport,
-        spec.command_or_url,
+        " ".join(spec.command) if spec.command else (spec.url or ""),
         str(spec.cwd),
         "" if spec.timeout_seconds is None else f"{spec.timeout_seconds:.6f}",
         str(spec.tool_prefix),
@@ -80,7 +82,7 @@ def _resolved_tool_prefix(spec: MCPServerSpec) -> "str | None":
 def build_mcp_server(spec: MCPServerSpec) -> Any:
     """Build the pydantic-ai MCPServer for a spec (stdio/sse/http). Raises
     MCPConnectionError for a misconfigured transport. ``command``/``url`` are
-    read from the structured fields (command_or_url is a compat-only string).
+    read from the structured fields (command/url).
     The per-server ``tool_prefix`` is applied here."""
     from pydantic_ai.mcp import MCPServerHTTP, MCPServerSSE, MCPServerStdio
 
@@ -101,13 +103,21 @@ def build_mcp_server(spec: MCPServerSpec) -> Any:
     if spec.transport == "sse":
         if not spec.url:
             raise MCPConnectionError(f"mcp {spec.id}: sse requires a url")
-        return MCPServerSSE(url=spec.url, headers=dict(spec.headers), timeout=timeout,
-                            tool_prefix=prefix)
+        return MCPServerSSE(
+            url=spec.url,
+            headers=dict(spec.headers),
+            timeout=timeout,
+            tool_prefix=prefix,
+        )
     if spec.transport == "http":
         if not spec.url:
             raise MCPConnectionError(f"mcp {spec.id}: http requires a url")
-        return MCPServerHTTP(url=spec.url, headers=dict(spec.headers), timeout=timeout,
-                             tool_prefix=prefix)
+        return MCPServerHTTP(
+            url=spec.url,
+            headers=dict(spec.headers),
+            timeout=timeout,
+            tool_prefix=prefix,
+        )
     raise MCPConnectionError(f"mcp {spec.id}: unknown transport {spec.transport!r}")
 
 
@@ -128,6 +138,7 @@ class MCPConnectionManager:
         if cached is not None:
             return MCPToolsetHandle(MCPConnectionRef(*key), cached)
         from pydantic_ai.mcp import MCPToolset
+
         mcp_server = build_mcp_server(server)
         toolset = MCPToolset(mcp_server)
         self._toolsets[key] = toolset
@@ -143,47 +154,63 @@ class MCPConnectionManager:
         return tuple(item.name for item in result.tools)
 
     async def list_tools_result(self, server: MCPServerSpec):
-        from .provider import MCPDiscoveryResult, MCPToolInfo
+        from .provider import MCPDiscoveryResult
+
         handle = None
         try:
             handle = await self.get_toolset(server)
             toolset = handle.toolset
             lister = getattr(toolset, "list_tools", None)
             if lister is None:
-                return MCPDiscoveryResult((), False, MCPDiscoveryUnsupportedError(
-                    f"MCP server {server.id!r} cannot enumerate tools"))
+                return MCPDiscoveryResult(
+                    (),
+                    False,
+                    MCPDiscoveryUnsupportedError(
+                        f"MCP server {server.id!r} cannot enumerate tools"
+                    ),
+                )
             raw_tools = await lister()
             tools = tuple(self._convert_tool_info(t) for t in raw_tools or ())
             return MCPDiscoveryResult(tools, True, None, handle.connection_ref)
         except Exception as exc:
             error = self._normalize_discovery_error(exc)
-            return MCPDiscoveryResult((), False, error,
-                                      handle.connection_ref if handle else None)
+            return MCPDiscoveryResult(
+                (), False, error, handle.connection_ref if handle else None
+            )
 
     @staticmethod
     def _convert_tool_info(tool: Any):
         from .provider import MCPToolInfo
         from ..errors import MCPToolDefinitionError
+
         name = getattr(tool, "name", None)
         if not isinstance(name, str) or not name.strip():
             raise MCPToolDefinitionError("MCP tool name must be non-empty")
-        schema = (getattr(tool, "inputSchema", None)
-                  or getattr(tool, "input_schema", None)
-                  or getattr(tool, "parameters_json_schema", None)
-                  or {"type": "object", "properties": {}})
+        schema = (
+            getattr(tool, "inputSchema", None)
+            or getattr(tool, "input_schema", None)
+            or getattr(tool, "parameters_json_schema", None)
+            or {"type": "object", "properties": {}}
+        )
         if not isinstance(schema, Mapping):
             raise MCPToolDefinitionError(f"invalid schema for MCP tool {name!r}")
-        from ..tool.schema_validate import validate_schema
+        from ..tool.schema import validate_schema
+
         try:
             validate_schema(schema)
         except Exception as exc:
             raise MCPToolDefinitionError(
-                f"invalid schema for MCP tool {name!r}") from exc
+                f"invalid schema for MCP tool {name!r}"
+            ) from exc
         # Only an explicit readOnlyHint annotation marks a tool non-mutating;
         # absent annotations stay None so unknown tools remain high-risk at the
         # provider layer (mutating = not bool(read_only)).
         annotations = getattr(tool, "annotations", None)
-        hint = getattr(annotations, "readOnlyHint", None) if annotations is not None else None
+        hint = (
+            getattr(annotations, "readOnlyHint", None)
+            if annotations is not None
+            else None
+        )
         if hint is True:
             read_only = True
         elif hint is False:
@@ -201,11 +228,16 @@ class MCPConnectionManager:
     @staticmethod
     def _normalize_discovery_error(exc: BaseException):
         from ..errors import MCPAuthenticationError, MCPConnectionError
+
         if isinstance(exc, MCPDiscoveryError):
             return exc
         name = type(exc).__name__.lower()
         text = str(exc)
-        if "auth" in name or "unauthorized" in text.lower() or "forbidden" in text.lower():
+        if (
+            "auth" in name
+            or "unauthorized" in text.lower()
+            or "forbidden" in text.lower()
+        ):
             return MCPAuthenticationError("MCP authentication failed")
         if "unsupported" in name or "notimplemented" in name:
             return MCPDiscoveryUnsupportedError("MCP discovery is unsupported")
@@ -213,18 +245,26 @@ class MCPConnectionManager:
             return MCPConnectionError("MCP connection failed")
         return MCPDiscoveryError("MCP discovery failed")
 
-    async def call_tool(self, *, connection_ref: MCPConnectionRef, tool_name: str,
-                        arguments: Mapping[str, Any]) -> Any:
+    async def call_tool(
+        self,
+        *,
+        connection_ref: MCPConnectionRef,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> Any:
         key = (connection_ref.server_id, connection_ref.fingerprint)
         toolset = self._toolsets.get(key)
         if toolset is None:
             from ..errors import MCPConnectionUnavailableError
+
             raise MCPConnectionUnavailableError(
-                f"MCP connection {key!r} is not available")
+                f"MCP connection {key!r} is not available"
+            )
         caller = getattr(toolset, "direct_call_tool", None)
         if caller is None:
             raise MCPConnectionError(
-                f"MCP server {connection_ref.server_id!r} has no direct tool caller")
+                f"MCP server {connection_ref.server_id!r} has no direct tool caller"
+            )
         return await caller(tool_name, dict(arguments))
 
     async def close_server(self, server_id: str) -> None:
@@ -257,39 +297,3 @@ class MCPConnectionManager:
                 errors.append(exc)
         if errors:
             _LOGGER.warning("MCP connection close failures: %d", len(errors))
-
-
-class LegacyMCPConnectionManagerAdapter:
-    """Explicit adapter for pre-ConnectionRef managers."""
-
-    def __init__(self, manager: Any, *, empty_is_verified: bool) -> None:
-        self._manager = manager
-        self._empty_is_verified = empty_is_verified
-        self._handles: dict[MCPConnectionRef, Any] = {}
-
-    async def list_tools_result(self, spec: MCPServerSpec):
-        from .provider import MCPDiscoveryResult, MCPToolInfo
-        names = await self._manager.list_tools(spec)
-        handle = await self.get_toolset(spec)
-        return MCPDiscoveryResult(
-            tuple(MCPToolInfo(name=name) for name in names),
-            bool(names) or self._empty_is_verified, None,
-            handle.connection_ref)
-
-    async def get_toolset(self, spec: MCPServerSpec) -> MCPToolsetHandle:
-        fingerprint = _config_fingerprint(spec)
-        ref = MCPConnectionRef(spec.id, fingerprint)
-        toolset = await self._manager.get_toolset(spec)
-        self._handles[ref] = toolset
-        return MCPToolsetHandle(ref, toolset)
-
-    async def call_tool(self, *, connection_ref: MCPConnectionRef,
-                        tool_name: str, arguments: Mapping[str, Any]) -> Any:
-        toolset = self._handles.get(connection_ref)
-        if toolset is None:
-            from ..errors import MCPConnectionUnavailableError
-            raise MCPConnectionUnavailableError(f"legacy MCP connection {connection_ref!r} is closed")
-        caller = getattr(toolset, "direct_call_tool", None)
-        if caller is None:
-            raise MCPConnectionError("legacy MCP toolset has no direct caller")
-        return await caller(tool_name, dict(arguments))

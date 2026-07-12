@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/policy/test_network.py"""
+
 import asyncio
 
 from linktools.ai.policy.network import NetworkRule

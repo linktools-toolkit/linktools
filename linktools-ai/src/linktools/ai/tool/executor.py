@@ -17,14 +17,20 @@ path, the executor persists a PENDING ApprovalRequest (when an approval store
 is wired) and emits an ApprovalRequested event (when an event store is wired)
 before raising ``ToolApprovalRequiredError``. This is the simpler, non-pausing
 mode; the pause/resume flow above is the recommended canonical path."""
+
 import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ..agent.approval import ApprovalStatus, build_approval_request
-from ..errors import (IdempotencyInProgressError, RunPaused, ToolApprovalRequiredError,
-                      ToolDeniedError, ToolSecurityAuditError)
+from ..errors import (
+    IdempotencyInProgressError,
+    RunPaused,
+    ToolApprovalRequiredError,
+    ToolDeniedError,
+    ToolSecurityAuditError,
+)
 from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 from .idempotency import IdempotencyStatus, IdempotencyStore, compute_request_hash
@@ -57,6 +63,7 @@ class ToolExecutor:
         # Retry is policy-driven: only clearly-transient errors, and never a
         # mutating non-idempotent tool. DefaultRetryPolicy when none supplied.
         from .retry import DefaultRetryPolicy
+
         self._retry_policy = retry_policy or DefaultRetryPolicy()
         # When True, the require-approval branch persists the request (via
         # _record_approval) and then raises RunPaused(run_id, approval_id)
@@ -66,12 +73,16 @@ class ToolExecutor:
         # tool-execution stack to AgentRunner ( catch it). Default
         # False preserves today's behavior byte-for-byte.
         self._pause_on_approval = pause_on_approval
-        self._security_audit_failure_mode = getattr(security_audit_failure_mode, "value", security_audit_failure_mode)
+        self._security_audit_failure_mode = getattr(
+            security_audit_failure_mode, "value", security_audit_failure_mode
+        )
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
         if decision.kind == PolicyDecisionKind.DENY:
-            raise ToolDeniedError(decision.reason or f"tool denied: {request.tool_name}")
+            raise ToolDeniedError(
+                decision.reason or f"tool denied: {request.tool_name}"
+            )
         if decision.kind == PolicyDecisionKind.REQUIRE_APPROVAL:
             # Resume gate: if the approval_store already holds an APPROVED
             # request matching (run_id, tool_call_id), the call was approved
@@ -99,7 +110,7 @@ class ToolExecutor:
                     reason=decision.reason,
                     arguments=dict(request.arguments),
                 )
-            # Legacy direct-raise path: persist immediately (unchanged).
+            # Direct-raise path: persist the approval request immediately.
             await self._record_approval(request, context, decision.reason)
             raise ToolApprovalRequiredError(
                 decision.reason or f"tool requires approval: {request.tool_name}"
@@ -121,12 +132,15 @@ class ToolExecutor:
         if self._approval_store is None or context.tool_call_id is None:
             return False
         run_id = (
-            self._run_id_resolver(context) if self._run_id_resolver is not None
+            self._run_id_resolver(context)
+            if self._run_id_resolver is not None
             else context.run_id
         )
         return await self.is_approved(run_id, context.tool_call_id)
 
-    async def is_approved(self, run_id: "str | None", tool_call_id: "str | None") -> bool:
+    async def is_approved(
+        self, run_id: "str | None", tool_call_id: "str | None"
+    ) -> bool:
         """Public resume gate: True iff the approval_store holds an APPROVED
         request matching ``(run_id, tool_call_id)``. Used by managed-path
         approval (pipeline REQUIRE_APPROVAL / policy.require_approval) to
@@ -137,8 +151,7 @@ class ToolExecutor:
             return False
         requests = await self._approval_store.list_for_run(run_id)
         return any(
-            r.tool_call_id == tool_call_id
-            and r.status is ApprovalStatus.APPROVED
+            r.tool_call_id == tool_call_id and r.status is ApprovalStatus.APPROVED
             for r in requests
         )
 
@@ -156,7 +169,7 @@ class ToolExecutor:
         With approval_store=None this is a no-op (default-None path: behavior
         identical to today).
 
-        Only used by the legacy ``pause_on_approval=False`` direct-raise path
+        Only used by the prior ``pause_on_approval=False`` direct-raise path
         -- the pause path does NOT call this; it defers persistence
         to AgentRunner's suspension handler instead (see ``check``).
 
@@ -169,7 +182,8 @@ class ToolExecutor:
             return None
 
         run_id = (
-            self._run_id_resolver(context) if self._run_id_resolver is not None
+            self._run_id_resolver(context)
+            if self._run_id_resolver is not None
             else context.run_id
         )
         # Prefer the pydantic-ai ToolCallPart id threaded through ToolContext
@@ -188,15 +202,20 @@ class ToolExecutor:
         await self._approval_store.create(approval)
 
         if self._event_store is not None:
+            from ..events.context import EventContext, append_event
+
             try:
-                await self._event_store.append(
-                    stream_id=approval.run_id,
-                    run_id=approval.run_id,
-                    root_run_id=approval.run_id,
-                    parent_run_id=None,
-                    session_id=context.session_id,
-                    runnable_id=request.tool_name,
-                    payload=ApprovalRequested(
+                await append_event(
+                    self._event_store,
+                    EventContext(
+                        stream_id=approval.run_id,
+                        run_id=approval.run_id,
+                        root_run_id=approval.run_id,
+                        parent_run_id=None,
+                        session_id=context.session_id,
+                        runnable_id=request.tool_name,
+                    ),
+                    ApprovalRequested(
                         approval_id=approval.id,
                         tool_name=request.tool_name,
                         reason=reason or "",
@@ -210,7 +229,8 @@ class ToolExecutor:
                 )
                 if self._security_audit_failure_mode != "best_effort":
                     raise ToolSecurityAuditError(
-                        "failed to persist approval security audit event") from exc
+                        "failed to persist approval security audit event"
+                    ) from exc
 
         return approval
 
@@ -236,7 +256,7 @@ class ToolExecutor:
         number of additional attempts after the first -- on any exception the
         call is retried up to ``max_retries`` times, after which the last error
         is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
-        the legacy single-call-no-timeout behavior exactly.
+        the prior single-call-no-timeout behavior exactly.
 
         ``idempotency_key`` enables persistent tool-call idempotency. When the
         executor was constructed with an
@@ -276,18 +296,25 @@ class ToolExecutor:
         # non-idempotently -- that would let a replayed call execute twice.
         if idempotency_key is not None and self._idempotency_store is None:
             from ..errors import StorageCapabilityError
+
             raise StorageCapabilityError(
                 f"tool {request.tool_name!r} is idempotent but no IdempotencyStore "
                 f"is wired; refusing to run non-idempotently"
             )
-        use_idempotency = self._idempotency_store is not None and idempotency_key is not None
+        use_idempotency = (
+            self._idempotency_store is not None and idempotency_key is not None
+        )
         if use_idempotency:
             scope = idempotency_scope or context.run_id
             request_hash = compute_request_hash(
-                request.tool_name, request.arguments, scope,
+                request.tool_name,
+                request.arguments,
+                scope,
                 schema_version=schema_version,
             )
-            existing = await self._idempotency_store.reserve(scope, idempotency_key, request_hash)
+            existing = await self._idempotency_store.reserve(
+                scope, idempotency_key, request_hash
+            )
             if existing is not None:
                 if existing.status is IdempotencyStatus.COMPLETED:
                     return existing.result
@@ -304,29 +331,39 @@ class ToolExecutor:
         # descriptor/effective_policy (e.g. a direct executor call): treat the
         # tool as non-mutating with default policy, so the retry decision is
         # governed purely by the error type.
-        from ..security.descriptor import ToolDescriptor as _Desc
+        from ..tool.models import ToolDescriptor as _Desc
         from .policy import EffectiveToolPolicy as _Eff
         from .retry import backoff_delay
+
         retry_desc = descriptor or _Desc(
-            name=request.tool_name, source="executor", category="custom",
-            risk="medium", mutating=False)
+            name=request.tool_name,
+            source="executor",
+            category="custom",
+            risk="medium",
+            mutating=False,
+        )
         retry_pol = effective_policy or _Eff()
         attempt = 0
         while True:
             try:
                 if timeout is not None:
-                    result = await asyncio.wait_for(handler(**arguments), timeout=timeout)
+                    result = await asyncio.wait_for(
+                        handler(**arguments), timeout=timeout
+                    )
                 else:
                     result = await handler(**arguments)
                 if use_idempotency:
-                    await self._idempotency_store.complete(scope, idempotency_key, result)
+                    await self._idempotency_store.complete(
+                        scope, idempotency_key, result
+                    )
                 return result
             except Exception as exc:  # noqa: BLE001 - decide via retry policy
                 last_error = exc
                 if attempt >= max_retries:
                     break
                 if not self._retry_policy.should_retry(
-                        error=exc, attempt=attempt, policy=retry_pol, descriptor=retry_desc):
+                    error=exc, attempt=attempt, policy=retry_pol, descriptor=retry_desc
+                ):
                     break
                 # Transient: back off (cancellable) and retry.
                 await asyncio.sleep(backoff_delay(attempt + 1))

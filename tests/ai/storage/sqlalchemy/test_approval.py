@@ -100,7 +100,9 @@ def test_get_missing_returns_none(tmp_path):
 def test_create_duplicate_id_raises_conflict(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
             with pytest.raises(ApprovalConflictError):
                 await store.create(req)
@@ -116,9 +118,13 @@ def test_create_duplicate_id_raises_conflict(tmp_path):
 def test_approve_transitions_to_approved(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
-            resolved = await store.approve(req.id, expected_version=1, resolved_by="alice")
+            resolved = await store.approve(
+                req.id, expected_version=1, resolved_by="alice"
+            )
             assert resolved.status is ApprovalStatus.APPROVED
             assert resolved.version == 2
             assert resolved.resolved_at is not None
@@ -171,7 +177,9 @@ def test_reject_transitions_to_rejected_and_stores_reason(tmp_path):
 def test_reject_without_reason_stores_none_key(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
             resolved = await store.reject(req.id, expected_version=1, resolved_by="bob")
             assert resolved.status is ApprovalStatus.REJECTED
@@ -190,7 +198,9 @@ def test_reject_without_reason_stores_none_key(tmp_path):
 def test_resolve_wrong_expected_version_raises_conflict(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
             with pytest.raises(ApprovalConflictError):
                 await store.approve(req.id, expected_version=99, resolved_by="alice")
@@ -219,7 +229,9 @@ def test_resolve_missing_id_raises_not_found(tmp_path):
 def test_double_resolve_raises_invalid_transition(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
             await store.approve(req.id, expected_version=1, resolved_by="alice")
             # Second approve with the new expected_version still can't transition
@@ -236,9 +248,13 @@ def test_double_resolve_raises_invalid_transition(tmp_path):
 def test_reject_then_reject_raises_invalid_transition(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            req = build_approval_request(run_id="run-1", tool_call_id="c", tool_name="t")
+            req = build_approval_request(
+                run_id="run-1", tool_call_id="c", tool_name="t"
+            )
             await store.create(req)
-            await store.reject(req.id, expected_version=1, resolved_by="bob", reason="no")
+            await store.reject(
+                req.id, expected_version=1, resolved_by="bob", reason="no"
+            )
             with pytest.raises(InvalidApprovalTransitionError):
                 await store.reject(req.id, expected_version=2, resolved_by="bob")
 
@@ -253,9 +269,15 @@ def test_reject_then_reject_raises_invalid_transition(tmp_path):
 def test_list_pending_filters_by_run_and_status(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            a1 = build_approval_request(run_id="run-a", tool_call_id="c1", tool_name="t")
-            a2 = build_approval_request(run_id="run-a", tool_call_id="c2", tool_name="t")
-            b1 = build_approval_request(run_id="run-b", tool_call_id="c3", tool_name="t")
+            a1 = build_approval_request(
+                run_id="run-a", tool_call_id="c1", tool_name="t"
+            )
+            a2 = build_approval_request(
+                run_id="run-a", tool_call_id="c2", tool_name="t"
+            )
+            b1 = build_approval_request(
+                run_id="run-b", tool_call_id="c3", tool_name="t"
+            )
             for r in (a1, a2, b1):
                 await store.create(r)
 

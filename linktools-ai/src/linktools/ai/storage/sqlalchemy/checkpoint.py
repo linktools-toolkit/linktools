@@ -24,8 +24,13 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_checkpoint(row: RunCheckpointRow) -> RunCheckpoint:
     return RunCheckpoint(
-        id=row.id, run_id=row.run_id, sequence=row.sequence, format=row.format,
-        schema_version=row.schema_version, payload=row.payload, created_at=_as_utc(row.created_at),
+        id=row.id,
+        run_id=row.run_id,
+        sequence=row.sequence,
+        format=row.format,
+        schema_version=row.schema_version,
+        payload=row.payload,
+        created_at=_as_utc(row.created_at),
         metadata=json.loads(row.metadata_json),
     )
 
@@ -56,25 +61,40 @@ class SqlAlchemyCheckpointStore:
 
     async def save(self, checkpoint: RunCheckpoint) -> None:
         async def _do(session):
-            session.add(RunCheckpointRow(
-                id=checkpoint.id, run_id=checkpoint.run_id, sequence=checkpoint.sequence,
-                format=checkpoint.format, schema_version=checkpoint.schema_version, payload=checkpoint.payload,
-                created_at=checkpoint.created_at, metadata_json=json.dumps(dict(checkpoint.metadata)),
-            ))
+            session.add(
+                RunCheckpointRow(
+                    id=checkpoint.id,
+                    run_id=checkpoint.run_id,
+                    sequence=checkpoint.sequence,
+                    format=checkpoint.format,
+                    schema_version=checkpoint.schema_version,
+                    payload=checkpoint.payload,
+                    created_at=checkpoint.created_at,
+                    metadata_json=json.dumps(dict(checkpoint.metadata)),
+                )
+            )
+
         await self._execute_in_session(_do)
 
     async def latest(self, run_id: str) -> "RunCheckpoint | None":
         async def _do(session):
             result = await session.execute(
-                select(RunCheckpointRow).where(RunCheckpointRow.run_id == run_id).order_by(RunCheckpointRow.sequence.desc()).limit(1)
+                select(RunCheckpointRow)
+                .where(RunCheckpointRow.run_id == run_id)
+                .order_by(RunCheckpointRow.sequence.desc())
+                .limit(1)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_checkpoint(row)
+
         return await self._execute_in_session(_do)
 
     async def get(self, checkpoint_id: str) -> "RunCheckpoint | None":
         async def _do(session):
-            result = await session.execute(select(RunCheckpointRow).where(RunCheckpointRow.id == checkpoint_id))
+            result = await session.execute(
+                select(RunCheckpointRow).where(RunCheckpointRow.id == checkpoint_id)
+            )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_checkpoint(row)
+
         return await self._execute_in_session(_do)

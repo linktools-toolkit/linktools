@@ -11,6 +11,7 @@ FunctionModel is wired with BOTH ``function`` (used by the graph's node.run()
 when iterating) and ``stream_function`` (used by ``node.stream(run.ctx)`` to
 emit the incremental events). The two must agree so the graph and the stream
 see the same model behavior."""
+
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -37,8 +38,10 @@ from linktools.ai.storage.file.session import FileSessionStore
 
 # -- Model fixtures ---------------------------------------------------------
 
+
 def _text_pair(text: str = "streamed-answer"):
     """A (function, stream_function) pair that emits a plain text response."""
+
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(content=text)])
 
@@ -52,22 +55,28 @@ def _tool_then_text_pair(final_text: str = "final-answer", tool_name: str = "ech
     """A pair whose first turn emits a ToolCallPart and whose second turn (after
     the tool returns) emits text. The stream_function mirrors this with a
     DeltaToolCall on turn one and text on turn two."""
+
     def _has_result(messages) -> bool:
         return any(
             isinstance(p, ToolReturnPart)
-            for m in messages for p in getattr(m, "parts", ()) or ()
+            for m in messages
+            for p in getattr(m, "parts", ()) or ()
         )
 
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         if _has_result(messages):
             return ModelResponse(parts=[TextPart(content=final_text)])
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"text": "ping"})])
+        return ModelResponse(
+            parts=[ToolCallPart(tool_name=tool_name, args={"text": "ping"})]
+        )
 
     async def _stream_fn(messages, info: AgentInfo):
         if _has_result(messages):
             yield final_text
         else:
-            yield {0: DeltaToolCall(name=tool_name, json_args=json.dumps({"text": "ping"}))}
+            yield {
+                0: DeltaToolCall(name=tool_name, json_args=json.dumps({"text": "ping"}))
+            }
 
     return _fn, _stream_fn
 
@@ -90,20 +99,42 @@ def _registry(fn, stream_fn) -> ModelRegistry:
 
 
 def _run_context(run_id="run-s1", session_id="session-s1") -> RunContext:
-    return RunContext(run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-                     runnable_id="agent-1", runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None)
+    return RunContext(
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
+    )
 
 
 def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    asyncio.run(store.create(SessionRecord(id=session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1, created_at=now, updated_at=now)))
+    asyncio.run(
+        store.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
 
 def _make_runner(tmp_path):
-    return AgentRunner(run_store=FileRunStore(root=tmp_path / "runs"),
-                       session_store=FileSessionStore(root=tmp_path / "sessions"),
-                       event_store=FileEventStore(root=tmp_path / "events"),
-                       checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"))
+    return AgentRunner(
+        run_store=FileRunStore(root=tmp_path / "runs"),
+        session_store=FileSessionStore(root=tmp_path / "sessions"),
+        event_store=FileEventStore(root=tmp_path / "events"),
+        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+    )
 
 
 async def _collect(gen):
@@ -113,26 +144,44 @@ async def _collect(gen):
     return out
 
 
-def _compile(tmp_path, fn, stream_fn, *, agent_id="agent-1", output_schema=str) -> "tuple[AgentRunner, CompiledAgent]":
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(fn, stream_fn)))
-    compiled = asyncio.run(compiler.compile(AgentSpec(
-        id=agent_id, name="a", model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=output_schema,
-    )))
+def _compile(
+    tmp_path, fn, stream_fn, *, agent_id="agent-1", output_schema=str
+) -> "tuple[AgentRunner, CompiledAgent]":
+    compiler = AgentCompiler(
+        model_router=ModelRouter(registry=_registry(fn, stream_fn))
+    )
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id=agent_id,
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=output_schema,
+            )
+        )
+    )
     runner = _make_runner(tmp_path)
     return runner, compiled
 
 
 # -- Tests ------------------------------------------------------------------
 
+
 def test_run_stream_yields_text_events_and_succeeds(tmp_path):
     fn, stream_fn = _text_pair(text="streamed-answer")
     runner, compiled = _compile(tmp_path, fn, stream_fn)
     _seed_session(runner._session_store, "session-s1")
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="what is the answer?"), _run_context(),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="what is the answer?"),
+                _run_context(),
+            )
+        )
+    )
 
     # At least one text delta was yielded with the streamed content.
     text_events = [e for e in events if e["type"] == "text"]
@@ -144,6 +193,7 @@ def test_run_stream_yields_text_events_and_succeeds(tmp_path):
         messages = await runner._session_store.list_messages("session-s1")
         events_list = await runner._event_store.list("run-s1")
         return run_record, messages, events_list
+
     run_record, messages, events_list = asyncio.run(_verify())
 
     # Driving RunRecord ended SUCCEEDED.
@@ -159,6 +209,7 @@ def test_run_stream_yields_text_events_and_succeeds(tmp_path):
 def test_run_stream_yields_tool_and_text_events(tmp_path):
     fn, stream_fn = _tool_then_text_pair(final_text="final-answer", tool_name="echo")
     runner, compiled = _compile(tmp_path, fn, stream_fn)
+
     # Register the tool the model will call on the compiled pydantic-ai agent.
     @compiled.pydantic_agent.tool
     async def echo(ctx, text: str) -> str:
@@ -166,9 +217,15 @@ def test_run_stream_yields_tool_and_text_events(tmp_path):
 
     _seed_session(runner._session_store, "session-s1")
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the tool"), _run_context(run_id="run-s2", session_id="session-s1"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the tool"),
+                _run_context(run_id="run-s2", session_id="session-s1"),
+            )
+        )
+    )
 
     tool_events = [e for e in events if e["type"] == "tool"]
     text_events = [e for e in events if e["type"] == "text"]
@@ -190,9 +247,15 @@ def test_run_stream_transitions_to_failed_on_model_error(tmp_path):
     _seed_session(runner._session_store, "session-s1")
 
     with pytest.raises(Exception):
-        asyncio.run(_collect(runner.run_stream(
-            compiled, RunInput(prompt="hi"), _run_context(run_id="run-s3", session_id="session-s1"),
-        )))
+        asyncio.run(
+            _collect(
+                runner.run_stream(
+                    compiled,
+                    RunInput(prompt="hi"),
+                    _run_context(run_id="run-s3", session_id="session-s1"),
+                )
+            )
+        )
 
     run_record = asyncio.run(runner._run_store.get("run-s3"))
     assert run_record.status is RunStatus.FAILED

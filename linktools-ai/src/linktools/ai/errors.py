@@ -114,7 +114,10 @@ class RunPaused(RunError):
     used here (no domain dataclass import) to keep this module dependency-free."""
 
     def __init__(
-        self, run_id: str, approval_id: str, *,
+        self,
+        run_id: str,
+        approval_id: str,
+        *,
         tool_call_id: "str | None" = None,
         tool_name: "str | None" = None,
         reason: "str | None" = None,
@@ -161,10 +164,6 @@ class ToolDeniedError(ToolError):
 
 class ToolResultDeniedError(ToolDeniedError):
     """The tool ran, but its result was rejected by after-tool policy."""
-
-
-class PipelineExecutionError(ToolError):
-    """A security pipeline returned an action invalid for the current phase."""
 
 
 class ToolApprovalRequiredError(ToolError):
@@ -219,7 +218,6 @@ class IdempotencyInProgressError(ToolError):
     in-progress / reject duplicate" are policy choices; for now the executor
     rejects -- the caller can retry once the in-flight call completes and the
     record moves to COMPLETED or FAILED."""
-
 
 
 class PolicyError(LinktoolsAIError):
@@ -309,6 +307,7 @@ class InvalidSpecError(RegistryError):
 # capabilities collide. Both carry agent_id / ref so callers can pinpoint the
 # failing declaration instead of grepping strings.
 
+
 class CapabilityResolutionError(LinktoolsAIError):
     """Base class for capability-resolution failures (assemble-time)."""
 
@@ -340,6 +339,7 @@ class MCPErrorCode(str, Enum):
 
 class MCPConnectionError(LinktoolsAIError):
     """An MCP server connection could not be established or was lost."""
+
     code = MCPErrorCode.CONNECTION
 
 
@@ -365,6 +365,7 @@ class MCPToolDefinitionError(MCPDiscoveryError):
 
 class MCPToolError(LinktoolsAIError):
     """An MCP tool invocation failed at the protocol/transport layer."""
+
     code = MCPErrorCode.PROTOCOL
 
 

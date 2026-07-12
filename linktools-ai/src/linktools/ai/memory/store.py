@@ -9,7 +9,9 @@ from typing import Protocol, runtime_checkable
 
 from .models import MemoryRecord
 
-_UNSET = object()   # sentinel: passing category=None CLEARS the field; omitting leaves unchanged.
+_UNSET = (
+    object()
+)  # sentinel: passing category=None CLEARS the field; omitting leaves unchanged.
 
 
 @runtime_checkable

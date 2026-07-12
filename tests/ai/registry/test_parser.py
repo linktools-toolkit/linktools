@@ -8,7 +8,11 @@ from decimal import Decimal
 import pytest
 
 from linktools.ai.agent.spec import ToolRef
-from linktools.ai.errors import InvalidSpecError, RegistryNotFoundError, RegistryParseError
+from linktools.ai.errors import (
+    InvalidSpecError,
+    RegistryNotFoundError,
+    RegistryParseError,
+)
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.registry.parser import (
     SpecLoader,

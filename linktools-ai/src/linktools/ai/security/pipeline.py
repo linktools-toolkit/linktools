@@ -57,6 +57,7 @@ class ToolInvocationEvent:
     run lineage (root/parent), session, agent, principal (user/tenant/workspace),
     and the capability that contributed the tool. Fields default to None so
     existing constructions keep working when only a subset is available."""
+
     tool_name: str
     arguments: "Mapping[str, Any]"
     run_id: "str | None" = None
@@ -126,18 +127,23 @@ def _with_modified_payload(event: Any, payload: Any) -> Any:
 
 def validate_tool_decision(decision: PipelineDecision, *, stage: str) -> None:
     before = {
-        PipelineAction.ALLOW, PipelineAction.DENY,
-        PipelineAction.REQUIRE_APPROVAL, PipelineAction.MODIFY,
+        PipelineAction.ALLOW,
+        PipelineAction.DENY,
+        PipelineAction.REQUIRE_APPROVAL,
+        PipelineAction.MODIFY,
         PipelineAction.AUDIT_ONLY,
     }
     after = {
-        PipelineAction.ALLOW, PipelineAction.DENY_RESULT,
-        PipelineAction.MODIFY_RESULT, PipelineAction.AUDIT_ONLY,
+        PipelineAction.ALLOW,
+        PipelineAction.DENY_RESULT,
+        PipelineAction.MODIFY_RESULT,
+        PipelineAction.AUDIT_ONLY,
     }
     allowed = before if stage == "before" else after
     if decision.action not in allowed:
         raise PipelineExecutionError(
-            f"pipeline action {decision.action.value!r} is invalid at {stage}_tool")
+            f"pipeline action {decision.action.value!r} is invalid at {stage}_tool"
+        )
 
 
 class CompositeSecurityPipeline:
@@ -171,24 +177,33 @@ class CompositeSecurityPipeline:
                 return decision
             if decision.action == PipelineAction.REQUIRE_APPROVAL:
                 require_approval = decision
-            elif (decision.action in (PipelineAction.MODIFY, PipelineAction.MODIFY_RESULT)
-                  and decision.modified_payload is not None):
+            elif (
+                decision.action in (PipelineAction.MODIFY, PipelineAction.MODIFY_RESULT)
+                and decision.modified_payload is not None
+            ):
                 last_modified_payload = decision.modified_payload
                 if schema is not None:
-                    from ..tool.schema_validate import validate_arguments
+                    from ..tool.schema import validate_arguments
+
                     tool_name = getattr(event, "tool_name", "")
                     # Raise as a DENY so the bad MODIFY never propagates.
                     try:
-                        validate_arguments(last_modified_payload, schema, tool_name=tool_name)
+                        validate_arguments(
+                            last_modified_payload, schema, tool_name=tool_name
+                        )
                     except Exception as exc:
                         return PipelineDecision(
                             action=PipelineAction.DENY,
                             reason=f"pipeline MODIFY failed schema validation: {exc}",
                         )
-                current_event = _with_modified_payload(current_event, last_modified_payload)
+                current_event = _with_modified_payload(
+                    current_event, last_modified_payload
+                )
         if require_approval is not None:
             return require_approval
-        return PipelineDecision(action=PipelineAction.ALLOW, modified_payload=last_modified_payload)
+        return PipelineDecision(
+            action=PipelineAction.ALLOW, modified_payload=last_modified_payload
+        )
 
     async def before_model(self, event: ModelInvocationEvent) -> PipelineDecision:
         return await self._evaluate("before_model", event)

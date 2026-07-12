@@ -1,0 +1,5 @@
+description: shell
+permissions: [execute, write]
+risk: HIGH
+side_effect: destructive
+approval: on_risk

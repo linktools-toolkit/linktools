@@ -21,7 +21,9 @@ def _parse_scope(raw: "Mapping[str, Any] | None") -> "PackageScope | None":
     package_id = raw.get("package_id")
     if not package_id:
         return None
-    return PackageScope(package_id=str(package_id), package_kind=raw.get("package_kind"))
+    return PackageScope(
+        package_id=str(package_id), package_kind=raw.get("package_kind")
+    )
 
 
 async def _resolve_spec(
@@ -36,7 +38,8 @@ async def _resolve_spec(
                 f"package-scoped subagent {agent_id!r} needs an entrypoint resolver"
             )
         return await entrypoint_resolver.resolve_agent(
-            EntrypointRef(kind="agent", name=agent_id, scope=scope))
+            EntrypointRef(kind="agent", name=agent_id, scope=scope)
+        )
     if subagent_provider is None:
         raise SubagentExecutionError("no subagent provider configured")
     try:
@@ -71,7 +74,8 @@ def build_subagent_toolset(
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
     async def call_subagent(
-        agent_id: str, task: str,
+        agent_id: str,
+        task: str,
         context: "dict[str, Any] | None" = None,
         scope: "dict[str, Any] | None" = None,
     ) -> "dict[str, Any]":
@@ -87,7 +91,9 @@ def build_subagent_toolset(
             raise SubagentNotFoundError(
                 f"package scope not allowed: {pkg_scope.package_id!r}"
             )
-        spec = await _resolve_spec(agent_id, pkg_scope, subagent_provider, entrypoint_resolver)
+        spec = await _resolve_spec(
+            agent_id, pkg_scope, subagent_provider, entrypoint_resolver
+        )
         if executor is None:
             raise SubagentExecutionError("no subagent executor configured")
         if parent is None:
@@ -102,8 +108,11 @@ def build_subagent_toolset(
             )
         async with semaphore:
             result = await executor.execute(
-                agent_spec=spec, task=task, context=context,
-                parent=parent, scope=pkg_scope,
+                agent_spec=spec,
+                task=task,
+                context=context,
+                parent=parent,
+                scope=pkg_scope,
                 timeout_seconds=timeout_seconds,
             )
         return result.model_dump()

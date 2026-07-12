@@ -13,6 +13,7 @@ ApprovalRequests are minted via ``build_approval_request`` (uuid4 id, fresh UTC
 timestamps, version=1, PENDING). Uses the ``def test_x(store_factory):`` +
 ``asyncio.run(_run())`` style (sync test wrapper driving its own event loop) —
 no pytest-asyncio mode config needed."""
+
 import asyncio
 
 import pytest
@@ -397,9 +398,7 @@ def test_list_for_run_is_status_agnostic(store_factory):
         await store.create(other_run)
         # Flip the second into APPROVED and the third into REJECTED (version
         # moves to 2, resolved_at/resolved_by get set).
-        await store.approve(
-            a_approved.id, expected_version=1, resolved_by="alice"
-        )
+        await store.approve(a_approved.id, expected_version=1, resolved_by="alice")
         await store.reject(
             a_rejected.id, expected_version=1, resolved_by="bob", reason="no"
         )

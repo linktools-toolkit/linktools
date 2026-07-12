@@ -6,10 +6,13 @@ global + package-scoped resolution, structured error on failure."""
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.errors import (
-    SubagentDepthExceededError, SubagentExecutionError, SubagentNotFoundError,
+    SubagentDepthExceededError,
+    SubagentExecutionError,
+    SubagentNotFoundError,
 )
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.subagent import SubagentProvider, SubagentResult
@@ -17,7 +20,9 @@ from linktools.ai.subagent import SubagentProvider, SubagentResult
 
 def _agent(agent_id):
     return AgentSpec(
-        id=agent_id, name=agent_id, model=ModelPolicy(primary="gpt-4"),
+        id=agent_id,
+        name=agent_id,
+        model=ModelPolicy(primary="gpt-4"),
         instructions=PromptSpec(instructions="hi"),
     )
 
@@ -40,34 +45,49 @@ class _Executor:
         self.calls = []
         self._fail = set(fail)
 
-    async def execute(self, *, agent_spec, task, context, parent, scope, timeout_seconds):
-        self.calls.append((
-            agent_spec.id, task,
-            parent.run_id if parent else None,
-            parent.session_id if parent else None,
-            scope,
-        ))
+    async def execute(
+        self, *, agent_spec, task, context, parent, scope, timeout_seconds
+    ):
+        self.calls.append(
+            (
+                agent_spec.id,
+                task,
+                parent.run_id if parent else None,
+                parent.session_id if parent else None,
+                scope,
+            )
+        )
         if agent_spec.id in self._fail:
             return SubagentResult(
-                agent_id=agent_spec.id, session_id="cs", run_id="cr",
-                status="failed", error={"reason": "boom"},
+                agent_id=agent_spec.id,
+                session_id="cs",
+                run_id="cr",
+                status="failed",
+                error={"reason": "boom"},
             )
         return SubagentResult(
-            agent_id=agent_spec.id, session_id="cs", run_id="cr",
-            status="succeeded", output=f"did:{task}",
+            agent_id=agent_spec.id,
+            session_id="cs",
+            run_id="cr",
+            status="succeeded",
+            output=f"did:{task}",
         )
 
 
 def _ctx():
     return CapabilityContext(
-        agent_id="parent", exposure_policy=CapabilityToolExposurePolicy(),
-        run_id="parent-run", session_id="parent-sess",
+        agent_id="parent",
+        exposure_policy=CapabilityToolExposurePolicy(),
+        run_id="parent-run",
+        session_id="parent-sess",
     )
 
 
 @pytest.mark.asyncio
 async def test_call_subagent_allowed_global():
-    provider = SubagentProvider(subagent_provider=_SubSrc(("reviewer",)), executor=_Executor())
+    provider = SubagentProvider(
+        subagent_provider=_SubSrc(("reviewer",)), executor=_Executor()
+    )
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
     call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     out = await call("reviewer", "review this")
@@ -78,7 +98,9 @@ async def test_call_subagent_allowed_global():
 
 @pytest.mark.asyncio
 async def test_call_subagent_unauthorized_rejected():
-    provider = SubagentProvider(subagent_provider=_SubSrc(("reviewer",)), executor=_Executor())
+    provider = SubagentProvider(
+        subagent_provider=_SubSrc(("reviewer",)), executor=_Executor()
+    )
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
     call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     with pytest.raises(SubagentNotFoundError):
@@ -89,7 +111,8 @@ async def test_call_subagent_unauthorized_rejected():
 async def test_call_subagent_depth_exceeded():
     depth = {"d": 3}
     provider = SubagentProvider(
-        subagent_provider=_SubSrc(("reviewer",)), executor=_Executor(),
+        subagent_provider=_SubSrc(("reviewer",)),
+        executor=_Executor(),
         depth_provider=lambda: depth["d"],
     )
     ref = CapabilityRef("subagent", "reviewer", config={"max_depth": 3})
@@ -102,7 +125,8 @@ async def test_call_subagent_depth_exceeded():
 @pytest.mark.asyncio
 async def test_call_subagent_structured_error_on_failure():
     provider = SubagentProvider(
-        subagent_provider=_SubSrc(("reviewer",)), executor=_Executor(fail=("reviewer",)),
+        subagent_provider=_SubSrc(("reviewer",)),
+        executor=_Executor(fail=("reviewer",)),
     )
     bundle = await provider.resolve(CapabilityRef("subagent", "reviewer"), _ctx())
     call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
@@ -123,7 +147,8 @@ async def test_call_subagent_no_executor_raises_execution_error():
 @pytest.mark.asyncio
 async def test_subagent_wildcard_authorizes_all():
     provider = SubagentProvider(
-        subagent_provider=_SubSrc(("a", "b")), executor=_Executor())
+        subagent_provider=_SubSrc(("a", "b")), executor=_Executor()
+    )
     bundle = await provider.resolve(CapabilityRef("subagent", "*"), _ctx())
     call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
     await call("a", "t")
@@ -134,8 +159,11 @@ async def test_subagent_wildcard_authorizes_all():
 
 def test_subagent_default_limits():
     from linktools.ai.subagent import (
-        DEFAULT_MAX_DEPTH, DEFAULT_MAX_CONCURRENCY, DEFAULT_TIMEOUT_SECONDS,
+        DEFAULT_MAX_DEPTH,
+        DEFAULT_MAX_CONCURRENCY,
+        DEFAULT_TIMEOUT_SECONDS,
     )
+
     assert DEFAULT_MAX_DEPTH == 3
     assert DEFAULT_MAX_CONCURRENCY == 1
     assert DEFAULT_TIMEOUT_SECONDS == 120

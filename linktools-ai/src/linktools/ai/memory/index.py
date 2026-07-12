@@ -22,7 +22,9 @@ class MemorySearchHit:
 class MemoryIndex(Protocol):
     async def index(self, record: MemoryRecord) -> None: ...
     async def remove(self, memory_id: str) -> None: ...
-    async def search(self, query: str, *, limit: int = 10) -> "tuple[MemorySearchHit, ...]": ...
+    async def search(
+        self, query: str, *, limit: int = 10
+    ) -> "tuple[MemorySearchHit, ...]": ...
 
 
 class KeywordMemoryIndex:
@@ -40,6 +42,8 @@ class KeywordMemoryIndex:
         # no-op.
         return None
 
-    async def search(self, query: str, *, limit: int = 10) -> "tuple[MemorySearchHit, ...]":
+    async def search(
+        self, query: str, *, limit: int = 10
+    ) -> "tuple[MemorySearchHit, ...]":
         records = await self._store.search(query, limit=limit)
         return tuple(MemorySearchHit(memory_id=r.id, score=1.0) for r in records)

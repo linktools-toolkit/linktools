@@ -17,6 +17,7 @@ The contract covers (per contract):
 
 Uses ``def test_x(store_factory): asyncio.run(_run())`` style — sync test
 wrapper driving its own event loop, no pytest-asyncio needed."""
+
 import asyncio
 
 import pytest

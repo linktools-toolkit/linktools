@@ -11,7 +11,9 @@ from typing import Any
 
 def stable_json(payload: "dict[str, Any]") -> str:
     """Serialize a dict with sorted keys and no extra whitespace, for stable hashing."""
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def json_ready(row: "dict[str, Any]") -> "dict[str, Any]":
@@ -60,7 +62,9 @@ def model_type(value: Any) -> str:
     return "standard"
 
 
-def deep_merge_dicts(base: "Mapping[str, Any]", override: "Mapping[str, Any] | None") -> "dict[str, Any]":
+def deep_merge_dicts(
+    base: "Mapping[str, Any]", override: "Mapping[str, Any] | None"
+) -> "dict[str, Any]":
     """Recursively merge nested dicts while keeping unspecified default keys intact."""
     merged = dict(base or {})
     if not isinstance(override, Mapping):
@@ -71,7 +75,6 @@ def deep_merge_dicts(base: "Mapping[str, Any]", override: "Mapping[str, Any] | N
         else:
             merged[key] = value
     return merged
-
 
 
 def call_id(*parts: str) -> str:
@@ -85,7 +88,6 @@ def _safe_id_part(value: str) -> str:
 def _to_safe_name(value: str, fallback: str) -> str:
     result = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip())
     return result.strip("._-") or fallback
-
 
 
 def safe_filename(value: str, fallback: str = "default") -> str:

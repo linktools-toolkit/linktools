@@ -4,7 +4,7 @@
 
 ToolExecutor consults an IdempotencyStore when an ``idempotency_key`` is
 supplied to ``execute()``. The store persists reservations so tool
-idempotency survives process restart -- the legacy in-process dict is gone
+idempotency survives process restart -- the prior in-process dict is gone
 ("禁止仅使用进程内字典").
 
 Lifecycle:
@@ -38,7 +38,15 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
+from uuid import UUID
+
+from ..errors import IdempotencyConfigurationError
+from .policy import IdempotencyStrategy
+
+if TYPE_CHECKING:
+    from ..run.context import RunContext
+    from ..tool.models import ToolDescriptor
 
 
 class IdempotencyStatus(str, Enum):
@@ -109,8 +117,11 @@ class IdempotencyStore(Protocol):
 
 
 def compute_request_hash(
-    tool_name: str, arguments: "dict[str, Any]", scope: str,
-    *, schema_version: str = "1",
+    tool_name: str,
+    arguments: "dict[str, Any]",
+    scope: str,
+    *,
+    schema_version: str = "1",
 ) -> str:
     """SHA-256 of ``tool_name | schema_version | normalized_args | scope``.
     ``arguments`` are json-serialized with ``sort_keys=True`` so
@@ -129,3 +140,80 @@ def compute_request_hash(
         f"{json.dumps(arguments, sort_keys=True, default=str)}|{scope}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def encode_business_key(value: Any) -> str:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    from ..errors import IdempotencyConfigurationError
+
+    raise IdempotencyConfigurationError(
+        "business key must be a string, integer, or UUID"
+    )
+
+
+@runtime_checkable
+class IdempotencyKeyBuilder(Protocol):
+    def build(
+        self,
+        *,
+        descriptor: "ToolDescriptor",
+        arguments: "Mapping[str, Any]",
+        run_context: "RunContext | None",
+        schema_version: str,
+        policy: Any = None,
+    ) -> "str | None": ...
+
+
+class DefaultIdempotencyKeyBuilder:
+    """sha256(run_id + tool_name + canonical_json(arguments) + schema_version).
+    Returns None when there is no run_id (the call is not part of a persisted
+    run, so idempotent replay is meaningless)."""
+
+    def build(
+        self,
+        *,
+        descriptor: "ToolDescriptor",
+        arguments: "Mapping[str, Any]",
+        run_context: "RunContext | None",
+        schema_version: str,
+        policy: Any = None,
+    ) -> "str | None":
+        run_id = getattr(run_context, "run_id", None) if run_context else None
+        strategy = getattr(
+            policy, "idempotency_strategy", IdempotencyStrategy.EXACT_CALL
+        )
+        if not run_id:
+            raise IdempotencyConfigurationError("idempotent tool calls require run_id")
+        if strategy == IdempotencyStrategy.BUSINESS_KEY:
+            field = getattr(policy, "idempotency_key_field", None)
+            if not field or field not in arguments:
+                raise IdempotencyConfigurationError(
+                    "business-key idempotency requires a configured key field"
+                )
+            tenant = getattr(run_context, "tenant_id", None) or ""
+            workspace = getattr(run_context, "workspace", None) or ""
+            identity = [
+                tenant,
+                workspace,
+                descriptor.name,
+                encode_business_key(arguments[field]),
+                schema_version,
+            ]
+        else:
+            identity = [
+                run_id,
+                descriptor.name,
+                _canonical_json(dict(arguments)),
+                schema_version,
+            ]
+        payload = "|".join(identity).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()

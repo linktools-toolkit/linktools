@@ -4,6 +4,7 @@
 
 Compiles the spec, resolves (or creates) a Session, mints a RunContext, and
 delegates to AgentRunner.run_stream, yielding the same dict-event shape."""
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -35,7 +36,9 @@ def _build_runtime(tmp_path):
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(fn, stream_function=stream_fn))
     storage = FileStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, model_router=ModelRouter(registry=registry))
+    runtime = Runtime.build(
+        storage=storage, model_router=ModelRouter(registry=registry)
+    )
     return runtime, storage
 
 
@@ -51,21 +54,37 @@ def test_runtime_run_stream_yields_text_events_and_completes(tmp_path):
     now = datetime.now(timezone.utc)
 
     async def _setup():
-        await storage.sessions.create(SessionRecord(
-            id="rt-stream-1", parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=now, updated_at=now,
-        ))
+        await storage.sessions.create(
+            SessionRecord(
+                id="rt-stream-1",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
     asyncio.run(_setup())
 
     spec = AgentSpec(
-        id="agent-rt-stream", name="rt-stream-agent",
+        id="agent-rt-stream",
+        name="rt-stream-agent",
         model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
+        instructions=PromptSpec(instructions="hi"),
+        output_schema=str,
     )
 
-    events = asyncio.run(_collect(runtime.run_stream(
-        spec, "hello", session_id="rt-stream-1", run_id="rt-run-stream-1",
-    )))
+    events = asyncio.run(
+        _collect(
+            runtime.run_stream(
+                spec,
+                "hello",
+                session_id="rt-stream-1",
+                run_id="rt-run-stream-1",
+            )
+        )
+    )
 
     text_events = [e for e in events if e["type"] == "text"]
     assert len(text_events) >= 1

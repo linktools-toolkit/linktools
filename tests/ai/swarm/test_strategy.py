@@ -107,7 +107,8 @@ class _MemorySwarmStore(SwarmStore):
     ) -> "SwarmTask | None":
         # FIFO: oldest PENDING task matching (swarm_run_id, agent_id).
         candidates = [
-            t for t in self._tasks.values()
+            t
+            for t in self._tasks.values()
             if t.swarm_run_id == swarm_run_id
             and t.assigned_agent_id == agent_id
             and t.status is SwarmTaskStatus.PENDING
@@ -135,6 +136,7 @@ class _MemorySwarmStore(SwarmStore):
         self, task_id: str, run_id: str, *, expected_version: int
     ) -> SwarmTask:
         from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+
         if task_id not in self._tasks:
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = self._tasks[task_id]
@@ -152,7 +154,12 @@ class _MemorySwarmStore(SwarmStore):
         return updated
 
     async def complete_task(
-        self, task_id: str, result, *, expected_version: int, active_run_id=None,
+        self,
+        task_id: str,
+        result,
+        *,
+        expected_version: int,
+        active_run_id=None,
     ) -> SwarmTask:
         current = self._tasks[task_id]
         if current.version != expected_version:
@@ -175,7 +182,12 @@ class _MemorySwarmStore(SwarmStore):
         return done
 
     async def fail_task(
-        self, task_id: str, error, *, expected_version: int, active_run_id=None,
+        self,
+        task_id: str,
+        error,
+        *,
+        expected_version: int,
+        active_run_id=None,
     ) -> SwarmTask:
         current = self._tasks[task_id]
         if current.version != expected_version:
@@ -201,7 +213,8 @@ class _MemorySwarmStore(SwarmStore):
         self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
     ) -> "tuple[SwarmTask, ...]":
         result = [
-            t for t in self._tasks.values()
+            t
+            for t in self._tasks.values()
             if t.swarm_run_id == swarm_run_id and (status is None or t.status is status)
         ]
         result.sort(key=lambda t: t.created_at)
@@ -215,7 +228,8 @@ class _MemorySwarmStore(SwarmStore):
         # task_id so list_attempts returns them in insertion order.
         bucket = self._attempts.setdefault(attempt.task_id, [])
         idx = next(
-            (i for i, a in enumerate(bucket) if a.id == attempt.id), None,
+            (i for i, a in enumerate(bucket) if a.id == attempt.id),
+            None,
         )
         if idx is None:
             bucket.append(attempt)
@@ -230,6 +244,7 @@ class _MemorySwarmStore(SwarmStore):
         self, task_id: str, *, expected_version: int, lease_seconds: float
     ) -> SwarmTask:
         from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+
         if task_id not in self._tasks:
             raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
         current = self._tasks[task_id]
@@ -238,6 +253,7 @@ class _MemorySwarmStore(SwarmStore):
                 f"expected version {expected_version}, found {current.version}"
             )
         from datetime import timedelta
+
         new_lease = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
         updated = replace(
             current,
@@ -251,16 +267,20 @@ class _MemorySwarmStore(SwarmStore):
 
 # --- helpers ----------------------------------------------------------------
 
+
 def _compile_worker(agent_id: str, output_text: str) -> CompiledAgent:
     """Compile an AgentSpec over a FunctionModel that always returns output_text
     as a plain str output (output_schema=str)."""
+
     def _model_fn(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(content=output_text)])
+
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     spec = AgentSpec(
-        id=agent_id, name=agent_id,
+        id=agent_id,
+        name=agent_id,
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions=f"you are {agent_id}"),
         output_schema=str,
@@ -270,8 +290,14 @@ def _compile_worker(agent_id: str, output_text: str) -> CompiledAgent:
 
 def _limits(**overrides) -> SwarmLimits:
     base = dict(
-        max_rounds=10, max_tasks=50, max_delegations=20, max_depth=5,
-        max_concurrency=4, max_total_tokens=None, max_total_cost=None, timeout_seconds=None,
+        max_rounds=10,
+        max_tasks=50,
+        max_delegations=20,
+        max_depth=5,
+        max_concurrency=4,
+        max_total_tokens=None,
+        max_total_cost=None,
+        timeout_seconds=None,
     )
     base.update(overrides)
     return SwarmLimits(**base)
@@ -279,17 +305,29 @@ def _limits(**overrides) -> SwarmLimits:
 
 def _swarm_run() -> SwarmRun:
     return SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
+        id="swarm-1",
+        run_id="drive-run-1",
+        round=0,
+        status=SwarmStatus.RUNNING,
+        version=1,
+        token_usage=TokenUsage(),
+        cost=Decimal("0"),
+        created_at=_NOW,
+        updated_at=_NOW,
     )
 
 
 def _parent_context() -> RunContext:
     return RunContext(
-        run_id="drive-run-1", root_run_id="drive-run-1", parent_run_id=None,
-        session_id="shared-session", runnable_id="swarm-spec-1",
-        runnable_type=RunnableType.SWARM, user_id=None, tenant_id=None, workspace=None,
+        run_id="drive-run-1",
+        root_run_id="drive-run-1",
+        parent_run_id=None,
+        session_id="shared-session",
+        runnable_id="swarm-spec-1",
+        runnable_type=RunnableType.SWARM,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
@@ -305,46 +343,77 @@ def _build_ctx(
     event_store = FileEventStore(root=tmp_path / "events")
     checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     runner = AgentRunner(
-        run_store=run_store, session_store=session_store,
-        event_store=event_store, checkpoint_store=checkpoint_store,
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
     )
     # pre-seed the shared session so the driving RunContext is consistent.
-    asyncio.run(session_store.create(SessionRecord(
-        id="shared-session", parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        session_store.create(
+            SessionRecord(
+                id="shared-session",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     compiler = AgentCompiler(model_router=ModelRouter(registry=ModelRegistry()))
     return SwarmExecutionContext(
-        spec=spec, swarm_run=_swarm_run(), request=RunInput(prompt="do the work"),
-        parent_context=_parent_context(), agent_runner=runner, compiler=compiler,
-        agents=agents, swarm_store=swarm_store or _MemorySwarmStore(),
-        run_store=run_store, session_store=session_store, event_store=event_store,
+        spec=spec,
+        swarm_run=_swarm_run(),
+        request=RunInput(prompt="do the work"),
+        parent_context=_parent_context(),
+        agent_runner=runner,
+        compiler=compiler,
+        agents=agents,
+        swarm_store=swarm_store or _MemorySwarmStore(),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
     )
 
 
-def _make_spec(*, kind: str, limits: SwarmLimits, agents: "tuple[AgentRef, ...]",
-               coordinator: AgentRef) -> SwarmSpec:
+def _make_spec(
+    *,
+    kind: str,
+    limits: SwarmLimits,
+    agents: "tuple[AgentRef, ...]",
+    coordinator: AgentRef,
+) -> SwarmSpec:
     return SwarmSpec(
-        id="swarm-spec-1", name="test-swarm", agents=agents, coordinator=coordinator,
-        strategy=SwarmStrategySpec(kind=kind), limits=limits,
-        context_policy=SwarmContextPolicy(), aggregation=AggregationPolicy(),
+        id="swarm-spec-1",
+        name="test-swarm",
+        agents=agents,
+        coordinator=coordinator,
+        strategy=SwarmStrategySpec(kind=kind),
+        limits=limits,
+        context_policy=SwarmContextPolicy(),
+        aggregation=AggregationPolicy(),
     )
 
 
 # --- 1. CoordinatorDelegationStrategy: 2 tasks round 1, empty round 2 --------
+
 
 def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
     compiled_a = _compile_worker("worker-a", "alpha-out")
     compiled_b = _compile_worker("worker-b", "beta-out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(max_rounds=10),
+        kind="coordinator_delegation",
+        limits=_limits(max_rounds=10),
         agents=(AgentRef("coord"), AgentRef("worker-a"), AgentRef("worker-b")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a, "worker-b": compiled_b},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a, "worker-b": compiled_b},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     # deterministic coordinator: 2 TaskInputs round 1, empty thereafter.
     call_count = {"n": 0}
@@ -356,10 +425,12 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
         return ()
 
     from linktools.ai.swarm.strategy import CoordinatorDelegationStrategy
+
     strategy = CoordinatorDelegationStrategy(coordinator_fn=coordinator_fn)
 
     async def _run():
         return await strategy.run(ctx)
+
     result = asyncio.run(_run())
 
     # output is the CONCAT of both workers' fixed strings (round-robin assignment).
@@ -372,6 +443,7 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
         children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
+
     children, tasks = asyncio.run(_verify())
     assert len(children) == 2
     assert all(c.parent_run_id == ctx.swarm_run.run_id for c in children)
@@ -386,17 +458,21 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
 
 # --- 2. CoordinatorDelegationStrategy: max_rounds exceeded -> raise ----------
 
+
 def test_coordinator_delegation_raises_when_max_rounds_exceeded(tmp_path):
     compiled_a = _compile_worker("worker-a", "alpha-out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(max_rounds=1),
+        kind="coordinator_delegation",
+        limits=_limits(max_rounds=1),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
 
     # coordinator that ALWAYS returns a task -- tries to start round 2 after max_rounds=1.
@@ -404,10 +480,12 @@ def test_coordinator_delegation_raises_when_max_rounds_exceeded(tmp_path):
         return (TaskInput(prompt="more work"),)
 
     from linktools.ai.swarm.strategy import CoordinatorDelegationStrategy
+
     strategy = CoordinatorDelegationStrategy(coordinator_fn=coordinator_fn)
 
     async def _run():
         await strategy.run(ctx)
+
     with pytest.raises(SwarmLimitExceededError) as exc_info:
         asyncio.run(_run())
     assert exc_info.value.kind == "max_rounds"
@@ -417,24 +495,30 @@ def test_coordinator_delegation_raises_when_max_rounds_exceeded(tmp_path):
 
 # --- 3. ParallelFanOutStrategy: task_count=3, one worker -> 3 child Runs -----
 
+
 def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
     compiled_a = _compile_worker("worker-a", "same-out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="parallel_fan_out", limits=_limits(max_concurrency=4),
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=4),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
 
     from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+
     strategy = ParallelFanOutStrategy(task_count=3)
 
     async def _run():
         return await strategy.run(ctx)
+
     result = asyncio.run(_run())
 
     # 3 child Runs, all SUCCEEDED.
@@ -442,6 +526,7 @@ def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
         children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
+
     children, tasks = asyncio.run(_verify())
     assert len(children) == 3
     assert all(c.status is RunStatus.SUCCEEDED for c in children)
@@ -453,6 +538,7 @@ def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
 
 
 # --- 4. ParallelFanOutStrategy: max_concurrency bounds in-flight runs --------
+
 
 class _ConcurrencyTrackingRunner:
     """Wraps AgentRunner; tracks the high-water mark of simultaneously-in-flight
@@ -478,22 +564,27 @@ def test_parallel_fan_out_bounds_concurrency_via_semaphore(tmp_path):
     compiled_a = _compile_worker("worker-a", "out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="parallel_fan_out", limits=_limits(max_concurrency=2),
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=2),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     tracker = _ConcurrencyTrackingRunner(ctx.agent_runner)
     ctx = replace(ctx, agent_runner=tracker)
 
     from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+
     strategy = ParallelFanOutStrategy(task_count=4)
 
     async def _run():
         return await strategy.run(ctx)
+
     result = asyncio.run(_run())
 
     # all 4 tasks SUCCEEDED.
@@ -506,62 +597,77 @@ def test_parallel_fan_out_bounds_concurrency_via_semaphore(tmp_path):
 
 # --- 4b. ParallelFanOutStrategy: max_tasks exceeded -> raise ------------------
 
+
 def test_parallel_fan_out_raises_when_max_tasks_exceeded(tmp_path):
     compiled_a = _compile_worker("worker-a", "out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="parallel_fan_out", limits=_limits(max_tasks=2),
+        kind="parallel_fan_out",
+        limits=_limits(max_tasks=2),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
 
     from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+
     # task_count=3 would exceed max_tasks=2 -- must raise before dispatching.
     strategy = ParallelFanOutStrategy(task_count=3)
 
     async def _run():
         await strategy.run(ctx)
+
     with pytest.raises(SwarmLimitExceededError) as exc_info:
         asyncio.run(_run())
     assert exc_info.value.kind == "max_tasks"
     # SwarmLimitExceededError is a SwarmError.
     assert isinstance(exc_info.value, SwarmError)
+
     # nothing was dispatched: no tasks created before the limit fired.
     async def _verify():
         return await swarm_store.list_tasks(ctx.swarm_run.id)
+
     tasks = asyncio.run(_verify())
     assert tasks == ()
 
 
 # --- 5. build_strategy registry ------------------------------------------------
 
+
 def test_build_strategy_returns_parallel_fan_out():
     from linktools.ai.swarm.strategy import (
-        ParallelFanOutStrategy, build_strategy,
+        ParallelFanOutStrategy,
+        build_strategy,
     )
+
     strategy = build_strategy(SwarmStrategySpec(kind="parallel_fan_out"))
     assert isinstance(strategy, ParallelFanOutStrategy)
 
 
 def test_build_strategy_returns_coordinator_delegation():
     from linktools.ai.swarm.strategy import (
-        CoordinatorDelegationStrategy, build_strategy,
+        CoordinatorDelegationStrategy,
+        build_strategy,
     )
+
     strategy = build_strategy(SwarmStrategySpec(kind="coordinator_delegation"))
     assert isinstance(strategy, CoordinatorDelegationStrategy)
 
 
 def test_build_strategy_unknown_kind_raises_swarm_error():
     from linktools.ai.swarm.strategy import build_strategy
+
     with pytest.raises(SwarmError):
         build_strategy(SwarmStrategySpec(kind="no_such_strategy"))
 
 
 # --- 6. SwarmLimits.max_depth enforcement in _run_task ----------------------
+
 
 def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
     """_run_task walks the parent_task_id chain via list_tasks and raises
@@ -572,39 +678,72 @@ def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
 
     compiled_a = _compile_worker("worker-a", "out")
     swarm_store = _MemorySwarmStore()
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(max_depth=1),
+        kind="coordinator_delegation",
+        limits=_limits(max_depth=1),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     # parent task (depth 1) already SUCCEEDED -> not claimable; it exists only
     # so the child's parent_task_id chain resolves to a real parent.
     parent = SwarmTask(
-        id="parent-1", swarm_run_id="swarm-1", parent_task_id=None,
-        assigned_agent_id="worker-a", description="parent",
+        id="parent-1",
+        swarm_run_id="swarm-1",
+        parent_task_id=None,
+        assigned_agent_id="worker-a",
+        description="parent",
         status=SwarmTaskStatus.SUCCEEDED,
-        dependencies=(), input=TaskInput(prompt="p"), result=None, error=None,
-        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="p"),
+        result=None,
+        error=None,
+        attempts=1,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     # child task (depth 2) PENDING -> would be claimed, but the depth guard
     # fires first.
     child = SwarmTask(
-        id="child-1", swarm_run_id="swarm-1", parent_task_id="parent-1",
-        assigned_agent_id="worker-a", description="child",
+        id="child-1",
+        swarm_run_id="swarm-1",
+        parent_task_id="parent-1",
+        assigned_agent_id="worker-a",
+        description="child",
         status=SwarmTaskStatus.PENDING,
-        dependencies=(), input=TaskInput(prompt="c"), result=None, error=None,
-        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="c"),
+        result=None,
+        error=None,
+        attempts=0,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     asyncio.run(swarm_store.create_task(parent))
     asyncio.run(swarm_store.create_task(child))
@@ -627,43 +766,86 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
 
     compiled_a = _compile_worker("worker-a", "out")
     swarm_store = _MemorySwarmStore()
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(max_depth=2),
+        kind="coordinator_delegation",
+        limits=_limits(max_depth=2),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     grandparent = SwarmTask(
-        id="gp-1", swarm_run_id="swarm-1", parent_task_id=None,
-        assigned_agent_id="worker-a", description="gp",
+        id="gp-1",
+        swarm_run_id="swarm-1",
+        parent_task_id=None,
+        assigned_agent_id="worker-a",
+        description="gp",
         status=SwarmTaskStatus.SUCCEEDED,
-        dependencies=(), input=TaskInput(prompt="g"), result=None, error=None,
-        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="g"),
+        result=None,
+        error=None,
+        attempts=1,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     parent = SwarmTask(
-        id="p-1", swarm_run_id="swarm-1", parent_task_id="gp-1",
-        assigned_agent_id="worker-a", description="p",
+        id="p-1",
+        swarm_run_id="swarm-1",
+        parent_task_id="gp-1",
+        assigned_agent_id="worker-a",
+        description="p",
         status=SwarmTaskStatus.SUCCEEDED,
-        dependencies=(), input=TaskInput(prompt="p"), result=None, error=None,
-        attempts=1, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="p"),
+        result=None,
+        error=None,
+        attempts=1,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     child = SwarmTask(
-        id="c-1", swarm_run_id="swarm-1", parent_task_id="p-1",
-        assigned_agent_id="worker-a", description="c",
+        id="c-1",
+        swarm_run_id="swarm-1",
+        parent_task_id="p-1",
+        assigned_agent_id="worker-a",
+        description="c",
         status=SwarmTaskStatus.PENDING,
-        dependencies=(), input=TaskInput(prompt="c"), result=None, error=None,
-        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="c"),
+        result=None,
+        error=None,
+        attempts=0,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     asyncio.run(swarm_store.create_task(grandparent))
     asyncio.run(swarm_store.create_task(parent))
@@ -686,26 +868,32 @@ def test_task_id_is_different_from_child_run_id(tmp_path):
     compiled_a = _compile_worker("worker-a", "alpha-out")
     swarm_store = _MemorySwarmStore()
     spec = _make_spec(
-        kind="parallel_fan_out", limits=_limits(max_concurrency=2),
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=2),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
 
     from linktools.ai.swarm.strategy import ParallelFanOutStrategy
+
     strategy = ParallelFanOutStrategy(task_count=2)
 
     async def _run():
         return await strategy.run(ctx)
+
     asyncio.run(_run())
 
     async def _verify():
         children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
+
     children, tasks = asyncio.run(_verify())
 
     child_ids = {c.id for c in children}
@@ -726,28 +914,51 @@ def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
 
     compiled_a = _compile_worker("worker-a", "alpha-out")
     swarm_store = _MemorySwarmStore()
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     # one PENDING task to execute twice.
     task = SwarmTask(
-        id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
-        assigned_agent_id="worker-a", description="x",
+        id="task-1",
+        swarm_run_id="swarm-1",
+        parent_task_id=None,
+        assigned_agent_id="worker-a",
+        description="x",
         status=SwarmTaskStatus.PENDING,
-        dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
-        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
+        dependencies=(),
+        input=TaskInput(prompt="do"),
+        result=None,
+        error=None,
+        attempts=0,
+        version=1,
+        claimed_at=None,
+        lease_expires_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     asyncio.run(swarm_store.create_task(task))
 
@@ -784,6 +995,7 @@ def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
     # the driving swarm run).
     async def _children():
         return await ctx.run_store.list_children(ctx.swarm_run.run_id)
+
     children = asyncio.run(_children())
     assert {first_active, second_active}.issubset({c.id for c in children})
 
@@ -796,35 +1008,63 @@ def test_set_active_run_rejects_stale_expected_version(swarm_store_via_module=No
     from linktools.ai.swarm.models import SwarmRun
 
     store = _MemorySwarmStore()
-    asyncio.run(store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
-    asyncio.run(store.create_task(SwarmTask(
-        id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
-        assigned_agent_id="worker-a", description="x",
-        status=SwarmTaskStatus.PENDING,
-        dependencies=(), input=TaskInput(prompt="x"), result=None, error=None,
-        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
+    asyncio.run(
+        store.create_task(
+            SwarmTask(
+                id="task-1",
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id="worker-a",
+                description="x",
+                status=SwarmTaskStatus.PENDING,
+                dependencies=(),
+                input=TaskInput(prompt="x"),
+                result=None,
+                error=None,
+                attempts=0,
+                version=1,
+                claimed_at=None,
+                lease_expires_at=None,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     claimed = asyncio.run(store.claim_task("swarm-1", "worker-a"))
     assert claimed is not None
     assert claimed.version == 2
 
     # Simulate a concurrent update bumping version (e.g., a reclaim or another
     # set_active_run) between claim_task and our set_active_run call.
-    bumped = asyncio.run(store.set_active_run(
-        "task-1", "child-run-concurrent", expected_version=claimed.version
-    ))
+    bumped = asyncio.run(
+        store.set_active_run(
+            "task-1", "child-run-concurrent", expected_version=claimed.version
+        )
+    )
     assert bumped.version == 3
 
     # Now the original caller tries with the STALE version -- conflict.
     with pytest.raises(SwarmConflictError):
-        asyncio.run(store.set_active_run(
-            "task-1", "child-run-stale", expected_version=claimed.version
-        ))
+        asyncio.run(
+            store.set_active_run(
+                "task-1", "child-run-stale", expected_version=claimed.version
+            )
+        )
 
 
 def test_set_active_run_missing_task_raises_not_found():
@@ -833,11 +1073,21 @@ def test_set_active_run_missing_task_raises_not_found():
     from linktools.ai.errors import SwarmTaskNotFoundError
 
     store = _MemorySwarmStore()
-    asyncio.run(store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     with pytest.raises(SwarmTaskNotFoundError):
         asyncio.run(store.set_active_run("nope", "child-1", expected_version=1))
 
@@ -847,19 +1097,37 @@ def test_set_active_run_missing_task_raises_not_found():
 # ---------------------------------------------------------------------------
 
 
-def _seed_worker_task(swarm_store, *, task_id: str = "task-1", agent_id: str = "worker-a"):
+def _seed_worker_task(
+    swarm_store, *, task_id: str = "task-1", agent_id: str = "worker-a"
+):
     """Seed a PENDING SwarmTask into the in-memory store for _run_task."""
-    asyncio.run(swarm_store.create_task(SwarmTask(
-        id=task_id, swarm_run_id="swarm-1", parent_task_id=None,
-        assigned_agent_id=agent_id, description="x",
-        status=SwarmTaskStatus.PENDING,
-        dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
-        attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_task(
+            SwarmTask(
+                id=task_id,
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id=agent_id,
+                description="x",
+                status=SwarmTaskStatus.PENDING,
+                dependencies=(),
+                input=TaskInput(prompt="do"),
+                result=None,
+                error=None,
+                attempts=0,
+                version=1,
+                claimed_at=None,
+                lease_expires_at=None,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
 
 
-def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_id(tmp_path):
+def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_id(
+    tmp_path,
+):
     """A successful _run_task records exactly one SwarmTaskAttempt whose run_id
     matches the task's active_run_id (Phase-5A child run) and whose attempt
     number is 1 (first execution: task.attempts started at 0 -> 0+1)."""
@@ -868,19 +1136,32 @@ def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_
 
     compiled_a = _compile_worker("worker-a", "alpha-out")
     swarm_store = _MemorySwarmStore()
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_a, "worker-a": compiled_a},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_a, "worker-a": compiled_a},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store)
 
@@ -898,7 +1179,9 @@ def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_
     assert attempts[0].finished_at is not None
 
 
-def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementing_numbers(tmp_path):
+def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementing_numbers(
+    tmp_path,
+):
     """With max_task_retries=2 and a worker that fails once then succeeds, the
     audit trail records TWO attempts: #1=FAILED, #2=SUCCEEDED. Each attempt
     gets its OWN fresh child run_id and scratch session -- reusing one across
@@ -931,7 +1214,8 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     registry.register("flaky-model", model=FunctionModel(_flaky_model))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     flaky_spec = AgentSpec(
-        id="worker-flaky", name="worker-flaky",
+        id="worker-flaky",
+        name="worker-flaky",
         model=ModelPolicy(primary="flaky-model"),
         instructions=PromptSpec(instructions="you are flaky"),
         output_schema=str,
@@ -939,26 +1223,43 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     compiled_flaky = asyncio.run(compiler.compile(flaky_spec))
 
     swarm_store = _MemorySwarmStore()
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-flaky")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store, agent_id="worker-flaky")
 
     # max_task_retries=1 -> two iterations: first fails, second succeeds.
-    result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=1,
-    ))
+    result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=1,
+        )
+    )
     assert result is not None
 
     attempts = asyncio.run(swarm_store.list_attempts("task-1"))
@@ -1026,19 +1327,28 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
         event_store = FileEventStore(root=tmp_path / "events")
         checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
         runner = AgentRunner(
-            run_store=run_store, session_store=session_store,
-            event_store=event_store, checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+            checkpoint_store=checkpoint_store,
         )
-        await session_store.create(SessionRecord(
-            id="shared-session", parent_id=None, status=SessionStatus.ACTIVE,
-            version=1, created_at=_NOW, updated_at=_NOW,
-        ))
+        await session_store.create(
+            SessionRecord(
+                id="shared-session",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
 
         registry = ModelRegistry()
         registry.register("flaky-model", model=FunctionModel(_flaky_model))
         compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
         flaky_spec = AgentSpec(
-            id="worker-flaky", name="worker-flaky",
+            id="worker-flaky",
+            name="worker-flaky",
             model=ModelPolicy(primary="flaky-model"),
             instructions=PromptSpec(instructions="you are flaky"),
             output_schema=str,
@@ -1046,31 +1356,58 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
         compiled_flaky = await compiler.compile(flaky_spec)
 
         swarm_store = _MemorySwarmStore()
-        await swarm_store.create_run(SwarmRun(
-            id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-            version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-            created_at=_NOW, updated_at=_NOW,
-        ))
+        await swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
         spec = _make_spec(
-            kind="coordinator_delegation", limits=_limits(),
+            kind="coordinator_delegation",
+            limits=_limits(),
             agents=(AgentRef("coord"), AgentRef("worker-flaky")),
             coordinator=AgentRef("coord"),
         )
         ctx = SwarmExecutionContext(
-            spec=spec, swarm_run=_swarm_run(), request=RunInput(prompt="do the work"),
-            parent_context=_parent_context(), agent_runner=runner, compiler=compiler,
+            spec=spec,
+            swarm_run=_swarm_run(),
+            request=RunInput(prompt="do the work"),
+            parent_context=_parent_context(),
+            agent_runner=runner,
+            compiler=compiler,
             agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
             swarm_store=swarm_store,
-            run_store=run_store, session_store=session_store, event_store=event_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
         )
-        await swarm_store.create_task(SwarmTask(
-            id="task-1", swarm_run_id="swarm-1", parent_task_id=None,
-            assigned_agent_id="worker-flaky", description="x",
-            status=SwarmTaskStatus.PENDING,
-            dependencies=(), input=TaskInput(prompt="do"), result=None, error=None,
-            attempts=0, version=1, claimed_at=None, lease_expires_at=None,
-            created_at=_NOW, updated_at=_NOW,
-        ))
+        await swarm_store.create_task(
+            SwarmTask(
+                id="task-1",
+                swarm_run_id="swarm-1",
+                parent_task_id=None,
+                assigned_agent_id="worker-flaky",
+                description="x",
+                status=SwarmTaskStatus.PENDING,
+                dependencies=(),
+                input=TaskInput(prompt="do"),
+                result=None,
+                error=None,
+                attempts=0,
+                version=1,
+                claimed_at=None,
+                lease_expires_at=None,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
 
         return await _run_task(ctx, swarm_store._tasks["task-1"], max_task_retries=1)
 
@@ -1112,7 +1449,8 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
         # attempt could safely retry past.
         current = swarm_store._tasks["task-1"]
         swarm_store._tasks["task-1"] = replace(
-            current, version=current.version + 1,
+            current,
+            version=current.version + 1,
             active_run_id="some-other-run-id",
         )
         return ModelResponse(parts=[TextPart(content="done")])
@@ -1121,32 +1459,50 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     worker_spec = AgentSpec(
-        id="worker-a", name="worker-a",
+        id="worker-a",
+        name="worker-a",
         model=ModelPolicy(primary="worker-model"),
         instructions=PromptSpec(instructions="you work"),
         output_schema=str,
     )
     compiled = asyncio.run(compiler.compile(worker_spec))
 
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled, "worker-a": compiled},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled, "worker-a": compiled},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store)
 
-    result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-    ))
+    result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=2,
+        )
+    )
 
     # The conflict is discarded, not retried: the worker model ran exactly
     # once (a wrongful retry would call it again), and _run_task reports
@@ -1204,7 +1560,8 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
         # not merely raced a stale version it could safely retry past.
         current = swarm_store._tasks["task-1"]
         swarm_store._tasks["task-1"] = replace(
-            current, version=current.version + 1,
+            current,
+            version=current.version + 1,
             status=SwarmTaskStatus.PENDING,
         )
         raise RuntimeError("transient boom")
@@ -1213,34 +1570,52 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     worker_spec = AgentSpec(
-        id="worker-a", name="worker-a",
+        id="worker-a",
+        name="worker-a",
         model=ModelPolicy(primary="worker-model"),
         instructions=PromptSpec(instructions="you work"),
         output_schema=str,
     )
     compiled = asyncio.run(compiler.compile(worker_spec))
 
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled, "worker-a": compiled},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled, "worker-a": compiled},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store)
 
     # max_task_retries=2 -> would be up to 3 iterations, but attempt #2's
     # set_active_run should short-circuit after the FIRST failure.
-    result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-    ))
+    result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=2,
+        )
+    )
 
     # No crash (SwarmConflictError did not propagate out of _run_task), and
     # the worker model ran exactly once -- attempt #2 never started it.
@@ -1282,51 +1657,74 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     worker_spec = AgentSpec(
-        id="worker-a", name="worker-a",
+        id="worker-a",
+        name="worker-a",
         model=ModelPolicy(primary="worker-model"),
         instructions=PromptSpec(instructions="you work"),
         output_schema=str,
     )
     compiled = asyncio.run(compiler.compile(worker_spec))
 
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled, "worker-a": compiled},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled, "worker-a": compiled},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store)
 
     original_complete_task = swarm_store.complete_task
     complete_task_calls = {"n": 0}
 
-    async def _flaky_complete_task(task_id, result, *, expected_version, active_run_id=None):
+    async def _flaky_complete_task(
+        task_id, result, *, expected_version, active_run_id=None
+    ):
         complete_task_calls["n"] += 1
         if complete_task_calls["n"] == 1:
             # Simulate a lease renewal bumping the version WHILE the worker
             # was in flight -- ownership (status/active_run_id) is untouched.
             current = swarm_store._tasks[task_id]
             swarm_store._tasks[task_id] = replace(
-                current, version=current.version + 1,
+                current,
+                version=current.version + 1,
             )
         return await original_complete_task(
-            task_id, result, expected_version=expected_version,
+            task_id,
+            result,
+            expected_version=expected_version,
             active_run_id=active_run_id,
         )
 
     swarm_store.complete_task = _flaky_complete_task
 
-    result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-    ))
+    result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=2,
+        )
+    )
 
     # The worker ran exactly once -- the stale-version conflict was resolved
     # by retrying the WRITE (complete_task, called twice: the losing attempt
@@ -1355,26 +1753,40 @@ def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
     registry.register("worker-model", model=FunctionModel(model_fn))
     compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
     worker_spec = AgentSpec(
-        id="worker-a", name="worker-a",
+        id="worker-a",
+        name="worker-a",
         model=ModelPolicy(primary="worker-model"),
         instructions=PromptSpec(instructions="you work"),
         output_schema=str,
     )
     compiled = asyncio.run(compiler.compile(worker_spec))
 
-    asyncio.run(swarm_store.create_run(SwarmRun(
-        id="swarm-1", run_id="drive-run-1", round=0, status=SwarmStatus.RUNNING,
-        version=1, token_usage=TokenUsage(), cost=Decimal("0"),
-        created_at=_NOW, updated_at=_NOW,
-    )))
+    asyncio.run(
+        swarm_store.create_run(
+            SwarmRun(
+                id="swarm-1",
+                run_id="drive-run-1",
+                round=0,
+                status=SwarmStatus.RUNNING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+    )
     spec = _make_spec(
-        kind="coordinator_delegation", limits=_limits(),
+        kind="coordinator_delegation",
+        limits=_limits(),
         agents=(AgentRef("coord"), AgentRef("worker-a")),
         coordinator=AgentRef("coord"),
     )
     ctx = _build_ctx(
-        tmp_path, agents={"coord": compiled, "worker-a": compiled},
-        spec=spec, swarm_store=swarm_store,
+        tmp_path,
+        agents={"coord": compiled, "worker-a": compiled},
+        spec=spec,
+        swarm_store=swarm_store,
     )
     _seed_worker_task(swarm_store)
     return ctx, swarm_store
@@ -1400,9 +1812,13 @@ def test_run_task_complete_task_not_found_propagates(tmp_path):
     swarm_store.complete_task = _not_found
 
     with pytest.raises(SwarmTaskNotFoundError):
-        asyncio.run(_run_task(
-            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-        ))
+        asyncio.run(
+            _run_task(
+                ctx,
+                swarm_store._tasks["task-1"],
+                max_task_retries=2,
+            )
+        )
 
 
 def test_run_task_complete_task_storage_error_propagates(tmp_path):
@@ -1424,9 +1840,13 @@ def test_run_task_complete_task_storage_error_propagates(tmp_path):
     swarm_store.complete_task = _db_down
 
     with pytest.raises(RuntimeError, match="db down"):
-        asyncio.run(_run_task(
-            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-        ))
+        asyncio.run(
+            _run_task(
+                ctx,
+                swarm_store._tasks["task-1"],
+                max_task_retries=2,
+            )
+        )
 
 
 def test_run_task_set_active_run_storage_error_propagates(tmp_path):
@@ -1446,9 +1866,13 @@ def test_run_task_set_active_run_storage_error_propagates(tmp_path):
     swarm_store.set_active_run = _db_down
 
     with pytest.raises(RuntimeError, match="db down"):
-        asyncio.run(_run_task(
-            ctx, swarm_store._tasks["task-1"], max_task_retries=2,
-        ))
+        asyncio.run(
+            _run_task(
+                ctx,
+                swarm_store._tasks["task-1"],
+                max_task_retries=2,
+            )
+        )
 
 
 def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_path):
@@ -1512,7 +1936,9 @@ def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_
     async def _counting_set_active_run(task_id, run_id, *, expected_version):
         set_active_run_calls["n"] += 1
         return await original_set_active_run(
-            task_id, run_id, expected_version=expected_version,
+            task_id,
+            run_id,
+            expected_version=expected_version,
         )
 
     swarm_store.set_active_run = _counting_set_active_run
@@ -1560,18 +1986,25 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     def _superseded_model_fn(messages, info):
         current = swarm_store._tasks["task-1"]
         swarm_store._tasks["task-1"] = replace(
-            current, version=current.version + 1,
+            current,
+            version=current.version + 1,
             active_run_id="some-other-run-id",
         )
         return ModelResponse(parts=[TextPart(content="done")])
 
     ctx, swarm_store = _worker_ctx_and_task(
-        tmp_path, _superseded_model_fn, swarm_store=swarm_store,
+        tmp_path,
+        _superseded_model_fn,
+        swarm_store=swarm_store,
     )
 
-    first_result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=0,
-    ))
+    first_result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=0,
+        )
+    )
     assert first_result is None
 
     attempts_after_first = asyncio.run(swarm_store.list_attempts("task-1"))
@@ -1591,8 +2024,10 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     # claims it and must number its attempt correctly).
     stale = swarm_store._tasks["task-1"]
     swarm_store._tasks["task-1"] = replace(
-        stale, status=SwarmTaskStatus.PENDING,
-        claimed_at=None, active_run_id=None,
+        stale,
+        status=SwarmTaskStatus.PENDING,
+        claimed_at=None,
+        active_run_id=None,
         version=stale.version + 1,
     )
 
@@ -1605,7 +2040,8 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     registry2.register("worker-model-2", model=FunctionModel(_clean_model_fn))
     compiler2 = AgentCompiler(model_router=ModelRouter(registry=registry2))
     worker_spec_2 = AgentSpec(
-        id="worker-a", name="worker-a",
+        id="worker-a",
+        name="worker-a",
         model=ModelPolicy(primary="worker-model-2"),
         instructions=PromptSpec(instructions="you work"),
         output_schema=str,
@@ -1613,9 +2049,13 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     compiled_2 = asyncio.run(compiler2.compile(worker_spec_2))
     ctx.agents["worker-a"] = compiled_2
 
-    second_result = asyncio.run(_run_task(
-        ctx, swarm_store._tasks["task-1"], max_task_retries=0,
-    ))
+    second_result = asyncio.run(
+        _run_task(
+            ctx,
+            swarm_store._tasks["task-1"],
+            max_task_retries=0,
+        )
+    )
     assert second_result is not None
     assert second_result.output == "done-for-real"
 

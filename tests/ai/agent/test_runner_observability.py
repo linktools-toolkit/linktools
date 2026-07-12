@@ -61,7 +61,9 @@ class _RecordingSink:
         self.started.append(span)
         return span
 
-    def record_event(self, name: str, *, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def record_event(
+        self, name: str, *, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         self.events.append((name, dict(attributes or {})))
 
     def end_span(self, span: Span) -> None:
@@ -76,25 +78,37 @@ class _RecordingMetrics:
         self.histograms: "list[tuple[str, float, dict]]" = []
         self.gauges: "list[tuple[str, float, dict]]" = []
 
-    def counter(self, name: str, *, value: int = 1, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def counter(
+        self,
+        name: str,
+        *,
+        value: int = 1,
+        attributes: "Mapping[str, Any] | None" = None,
+    ) -> None:
         self.counters.append((name, value, dict(attributes or {})))
 
-    def histogram(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def histogram(
+        self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         self.histograms.append((name, value, dict(attributes or {})))
 
-    def gauge(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
+    def gauge(
+        self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None
+    ) -> None:
         self.gauges.append((name, value, dict(attributes or {})))
 
 
 def _model_fn(text: str = '{"response": {"answer": 42}}'):
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart(content=text)])
+
     return _fn
 
 
 def _boom_model_fn():
     def _fn(messages, info: AgentInfo) -> ModelResponse:
         raise RuntimeError("model exploded")
+
     return _fn
 
 
@@ -105,18 +119,47 @@ def _registry(model_fn):
 
 
 def _run_context(run_id="run-1", session_id="session-1") -> RunContext:
-    return RunContext(run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-                     runnable_id="agent-1", runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None, workspace=None)
+    return RunContext(
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
+    )
 
 
 def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    asyncio.run(store.create(SessionRecord(id=session_id, parent_id=None, status=SessionStatus.ACTIVE, version=1, created_at=now, updated_at=now)))
+    asyncio.run(
+        store.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
 
 def _compile(model_fn):
     compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(model_fn)))
-    return asyncio.run(compiler.compile(AgentSpec(id="agent-1", name="a", model=ModelPolicy(primary="test-model"), instructions=PromptSpec(instructions="hi"))))
+    return asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id="agent-1",
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+            )
+        )
+    )
 
 
 def _make_runner(tmp_path, sink=None, metrics=None):
@@ -138,7 +181,10 @@ def test_observability_records_run_and_model_spans_with_metrics_on_success(tmp_p
     _seed_session(runner._session_store, "session-1")
 
     async def _run():
-        return await runner.run(compiled, RunInput(prompt="what is the answer?"), _run_context())
+        return await runner.run(
+            compiled, RunInput(prompt="what is the answer?"), _run_context()
+        )
+
     result = asyncio.run(_run())
     assert "42" in str(result.output)
 
@@ -175,6 +221,7 @@ def test_observability_records_failed_counter_and_ends_span_on_model_error(tmp_p
 
     async def _run():
         await runner.run(compiled, RunInput(prompt="hi"), _run_context())
+
     with pytest.raises(RuntimeError):
         asyncio.run(_run())
 
@@ -204,5 +251,6 @@ def test_default_none_observability_is_a_noop(tmp_path):
 
     async def _run():
         return await runner.run(compiled, RunInput(prompt="hi"), _run_context())
+
     result = asyncio.run(_run())
     assert "42" in str(result.output)

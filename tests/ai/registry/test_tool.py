@@ -74,13 +74,13 @@ def test_list_ids_returns_all_tool_ids(tmp_path):
     assert ids == ("reader", "terminal")
 
 
-# 3. to_metadata_map() exposes the ToolPolicyMetadata slice the rule modules consume.
-def test_to_metadata_map_returns_policy_metadata(tmp_path):
+# 3. get_metadata_map() exposes the ToolPolicyMetadata slice the rule modules consume.
+def test_get_metadata_map_returns_policy_metadata(tmp_path):
     _write_tools(tmp_path)
     registry = ToolRegistry(SpecLoader.from_filesystem(tmp_path / "tools"))
 
     async def run():
-        return await registry.to_metadata_map()
+        return await registry.get_metadata_map()
 
     mapping = asyncio.run(run())
     assert set(mapping.keys()) == {"reader", "terminal"}
@@ -185,7 +185,9 @@ def test_get_unknown_risk_raises_invalid_spec(tmp_path):
 def test_get_applies_defaults_when_only_description(tmp_path):
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "minimal.yaml").write_text("description: just a description\n", encoding="utf-8")
+    (tools / "minimal.yaml").write_text(
+        "description: just a description\n", encoding="utf-8"
+    )
     registry = ToolRegistry(SpecLoader.from_filesystem(tools))
 
     async def run():

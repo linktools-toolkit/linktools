@@ -12,15 +12,22 @@ the tool list -- advertising it would promise capability that is not wired in.""
 
 from ..registry.mcp import MCPServerSpec, parse_mcp_spec
 from .client import (
-    MCPConnectionManager, MCPConnectionRef, MCPToolsetHandle,
-    LegacyMCPConnectionManagerAdapter, build_mcp_server,
+    MCPConnectionManager,
+    MCPConnectionRef,
+    MCPToolsetHandle,
+    build_mcp_server,
 )
 from .provider import MCPProvider, MCPDiscoveryResult, MCPToolInfo, MCPExposedTool
 
 __all__ = [
-    "MCPServerSpec", "parse_mcp_spec",
-    "MCPConnectionManager", "MCPConnectionRef", "MCPToolsetHandle",
-    "LegacyMCPConnectionManagerAdapter", "build_mcp_server",
+    "MCPServerSpec",
+    "parse_mcp_spec",
+    "MCPConnectionManager",
+    "MCPConnectionRef",
+    "MCPToolsetHandle",
+    "build_mcp_server",
     "MCPProvider",
-    "MCPDiscoveryResult", "MCPToolInfo", "MCPExposedTool",
+    "MCPDiscoveryResult",
+    "MCPToolInfo",
+    "MCPExposedTool",
 ]

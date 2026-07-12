@@ -10,7 +10,7 @@ exceeds a configured ceiling. Reads these context.metadata keys:
   - "calls_used"    compared against limits["max_calls"]
 
 Both default to 0 when absent, so an empty/missing counter never trips the rule.
-Other keys in `limits` are accepted but ignored at present (forward-compat)."""
+Other keys in `limits` are accepted but ignored at present (extensibility)."""
 
 from typing import Mapping
 
@@ -39,24 +39,32 @@ class RiskRule:
         self._max_allowed = max_allowed
         self._tool_metadata = tool_metadata
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         meta = self._tool_metadata.get(request.tool_name)
         if meta is None:
-            return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="risk-rule", reason=None)
+            return PolicyDecision(
+                kind=PolicyDecisionKind.ALLOW, rule_id="risk-rule", reason=None
+            )
         if meta.risk > self._max_allowed:
             return PolicyDecision(
                 kind=PolicyDecisionKind.DENY,
                 rule_id="risk-rule",
                 reason=f"risk {meta.risk.name} exceeds max {self._max_allowed.name}",
             )
-        return PolicyDecision(kind=PolicyDecisionKind.ALLOW, rule_id="risk-rule", reason=None)
+        return PolicyDecision(
+            kind=PolicyDecisionKind.ALLOW, rule_id="risk-rule", reason=None
+        )
 
 
 class ResourceLimitRule:
     def __init__(self, *, limits: "Mapping[str, int]") -> None:
         self._limits = limits
 
-    async def evaluate(self, request: ToolRequest, context: ToolContext) -> PolicyDecision:
+    async def evaluate(
+        self, request: ToolRequest, context: ToolContext
+    ) -> PolicyDecision:
         for limit_key, ceiling in self._limits.items():
             usage_key = _LIMIT_TO_USAGE_KEY.get(limit_key)
             if usage_key is None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ToolSpec + ToolRegistry: loads tool declarations from
-YAML via SpecLoader, caches per-revision, and exposes to_metadata_map() (the
+YAML via SpecLoader, caches per-revision, and exposes get_metadata_map() (the
 bridge the policy rule modules -- PermissionRule/RiskRule/ApprovalRule -- consume)."""
 
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ from ..policy.rule import (
     SideEffectKind,
     ToolPolicyMetadata,
 )
-from .parser import SpecLoader, parse_yaml_text
+from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,14 +67,22 @@ def _parse_permissions(items: Any) -> "frozenset[Permission]":
 
 def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     allowed = {
-        "description", "enabled", "permissions", "risk", "side_effect",
-        "approval", "idempotent", "timeout_seconds", "max_retries",
-        "schema_version", "idempotency_strategy", "idempotency_key_field",
-        "metadata", "name",
+        "description",
+        "enabled",
+        "permissions",
+        "risk",
+        "side_effect",
+        "approval",
+        "idempotent",
+        "timeout_seconds",
+        "max_retries",
+        "schema_version",
+        "idempotency_strategy",
+        "idempotency_key_field",
+        "metadata",
+        "name",
     }
-    unknown = sorted(set(payload) - allowed)
-    if unknown:
-        raise InvalidSpecError(f"unknown tool fields: {', '.join(unknown)}")
+    reader = StrictConfigReader(payload, allowed=allowed, context=f"tool {name}")
     risk_key = str(payload.get("risk", "LOW")).upper()
     if risk_key not in _RISK_LOOKUP:
         raise InvalidSpecError(f"unknown risk level: {payload.get('risk')!r}")
@@ -84,56 +92,52 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     approval_key = str(payload.get("approval", "never")).lower()
     if approval_key not in _APPROVAL_LOOKUP:
         raise InvalidSpecError(f"unknown approval mode: {approval_key!r}")
-    timeout = payload.get("timeout_seconds")
-    if "enabled" in payload and not isinstance(payload["enabled"], bool):
-        raise InvalidSpecError("enabled must be a boolean")
-    for field_name in ("idempotent",):
-        if field_name in payload and not isinstance(payload[field_name], bool):
-            raise InvalidSpecError(f"{field_name} must be a boolean")
-    if timeout is not None and isinstance(timeout, bool):
-        raise InvalidSpecError("timeout_seconds must be a number")
-    if timeout is not None and not isinstance(timeout, (int, float)):
-        raise InvalidSpecError(f"timeout_seconds must be a number: {timeout!r}")
-    if timeout is not None and timeout <= 0:
-        raise InvalidSpecError("timeout_seconds must be > 0")
-    retries = payload.get("max_retries")
-    if retries is not None and (not isinstance(retries, int) or isinstance(retries, bool) or retries < 0):
-        raise InvalidSpecError("max_retries must be a non-negative integer")
+    enabled = reader.bool("enabled", default=True)
+    idempotent = reader.bool("idempotent")
+    timeout = reader.positive_number("timeout_seconds")
+    retries = reader.non_negative_int("max_retries")
     schema_version = payload.get("schema_version", "1")
     if schema_version is None or not str(schema_version).strip():
         raise InvalidSpecError("schema_version must be non-empty")
     strategy = payload.get("idempotency_strategy")
     if strategy is not None and strategy not in ("exact_call", "business_key"):
-        raise InvalidSpecError("idempotency_strategy must be 'exact_call' or 'business_key'")
-    key_field = payload.get("idempotency_key_field")
-    if key_field is not None and not str(key_field).strip():
-        raise InvalidSpecError("idempotency_key_field must be non-empty")
-    idempotent = payload.get("idempotent")
+        raise InvalidSpecError(
+            "idempotency_strategy must be 'exact_call' or 'business_key'"
+        )
+    key_field = reader.optional_str("idempotency_key_field")
+    if key_field is not None:
+        key_field = key_field.strip()
+        if not key_field:
+            raise InvalidSpecError("idempotency_key_field must be non-empty")
     # Reuse the policy layer's rules so the registry rejects the same bad
     # combinations (e.g. business_key without idempotency_key_field) at load time
     # rather than letting them reach the first tool call.
     from ..tool.policy import IdempotencyStrategy, validate_idempotency_policy
+
     strategy_enum = IdempotencyStrategy(strategy) if strategy is not None else None
     try:
         validate_idempotency_policy(
-            idempotent=idempotent, strategy=strategy_enum,
-            key_field=key_field, effective=False)
+            idempotent=idempotent,
+            strategy=strategy_enum,
+            key_field=key_field,
+            effective=False,
+        )
     except ValueError as exc:
         raise InvalidSpecError(str(exc)) from exc
     return ToolSpec(
         name=name,
         description=str(payload.get("description", "")),
-        enabled=bool(payload.get("enabled", True)),
+        enabled=enabled,
         permissions=_parse_permissions(payload.get("permissions")),
         risk=_RISK_LOOKUP[risk_key],
         side_effect=_SIDE_EFFECT_LOOKUP[side_key],
         approval=_APPROVAL_LOOKUP[approval_key],
         idempotent=idempotent,
-        timeout_seconds=float(timeout) if timeout is not None else None,
+        timeout_seconds=timeout,
         max_retries=retries,
         schema_version=str(schema_version),
         idempotency_strategy=strategy,
-        idempotency_key_field=str(key_field) if key_field is not None else None,
+        idempotency_key_field=key_field,
         metadata=dict(payload.get("metadata") or {}),
     )
 
@@ -174,7 +178,7 @@ class ToolRegistry:
         self._cache[cache_key] = spec
         return spec
 
-    async def to_metadata_map(self) -> "Mapping[str, ToolPolicyMetadata]":
+    async def get_metadata_map(self) -> "Mapping[str, ToolPolicyMetadata]":
         """Return {tool_name: ToolPolicyMetadata} for every loaded tool -- the bridge
         the PermissionRule/RiskRule/ApprovalRule consume."""
         ids = await self.list_ids()
@@ -196,7 +200,3 @@ class ToolRegistry:
                 metadata=spec.metadata,
             )
         return result
-
-    # ToolPolicyProvider (Protocol) canonical name; to_metadata_map is kept as a
-    # backward-compatible alias. Both resolve to the same coroutine function.
-    get_metadata_map = to_metadata_map

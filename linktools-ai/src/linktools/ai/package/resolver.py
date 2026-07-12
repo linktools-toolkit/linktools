@@ -9,10 +9,13 @@ agent parser and re-id'd as ``package:<id>:agent:<name>`` so the same entrypoint
 name in two different packages never collides in the global namespace."""
 
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from ..agent.spec import AgentSpec
 from ..errors import PackageEntrypointNotFoundError, PackageNotFoundError
+
+if TYPE_CHECKING:
+    from .provider import DirectoryPackageResourceProvider
 from .entrypoint import EntrypointInfo, EntrypointListResult, EntrypointRef
 from .resource import sanitize_package_path
 from .scope import PackageScope
@@ -38,11 +41,9 @@ class EntrypointResolver(Protocol):
         kind: "str | None" = None,
         limit: int = DEFAULT_ENTRYPOINT_LIMIT,
         cursor: "str | None" = None,
-    ) -> EntrypointListResult:
-        ...
+    ) -> EntrypointListResult: ...
 
-    async def resolve_agent(self, ref: EntrypointRef) -> AgentSpec:
-        ...
+    async def resolve_agent(self, ref: EntrypointRef) -> AgentSpec: ...
 
 
 class DirectoryEntrypointResolver:
@@ -74,11 +75,14 @@ class DirectoryEntrypointResolver:
             for p in sorted(sub.iterdir()):
                 if p.suffix not in _ENTRYPOINT_SUFFIX:
                     continue
-                entries.append(EntrypointInfo(
-                    kind=k, name=p.stem, package_id=scope.package_id))
+                entries.append(
+                    EntrypointInfo(kind=k, name=p.stem, package_id=scope.package_id)
+                )
         offset = int(cursor) if cursor else 0
-        page = entries[offset:offset + max(1, limit)]
-        next_cursor = str(offset + len(page)) if offset + len(page) < len(entries) else None
+        page = entries[offset : offset + max(1, limit)]
+        next_cursor = (
+            str(offset + len(page)) if offset + len(page) < len(entries) else None
+        )
         return EntrypointListResult(items=page, next_cursor=next_cursor)
 
     async def resolve_agent(self, ref: EntrypointRef) -> AgentSpec:
@@ -125,8 +129,13 @@ class PackageRegistry:
 
     def _resources(self) -> "DirectoryPackageResourceProvider":
         from .provider import DirectoryPackageResourceProvider
+
         if self._resource_provider is None:
-            roots = {p.name: p for p in self._base.iterdir() if p.is_dir()} if self._base.is_dir() else {}
+            roots = (
+                {p.name: p for p in self._base.iterdir() if p.is_dir()}
+                if self._base.is_dir()
+                else {}
+            )
             self._resource_provider = DirectoryPackageResourceProvider(roots)
         return self._resource_provider
 
@@ -146,14 +155,20 @@ class PackageRegistry:
         pkg_yaml = root / "package.yaml"
         if pkg_yaml.is_file():
             from ..registry.parser import parse_yaml_text
-            payload = parse_yaml_text(pkg_yaml.read_text(encoding="utf-8"), source=str(pkg_yaml))
+
+            payload = parse_yaml_text(
+                pkg_yaml.read_text(encoding="utf-8"), source=str(pkg_yaml)
+            )
             kind = str(payload.get("kind") or kind)
             name = str(payload.get("name") or name)
         return CapabilityPackageSpec(id=package_id, name=name, kind=kind)
 
-    async def list_resources(self, scope, path: str = "", *, limit: int = 50,
-                             cursor: "str | None" = None):
-        return await self._resources().list_resources(scope, path, limit=limit, cursor=cursor)
+    async def list_resources(
+        self, scope, path: str = "", *, limit: int = 50, cursor: "str | None" = None
+    ):
+        return await self._resources().list_resources(
+            scope, path, limit=limit, cursor=cursor
+        )
 
     async def read_resource(self, ref, *, max_bytes: "int | None" = None):
         return await self._resources().read_resource(ref, max_bytes=max_bytes)

@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.capability: the Capability Runtime core -- resolve an AgentSpec's
-tool declarations into prompt sections + toolsets via pluggable providers."""
+"""linktools.ai.capability: the capability domain's public model (spec §18.2).
+The minimal surface: CapabilityRef / CapabilityRuntimeOptions /
+CapabilityInspection / CapabilityProvider. The bundle, context, assembler,
+builtin provider, and exposure policy live in their submodules
+(``capability.models``, ``capability.provider``, ``capability.assembler``,
+``capability.builtin``, ``capability.exposure``)."""
 
-from .assembler import CapabilityAssembler, CapabilityResolver
-from .builtin import BuiltinProvider
-from .bundle import CapabilityBundle
-from .options import CapabilityRuntimeOptions
-from .policy import CapabilityToolExposurePolicy
-from .provider import CapabilityContext, CapabilityProvider
-from .ref import CapabilityRef
+from .models import CapabilityInspection, CapabilityRef, CapabilityRuntimeOptions
+from .provider import CapabilityProvider
 
 __all__ = [
     "CapabilityRef",
-    "CapabilityBundle",
-    "CapabilityProvider",
-    "CapabilityContext",
-    "CapabilityAssembler",
-    "CapabilityResolver",
-    "BuiltinProvider",
-    "CapabilityToolExposurePolicy",
     "CapabilityRuntimeOptions",
+    "CapabilityInspection",
+    "CapabilityProvider",
 ]

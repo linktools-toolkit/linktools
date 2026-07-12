@@ -24,7 +24,9 @@ def env(tmp_path):
         (root / "SKILL.md").write_text("# s", encoding="utf-8")
         (root / "references" / "r.md").write_text("ref", encoding="utf-8")
         (root / "agents" / "grader.md").write_text(
-            "---\nname: grader\nmodel:\n  primary: gpt-4o\n---\nGrade.\n", encoding="utf-8")
+            "---\nname: grader\nmodel:\n  primary: gpt-4o\n---\nGrade.\n",
+            encoding="utf-8",
+        )
     roots = {p: tmp_path / p for p in ("skill-creator", "another-skill")}
     return (
         DirectoryPackageResourceProvider(roots),
@@ -36,14 +38,16 @@ def env(tmp_path):
 async def test_package_resource_provider_contract(env):
     provider, _ = env
     await assert_package_resource_provider_contract(
-        provider, package_id="skill-creator", sample_path="SKILL.md")
+        provider, package_id="skill-creator", sample_path="SKILL.md"
+    )
 
 
 @pytest.mark.asyncio
 async def test_entrypoint_resolver_contract(env):
     _, resolver = env
     await assert_entrypoint_resolver_contract(
-        resolver, package_id="skill-creator", agent_name="grader")
+        resolver, package_id="skill-creator", agent_name="grader"
+    )
 
 
 @pytest.mark.asyncio
@@ -53,7 +57,9 @@ async def test_same_entrypoint_name_in_two_packages_stays_distinct(env):
     from linktools.ai.package.scope import PackageScope
 
     a = await resolver.resolve_agent(
-        EntrypointRef("agent", "grader", PackageScope("skill-creator")))
+        EntrypointRef("agent", "grader", PackageScope("skill-creator"))
+    )
     b = await resolver.resolve_agent(
-        EntrypointRef("agent", "grader", PackageScope("another-skill")))
+        EntrypointRef("agent", "grader", PackageScope("another-skill"))
+    )
     assert a.id != b.id

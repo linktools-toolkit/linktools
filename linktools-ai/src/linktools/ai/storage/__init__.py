@@ -4,9 +4,10 @@
 ``SqlAlchemyStorage`` is loaded lazily on first access so ``import
 linktools.ai.storage`` succeeds without SQLAlchemy installed."""
 
+from .capabilities import StorageCapabilities
 from .facade import FileStorage, Storage
 
-__all__ = ["Storage", "FileStorage", "SqlAlchemyStorage"]
+__all__ = ["Storage", "StorageCapabilities", "FileStorage", "SqlAlchemyStorage"]
 
 
 def __getattr__(name: str):

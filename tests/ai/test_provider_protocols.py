@@ -5,17 +5,16 @@ registries conform to them; the format aliases point at the right classes."""
 
 import pytest
 
-from linktools.ai.providers import (
+from linktools.ai.providers.agent import AgentSpecProvider
+from linktools.ai.providers.mcp import MCPServerSpecProvider
+from linktools.ai.providers.package import PackageResourceProvider, PackageSpecProvider
+from linktools.ai.providers.skill import SkillSpecProvider
+from linktools.ai.providers.subagent import (
     AgentBackedSubagentSpecProvider,
-    AgentSpecProvider,
-    MCPServerSpecProvider,
-    PackageResourceProvider,
-    PackageSpecProvider,
-    SkillSpecProvider,
     SubagentSpecProvider,
-    SwarmSpecProvider,
-    ToolPolicyProvider,
 )
+from linktools.ai.providers.swarm import SwarmSpecProvider
+from linktools.ai.providers.tool_policy import ToolPolicyMetadataSource
 from linktools.ai.registry import (
     AgentRegistry,
     MarkdownAgentRegistry,
@@ -40,9 +39,14 @@ def test_format_aliases_are_the_canonical_registries():
 
 def test_protocols_importable_and_distinct():
     protos = {
-        AgentSpecProvider, SkillSpecProvider, MCPServerSpecProvider,
-        ToolPolicyProvider, SwarmSpecProvider, SubagentSpecProvider,
-        PackageSpecProvider, PackageResourceProvider,
+        AgentSpecProvider,
+        SkillSpecProvider,
+        MCPServerSpecProvider,
+        ToolPolicyMetadataSource,
+        SwarmSpecProvider,
+        SubagentSpecProvider,
+        PackageSpecProvider,
+        PackageResourceProvider,
     }
     assert len(protos) == 8
 
@@ -76,6 +80,7 @@ def test_runtime_checkable_protocols_match_duck_types():
     class _Stub:
         async def list_ids(self): ...
         async def get(self, x): ...
+
     assert isinstance(_Stub(), AgentSpecProvider)
     assert isinstance(_Stub(), SkillSpecProvider)
     assert isinstance(_Stub(), MCPServerSpecProvider)

@@ -4,6 +4,7 @@
 cooperative-cancellation signal checked at execution points (before/after the
 model call). These tests cover the three surface methods -- ``cancel``,
 ``is_cancelled``, ``raise_if_cancelled`` -- and the idempotency contract."""
+
 import asyncio
 
 import pytest

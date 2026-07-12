@@ -56,7 +56,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from ..errors import InvalidRunTransitionError, ModelPolicyExceededError, ModelRoutingError, RunConflictError, RunPaused
+from ..errors import (
+    InvalidRunTransitionError,
+    ModelPolicyExceededError,
+    ModelRoutingError,
+    RunConflictError,
+    RunPaused,
+)
 from ..events.payloads import (
     ApprovalRequested,
     RunCompleted,
@@ -64,6 +70,7 @@ from ..events.payloads import (
     RunPaused as RunPausedEvent,
     RunStarted,
 )
+from ..events.context import EventContext, append_event
 from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
@@ -72,6 +79,7 @@ from ..run.cancellation import CancellationToken
 from ..run.checkpoint import CheckpointStore
 from ..run.context import RunContext
 from ..run.controller import RunController
+from ..run.lifecycle import mark_cancelled, mark_completed, mark_failed
 from ..run.models import (
     RunCheckpoint,
     RunErrorInfo,
@@ -83,7 +91,7 @@ from ..run.models import (
 from ..run.store import RunStore
 from ..session.models import MessageRole, NewSessionMessage
 from ..session.store import SessionStore
-from .checkpoint_io import serialize_messages
+from .checkpoint import serialize_messages
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
 
@@ -96,7 +104,7 @@ if TYPE_CHECKING:
 
     from ..agent.approval import ApprovalStore
     from ..capability.assembler import CapabilityAssembler
-    from ..capability.options import CapabilityRuntimeOptions
+    from ..capability.models import CapabilityRuntimeOptions
     from ..execution.protocols import ExecutionBackend
     from ..knowledge.retriever import Retriever
     from ..memory.store import MemoryStore
@@ -123,40 +131,49 @@ def _toolset_for_definition(md) -> Any:
     Tool.from_schema so the model sees the correct parameters; otherwise let
     pydantic-ai derive the schema from the handler signature."""
     from pydantic_ai.toolsets import FunctionToolset
+
     ts: "FunctionToolset" = FunctionToolset()
     if md.parameters_json_schema:
         from pydantic_ai.tools import Tool
-        ts.add_tool(Tool.from_schema(
-            function=md.handler, name=md.descriptor.name,
-            description=md.description or md.descriptor.name,
-            json_schema=dict(md.parameters_json_schema),
-        ))
+
+        ts.add_tool(
+            Tool.from_schema(
+                function=md.handler,
+                name=md.descriptor.name,
+                description=md.description or md.descriptor.name,
+                json_schema=dict(md.parameters_json_schema),
+            )
+        )
     else:
-        ts.add_function(md.handler, name=md.descriptor.name,
-                        description=md.description)
+        ts.add_function(md.handler, name=md.descriptor.name, description=md.description)
     return ts
 
 
 class AgentRunner:
-    def __init__(self, *, run_store: RunStore, session_store: SessionStore,
-                 event_store: EventStore, checkpoint_store: CheckpointStore,
-                 middleware_pipeline: "MiddlewarePipeline | None" = None,
-                 memory_store: "MemoryStore | None" = None,
-                 retriever: "Retriever | None" = None,
-                 observability: "ObservabilitySink | None" = None,
-                 metrics: "ObservabilityMetrics | None" = None,
-                 uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
-                 run_controller: "RunController | None" = None,
-                 execution: "ExecutionBackend | None" = None,
-                 approval_store: "ApprovalStore | None" = None,
-                 capability_assembler: "CapabilityAssembler | None" = None,
-                 capability_options: "CapabilityRuntimeOptions | None" = None,
-                 security_pipeline: Any = None,
-                 baseline_policy: Any = None,
-                 tool_policy_provider: Any = None,
-                 managed_tool_executor: Any = None,
-                 security_audit_failure_mode: Any = "fail_closed",
-                 ) -> None:
+    def __init__(
+        self,
+        *,
+        run_store: RunStore,
+        session_store: SessionStore,
+        event_store: EventStore,
+        checkpoint_store: CheckpointStore,
+        middleware_pipeline: "MiddlewarePipeline | None" = None,
+        memory_store: "MemoryStore | None" = None,
+        retriever: "Retriever | None" = None,
+        observability: "ObservabilitySink | None" = None,
+        metrics: "ObservabilityMetrics | None" = None,
+        uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
+        run_controller: "RunController | None" = None,
+        execution: "ExecutionBackend | None" = None,
+        approval_store: "ApprovalStore | None" = None,
+        capability_assembler: "CapabilityAssembler | None" = None,
+        capability_options: "CapabilityRuntimeOptions | None" = None,
+        security_pipeline: Any = None,
+        baseline_policy: Any = None,
+        tool_policy_provider: Any = None,
+        managed_tool_executor: Any = None,
+        security_audit_failure_mode: Any = "fail_closed",
+    ) -> None:
         self._run_store = run_store
         self._session_store = session_store
         self._event_store = event_store
@@ -201,7 +218,7 @@ class AgentRunner:
         # Capability Runtime: when an AgentSpec declares non-
         # empty tools and an assembler is wired, execute() resolves those tools
         # into prompt sections + toolsets via the capability providers. Default
-        # None preserves the legacy behavior (empty tools -> default builtin
+        # None preserves the prior behavior (empty tools -> default builtin
         # toolset when an execution backend is present).
         self._capability_assembler = capability_assembler
         self._capability_options = capability_options
@@ -230,6 +247,7 @@ class AgentRunner:
             return opts.memory_policy
         if self._memory_store is not None:
             from .context_policies import DefaultMemoryPolicy
+
             return DefaultMemoryPolicy(self._memory_store)
         return None
 
@@ -239,6 +257,7 @@ class AgentRunner:
             return opts.retrieval_policy
         if self._retriever is not None:
             from .context_policies import DefaultRetrievalPolicy
+
             return DefaultRetrievalPolicy(self._retriever)
         return None
 
@@ -247,6 +266,7 @@ class AgentRunner:
         if opts is not None and opts.prompt_context_formatter is not None:
             return opts.prompt_context_formatter
         from .context_policies import DefaultPromptContextFormatter
+
         return DefaultPromptContextFormatter()
 
     async def execute(
@@ -291,15 +311,26 @@ class AgentRunner:
         if message_history is None:
             now = datetime.now(timezone.utc)
             record = RunRecord(
-                id=context.run_id, root_run_id=context.root_run_id,
-                parent_run_id=context.parent_run_id, session_id=context.session_id,
-                runnable_id=context.runnable_id, runnable_type=context.runnable_type,
-                status=RunStatus.PENDING, input=request, result=None, error=None,
-                version=1, created_at=now, started_at=None, finished_at=None,
+                id=context.run_id,
+                root_run_id=context.root_run_id,
+                parent_run_id=context.parent_run_id,
+                session_id=context.session_id,
+                runnable_id=context.runnable_id,
+                runnable_type=context.runnable_type,
+                status=RunStatus.PENDING,
+                input=request,
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=None,
+                finished_at=None,
             )
             created = await self._run_store.create(record)
             running = await self._run_store.transition(
-                context.run_id, RunStatus.RUNNING, expected_version=created.version,
+                context.run_id,
+                RunStatus.RUNNING,
+                expected_version=created.version,
             )
             running_version = running.version
         else:
@@ -323,7 +354,9 @@ class AgentRunner:
             current_task = asyncio.current_task()
             if current_task is not None:
                 await self._run_controller.register(
-                    context.run_id, current_task, token,
+                    context.run_id,
+                    current_task,
+                    token,
                 )
 
         started = time.monotonic()
@@ -345,41 +378,44 @@ class AgentRunner:
                 # -- New-run setup: RunStarted event + before_run middleware.
                 # Resume path skips both -- the initial run already did them.
                 if message_history is None:
-                    await self._event_store.append(
-                        stream_id=context.run_id,
-                        run_id=context.run_id,
-                        root_run_id=context.root_run_id,
-                        parent_run_id=context.parent_run_id,
-                        session_id=context.session_id,
-                        runnable_id=context.runnable_id,
-                        payload=RunStarted(
-                            run_id=context.run_id,
-                            runnable_id=context.runnable_id),
+                    await append_event(
+                        self._event_store,
+                        EventContext.from_run_context(context),
+                        RunStarted(
+                            run_id=context.run_id, runnable_id=context.runnable_id
+                        ),
                     )
                     if self._middleware_pipeline is not None:
                         await self._middleware_pipeline.run_before_run(context)
 
                 prior_messages = await self._session_store.list_messages(
-                    context.session_id)
+                    context.session_id
+                )
                 # Prompt window policy: trim session history before it
                 # is folded into the prompt. Opt-in via CapabilityRuntimeOptions;
                 # None (default) leaves prior_messages untouched.
                 window_policy = (
                     self._capability_options.session_window_policy
-                    if self._capability_options is not None else None
+                    if self._capability_options is not None
+                    else None
                 )
                 if window_policy is not None:
                     from ..events.payloads import PromptWindowApplied
+
                     before_count = len(prior_messages)
-                    prior_messages = list(await window_policy.select_messages(
-                        prior_messages, agent.spec.model))
-                    await self._event_store.append(
-                        stream_id=context.run_id, run_id=context.run_id,
-                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
-                        session_id=context.session_id, runnable_id=context.runnable_id,
-                        payload=PromptWindowApplied(
+                    prior_messages = list(
+                        await window_policy.select_messages(
+                            prior_messages, agent.spec.model
+                        )
+                    )
+                    await append_event(
+                        self._event_store,
+                        EventContext.from_run_context(context),
+                        PromptWindowApplied(
                             policy=type(window_policy).__name__,
-                            before=before_count, after=len(prior_messages)),
+                            before=before_count,
+                            after=len(prior_messages),
+                        ),
                     )
 
                 # -- Prompt build. Resume path skips this entirely -- the
@@ -387,8 +423,11 @@ class AgentRunner:
                 prompt: "str | None" = None
                 if message_history is None:
                     history_text = "\n".join(str(m.content) for m in prior_messages)
-                    prompt = (f"{history_text}\n{request.prompt}"
-                              if history_text else request.prompt)
+                    prompt = (
+                        f"{history_text}\n{request.prompt}"
+                        if history_text
+                        else request.prompt
+                    )
 
                     # Memory + Knowledge injection via substitutable policies.
                     # Each fires only when its policy is wired (explicit on
@@ -399,7 +438,9 @@ class AgentRunner:
                     # user prompt.
                     memory_policy = self._effective_memory_policy()
                     if memory_policy is not None:
-                        memories = await memory_policy.select_memories(context, request.prompt)
+                        memories = await memory_policy.select_memories(
+                            context, request.prompt
+                        )
                         section = self._prompt_formatter().format_memory(memories)
                         if section:
                             prompt = f"{section}\n{prompt}"
@@ -416,8 +457,10 @@ class AgentRunner:
                 # capability hook (safe concurrent reuse
                 # of one CompiledAgent across many Runs).
                 tool_context = ToolContext(
-                    run_id=context.run_id, session_id=context.session_id,
-                    tool_call_id=None)
+                    run_id=context.run_id,
+                    session_id=context.session_id,
+                    tool_call_id=None,
+                )
                 # The builtin file/terminal toolset is
                 # constructed HERE, at execution time, from the per-Runtime
                 # ExecutionBackend -- not baked into the compiled Agent. This
@@ -429,7 +472,8 @@ class AgentRunner:
                 # is the same backend -- capabilities that need it read
                 # ``ctx.deps.execution`` (future work).
                 deps = AgentDependencies(
-                    tool_context=tool_context, execution=self._execution,
+                    tool_context=tool_context,
+                    execution=self._execution,
                 )
                 toolsets: "list[AbstractToolset]" = []
                 capability_prompt = ""
@@ -439,8 +483,26 @@ class AgentRunner:
                 # tools=() -> no tools. tools explicit -> only declared.
                 has_assembler = self._capability_assembler is not None
                 needs_default = agent.spec.tools is None and deps.execution is not None
-                if (agent.spec.tools or needs_default) and has_assembler:
-                    from ..capability.policy import CapabilityToolExposurePolicy
+                # Eager fail-fast: a spec that needs tools -- default builtin
+                # when an execution backend is present, or explicitly declared
+                # tools -- must have BOTH an assembler and a managed executor
+                # wired before any resolution work. tools=() needs neither and
+                # never raises; tools=None without execution is a model-only run.
+                requires_tools = needs_default or bool(agent.spec.tools)
+                if requires_tools and not has_assembler:
+                    from ..errors import RuntimeInitializationError
+
+                    raise RuntimeInitializationError(
+                        "AgentRunner requires a CapabilityAssembler to resolve tools"
+                    )
+                if requires_tools and self._tool_executor_for_managed is None:
+                    from ..errors import RuntimeInitializationError
+
+                    raise RuntimeInitializationError(
+                        "AgentRunner requires a ToolExecutor for managed tool execution"
+                    )
+                if requires_tools:
+                    from ..capability.exposure import CapabilityToolExposurePolicy
                     from ..capability.provider import CapabilityContext
 
                     exposure = (
@@ -449,17 +511,23 @@ class AgentRunner:
                         else CapabilityToolExposurePolicy()
                     )
                     from ..security.emitter import EventStoreSecurityEventEmitter
+
                     cap_ctx = CapabilityContext(
-                        agent_id=agent.spec.id, exposure_policy=exposure,
-                        execution=deps.execution, run_id=context.run_id,
-                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
+                        agent_id=agent.spec.id,
+                        exposure_policy=exposure,
+                        execution=deps.execution,
+                        run_id=context.run_id,
+                        root_run_id=context.root_run_id,
+                        parent_run_id=context.parent_run_id,
                         session_id=context.session_id,
                         event_store=self._event_store,
                         security_event_emitter=EventStoreSecurityEventEmitter(
-                            self._event_store, context=context,
+                            self._event_store,
+                            context=context,
                             failure_mode=self._security_audit_failure_mode,
                         ),
-                        user_id=context.user_id, tenant_id=context.tenant_id,
+                        user_id=context.user_id,
+                        tenant_id=context.tenant_id,
                         workspace=context.workspace,
                     )
                     # When tools is None, synthesize a default builtin:* ref.
@@ -470,54 +538,49 @@ class AgentRunner:
                     # declared spec).
                     if needs_default:
                         from ..agent.spec import ToolRef as _TR
+
                         effective_spec = dataclasses.replace(
-                            agent.spec, tools=(_TR(kind="builtin", name="*"),),
+                            agent.spec,
+                            tools=(_TR(kind="builtin", name="*"),),
                         )
                     else:
                         effective_spec = agent.spec
-                    cap_bundle = await self._capability_assembler.assemble(effective_spec, cap_ctx)
+                    cap_bundle = await self._capability_assembler.assemble(
+                        effective_spec, cap_ctx
+                    )
                     # Publish this run's descriptor lookup so PolicyCapability
                     # (the global before-every-tool-call hook, independent of
                     # whether a tool is ManagedToolsetWrapper-wrapped) can
                     # classify calls by category/risk/mutating too -- not just
                     # by tool name.
                     # Build the per-run descriptor lookup from BOTH contribution
-                    # forms (per-tool ``tools`` and legacy ``descriptors``) -- the
+                    # forms (per-tool ``tools`` and prior ``descriptors``) -- the
                     # assembler normalizes introspectable contributions to the
                     # tools form (descriptors empty), so reading descriptors alone
                     # would leave the lookup empty and defeat the single-check
                     # (PolicyCapability would not recognize these as managed).
                     from ..capability.assembler import _contribution_descriptors
+
                     descriptor_lookup = {
                         d.name: d
                         for contrib in cap_bundle.tool_contributions
                         for d in _contribution_descriptors(contrib)
                     }
                     if descriptor_lookup:
-                        deps = dataclasses.replace(deps, descriptor_lookup=descriptor_lookup)
+                        deps = dataclasses.replace(
+                            deps, descriptor_lookup=descriptor_lookup
+                        )
                     # Every ToolContribution ALWAYS goes through
                     # ManagedToolsetWrapper -> ManagedToolAdapter ->
                     # ToolExecutor.execute, whether or not a security object is
                     # configured. The managed path owns more than security --
                     # timeout, retry, idempotency, stable errors, events, call
                     # id -- so disabling the baseline must NOT route tools back
-                    # to a raw toolset. A declared capability pipeline is
-                    # composed with the baseline pipeline so it takes effect.
+                    # to a raw toolset.
                     effective_pipeline = self._security_pipeline
-                    if cap_bundle.pipelines:
-                        from ..security.pipeline import CompositeSecurityPipeline
-                        declared = tuple(cap_bundle.pipelines)
-                        if effective_pipeline is not None:
-                            effective_pipeline = CompositeSecurityPipeline(
-                                (effective_pipeline,) + declared)
-                        else:
-                            effective_pipeline = CompositeSecurityPipeline(declared)
                     if cap_bundle.tool_contributions:
-                        if self._tool_executor_for_managed is None:
-                            from ..errors import RuntimeInitializationError
-                            raise RuntimeInitializationError(
-                                "managed tool execution requires a ToolExecutor")
-                        from ..tool.managed_toolset import ManagedToolsetWrapper
+                        from ..tool.pydantic import ManagedToolsetWrapper
+
                         wrap_kw = dict(
                             security_pipeline=effective_pipeline,
                             tool_executor=self._tool_executor_for_managed,
@@ -529,64 +592,50 @@ class AgentRunner:
                             security_event_emitter=cap_ctx.security_event_emitter,
                         )
                         for contrib in cap_bundle.tool_contributions:
-                            if contrib.tools:
-                                # Per-tool form: each tool gets its own wrapped
-                                # toolset built from its explicit handler. When
-                                # the definition carries parameters_json_schema
-                                # (e.g. a **kwargs MCP forwarding handler), use
-                                # it so the model sees the right parameters;
-                                # otherwise pydantic-ai derives it from the
-                                # handler signature.
-                                for md in contrib.tools:
-                                    toolsets.append(ManagedToolsetWrapper(
+                            # Each tool gets its own wrapped toolset built from
+                            # its explicit handler. When the definition carries
+                            # parameters_json_schema (e.g. a **kwargs MCP
+                            # forwarding handler), use it so the model sees the
+                            # right parameters; otherwise pydantic-ai derives it
+                            # from the handler signature.
+                            for md in contrib.tools:
+                                toolsets.append(
+                                    ManagedToolsetWrapper(
                                         _toolset_for_definition(md),
                                         descriptors={md.descriptor.name: md.descriptor},
                                         **wrap_kw,
-                                    ))
-                            elif contrib.toolset is not None and contrib.descriptors:
-                                # Legacy toolset+descriptors form (opaque
-                                # toolsets). Still wrapped -- never raw.
-                                toolsets.append(ManagedToolsetWrapper(
-                                    contrib.toolset,
-                                    descriptors={d.name: d for d in contrib.descriptors},
-                                    **wrap_kw,
-                                ))
-                            # else: empty contribution -- nothing to expose.
-                elif needs_default:
-                    from ..errors import RuntimeInitializationError
-                    raise RuntimeInitializationError(
-                        "AgentRunner requires a CapabilityAssembler for builtin tools")
-                elif agent.spec.tools:
-                    from ..errors import RuntimeInitializationError
-                    raise RuntimeInitializationError(
-                        "AgentRunner requires a CapabilityAssembler for declared tools")
+                                    )
+                                )
+                            # empty contribution (no tools) -> nothing to expose
                 # ToolExposureApplied + PromptCatalog events only fire when the
                 # capability assembler ran (cap_bundle exists).
                 if cap_bundle is not None:
-                    from ..events.payloads import PromptCatalogInjected, ToolExposureApplied
+                    from ..events.payloads import (
+                        PromptCatalogInjected,
+                        ToolExposureApplied,
+                    )
+
                     # Descriptor-only tool count (no toolset introspection): the
                     # same source the assembler used for conflict/cap checks.
                     total = 0
                     for c in cap_bundle.tool_contributions:
                         total += len(c.tools) if c.tools else len(c.descriptors)
-                    await self._event_store.append(
-                        stream_id=context.run_id, run_id=context.run_id,
-                        root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
-                        session_id=context.session_id, runnable_id=context.runnable_id,
-                        payload=ToolExposureApplied(
-                            agent_id=agent.spec.id,
-                            total_tools=total,
-                        ),
+                    await append_event(
+                        self._event_store,
+                        EventContext.from_run_context(context),
+                        ToolExposureApplied(agent_id=agent.spec.id, total_tools=total),
                     )
                     if cap_bundle.prompt_sections:
-                        capability_prompt = "\n\n".join(cap_bundle.prompt_sections.values())
+                        capability_prompt = "\n\n".join(
+                            cap_bundle.prompt_sections.values()
+                        )
                         for section in cap_bundle.prompt_sections:
-                            await self._event_store.append(
-                                stream_id=context.run_id, run_id=context.run_id,
-                                root_run_id=context.root_run_id, parent_run_id=context.parent_run_id,
-                                session_id=context.session_id, runnable_id=context.runnable_id,
-                                payload=PromptCatalogInjected(
-                                    agent_id=agent.spec.id, section=section),
+                            await append_event(
+                                self._event_store,
+                                EventContext.from_run_context(context),
+                                PromptCatalogInjected(
+                                    agent_id=agent.spec.id, section=section
+                                ),
                             )
                 # ModelPolicy.timeout_seconds is enforced by wrapping
                 # each graph step (``run.__anext__()``) in asyncio.wait_for with
@@ -609,11 +658,12 @@ class AgentRunner:
                 )
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
-                        message_history=message_history, deps=deps,
-                        toolsets=toolsets)
+                        message_history=message_history, deps=deps, toolsets=toolsets
+                    )
                 else:
                     run_iter = agent.pydantic_agent.iter(
-                        effective_prompt, deps=deps, toolsets=toolsets)
+                        effective_prompt, deps=deps, toolsets=toolsets
+                    )
 
                 # ``timed_out`` is set whenever the wait_for budget is exhausted
                 # (either proactively before the call, or reactively when
@@ -642,13 +692,15 @@ class AgentRunner:
                                     # absorbed back into the timeout path).
                                     try:
                                         if timeout is not None:
-                                            remaining = (timeout
-                                                         - (time.monotonic() - iter_started))
+                                            remaining = timeout - (
+                                                time.monotonic() - iter_started
+                                            )
                                             if remaining <= 0:
                                                 timed_out = True
                                                 break
                                             node = await asyncio.wait_for(
-                                                run.__anext__(), remaining)
+                                                run.__anext__(), remaining
+                                            )
                                         else:
                                             node = await run.__anext__()
                                     except StopAsyncIteration:
@@ -664,8 +716,11 @@ class AgentRunner:
                                         # the deadline has passed, treat as
                                         # timeout; otherwise it's a real cancel
                                         # (propagate to the outer handler).
-                                        if (timeout is not None
-                                                and (time.monotonic() - iter_started) >= timeout):
+                                        if (
+                                            timeout is not None
+                                            and (time.monotonic() - iter_started)
+                                            >= timeout
+                                        ):
                                             timed_out = True
                                             break
                                         raise
@@ -682,18 +737,27 @@ class AgentRunner:
                                     # the final result.output is used.
                                     if PydanticAgent.is_model_request_node(node):
                                         try:
-                                            async with node.stream(run.ctx) as request_stream:
+                                            async with node.stream(
+                                                run.ctx
+                                            ) as request_stream:
                                                 async for ev in request_stream:
                                                     text = None
-                                                    if (isinstance(ev, PartStartEvent)
-                                                            and isinstance(ev.part, TextPart)):
+                                                    if isinstance(
+                                                        ev, PartStartEvent
+                                                    ) and isinstance(ev.part, TextPart):
                                                         text = ev.part.content
-                                                    elif (isinstance(ev, PartDeltaEvent)
-                                                          and isinstance(ev.delta, TextPartDelta)):
+                                                    elif isinstance(
+                                                        ev, PartDeltaEvent
+                                                    ) and isinstance(
+                                                        ev.delta, TextPartDelta
+                                                    ):
                                                         text = ev.delta.content_delta
                                                     if text:
                                                         accumulated_text += text
-                                                        yield {"type": "text", "text": text}
+                                                        yield {
+                                                            "type": "text",
+                                                            "text": text,
+                                                        }
                                         except Exception:
                                             # Model lacks stream_function or
                                             # otherwise can't stream -- skip.
@@ -703,20 +767,29 @@ class AgentRunner:
                                             pass
                                     elif PydanticAgent.is_call_tools_node(node):
                                         try:
-                                            async with node.stream(run.ctx) as tool_stream:
+                                            async with node.stream(
+                                                run.ctx
+                                            ) as tool_stream:
                                                 async for ev in tool_stream:
-                                                    if isinstance(ev, FunctionToolCallEvent):
+                                                    if isinstance(
+                                                        ev, FunctionToolCallEvent
+                                                    ):
                                                         yield {
                                                             "type": "tool",
                                                             "name": ev.part.tool_name,
-                                                            "phase": "start", "ok": None,
+                                                            "phase": "start",
+                                                            "ok": None,
                                                         }
-                                                    elif isinstance(ev, FunctionToolResultEvent):
+                                                    elif isinstance(
+                                                        ev, FunctionToolResultEvent
+                                                    ):
                                                         yield {
                                                             "type": "tool",
                                                             "name": ev.part.tool_name,
                                                             "phase": "end",
-                                                            "ok": isinstance(ev.part, ToolReturnPart),
+                                                            "ok": isinstance(
+                                                                ev.part, ToolReturnPart
+                                                            ),
                                                         }
                                         except Exception:
                                             # Same degradation as above -- the
@@ -791,12 +864,18 @@ class AgentRunner:
                                             )
                                             paused.approval_id = approval.id
                                         checkpoint = RunCheckpoint(
-                                            id=str(uuid.uuid4()), run_id=context.run_id,
-                                            sequence=1, format="pydantic-ai-v1",
+                                            id=str(uuid.uuid4()),
+                                            run_id=context.run_id,
+                                            sequence=1,
+                                            format="pydantic-ai-v1",
                                             schema_version=1,
-                                            payload=serialize_messages(run.all_messages()),
+                                            payload=serialize_messages(
+                                                run.all_messages()
+                                            ),
                                             created_at=datetime.now(timezone.utc),
-                                            metadata={"approval_id": paused.approval_id},
+                                            metadata={
+                                                "approval_id": paused.approval_id
+                                            },
                                         )
                                         approval_requested_payload = ApprovalRequested(
                                             approval_id=paused.approval_id,
@@ -820,23 +899,15 @@ class AgentRunner:
                                             RunStatus.WAITING_APPROVAL,
                                             expected_version=running_version,
                                         )
-                                        await tx.events.append(
-                                            stream_id=context.run_id,
-                                            run_id=context.run_id,
-                                            root_run_id=context.root_run_id,
-                                            parent_run_id=context.parent_run_id,
-                                            session_id=context.session_id,
-                                            runnable_id=context.runnable_id,
-                                            payload=approval_requested_payload,
+                                        await append_event(
+                                            tx.events,
+                                            EventContext.from_run_context(context),
+                                            approval_requested_payload,
                                         )
-                                        await tx.events.append(
-                                            stream_id=context.run_id,
-                                            run_id=context.run_id,
-                                            root_run_id=context.root_run_id,
-                                            parent_run_id=context.parent_run_id,
-                                            session_id=context.session_id,
-                                            runnable_id=context.runnable_id,
-                                            payload=paused_payload,
+                                        await append_event(
+                                            tx.events,
+                                            EventContext.from_run_context(context),
+                                            paused_payload,
                                         )
                                 else:
                                     # File mode: non-atomic best-effort.
@@ -847,8 +918,10 @@ class AgentRunner:
                                     # -- the run is already WAITING_APPROVAL, so
                                     # a missing approval/event is a recovery
                                     # gap, not state corruption.
-                                    if (self._approval_store is not None
-                                            and paused.tool_call_id is not None):
+                                    if (
+                                        self._approval_store is not None
+                                        and paused.tool_call_id is not None
+                                    ):
                                         try:
                                             approval = await self._approval_store.create_or_get_pending(
                                                 run_id=paused.run_id,
@@ -862,11 +935,14 @@ class AgentRunner:
                                         except Exception as exc:  # noqa: BLE001
                                             _LOGGER.warning(
                                                 "failed to persist ApprovalRequest for run %s: %s",
-                                                context.run_id, exc,
+                                                context.run_id,
+                                                exc,
                                             )
                                     checkpoint = RunCheckpoint(
-                                        id=str(uuid.uuid4()), run_id=context.run_id,
-                                        sequence=1, format="pydantic-ai-v1",
+                                        id=str(uuid.uuid4()),
+                                        run_id=context.run_id,
+                                        sequence=1,
+                                        format="pydantic-ai-v1",
                                         schema_version=1,
                                         payload=serialize_messages(run.all_messages()),
                                         created_at=datetime.now(timezone.utc),
@@ -883,32 +959,26 @@ class AgentRunner:
                                     )
                                     await self._checkpoint_store.save(checkpoint)
                                     await self._run_store.transition(
-                                        context.run_id, RunStatus.WAITING_APPROVAL,
+                                        context.run_id,
+                                        RunStatus.WAITING_APPROVAL,
                                         expected_version=running_version,
                                     )
                                     try:
-                                        await self._event_store.append(
-                                            stream_id=context.run_id,
-                                            run_id=context.run_id,
-                                            root_run_id=context.root_run_id,
-                                            parent_run_id=context.parent_run_id,
-                                            session_id=context.session_id,
-                                            runnable_id=context.runnable_id,
-                                            payload=approval_requested_payload,
+                                        await append_event(
+                                            self._event_store,
+                                            EventContext.from_run_context(context),
+                                            approval_requested_payload,
                                         )
-                                        await self._event_store.append(
-                                            stream_id=context.run_id,
-                                            run_id=context.run_id,
-                                            root_run_id=context.root_run_id,
-                                            parent_run_id=context.parent_run_id,
-                                            session_id=context.session_id,
-                                            runnable_id=context.runnable_id,
-                                            payload=paused_payload,
+                                        await append_event(
+                                            self._event_store,
+                                            EventContext.from_run_context(context),
+                                            paused_payload,
                                         )
                                     except Exception as exc:  # noqa: BLE001
                                         _LOGGER.warning(
                                             "failed to append RunPaused event for run %s: %s",
-                                            context.run_id, exc,
+                                            context.run_id,
+                                            exc,
                                         )
                                 paused_signal = paused
                             else:
@@ -919,7 +989,10 @@ class AgentRunner:
                     # wait_for directly or from iter() __aexit__ cleanup).
                     # Only treat as model timeout when the deadline actually
                     # passed; an unrelated TimeoutError propagates.
-                    if timeout is not None and (time.monotonic() - iter_started) >= timeout:
+                    if (
+                        timeout is not None
+                        and (time.monotonic() - iter_started) >= timeout
+                    ):
                         timed_out = True
                     else:
                         raise
@@ -930,8 +1003,10 @@ class AgentRunner:
                     # as timeout; otherwise it's a real cancel -- propagate to
                     # execute()'s outer CancelledError handler so the run ends
                     # up CANCELLED, not FAILED.
-                    if (timeout is not None
-                            and (time.monotonic() - iter_started) >= timeout):
+                    if (
+                        timeout is not None
+                        and (time.monotonic() - iter_started) >= timeout
+                    ):
                         timed_out = True
                     else:
                         raise
@@ -996,23 +1071,32 @@ class AgentRunner:
                     # the caller no longer computes `len(prior_messages) + 1`,
                     # which could race with a concurrent Run appending to the
                     # same session.
-                    await self._session_store.append_messages(context.session_id, (
-                        NewSessionMessage(
-                            role=MessageRole.ASSISTANT,
-                            content=str(output), run_id=context.run_id,
+                    await self._session_store.append_messages(
+                        context.session_id,
+                        (
+                            NewSessionMessage(
+                                role=MessageRole.ASSISTANT,
+                                content=str(output),
+                                run_id=context.run_id,
+                            ),
                         ),
-                    ))
+                    )
 
                     # ``run`` is still bound here (Python preserves the
                     # ``with ... as run`` target after the block). The iter()
                     # context has exited cleanly, but the AgentRun still
                     # serves message history.
-                    await self._checkpoint_store.save(RunCheckpoint(
-                        id=str(uuid.uuid4()), run_id=context.run_id, sequence=1,
-                        format="pydantic-ai-v1", schema_version=1,
-                        payload=serialize_messages(run.all_messages()),
-                        created_at=datetime.now(timezone.utc),
-                    ))
+                    await self._checkpoint_store.save(
+                        RunCheckpoint(
+                            id=str(uuid.uuid4()),
+                            run_id=context.run_id,
+                            sequence=1,
+                            format="pydantic-ai-v1",
+                            schema_version=1,
+                            payload=serialize_messages(run.all_messages()),
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
 
                     run_result = RunResult(
                         output=output,
@@ -1021,14 +1105,17 @@ class AgentRunner:
                             "output_tokens": usage.output_tokens if usage else 0,
                         },
                     )
-                    await self._run_store.transition(
-                        context.run_id, RunStatus.SUCCEEDED,
-                        expected_version=running_version, result=run_result,
+                    await mark_completed(
+                        self._run_store,
+                        context.run_id,
+                        expected_version=running_version,
+                        result=run_result,
                     )
 
                     if self._middleware_pipeline is not None:
                         await self._middleware_pipeline.run_after_run(
-                            context, run_result)
+                            context, run_result
+                        )
 
                     # Best-effort RunCompleted: on the resume path, the event
                     # stream may already hold a RunPaused event from the
@@ -1038,19 +1125,16 @@ class AgentRunner:
                     # the run is already SUCCEEDED, so a missing event is an
                     # observability gap, not state corruption.
                     try:
-                        await self._event_store.append(
-                            stream_id=context.run_id,
-                            run_id=context.run_id,
-                            root_run_id=context.root_run_id,
-                            parent_run_id=context.parent_run_id,
-                            session_id=context.session_id,
-                            runnable_id=context.runnable_id,
-                            payload=RunCompleted(run_id=context.run_id),
+                        await append_event(
+                            self._event_store,
+                            EventContext.from_run_context(context),
+                            RunCompleted(run_id=context.run_id),
                         )
                     except Exception as exc:  # noqa: BLE001
                         _LOGGER.warning(
                             "failed to append RunCompleted event for run %s: %s",
-                            context.run_id, exc,
+                            context.run_id,
+                            exc,
                         )
 
                     if metrics is not None:
@@ -1086,7 +1170,8 @@ class AgentRunner:
             try:
                 try:
                     cancelling = await self._run_store.transition(
-                        context.run_id, RunStatus.CANCELLING,
+                        context.run_id,
+                        RunStatus.CANCELLING,
                         expected_version=running_version,
                     )
                 except (InvalidRunTransitionError, RunConflictError):
@@ -1102,21 +1187,22 @@ class AgentRunner:
                     if current is None or current.status is not RunStatus.CANCELLING:
                         raise
                     cancelling = current
-                await self._run_store.transition(
-                    context.run_id, RunStatus.CANCELLED,
+                await mark_cancelled(
+                    self._run_store,
+                    context.run_id,
                     expected_version=cancelling.version,
                 )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition run %s to CANCELLED on cancel: %s",
-                    context.run_id, exc,
+                    context.run_id,
+                    exc,
                 )
             raise
         except Exception as exc:
             # Generic error path: transition FAILED, run on_error, append
             # RunFailed, record metrics. Re-raise so the caller sees the error.
-            error_info = RunErrorInfo(
-                error_type=type(exc).__name__, message=str(exc))
+            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
             # Run status update. The FAILED transition is kept
             # best-effort ONLY because we are already in the failing path:
             # letting the transition error escape would replace the ORIGINAL
@@ -1125,14 +1211,17 @@ class AgentRunner:
             # transition failure visible rather than silent; a typical failure
             # is a version mismatch from a concurrent terminal transition.
             try:
-                await self._run_store.transition(
-                    context.run_id, RunStatus.FAILED,
-                    expected_version=running_version, error=error_info,
+                await mark_failed(
+                    self._run_store,
+                    context.run_id,
+                    expected_version=running_version,
+                    error=error_info,
                 )
             except Exception as transition_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to transition run %s to FAILED: %s",
-                    context.run_id, transition_exc,
+                    context.run_id,
+                    transition_exc,
                 )
             if self._middleware_pipeline is not None:
                 await self._middleware_pipeline.run_on_error(context, exc)
@@ -1140,27 +1229,30 @@ class AgentRunner:
             # (FAILED transition attempted above), so a missing RunFailed event
             # is an observability gap, not state corruption.
             try:
-                await self._event_store.append(
-                    stream_id=context.run_id,
-                    run_id=context.run_id,
-                    root_run_id=context.root_run_id,
-                    parent_run_id=context.parent_run_id,
-                    session_id=context.session_id,
-                    runnable_id=context.runnable_id,
-                    payload=RunFailed(
+                await append_event(
+                    self._event_store,
+                    EventContext.from_run_context(context),
+                    RunFailed(
                         run_id=context.run_id,
-                        error_type=type(exc).__name__, message=str(exc)),
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    ),
                 )
             except Exception as event_exc:  # noqa: BLE001
                 _LOGGER.warning(
                     "failed to append RunFailed event for run %s: %s",
-                    context.run_id, event_exc,
+                    context.run_id,
+                    event_exc,
                 )
             if metrics is not None:
-                metrics.counter("agent.run.failed", attributes={
-                    "run_id": context.run_id, "session_id": context.session_id,
-                    "error_type": type(exc).__name__,
-                })
+                metrics.counter(
+                    "agent.run.failed",
+                    attributes={
+                        "run_id": context.run_id,
+                        "session_id": context.session_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
             raise
         finally:
             # drop the in-flight registration so the controller does
@@ -1186,7 +1278,10 @@ class AgentRunner:
             }
 
     async def run(
-        self, agent: CompiledAgent, request: RunInput, context: RunContext,
+        self,
+        agent: CompiledAgent,
+        request: RunInput,
+        context: RunContext,
     ) -> RunResult:
         """Non-streaming entry point. Consumes execute() in full, re-raises
         RunPaused when the lifecycle yields a pause signal, and reads the
@@ -1200,9 +1295,7 @@ class AgentRunner:
         event with no open context manager, but aclosing is belt-and-suspenders
         so any future change to execute()'s suspension points stays safe."""
         paused_event: "dict | None" = None
-        async with contextlib.aclosing(
-            self.execute(agent, request, context)
-        ) as gen:
+        async with contextlib.aclosing(self.execute(agent, request, context)) as gen:
             async for event in gen:
                 if event["type"] == "paused":
                     paused_event = event
@@ -1239,6 +1332,9 @@ class AgentRunner:
         ``message_history=<deserialized checkpoint>`` so the pydantic-ai graph
         picks up from the paused state."""
         async for event in self.execute(
-            agent, request, context, message_history=message_history,
+            agent,
+            request,
+            context,
+            message_history=message_history,
         ):
             yield event

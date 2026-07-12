@@ -6,6 +6,7 @@ point inside the lifecycle try/except. The handler transitions the RunRecord to
 CANCELLED (best-effort) and re-raises so the asyncio machinery observes the
 cancellation. This file drives that path end-to-end: a blocking middleware
 gives the test a deterministic await point to cancel against."""
+
 import asyncio
 from datetime import datetime, timezone
 
@@ -42,9 +43,14 @@ def _registry():
 
 def _run_context(run_id="run-cancel-1", session_id="session-cancel-1") -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None,
-        session_id=session_id, runnable_id="agent-1",
-        runnable_type=RunnableType.AGENT, user_id=None, tenant_id=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
         workspace=None,
     )
 
@@ -61,14 +67,21 @@ def _make_runner(tmp_path, pipeline=None) -> AgentRunner:
 
 async def _seed_session(store, session_id) -> None:
     now = datetime.now(timezone.utc)
-    await store.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    ))
+    await store.create(
+        SessionRecord(
+            id=session_id,
+            parent_id=None,
+            status=SessionStatus.ACTIVE,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
 
 
 # 4. A run whose driving asyncio.Task is cancelled mid-execution transitions to
 #    CANCELLED and re-raises CancelledError.
+
 
 def test_run_cancelled_mid_lifecycle_transitions_to_cancelled(tmp_path):
     async def _run():
@@ -96,11 +109,14 @@ def test_run_cancelled_mid_lifecycle_transitions_to_cancelled(tmp_path):
         await _seed_session(runner._session_store, "session-cancel-1")
 
         compiler = AgentCompiler(model_router=ModelRouter(registry=_registry()))
-        compiled = await compiler.compile(AgentSpec(
-            id="agent-1", name="a",
-            model=ModelPolicy(primary="test-model"),
-            instructions=PromptSpec(instructions="hi"),
-        ))
+        compiled = await compiler.compile(
+            AgentSpec(
+                id="agent-1",
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+            )
+        )
 
         task = asyncio.create_task(
             runner.run(compiled, RunInput(prompt="x"), _run_context())

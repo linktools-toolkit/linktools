@@ -163,6 +163,7 @@ class ResourceChanged:
 # These let a downstream EventStore observe the capability/skill/mcp/subagent/
 # package/prompt/tool-exposure lifecycle without coupling to internal classes.
 
+
 @dataclass(frozen=True, slots=True)
 class CapabilityResolveStarted:
     agent_id: str
@@ -292,6 +293,7 @@ class SecurityDegraded:
     """Emitted when a security-relevant component fails and the system falls
     back to a safer-but-degraded posture rather than failing open -- e.g. a
     ToolPolicyProvider error caught and replaced with a fail-closed policy."""
+
     run_id: "str | None" = None
     component: str = ""
     reason: str = ""
@@ -307,6 +309,7 @@ class TruncatedSecurityEvent:
     reconstructs by class name -- a plain dict would TypeError there). Carries
     only the original type name and the measured size; the original payload is
     deliberately dropped so a too-large event can never re-bloat the store."""
+
     original_event_type: str
     reason: str = "payload_too_large"
     original_size_bytes: int = 0
@@ -316,6 +319,7 @@ class TruncatedSecurityEvent:
 class ToolPolicyResolved:
     """tool.policy.resolved: the finalized policy that governs one tool call
     (enabled/timeout/retries/idempotent/approval/risk), for audit."""
+
     run_id: "str | None" = None
     tool_name: str = ""
     enabled: bool = True
@@ -330,6 +334,7 @@ class ToolPolicyResolved:
 class ToolPipelineBefore:
     """tool.pipeline.before: a SecurityPipeline's before_tool was consulted for
     a tool call."""
+
     run_id: "str | None" = None
     tool_name: str = ""
     call_id: "str | None" = None
@@ -339,6 +344,7 @@ class ToolPipelineBefore:
 class ToolPipelineDecision:
     """tool.pipeline.decision: the decision a pipeline returned (allow/deny/
     require_approval/modify) for a tool call."""
+
     run_id: "str | None" = None
     tool_name: str = ""
     call_id: "str | None" = None
@@ -351,6 +357,7 @@ class ToolPipelineDecision:
 class ToolPipelineAfter:
     """tool.pipeline.after: a SecurityPipeline's after_tool was consulted for a
     completed tool call."""
+
     run_id: "str | None" = None
     tool_name: str = ""
     call_id: "str | None" = None

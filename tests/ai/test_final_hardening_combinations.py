@@ -1,14 +1,13 @@
 """Combination tests for the hardened runtime paths: each test drives a real
 multi-component chain end to end (not a helper in isolation)."""
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.capability import CapabilityContext, CapabilityToolExposurePolicy
-from linktools.ai.capability.assembler import CapabilityAssembler
-from linktools.ai.capability.ref import CapabilityRef
+from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.events.payloads import TruncatedSecurityEvent
 from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
@@ -16,9 +15,10 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.policy.engine import PolicyEngine
 from linktools.ai.providers.mcp import MCPServerSpecProvider
+from linktools.ai.providers import ProviderBundle
 from linktools.ai.registry.mcp import parse_mcp_spec
 from linktools.ai.runtime import Runtime
-from linktools.ai.security.descriptor import ToolDescriptor
+from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.security.emitter import (
     DefaultSecurityEventSanitizer,
     EventStoreSecurityEventEmitter,
@@ -32,7 +32,8 @@ from linktools.ai.tool.policy import IdempotencyStrategy, ResolvedToolPolicy
 
 def _descriptor() -> ToolDescriptor:
     return ToolDescriptor(
-        name="t", source="test", category="c", risk="low", mutating=False)
+        name="t", source="test", category="c", risk="low", mutating=False
+    )
 
 
 class _TinySanitizer(DefaultSecurityEventSanitizer):
@@ -49,14 +50,18 @@ async def test_large_security_event_is_persisted_through_managed_adapter(tmp_pat
     store = FileEventStore(root=tmp_path)
     ctx = SimpleNamespace(run_id="r1")
     emitter = EventStoreSecurityEventEmitter(
-        store, context=ctx, sanitizer=_TinySanitizer(), failure_mode="fail_closed")
+        store, context=ctx, sanitizer=_TinySanitizer(), failure_mode="fail_closed"
+    )
 
     async def handler(x: str = "d") -> str:
         return f"ok:{x}"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
-        security_event_emitter=emitter, run_context=ctx)
+        descriptor=_descriptor(),
+        handler=handler,
+        security_event_emitter=emitter,
+        run_context=ctx,
+    )
 
     result = await adapter.invoke(x="hi")  # must not raise TypeError
     assert result == "ok:hi"
@@ -88,11 +93,13 @@ class _UnenumerableManager:
 
     async def get_toolset(self, spec):
         from pydantic_ai.toolsets import FunctionToolset
+
         return FunctionToolset()
 
     async def list_tools_result(self, spec):
         return MCPDiscoveryResult(
-            tools=(), verified=False, error=RuntimeError("enumeration unavailable"))
+            tools=(), verified=False, error=RuntimeError("enumeration unavailable")
+        )
 
     async def call_tool(self, *, connection_ref, tool_name, arguments):
         raise RuntimeError("no tools should be resolved")
@@ -103,19 +110,28 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 
     spec_mcp = parse_mcp_spec(
-        "risk", {"transport": "stdio", "command": ["python", "-m", "r"],
-                  "discovery_mode": "best_effort"})
+        "risk",
+        {
+            "transport": "stdio",
+            "command": ["python", "-m", "r"],
+            "discovery_mode": "best_effort",
+        },
+    )
     provider = MCPProvider(_InfoSpecProvider(spec_mcp), _UnenumerableManager())
-    assembler = CapabilityAssembler({"mcp": provider})
 
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path), model_router=ModelRouter())
-    rt._capability_assembler = assembler
+        storage=FileStorage(root=tmp_path),
+        model_router=ModelRouter(),
+        providers=ProviderBundle(capabilities=(provider,)),
+    )
 
     agent = AgentSpec(
-        id="a", name="a", model=ModelPolicy(primary="m"),
+        id="a",
+        name="a",
+        model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(kind="mcp", name="risk"),))
+        tools=(ToolRef(kind="mcp", name="risk"),),
+    )
     inspection = await rt.inspect(agent, execution=None)
 
     assert inspection.tools == ()
@@ -133,7 +149,8 @@ async def test_dynamic_business_key_policy_fails_before_tool_execution():
             # for another layer) that finalizes to an invalid effective policy.
             return ResolvedToolPolicy(
                 idempotency_strategy=IdempotencyStrategy.BUSINESS_KEY,
-                idempotency_key_field="ext_id")
+                idempotency_key_field="ext_id",
+            )
 
     handler_calls: "list" = []
 
@@ -142,9 +159,11 @@ async def test_dynamic_business_key_policy_fails_before_tool_execution():
         return "ok"
 
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler,
+        descriptor=_descriptor(),
+        handler=handler,
         policy_provider=_BusinessKeyNoIdempotentProvider(),
-        run_context=SimpleNamespace(run_id="r1"))
+        run_context=SimpleNamespace(run_id="r1"),
+    )
 
     with pytest.raises(ValueError, match="idempotent=true"):
         await adapter.invoke(x="hi")
@@ -164,15 +183,16 @@ class _RecordingManager:
 
     async def get_toolset(self, spec):
         from pydantic_ai.toolsets import FunctionToolset
+
         return FunctionToolset()
 
     async def list_tools_result(self, spec):
         info = MCPToolInfo(
-            name="get_x", parameters_json_schema={"type": "object", "properties": {}})
+            name="get_x", parameters_json_schema={"type": "object", "properties": {}}
+        )
         return MCPDiscoveryResult(
-            tools=(info,),
-            verified=True,
-            connection_ref=MCPConnectionRef("risk", "fp"))
+            tools=(info,), verified=True, connection_ref=MCPConnectionRef("risk", "fp")
+        )
 
     async def call_tool(self, *, connection_ref, tool_name, arguments):
         self.calls.append((tool_name, dict(arguments)))
@@ -180,21 +200,30 @@ class _RecordingManager:
 
 
 @pytest.mark.asyncio
-async def test_mcp_tool_runs_through_managed_adapter_and_executor_to_call_tool(tmp_path):
+async def test_mcp_tool_runs_through_managed_adapter_and_executor_to_call_tool(
+    tmp_path,
+):
     spec_mcp = parse_mcp_spec(
-        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]})
+        "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
+    )
     manager = _RecordingManager()
     provider = MCPProvider(_InfoSpecProvider(spec_mcp), manager)
 
     bundle = await provider.resolve(
         CapabilityRef("mcp", "risk"),
-        CapabilityContext(agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()))
+        CapabilityContext(
+            agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+        ),
+    )
     definition = bundle.tool_contributions[0].tools[0]
 
     executor = ToolExecutor(policy=PolicyEngine(rules=()))
     adapter = ManagedToolAdapter(
-        descriptor=definition.descriptor, handler=definition.handler,
-        tool_executor=executor, run_context=SimpleNamespace(run_id="r1"))
+        descriptor=definition.descriptor,
+        handler=definition.handler,
+        tool_executor=executor,
+        run_context=SimpleNamespace(run_id="r1"),
+    )
 
     result = await adapter.invoke()
 

@@ -124,7 +124,9 @@ def _task_to_json(task: SwarmTask) -> dict:
         "attempts": task.attempts,
         "version": task.version,
         "claimed_at": None if task.claimed_at is None else task.claimed_at.isoformat(),
-        "lease_expires_at": None if task.lease_expires_at is None else task.lease_expires_at.isoformat(),
+        "lease_expires_at": None
+        if task.lease_expires_at is None
+        else task.lease_expires_at.isoformat(),
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat(),
         # active_run_id added in Phase-5A; older files lack the key, so the
@@ -142,13 +144,19 @@ def _task_from_json(raw: dict) -> SwarmTask:
         description=raw["description"],
         status=SwarmTaskStatus(raw["status"]),
         dependencies=tuple(raw["dependencies"]),
-        input=TaskInput(prompt=raw["input"]["prompt"], metadata=raw["input"]["metadata"]),
+        input=TaskInput(
+            prompt=raw["input"]["prompt"], metadata=raw["input"]["metadata"]
+        ),
         result=None if raw["result"] is None else _result_from_json(raw["result"]),
         error=None if raw["error"] is None else _error_from_json(raw["error"]),
         attempts=raw["attempts"],
         version=raw["version"],
-        claimed_at=None if raw["claimed_at"] is None else datetime.fromisoformat(raw["claimed_at"]),
-        lease_expires_at=None if raw["lease_expires_at"] is None else datetime.fromisoformat(raw["lease_expires_at"]),
+        claimed_at=None
+        if raw["claimed_at"] is None
+        else datetime.fromisoformat(raw["claimed_at"]),
+        lease_expires_at=None
+        if raw["lease_expires_at"] is None
+        else datetime.fromisoformat(raw["lease_expires_at"]),
         created_at=datetime.fromisoformat(raw["created_at"]),
         updated_at=datetime.fromisoformat(raw["updated_at"]),
         # Phase-5A: older files written before active_run_id land as None.
@@ -165,7 +173,9 @@ def _attempt_to_json(attempt: SwarmTaskAttempt) -> dict:
         "attempt": attempt.attempt,
         "status": attempt.status.value,
         "started_at": attempt.started_at.isoformat(),
-        "finished_at": None if attempt.finished_at is None else attempt.finished_at.isoformat(),
+        "finished_at": None
+        if attempt.finished_at is None
+        else attempt.finished_at.isoformat(),
         "error": None if attempt.error is None else _error_to_json(attempt.error),
     }
 
@@ -179,7 +189,9 @@ def _attempt_from_json(raw: dict) -> SwarmTaskAttempt:
         attempt=raw["attempt"],
         status=AttemptStatus(raw["status"]),
         started_at=datetime.fromisoformat(raw["started_at"]),
-        finished_at=None if raw["finished_at"] is None else datetime.fromisoformat(raw["finished_at"]),
+        finished_at=None
+        if raw["finished_at"] is None
+        else datetime.fromisoformat(raw["finished_at"]),
         error=None if raw["error"] is None else _error_from_json(raw["error"]),
     )
 
@@ -231,18 +243,26 @@ class FileSwarmStore:
     # -- paths ---------------------------------------------------------
 
     def _run_path(self, swarm_run_id: str) -> Path:
-        return self._runs_dir / f"{_validate_id_segment(swarm_run_id, kind='swarm_run_id')}.json"
+        return (
+            self._runs_dir
+            / f"{_validate_id_segment(swarm_run_id, kind='swarm_run_id')}.json"
+        )
 
     def _task_path(self, task_id: str) -> Path:
         return self._tasks_dir / f"{_validate_id_segment(task_id, kind='task_id')}.json"
 
     def _attempt_path(self, attempt_id: str) -> Path:
-        return self._attempts_dir / f"{_validate_id_segment(attempt_id, kind='attempt_id')}.json"
+        return (
+            self._attempts_dir
+            / f"{_validate_id_segment(attempt_id, kind='attempt_id')}.json"
+        )
 
     # -- run lifecycle -------------------------------------------------
 
     def _create_run_sync(self, run: SwarmRun) -> SwarmRun:
-        _atomic_write(self._run_path(run.id), json.dumps(_run_to_json(run)).encode("utf-8"))
+        _atomic_write(
+            self._run_path(run.id), json.dumps(_run_to_json(run)).encode("utf-8")
+        )
         return run
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
@@ -297,7 +317,10 @@ class FileSwarmStore:
             updated_at=datetime.now(current.created_at.tzinfo),
             metadata=new_metadata,
         )
-        _atomic_write(self._run_path(swarm_run_id), json.dumps(_run_to_json(updated)).encode("utf-8"))
+        _atomic_write(
+            self._run_path(swarm_run_id),
+            json.dumps(_run_to_json(updated)).encode("utf-8"),
+        )
         return updated
 
     async def update_run(
@@ -313,15 +336,22 @@ class FileSwarmStore:
     ) -> SwarmRun:
         async with self._lock:
             return await asyncio.to_thread(
-                self._update_run_sync, swarm_run_id,
-                expected_version=expected_version, status=status, round=round,
-                token_usage=token_usage, cost=cost, metadata=metadata,
+                self._update_run_sync,
+                swarm_run_id,
+                expected_version=expected_version,
+                status=status,
+                round=round,
+                token_usage=token_usage,
+                cost=cost,
+                metadata=metadata,
             )
 
     # -- task lifecycle ------------------------------------------------
 
     def _create_task_sync(self, task: SwarmTask) -> SwarmTask:
-        _atomic_write(self._task_path(task.id), json.dumps(_task_to_json(task)).encode("utf-8"))
+        _atomic_write(
+            self._task_path(task.id), json.dumps(_task_to_json(task)).encode("utf-8")
+        )
         return task
 
     async def create_task(self, task: SwarmTask) -> SwarmTask:
@@ -345,7 +375,9 @@ class FileSwarmStore:
     async def list_tasks(
         self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
     ) -> "tuple[SwarmTask, ...]":
-        return await asyncio.to_thread(self._list_tasks_sync, swarm_run_id, status=status)
+        return await asyncio.to_thread(
+            self._list_tasks_sync, swarm_run_id, status=status
+        )
 
     def _claim_task_sync(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None"
@@ -389,7 +421,10 @@ class FileSwarmStore:
                 # after a reclaim reset; fresh PENDING tasks have None).
                 active_run_id=task.active_run_id,
             )
-            _atomic_write(self._task_path(task.id), json.dumps(_task_to_json(claimed)).encode("utf-8"))
+            _atomic_write(
+                self._task_path(task.id),
+                json.dumps(_task_to_json(claimed)).encode("utf-8"),
+            )
             return claimed
         return None
 
@@ -398,7 +433,10 @@ class FileSwarmStore:
     ) -> "SwarmTask | None":
         async with self._lock:
             return await asyncio.to_thread(
-                self._claim_task_sync, swarm_run_id, agent_id, lease_seconds=lease_seconds,
+                self._claim_task_sync,
+                swarm_run_id,
+                agent_id,
+                lease_seconds=lease_seconds,
             )
 
     def _set_active_run_sync(
@@ -451,16 +489,22 @@ class FileSwarmStore:
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._set_active_run_sync, task_id, run_id, expected_version=expected_version,
+                self._set_active_run_sync,
+                task_id,
+                run_id,
+                expected_version=expected_version,
             )
 
     def _complete_task_sync(
-        self, task_id: str, result: RunResult, *,
+        self,
+        task_id: str,
+        result: RunResult,
+        *,
         expected_version: int,
         active_run_id: "str | None",
     ) -> SwarmTask:
         # expected_version is mandatory -- no more unconditional
-        # legacy path. Held under self._lock (see complete_task) so the
+        # prior path. Held under self._lock (see complete_task) so the
         # read-check-write is atomic within this process.
         path = self._task_path(task_id)
         if not path.exists():
@@ -503,18 +547,27 @@ class FileSwarmStore:
         return updated
 
     async def complete_task(
-        self, task_id: str, result: RunResult, *,
+        self,
+        task_id: str,
+        result: RunResult,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._complete_task_sync, task_id, result,
-                expected_version=expected_version, active_run_id=active_run_id,
+                self._complete_task_sync,
+                task_id,
+                result,
+                expected_version=expected_version,
+                active_run_id=active_run_id,
             )
 
     def _fail_task_sync(
-        self, task_id: str, error: RunErrorInfo, *,
+        self,
+        task_id: str,
+        error: RunErrorInfo,
+        *,
         expected_version: int,
         active_run_id: "str | None",
     ) -> SwarmTask:
@@ -559,14 +612,20 @@ class FileSwarmStore:
         return updated
 
     async def fail_task(
-        self, task_id: str, error: RunErrorInfo, *,
+        self,
+        task_id: str,
+        error: RunErrorInfo,
+        *,
         expected_version: int,
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._fail_task_sync, task_id, error,
-                expected_version=expected_version, active_run_id=active_run_id,
+                self._fail_task_sync,
+                task_id,
+                error,
+                expected_version=expected_version,
+                active_run_id=active_run_id,
             )
 
     async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
@@ -621,8 +680,10 @@ class FileSwarmStore:
     ) -> SwarmTask:
         async with self._lock:
             return await asyncio.to_thread(
-                self._renew_lease_sync, task_id,
-                expected_version=expected_version, lease_seconds=lease_seconds,
+                self._renew_lease_sync,
+                task_id,
+                expected_version=expected_version,
+                lease_seconds=lease_seconds,
             )
 
     # -- attempts ---------------------------------------------

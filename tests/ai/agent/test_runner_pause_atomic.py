@@ -15,6 +15,7 @@ These tests prove the contrast:
 3. File mode: a failure in the (best-effort) event append does NOT roll back
    the checkpoint or the transition -- the non-atomic shape contract documents.
 """
+
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -73,9 +74,15 @@ def _registry() -> ModelRegistry:
 
 def _run_context(run_id, session_id) -> RunContext:
     return RunContext(
-        run_id=run_id, root_run_id=run_id, parent_run_id=None, session_id=session_id,
-        runnable_id="agent-1", runnable_type=RunnableType.AGENT,
-        user_id=None, tenant_id=None, workspace=None,
+        run_id=run_id,
+        root_run_id=run_id,
+        parent_run_id=None,
+        session_id=session_id,
+        runnable_id="agent-1",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
     )
 
 
@@ -95,10 +102,18 @@ def _sqlalchemy_storage(tmp_path):
 
 def _seed_session(storage, session_id) -> None:
     now = datetime.now(timezone.utc)
-    asyncio.run(storage.sessions.create(SessionRecord(
-        id=session_id, parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    )))
+    asyncio.run(
+        storage.sessions.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
 
 def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
@@ -114,10 +129,17 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
     )
-    compiled = asyncio.run(compiler.compile(AgentSpec(
-        id="agent-1", name="a", model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
-    )))
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id="agent-1",
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=str,
+            )
+        )
+    )
 
     @compiled.pydantic_agent.tool
     async def risky(ctx, x: int) -> int:  # noqa: ANN001
@@ -156,10 +178,15 @@ def test_sqla_pause_writes_all_three_operations_atomically_on_success(tmp_path):
     compiled, _ = _compile_with_storage(storage)
     runner = _sqla_runner(storage)
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"),
-        _run_context("run-a1", "session-a1"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context("run-a1", "session-a1"),
+            )
+        )
+    )
     paused = [e for e in events if e["type"] == "paused"]
     assert len(paused) == 1, f"expected one paused event, got {events}"
 
@@ -188,10 +215,15 @@ def test_sqla_pause_persists_approval_request_atomically(tmp_path):
     compiled, _ = _compile_with_storage(storage)
     runner = _sqla_runner(storage)
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"),
-        _run_context("run-a2", "session-a2"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context("run-a2", "session-a2"),
+            )
+        )
+    )
     paused = [e for e in events if e["type"] == "paused"]
     assert len(paused) == 1
     approval_id = paused[0]["approval_id"]
@@ -201,6 +233,7 @@ def test_sqla_pause_persists_approval_request_atomically(tmp_path):
     assert approval.run_id == "run-a2"
     assert approval.tool_name == TOOL_NAME
     from linktools.ai.agent.approval import ApprovalStatus
+
     assert approval.status is ApprovalStatus.PENDING
 
 
@@ -212,19 +245,32 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
     _seed_session(storage, "session-a3")
 
     from linktools.ai.agent.approval import build_approval_request
+
     # Simulate: an approval already exists for this (run_id, tool_call_id)
     # PRIOR to the pause handler running (e.g. a previous partial attempt).
     pre_existing = build_approval_request(
-        run_id="run-a3", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
-        reason="prior", arguments={"x": 1}, approval_id="approval-fixed",
+        run_id="run-a3",
+        tool_call_id="tc-fixed",
+        tool_name=TOOL_NAME,
+        reason="prior",
+        arguments={"x": 1},
+        approval_id="approval-fixed",
     )
     asyncio.run(storage.approvals.create(pre_existing))
 
-    result = asyncio.run(storage.approvals.create_or_get_pending(
-        run_id="run-a3", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
-        reason="new-reason", arguments={"x": 1}, approval_id="approval-different",
-    ))
-    assert result.id == "approval-fixed", "dedup must return the EXISTING request, not create a new one"
+    result = asyncio.run(
+        storage.approvals.create_or_get_pending(
+            run_id="run-a3",
+            tool_call_id="tc-fixed",
+            tool_name=TOOL_NAME,
+            reason="new-reason",
+            arguments={"x": 1},
+            approval_id="approval-different",
+        )
+    )
+    assert result.id == "approval-fixed", (
+        "dedup must return the EXISTING request, not create a new one"
+    )
     all_for_run = asyncio.run(storage.approvals.list_for_run("run-a3"))
     assert len(all_for_run) == 1, "a second PENDING approval must not have been created"
 
@@ -239,16 +285,26 @@ def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
     storage = _sqlalchemy_storage(tmp_path)
     _seed_session(storage, "session-a4")
     pre_existing = build_approval_request(
-        run_id="run-a4", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
-        reason="prior", arguments={"x": 1}, approval_id="approval-fixed",
+        run_id="run-a4",
+        tool_call_id="tc-fixed",
+        tool_name=TOOL_NAME,
+        reason="prior",
+        arguments={"x": 1},
+        approval_id="approval-fixed",
     )
     asyncio.run(storage.approvals.create(pre_existing))
 
     with pytest.raises(ApprovalConflictError):
-        asyncio.run(storage.approvals.create_or_get_pending(
-            run_id="run-a4", tool_call_id="tc-fixed", tool_name=TOOL_NAME,
-            reason="new-reason", arguments={"x": 2}, approval_id="approval-different",
-        ))
+        asyncio.run(
+            storage.approvals.create_or_get_pending(
+                run_id="run-a4",
+                tool_call_id="tc-fixed",
+                tool_name=TOOL_NAME,
+                reason="new-reason",
+                arguments={"x": 2},
+                approval_id="approval-different",
+            )
+        )
 
 
 def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_path):
@@ -261,8 +317,12 @@ def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_
 
     async def _attempt(i: int):
         return await storage.approvals.create_or_get_pending(
-            run_id="run-a5", tool_call_id="tc-shared", tool_name=TOOL_NAME,
-            reason="r", arguments={"x": 1}, approval_id=f"approval-{i}",
+            run_id="run-a5",
+            tool_call_id="tc-shared",
+            tool_name=TOOL_NAME,
+            reason="r",
+            arguments={"x": 1},
+            approval_id=f"approval-{i}",
         )
 
     async def _run_all():
@@ -272,14 +332,17 @@ def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_
     ids = {r.id for r in results}
     assert len(ids) == 1, f"expected exactly one winning approval id, got {ids}"
     all_for_run = asyncio.run(storage.approvals.list_for_run("run-a5"))
-    assert len(all_for_run) == 1, "concurrent create_or_get_pending must create exactly one row"
+    assert len(all_for_run) == 1, (
+        "concurrent create_or_get_pending must create exactly one row"
+    )
 
 
 # -- Tests: SqlAlchemy atomic rollback --------------------------------------
 
 
 def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Atomicity guarantee: when the event append fails INSIDE the UoW, the
     checkpoint-save and WAITING_APPROVAL transition roll back too -- the run
@@ -312,10 +375,15 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     # is the resulting STATE (asserted below), not the exception type.
     raised: "BaseException | None" = None
     try:
-        asyncio.run(_collect(runner.run_stream(
-            compiled, RunInput(prompt="call the risky tool"),
-            _run_context("run-r1", "session-r1"),
-        )))
+        asyncio.run(
+            _collect(
+                runner.run_stream(
+                    compiled,
+                    RunInput(prompt="call the risky tool"),
+                    _run_context("run-r1", "session-r1"),
+                )
+            )
+        )
     except BaseException as exc:  # noqa: BLE001
         raised = exc
     assert raised is not None, "UoW failure should have surfaced"
@@ -334,9 +402,7 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
 
     event_page = asyncio.run(storage.events.list("run-r1"))
     payload_types = {type(e.payload).__name__ for e in event_page.items}
-    assert "RunPaused" not in payload_types, (
-        "RunPaused event leaked past UoW rollback"
-    )
+    assert "RunPaused" not in payload_types, "RunPaused event leaked past UoW rollback"
     assert "ApprovalRequested" not in payload_types, (
         "ApprovalRequested event leaked past UoW rollback"
     )
@@ -386,10 +452,17 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
     )
-    compiled = asyncio.run(compiler.compile(AgentSpec(
-        id="agent-1", name="a", model=ModelPolicy(primary="test-model"),
-        instructions=PromptSpec(instructions="hi"), output_schema=str,
-    )))
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id="agent-1",
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=str,
+            )
+        )
+    )
 
     @compiled.pydantic_agent.tool
     async def risky(ctx, x: int) -> int:  # noqa: ANN001
@@ -403,15 +476,28 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         # uow_factory deliberately omitted -> File mode non-atomic path.
     )
     now = datetime.now(timezone.utc)
-    asyncio.run(runner._session_store.create(SessionRecord(
-        id="session-f1", parent_id=None, status=SessionStatus.ACTIVE,
-        version=1, created_at=now, updated_at=now,
-    )))
+    asyncio.run(
+        runner._session_store.create(
+            SessionRecord(
+                id="session-f1",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
 
-    events = asyncio.run(_collect(runner.run_stream(
-        compiled, RunInput(prompt="call the risky tool"),
-        _run_context("run-f1", "session-f1"),
-    )))
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="call the risky tool"),
+                _run_context("run-f1", "session-f1"),
+            )
+        )
+    )
     assert any(e["type"] == "paused" for e in events), (
         "File pause should still yield paused despite best-effort event failure"
     )
