@@ -133,9 +133,9 @@ def test_parse_model_policy_builds_policy_with_decimal_budget():
     assert policy.budget == Decimal("1.50")
 
 
-def test_parse_model_policy_accepts_model_alias_for_primary():
-    policy = parse_model_policy({"model": "claude-haiku"})
-    assert policy.primary == "claude-haiku"
+def test_parse_model_policy_rejects_model_alias_for_primary():
+    with pytest.raises(InvalidSpecError):
+        parse_model_policy({"model": "claude-haiku"})
 
 
 def test_parse_model_policy_rejects_missing_primary():

@@ -359,7 +359,7 @@ class ResourceStore:
         Two cases keep the prior put+delete orchestration: (1) the Memory
         backend has no transaction primitive, so it never implements raw_move;
         (2) an OVERLAY-only source must be copied across backends, which
-        cannot be made fully atomic -- the prior path copies the overlay
+        cannot be made fully atomic -- this path copies the overlay
         resource into primary and writes a primary whiteout to mask the
         overlay source.
 

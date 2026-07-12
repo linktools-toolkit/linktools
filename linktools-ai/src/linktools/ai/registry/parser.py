@@ -3,6 +3,7 @@
 """Shared text parsers and strict registry configuration helpers."""
 
 import json
+import math
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from collections.abc import Mapping
@@ -133,15 +134,22 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
     """Build a ModelPolicy from a YAML dict. Handles Decimal budget coercion."""
     from ..model.policy import ModelPolicy
 
-    primary = payload.get("primary") or payload.get("model")
-    if not isinstance(primary, str) or not primary.strip():
-        raise InvalidSpecError("model policy requires 'primary' (or 'model')")
-    fallbacks_raw = payload.get("fallbacks") or ()
-    if not isinstance(fallbacks_raw, (list, tuple)) or any(
-        not isinstance(value, str) for value in fallbacks_raw
-    ):
-        raise InvalidSpecError("model policy fallbacks must be a list of strings")
-    fallbacks = tuple(fallbacks_raw)
+    reader = StrictConfigReader(
+        payload,
+        allowed={
+            "primary",
+            "fallbacks",
+            "max_retries",
+            "timeout_seconds",
+            "max_tokens",
+            "budget",
+        },
+        context="model policy",
+    )
+    primary = reader.required_str("primary").strip()
+    if not primary:
+        raise InvalidSpecError("model policy primary must not be empty")
+    fallbacks = reader.string_tuple("fallbacks") if "fallbacks" in payload else ()
     max_retries = payload.get("max_retries", 1)
     timeout = payload.get("timeout_seconds", 30.0)
     if (
@@ -158,19 +166,6 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
         or timeout <= 0
     ):
         raise InvalidSpecError("model policy timeout_seconds must be positive")
-    reader = StrictConfigReader(
-        payload,
-        allowed={
-            "primary",
-            "model",
-            "fallbacks",
-            "max_retries",
-            "timeout_seconds",
-            "max_tokens",
-            "budget",
-        },
-        context="model policy",
-    )
     budget = reader.non_negative_decimal("budget")
     return ModelPolicy(
         primary=primary,
@@ -208,8 +203,10 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
                 raise InvalidSpecError(
                     f"tool ref name must be a non-empty string: {item!r}"
                 )
-            config = item.get("config") or {}
-            if not isinstance(config, dict):
+            config = item.get("config")
+            if config is None:
+                config = {}
+            elif not isinstance(config, dict):
                 raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
             refs.append(
                 ToolRef(
@@ -239,6 +236,10 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{context}: unknown fields: {', '.join(unknown)}")
 
     def required_str(self, name):
+        if name not in self._payload:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} is required")
         value = self._payload[name]
         if not isinstance(value, str):
             from ..errors import InvalidSpecError
@@ -282,7 +283,12 @@ class StrictConfigReader:
         if name not in self._payload:
             return default
         value = self._payload[name]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
             from ..errors import InvalidSpecError
 
             raise InvalidSpecError(f"{self._context}: {name} must be a positive number")

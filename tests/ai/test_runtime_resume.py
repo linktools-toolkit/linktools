@@ -32,7 +32,15 @@ from datetime import datetime, timezone
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityProvider
+from linktools.ai.tool.models import (
+    ManagedToolDefinition,
+    ToolContribution,
+    ToolDescriptor,
+)
+from linktools.ai.providers.bundle import ProviderBundle
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import InvalidRunTransitionError, RunNotFoundError
 from linktools.ai.model.policy import ModelPolicy
@@ -46,6 +54,33 @@ from linktools.ai.storage.facade import FileStorage
 from linktools.ai.tool.executor import ToolExecutor
 
 TOOL_NAME = "risky"
+
+
+class _RiskyProvider(CapabilityProvider):
+    supported_kinds = ("test",)
+
+    async def resolve(self, ref, context):
+        async def risky(x: int) -> int:
+            return x * 2
+
+        return CapabilityBundle(
+            tool_contributions=(
+                ToolContribution(
+                    tools=(
+                        ManagedToolDefinition(
+                            descriptor=ToolDescriptor(
+                                name=TOOL_NAME,
+                                source="test",
+                                category="discovery",
+                                risk="high",
+                                mutating=False,
+                            ),
+                            handler=risky,
+                        ),
+                    )
+                ),
+            )
+        )
 
 
 # -- Model fixtures ---------------------------------------------------------
@@ -95,6 +130,7 @@ def _spec() -> AgentSpec:
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
         output_schema=str,
+        tools=(ToolRef(kind="test", name=TOOL_NAME),),
     )
 
 
@@ -109,6 +145,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FileStorage]":
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
+        providers=ProviderBundle(capabilities=(_RiskyProvider(),)),
     )
     return runtime, storage
 
@@ -118,26 +155,6 @@ async def _collect(gen) -> "list[dict]":
     async for event in gen:
         out.append(event)
     return out
-
-
-def _stub_compiler_with_tool(runtime: Runtime, spec: AgentSpec) -> None:
-    """Pre-compile the spec, register the risky tool on the compiled
-    pydantic-ai Agent, and stub the compiler so every subsequent
-    ``compile(spec)`` returns the same cached compiled agent (with the tool).
-
-    The compiler does not cache (each ``compile()`` builds a fresh Agent), so
-    without this stub the tool registered before run_stream would be lost when
-    run_stream calls ``self.compiler.compile(spec)`` internally."""
-    compiled = asyncio.run(runtime.compiler.compile(spec))
-
-    @compiled.pydantic_agent.tool_plain
-    def risky(x: int) -> int:
-        return x * 2
-
-    async def _stub_compile(_spec: AgentSpec):
-        return compiled
-
-    runtime.compiler.compile = _stub_compile
 
 
 # -- Tests ------------------------------------------------------------------
@@ -151,18 +168,6 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
     async def _drive():
         runtime, storage = _build_runtime(tmp_path)
         spec = _spec()
-
-        # Pre-compile + register the risky tool + stub the compiler.
-        compiled = await runtime.compiler.compile(spec)
-
-        @compiled.pydantic_agent.tool_plain
-        def risky(x: int) -> int:
-            return x * 2
-
-        async def _stub_compile(_spec):
-            return compiled
-
-        runtime.compiler.compile = _stub_compile
 
         # Create a session.
         now = datetime.now(timezone.utc)

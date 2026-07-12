@@ -30,8 +30,10 @@ def _parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
         elif isinstance(item, dict) and "name" in item:
             if not isinstance(item["name"], str) or not item["name"].strip():
                 raise InvalidSpecError("middleware name must be a non-empty string")
-            config = item.get("config") or {}
-            if not isinstance(config, dict):
+            config = item.get("config")
+            if config is None:
+                config = {}
+            elif not isinstance(config, dict):
                 raise InvalidSpecError("middleware config must be a mapping")
             refs.append(
                 MiddlewareRef(
@@ -53,7 +55,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
     if not isinstance(model_payload, dict):
         raise InvalidSpecError(f"agent {agent_id}: 'model' must be a mapping")
     model = parse_model_policy(model_payload)
-    sections = reader.mapping("sections") or {}
+    sections = reader.string_mapping("sections") or {}
     instructions = PromptSpec(
         instructions=body.strip(),
         sections=sections,

@@ -505,14 +505,7 @@ class ManagedToolAdapter:
                     success=True,
                 )
             )
-            # after_tool distinct actions: DENY_RESULT (or prior DENY) discards
-            # the result; MODIFY_RESULT (or prior MODIFY) replaces it. The
-            # result-level decision is never confused with a before_tool
-            # call-level DENY/MODIFY.
-            if after_decision.action in (
-                PipelineAction.DENY,
-                PipelineAction.DENY_RESULT,
-            ):
+            if after_decision.action is PipelineAction.DENY_RESULT:
                 result_action = "denied"
                 await self._emit_observability(
                     ToolCompleted(
@@ -526,10 +519,7 @@ class ManagedToolAdapter:
                 raise ToolResultDeniedError(
                     f"tool {self._descriptor.name!r} result denied by after_tool pipeline"
                 )
-            if after_decision.action in (
-                PipelineAction.MODIFY,
-                PipelineAction.MODIFY_RESULT,
-            ):
+            if after_decision.action is PipelineAction.MODIFY_RESULT:
                 result = after_decision.modified_payload
                 result_action = "modified"
 

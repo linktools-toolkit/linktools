@@ -141,7 +141,7 @@ class SwarmTask:
     created_at: datetime
     updated_at: datetime
     # The id of the child RunRecord this task's execution creates (set in
-    # strategy._run_task right after claim_task succeeds). Phase-5A invariant:
+    # strategy._run_task right after claim_task succeeds). The child identity:
     # task.id IS NOT its child RunRecord.id; each (re)execution mints a fresh
     # run_id and stores it here. None until claimed, or after a reclaim reset.
     active_run_id: "str | None" = None
@@ -154,7 +154,7 @@ class SwarmTaskAttempt:
     A single SwarmTask may produce several SwarmTaskAttempts over its life:
     retries inside one ``_run_task`` call each record their own attempt, as does
     a re-invocation of ``_run_task`` after a prior FAILED. The ``run_id`` is the
-    Phase-5A child RunRecord id for that execution (NOT the task id), and the
+    child RunRecord id for that execution (NOT the task id), and the
     ``attempt`` field is 1-based and monotonically increments per task. The
     status transitions RUNNING -> SUCCEEDED | FAILED so the audit trail records
     both the failures and the eventual success (or final failure).

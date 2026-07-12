@@ -237,7 +237,7 @@ def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_pat
     async def _handler() -> str:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("transient")
+            raise RuntimeError("request failed with Bearer super-secret-token")
         return "ok"
 
     async def _run():
@@ -252,7 +252,8 @@ def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_pat
         failed = await store.get("r1", "k")
         assert failed is not None
         assert failed.status.value == "failed"
-        assert "transient" in (failed.error or "")
+        assert "super-secret-token" not in (failed.error or "")
+        assert "***REDACTED***" in (failed.error or "")
         # Retry: same key + same args -> reserve returns the FAILED record,
         # executor falls through to re-invoke the handler, and on success
         # overwrites the record with COMPLETED.

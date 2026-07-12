@@ -47,7 +47,7 @@ class MemoryResourceBackend:
         # Keyset pagination: entries iterate in sorted key order;
         # ``key > cursor`` is the resume point. Collect limit+1 so the
         # (limit+1)th path becomes next_cursor. Memory does NOT implement
-        # raw_move / raw_stat -- ResourceStore falls back to the prior path
+        # raw_move / raw_stat -- ResourceStore uses the basic implementation
         # for this backend, exercising the hasattr() probe.
         prefix = path.value.rstrip("/") + "/"
         items = []

@@ -14,12 +14,22 @@ from linktools.ai.security.pipeline import (
 from linktools.ai.errors import RunPaused, ToolDeniedError, ToolTimeoutError
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 from linktools.ai.tool.policy import (
     EffectiveToolPolicy,
     ResolvedToolPolicy,
     finalize_policy,
     merge_policies,
 )
+
+
+_ManagedToolAdapter = ManagedToolAdapter
+
+
+def ManagedToolAdapter(**kwargs):
+    kwargs.setdefault("tool_executor", ToolExecutor(policy=PolicyEngine(rules=())))
+    return _ManagedToolAdapter(**kwargs)
 
 
 # --- ToolDescriptor ---

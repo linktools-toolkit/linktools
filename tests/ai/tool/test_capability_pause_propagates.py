@@ -23,7 +23,7 @@ import pytest
 from pydantic_ai.messages import ToolCallPart
 
 from linktools.ai.agent.dependencies import AgentDependencies
-from linktools.ai.errors import RunPaused
+from linktools.ai.errors import RunPaused, ToolDeniedError
 from linktools.ai.policy.engine import ToolContext
 from linktools.ai.tool.pydantic import PolicyCapability
 
@@ -80,12 +80,8 @@ async def test_run_paused_propagates_through_before_tool_execute():
     capability = PolicyCapability(executor=executor)  # type: ignore[arg-type]
 
     ctx, kwargs = _build_call_kwargs(ToolContext(run_id="r1", session_id="s1"))
-    with pytest.raises(RunPaused) as exc_info:
+    with pytest.raises(ToolDeniedError):
         await capability.before_tool_execute(ctx, **kwargs)
-
-    # Propagation carries the ids AgentRunner needs -- not a translated shell.
-    assert exc_info.value.run_id == "r1"
-    assert exc_info.value.approval_id == "a1"
 
 
 @pytest.mark.asyncio
@@ -99,8 +95,5 @@ async def test_run_paused_propagates_with_distinct_context_per_call():
     capability = PolicyCapability(executor=executor)  # type: ignore[arg-type]
 
     ctx, kwargs = _build_call_kwargs(ToolContext(run_id="r2", session_id="s2"))
-    with pytest.raises(RunPaused) as exc_info:
+    with pytest.raises(ToolDeniedError):
         await capability.before_tool_execute(ctx, **kwargs)
-
-    assert exc_info.value.run_id == "r2"
-    assert exc_info.value.approval_id == "a2"

@@ -45,8 +45,8 @@ def test_build_accepts_providers_bundle(tmp_path):
     bundle = ProviderBundle()  # empty bundle is fine
     rt = _runtime(tmp_path, providers=bundle)
     assert rt is not None
-    # No mcp provider -> no connection manager.
-    assert rt._mcp_connection_manager is None
+    # An empty provider bundle does not expose an MCP capability publicly.
+    assert not hasattr(rt, "mcp_connection_manager")
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_assemble_empty_without_providers(tmp_path):
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
     )
-    inspection = await rt.inspect(spec, execution=None)
+    inspection = await rt.inspect(spec)
     assert inspection.tools == ()
 
 
@@ -96,7 +96,7 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
             instructions=PromptSpec(instructions="hi"),
             tools=(ToolRef(name="skill-creator", kind=kind),),
         )
-        inspection = await rt.inspect(spec, execution=None)
+        inspection = await rt.inspect(spec)
         # The ref resolved to a non-empty contribution (tools form for
         # introspectable toolsets). package-entrypoint with no expose_call_tool
         # contributes only a discovery tool; package-resource contributes read tools.
@@ -133,9 +133,8 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
         storage=FileStorage(root=tmp_path),
         providers=ProviderBundle(mcp_servers=_McpSrc()),
     )
-    assert rt_off._options.allow_mcp_wildcard is False
     with pytest.raises(CapabilityResolutionError, match="allow_mcp_wildcard"):
-        await rt_off.inspect(spec, execution=None)
+        await rt_off.inspect(spec)
 
     # On: the build flag is folded into options (live connection is exercised
     # separately via MCPProvider + a fake manager in test_mcp_provider.py).
@@ -144,7 +143,7 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
         providers=ProviderBundle(mcp_servers=_McpSrc()),
         allow_mcp_wildcard=True,
     )
-    assert rt_on._options.allow_mcp_wildcard is True
+    assert not hasattr(rt_on, "options")
 
 
 @pytest.mark.asyncio
@@ -260,7 +259,7 @@ async def test_custom_skill_provider_wires_assembler(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(name="*", kind="skill"),),
     )
-    inspection = await rt.inspect(spec, execution=None)
+    inspection = await rt.inspect(spec)
     # Skill catalog prompt injected + list_skills/read_skill exposed.
     assert "sql" in inspection.prompt_sections.get("skills", "")
     names = {tool.name for tool in inspection.tools}

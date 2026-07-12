@@ -164,7 +164,7 @@ def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
     async def _scenario():
         token = CancellationToken()
         task = asyncio.create_task(asyncio.sleep(60))
-        await runtime.run_controller.register("run-1", task, token)
+        await runtime._components.run_controller.register("run-1", task, token)
         try:
             await runtime.cancel("run-1")
             first = await storage.runs.get("run-1")
@@ -201,7 +201,7 @@ def test_cancel_handles_conflict_when_fresh_status_is_cancelling(tmp_path, monke
     async def _scenario():
         token = CancellationToken()
         task = asyncio.create_task(asyncio.sleep(60))
-        await runtime.run_controller.register("run-2", task, token)
+        await runtime._components.run_controller.register("run-2", task, token)
 
         original_transition = storage.runs.transition
         state = {"simulated": False}

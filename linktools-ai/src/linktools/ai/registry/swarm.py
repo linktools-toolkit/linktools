@@ -5,7 +5,6 @@ revision-cached. Mirrors AgentRegistry — the loader exposes a revision() monot
 clock; whenever it changes the per-(id, revision) cache and the id listing are
 dropped so the next get() re-reads and re-parses the YAML."""
 
-from decimal import Decimal
 from typing import Any
 
 from ..agent.spec import MiddlewareRef
@@ -96,51 +95,41 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
     if limits_raw is None:
         limits = DEFAULT_SWARM_LIMITS
     elif isinstance(limits_raw, dict):
-
-        def _int_field(key: str) -> "int | None":
-            v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            if v is None:
-                return None
-            if isinstance(v, bool) or not isinstance(v, int):
-                raise InvalidSpecError(
-                    f"swarm {swarm_id}: limits.{key} must be an integer"
-                )
-            return v
-
-        def _decimal_field(key: str) -> "Decimal | None":
-            v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            if v is None:
-                return None
-            if isinstance(v, bool) or not isinstance(v, (int, float, str)):
-                raise InvalidSpecError(
-                    f"swarm {swarm_id}: limits.{key} has an invalid number"
-                )
-            try:
-                return Decimal(v)
-            except Exception as exc:
-                raise InvalidSpecError(
-                    f"swarm {swarm_id}: limits.{key} has an invalid number"
-                ) from exc
-
-        def _float_field(key: str) -> "float | None":
-            v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            if v is None:
-                return None
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise InvalidSpecError(
-                    f"swarm {swarm_id}: limits.{key} must be a number"
-                )
-            return float(v)
-
+        limits_reader = StrictConfigReader(
+            limits_raw,
+            allowed={
+                "max_rounds",
+                "max_tasks",
+                "max_delegations",
+                "max_depth",
+                "max_concurrency",
+                "max_total_tokens",
+                "max_total_cost",
+                "timeout_seconds",
+            },
+            context=f"swarm {swarm_id}.limits",
+        )
         limits = SwarmLimits(
-            max_rounds=_int_field("max_rounds"),
-            max_tasks=_int_field("max_tasks"),
-            max_delegations=_int_field("max_delegations"),
-            max_depth=_int_field("max_depth"),
-            max_concurrency=_int_field("max_concurrency"),
-            max_total_tokens=_int_field("max_total_tokens"),
-            max_total_cost=_decimal_field("max_total_cost"),
-            timeout_seconds=_float_field("timeout_seconds"),
+            max_rounds=limits_reader.positive_int(
+                "max_rounds", DEFAULT_SWARM_LIMITS.max_rounds
+            ),
+            max_tasks=limits_reader.positive_int(
+                "max_tasks", DEFAULT_SWARM_LIMITS.max_tasks
+            ),
+            max_delegations=limits_reader.non_negative_int(
+                "max_delegations", DEFAULT_SWARM_LIMITS.max_delegations
+            ),
+            max_depth=limits_reader.non_negative_int(
+                "max_depth", DEFAULT_SWARM_LIMITS.max_depth
+            ),
+            max_concurrency=limits_reader.positive_int(
+                "max_concurrency", DEFAULT_SWARM_LIMITS.max_concurrency
+            ),
+            max_total_tokens=limits_reader.positive_int("max_total_tokens"),
+            max_total_cost=limits_reader.non_negative_decimal("max_total_cost"),
+            timeout_seconds=limits_reader.positive_number(
+                "timeout_seconds", DEFAULT_SWARM_LIMITS.timeout_seconds
+            ),
         )
     else:
         raise InvalidSpecError(f"swarm {swarm_id}: 'limits' must be a mapping")

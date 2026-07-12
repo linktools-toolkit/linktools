@@ -129,7 +129,7 @@ def _task_to_json(task: SwarmTask) -> dict:
         else task.lease_expires_at.isoformat(),
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat(),
-        # active_run_id added in Phase-5A; older files lack the key, so the
+        # active_run_id may be absent in older files, so the
         # reader falls back to None (dataclasses.replace + default).
         "active_run_id": task.active_run_id,
     }
@@ -159,7 +159,7 @@ def _task_from_json(raw: dict) -> SwarmTask:
         else datetime.fromisoformat(raw["lease_expires_at"]),
         created_at=datetime.fromisoformat(raw["created_at"]),
         updated_at=datetime.fromisoformat(raw["updated_at"]),
-        # Phase-5A: older files written before active_run_id land as None.
+        # Older files without active_run_id land as None.
         active_run_id=raw.get("active_run_id"),
     )
 
@@ -504,7 +504,7 @@ class FileSwarmStore:
         active_run_id: "str | None",
     ) -> SwarmTask:
         # expected_version is mandatory -- no more unconditional
-        # prior path. Held under self._lock (see complete_task) so the
+        # fallback path. Held under self._lock (see complete_task) so the
         # read-check-write is atomic within this process.
         path = self._task_path(task_id)
         if not path.exists():

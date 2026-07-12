@@ -1,7 +1,9 @@
 import pytest
+from decimal import Decimal
 
 from linktools.ai.errors import InvalidSpecError
 from linktools.ai.registry.swarm import parse_swarm_spec
+from linktools.ai.swarm.limits import SwarmLimits
 
 
 def _payload():
@@ -44,3 +46,37 @@ def test_swarm_registry_keeps_unknown_top_level_fields_strict():
     payload["unknown"] = True
     with pytest.raises(InvalidSpecError):
         parse_swarm_spec("demo", payload)
+
+
+@pytest.mark.parametrize("field", ["max_rounds", "max_tasks", "max_concurrency"])
+@pytest.mark.parametrize("value", [0, -1, False])
+def test_swarm_registry_rejects_invalid_positive_limits(field, value):
+    payload = _payload()
+    payload["limits"] = {field: value}
+    with pytest.raises(InvalidSpecError):
+        parse_swarm_spec("demo", payload)
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_swarm_registry_rejects_invalid_timeout(value):
+    payload = _payload()
+    payload["limits"] = {"timeout_seconds": value}
+    with pytest.raises(InvalidSpecError):
+        parse_swarm_spec("demo", payload)
+
+
+def test_swarm_registry_rejects_invalid_cost_values():
+    for value in [-1, "1.2", float("nan"), float("inf")]:
+        payload = _payload()
+        payload["limits"] = {"max_total_cost": value}
+        with pytest.raises(InvalidSpecError):
+            parse_swarm_spec("demo", payload)
+
+
+def test_swarm_limits_programmatic_validation():
+    with pytest.raises(ValueError):
+        SwarmLimits(0, 1, 0, 0, 1, None, None, None)
+    with pytest.raises(ValueError):
+        SwarmLimits(1, 1, 0, 0, 1, None, Decimal("-1"), None)
+    with pytest.raises(ValueError):
+        SwarmLimits(1, 1, 0, 0, 1, None, None, float("inf"))

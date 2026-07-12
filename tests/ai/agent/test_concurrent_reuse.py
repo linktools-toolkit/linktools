@@ -34,13 +34,16 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.agent.runner import AgentRunner
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import ToolContext
+from linktools.ai.policy.engine import PolicyEngine, ToolContext
 from linktools.ai.run.context import RunContext as AiRunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -48,6 +51,42 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.tool.models import (
+    ManagedToolDefinition,
+    ToolContribution,
+    ToolDescriptor,
+)
+from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.pydantic import build_managed_toolset
+
+
+class _PingProvider(CapabilityProvider):
+    supported_kinds = ("test",)
+
+    async def resolve(self, ref, context):
+        async def ping():
+            return "pong"
+
+        return CapabilityBundle(
+            tool_contributions=(
+                ToolContribution(
+                    tools=(
+                        ManagedToolDefinition(
+                            descriptor=ToolDescriptor(
+                                name="ping",
+                                source="test",
+                                category="misc",
+                                risk="low",
+                                mutating=False,
+                                capability_kind="test",
+                                capability_name="ping",
+                            ),
+                            handler=ping,
+                        ),
+                    )
+                ),
+            )
+        )
 
 
 class _ContextCapturingMiddleware(Middleware):
@@ -96,14 +135,23 @@ async def _compiled(pipeline: MiddlewarePipeline):
         model=ModelPolicy(primary="test-model"),
         instructions=PromptSpec(instructions="hi"),
         output_schema=str,
+        tools=(ToolRef(kind="test", name="ping"),),
     )
     compiled = await compiler.compile(spec)
 
-    @compiled.pydantic_agent.tool_plain
-    def ping() -> str:  # noqa: D401
+    return compiled
+
+
+def _ping_definition() -> ManagedToolDefinition:
+    async def ping():
         return "pong"
 
-    return compiled
+    return ManagedToolDefinition(
+        descriptor=ToolDescriptor(
+            name="ping", source="test", category="misc", risk="low", mutating=False
+        ),
+        handler=ping,
+    )
 
 
 async def _seed_session(store, session_id) -> None:
@@ -127,6 +175,8 @@ def _make_runner(tmp_path, pipeline) -> AgentRunner:
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
         middleware_pipeline=pipeline,
+        capability_assembler=CapabilityAssembler({"test": _PingProvider()}),
+        managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
     )
 
 
@@ -216,8 +266,18 @@ async def test_concurrent_reuse_each_run_sees_own_tool_context_no_pollution(tmp_
         return await compiled.pydantic_agent.run(
             "ping",
             deps=AgentDependencies(
-                tool_context=ToolContext(run_id=run_id, session_id="session-cc")
+                tool_context=ToolContext(run_id=run_id, session_id="session-cc"),
+                descriptor_lookup={
+                    "ping": ToolDescriptor(
+                        name="ping",
+                        source="test",
+                        category="misc",
+                        risk="low",
+                        mutating=False,
+                    )
+                },
             ),
+            toolsets=[build_managed_toolset(_ping_definition())],
         )
 
     # Drive both calls concurrently on the SAME compiled agent.

@@ -319,7 +319,7 @@ def finalize_policy(resolved: "ResolvedToolPolicy | None") -> EffectiveToolPolic
 
 
 class MetadataBackedPolicyProvider:
-    """Wraps an old-style ``get_metadata_map()`` provider and resolves a
+    """Wraps a ``get_metadata_map()`` provider and resolves a
     ToolDescriptor into a ResolvedToolPolicy by looking up the tool's metadata.
     Tools not in the metadata map get default policy (enabled, no approval).
     Provider errors fail closed."""

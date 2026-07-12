@@ -259,7 +259,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
 async def test_runner_without_controller_still_transitions_on_external_cancel(tmp_path):
     """When ``run_controller`` is None (the default), the runner does no
     token checks, but external task.cancel() still drives the CancelledError
-    handler through CANCELLING -> CANCELLED. This preserves the pre-Phase-3A
+    handler through CANCELLING -> CANCELLED. This preserves the established
     behavior (existing tests like test_runner_cancel.py cover this exact
     case) while also exercising the new CANCELLING transition path."""
     ready = asyncio.Event()

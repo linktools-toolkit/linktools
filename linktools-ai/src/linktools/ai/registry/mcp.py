@@ -99,7 +99,9 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
     cwd = reader.optional_str("cwd")
     timeout_seconds = reader.positive_number("timeout_seconds")
     tool_prefix = reader.str_or_bool("tool_prefix")
-    enabled_tools = reader.string_tuple("enabled_tools") or None
+    enabled_tools = (
+        reader.string_tuple("enabled_tools") if "enabled_tools" in payload else None
+    )
     disabled_tools = reader.string_tuple("disabled_tools")
     discovery_mode = reader.optional_str("discovery_mode") or "strict"
     if discovery_mode not in ("strict", "best_effort"):
@@ -120,7 +122,7 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
         headers=headers,
         timeout_seconds=timeout_seconds,
         tool_prefix=tool_prefix,
-        enabled_tools=enabled_tools if enabled_tools else None,
+        enabled_tools=enabled_tools,
         disabled_tools=disabled_tools,
         metadata=metadata,
     )

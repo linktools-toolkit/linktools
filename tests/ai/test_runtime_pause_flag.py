@@ -25,7 +25,7 @@ def test_build_with_pause_wires_pause_enabled_executor(tmp_path):
     )
     # The compiler's default tool executor has pause_on_approval=True +
     # approval_store wired.
-    executor = runtime.compiler._tool_executor
+    executor = runtime._components.compiler._tool_executor
     assert executor._pause_on_approval is True
     assert executor._approval_store is not None
 
@@ -35,5 +35,5 @@ def test_build_default_has_pause_disabled(tmp_path):
         storage=FileStorage(root=tmp_path),
         model_router=ModelRouter(registry=_registry()),
     )
-    executor = runtime.compiler._tool_executor
+    executor = runtime._components.compiler._tool_executor
     assert executor._pause_on_approval is False

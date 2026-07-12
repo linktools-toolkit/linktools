@@ -369,5 +369,12 @@ class ToolExecutor:
                 await asyncio.sleep(backoff_delay(attempt + 1))
                 attempt += 1
         if use_idempotency:
-            await self._idempotency_store.fail(scope, idempotency_key, str(last_error))
+            from ..security.redact import redact_exception
+
+            safe_error = (
+                redact_exception(last_error)
+                if last_error is not None
+                else "unknown error"
+            )
+            await self._idempotency_store.fail(scope, idempotency_key, safe_error)
         raise last_error  # type: ignore[misc]

@@ -856,7 +856,7 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
     assert exc_info.value.kind == "max_depth"
 
 
-# --- 7. Phase-5A: task.id != child RunRecord.id (active_run_id decoupling) ---
+# --- 7. task.id != child RunRecord.id (active_run_id decoupling) ---
 #
 # design note contract: "禁止 SwarmTask.id == child_run_id". Each execution mints a
 # fresh run_id and stores it on task.active_run_id via SwarmStore.set_active_run.
@@ -1093,7 +1093,7 @@ def test_set_active_run_missing_task_raises_not_found():
 
 
 # ---------------------------------------------------------------------------
-# SwarmTaskAttempt recording (Phase-5B / design note contract)
+# SwarmTaskAttempt recording contract
 # ---------------------------------------------------------------------------
 
 
@@ -1129,7 +1129,7 @@ def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_
     tmp_path,
 ):
     """A successful _run_task records exactly one SwarmTaskAttempt whose run_id
-    matches the task's active_run_id (Phase-5A child run) and whose attempt
+    matches the task's active_run_id (child run) and whose attempt
     number is 1 (first execution: task.attempts started at 0 -> 0+1)."""
     from linktools.ai.swarm.models import AttemptStatus
     from linktools.ai.swarm.strategy import _run_task
@@ -1172,7 +1172,7 @@ def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_
     attempts = asyncio.run(swarm_store.list_attempts("task-1"))
     assert len(attempts) == 1
     assert attempts[0].status is AttemptStatus.SUCCEEDED
-    assert attempts[0].run_id == after.active_run_id  # Phase-5A invariant
+    assert attempts[0].run_id == after.active_run_id
     assert attempts[0].task_id == "task-1"
     assert attempts[0].agent_id == "worker-a"
     assert attempts[0].attempt == 1  # 1-based: first attempt

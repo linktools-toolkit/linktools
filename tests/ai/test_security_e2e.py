@@ -81,8 +81,9 @@ async def test_runtime_with_default_baseline_runs(tmp_path):
     """Default SecurityBaseline does not break normal execution."""
     from linktools.ai.model.router import ModelRouter
 
+    storage = FileStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=_registry()),
     )
     result = await rt.run(_spec(), "hello")
@@ -94,8 +95,9 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
     """SecurityBaseline(enabled=False) falls back to legacy path."""
     from linktools.ai.model.router import ModelRouter
 
+    storage = FileStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=_registry()),
         security=SecurityBaseline(enabled=False),
     )
@@ -323,8 +325,9 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     registry.register(
         "m", model=FunctionModel(_tool_calling_model_fn("read_file", {"path": "x"}))
     )
+    storage = FileStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_RequireApprovalPipeline()),
@@ -345,8 +348,8 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     approval_id = ei.value.approval_id
 
     # Approve the paused request.
-    req = await rt.storage.approvals.get(approval_id)
-    await rt.storage.approvals.approve(
+    req = await storage.approvals.get(approval_id)
+    await storage.approvals.approve(
         approval_id, expected_version=req.version, resolved_by="tester"
     )
 
@@ -355,7 +358,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     resumed_run = False
     async for _ev in rt.resume(run_id, spec):
         resumed_run = True
-    record = await rt.storage.runs.get(run_id)
+    record = await storage.runs.get(run_id)
     from linktools.ai.run.models import RunStatus
 
     assert record is not None
@@ -481,7 +484,7 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(kind="builtin", name="*"),),
     )
-    inspection = await rt.inspect(spec, execution=backend)
+    inspection = await rt.inspect(spec)
     names = {tool.name for tool in inspection.tools}
     assert {"list_dir", "read_file"} <= names
     assert "write_file" not in names

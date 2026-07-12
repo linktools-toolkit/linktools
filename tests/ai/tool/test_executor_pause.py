@@ -4,7 +4,7 @@
 policy says REQUIRE_APPROVAL, ``check()`` raises ``RunPaused`` carrying every
 field AgentRunner's suspension handler needs to persist the ApprovalRequest
 ITSELF -- the executor no longer persists anything (review3 contract/scenario,
-P0-6/G1). This is the key behavior change from the pre-Package-A contract:
+P0-6/G1). This is the key behavior change from the earlier contract:
 previously the executor called ``_record_approval`` (persisting a PENDING
 request) BEFORE raising; now persistence is deferred entirely to
 AgentRunner's pause handler so it can share one UnitOfWork with the

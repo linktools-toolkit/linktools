@@ -213,7 +213,7 @@ class SwarmRunner:
             # round loop in asyncio.wait_for. On timeout the TimeoutError is
             # translated to SwarmError("swarm timeout: ...") so the generic
             # FAILED handler below records a descriptive message; timeout_seconds
-            # left at None reproduces the prior path (no wait_for wrapper).
+            # None means no timeout wrapper is needed.
             timeout = spec.limits.timeout_seconds
             try:
                 if timeout is not None:
@@ -543,7 +543,7 @@ class SwarmRunner:
             await self._run_controller.cancel(driving_run_id)
         else:
             # No in-flight task (or no controller wired) -- nothing to
-            # actually stop, so go straight to CANCELLED (pre-Package-2
+            # actually stop, so go straight to CANCELLED
             # behavior, preserved for the store-only / cross-process case).
             await self._swarm_store.update_run(
                 swarm_run_id,
@@ -555,7 +555,7 @@ class SwarmRunner:
             swarm_run_id, status=SwarmTaskStatus.CLAIMED
         )
         for task in claimed:
-            # Phase-5A: the child RunRecord's id is task.active_run_id (NOT
+            # The child RunRecord's id is task.active_run_id (NOT
             # task.id). A CLAIMED task with active_run_id is None means the
             # strategy claimed it but crashed before set_active_run -- nothing
             # to cancel in RunStore, skip. Read the child's current version

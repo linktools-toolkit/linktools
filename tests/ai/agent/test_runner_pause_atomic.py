@@ -28,7 +28,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.runner import AgentRunner
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.events.payloads import RunPaused as RunPausedPayload
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
@@ -47,8 +50,40 @@ from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import (
+    ManagedToolDefinition,
+    ToolContribution,
+    ToolDescriptor,
+)
 
 TOOL_NAME = "risky"
+
+
+class _RiskyProvider(CapabilityProvider):
+    supported_kinds = ("test",)
+
+    async def resolve(self, ref, context):
+        async def risky(x: int) -> int:
+            return x * 2
+
+        return CapabilityBundle(
+            tool_contributions=(
+                ToolContribution(
+                    tools=(
+                        ManagedToolDefinition(
+                            descriptor=ToolDescriptor(
+                                name=TOOL_NAME,
+                                source="test",
+                                category="discovery",
+                                risk="high",
+                                mutating=False,
+                            ),
+                            handler=risky,
+                        ),
+                    )
+                ),
+            )
+        )
 
 
 # -- Model fixtures ---------------------------------------------------------
@@ -137,26 +172,31 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
                 model=ModelPolicy(primary="test-model"),
                 instructions=PromptSpec(instructions="hi"),
                 output_schema=str,
+                tools=(ToolRef(kind="test", name=TOOL_NAME),),
             )
         )
     )
-
-    @compiled.pydantic_agent.tool
-    async def risky(ctx, x: int) -> int:  # noqa: ANN001
-        return x * 2
 
     return compiled, executor
 
 
 def _sqla_runner(storage) -> AgentRunner:
     """AgentRunner wired with SqlAlchemy stores + the UoW factory -- the
-    Phase-2D atomic configuration."""
+    atomic configuration."""
     return AgentRunner(
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
         checkpoint_store=storage.checkpoints,
         uow_factory=storage.transaction,
+        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        managed_tool_executor=ToolExecutor(
+            policy=PolicyEngine(
+                rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
+            ),
+            approval_store=storage.approvals,
+            pause_on_approval=True,
+        ),
     )
 
 
@@ -460,19 +500,18 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
                 model=ModelPolicy(primary="test-model"),
                 instructions=PromptSpec(instructions="hi"),
                 output_schema=str,
+                tools=(ToolRef(kind="test", name=TOOL_NAME),),
             )
         )
     )
-
-    @compiled.pydantic_agent.tool
-    async def risky(ctx, x: int) -> int:  # noqa: ANN001
-        return x * 2
 
     runner = AgentRunner(
         run_store=FileRunStore(root=tmp_path / "runs"),
         session_store=FileSessionStore(root=tmp_path / "sessions"),
         event_store=_FailingOnRunPausedEvents(FileEventStore(root=tmp_path / "events")),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        managed_tool_executor=executor,
         # uow_factory deliberately omitted -> File mode non-atomic path.
     )
     now = datetime.now(timezone.utc)

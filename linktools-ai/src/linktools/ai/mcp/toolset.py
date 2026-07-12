@@ -37,7 +37,7 @@ def filter_tool_names(
     """Apply enabled_tools then disabled_tools. Order is preserved
     from the input; disabled always wins when both are set."""
     out: "list[str]" = []
-    enabled_set = set(enabled_tools) if enabled_tools else None
+    enabled_set = set(enabled_tools) if enabled_tools is not None else None
     disabled_set = set(disabled_tools) if disabled_tools else set()
     for name in names:
         if enabled_set is not None and name not in enabled_set:

@@ -371,7 +371,7 @@ def test_claim_task_returns_none_when_nothing_claimable(store_factory):
 
 # ---------------------------------------------------------------------------
 # 8b. set_active_run: stores the child RunRecord id on a CLAIMED task,
-#     bumps version, and rejects a stale expected_version. Phase-5A.
+#     bumps version, and rejects a stale expected_version.
 # ---------------------------------------------------------------------------
 
 

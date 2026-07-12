@@ -19,6 +19,8 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 from linktools.ai.tool.retry import DefaultRetryPolicy
 
 
@@ -138,7 +140,7 @@ async def test_inspect_returns_immutable_capability_inspection(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(),
     )
-    inspection = await rt.inspect(spec, execution=None)
+    inspection = await rt.inspect(spec)
     assert isinstance(inspection, CapabilityInspection)
     # Immutable: frozen dataclass.
     with pytest.raises(Exception):
@@ -163,6 +165,7 @@ async def test_schema_validation_raises_dedicated_error():
             name="t", source="t", category="file-read", risk="low", mutating=False
         ),
         handler=handler,
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
     )
     with pytest.raises(ToolSchemaValidationError):
         # Pass an argument violating the schema before any pipeline runs.
@@ -213,8 +216,9 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
 
     reg = ModelRegistry()
     reg.register("m", model=FunctionModel(model_fn))
+    storage = FileStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=reg),
         tool_executor=ToolExecutor(policy=PolicyEngine(rules=(_CountingRule(),))),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
@@ -329,8 +333,9 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
 
     reg = ModelRegistry()
     reg.register("m", model=FunctionModel(model_fn))
+    storage = FileStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=reg),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         providers=ProviderBundle(tool_policies=_IdemPolicySrc()),
@@ -374,7 +379,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     ).hexdigest()
     from linktools.ai.tool.idempotency import IdempotencyStatus
 
-    record = await rt.storage.idempotency.get("run-idem", key)
+    record = await storage.idempotency.get("run-idem", key)
     # The record may differ if pydantic-ai filled optional-arg defaults into
     # the persisted args; the definitive proof above is the run completing
     # without fail-closed. Assert the record when the key matches.

@@ -23,7 +23,10 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.runner import AgentRunner
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
@@ -34,9 +37,43 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import (
+    ManagedToolDefinition,
+    ToolContribution,
+    ToolDescriptor,
+)
 
 
 # -- Model fixtures ---------------------------------------------------------
+
+
+class _EchoProvider(CapabilityProvider):
+    supported_kinds = ("test",)
+
+    async def resolve(self, ref, context):
+        async def echo(text: str) -> str:
+            return f"echoed: {text}"
+
+        return CapabilityBundle(
+            tool_contributions=(
+                ToolContribution(
+                    tools=(
+                        ManagedToolDefinition(
+                            descriptor=ToolDescriptor(
+                                name="echo",
+                                source="test",
+                                category="discovery",
+                                risk="low",
+                                mutating=False,
+                            ),
+                            handler=echo,
+                        ),
+                    )
+                ),
+            )
+        )
 
 
 def _text_pair(text: str = "streamed-answer"):
@@ -134,6 +171,8 @@ def _make_runner(tmp_path):
         session_store=FileSessionStore(root=tmp_path / "sessions"),
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        capability_assembler=CapabilityAssembler({"test": _EchoProvider()}),
+        managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
     )
 
 
@@ -158,6 +197,7 @@ def _compile(
                 model=ModelPolicy(primary="test-model"),
                 instructions=PromptSpec(instructions="hi"),
                 output_schema=output_schema,
+                tools=(ToolRef(kind="test", name="echo"),),
             )
         )
     )
@@ -209,11 +249,6 @@ def test_run_stream_yields_text_events_and_succeeds(tmp_path):
 def test_run_stream_yields_tool_and_text_events(tmp_path):
     fn, stream_fn = _tool_then_text_pair(final_text="final-answer", tool_name="echo")
     runner, compiled = _compile(tmp_path, fn, stream_fn)
-
-    # Register the tool the model will call on the compiled pydantic-ai agent.
-    @compiled.pydantic_agent.tool
-    async def echo(ctx, text: str) -> str:
-        return f"echoed: {text}"
 
     _seed_session(runner._session_store, "session-s1")
 

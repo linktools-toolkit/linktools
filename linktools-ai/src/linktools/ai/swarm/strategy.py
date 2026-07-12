@@ -13,10 +13,10 @@ aggregate is written to the shared/parent session). ``_run_task`` builds a CHILD
 RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}:{child_run_id}"``
 and creates that SessionRecord before invoking AgentRunner.run. The
 ``child_run_id`` suffix keeps each retry attempt's scratch session distinct
-(see the Phase-5A note below) so a failed attempt's partial conversation
+(see the retry identity note below) so a failed attempt's partial conversation
 can never leak into the next attempt's prompt.
 
-Phase-5A invariant: the child RunRecord's id is NOT the task's id. ``_run_task``
+The child RunRecord's id is NOT the task's id. ``_run_task``
 mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
 task via ``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the
 handle SwarmRunner.cancel uses to find the in-flight child Run. On retry the
@@ -264,7 +264,7 @@ async def _run_task(
          api -- in the serial path this is ``task``; in the parallel path it may
          be a sibling task created by the same fan-out. We process whatever the
          store hands us so the PENDING->CLAIMED flip is consistent.
-      3. mint a FRESH child run_id (Phase-5A invariant: task.id != run_id) and
+      3. mint a FRESH child run_id (task.id != run_id) and
          record it on the task via ``set_active_run`` so cancel() can find the
          child RunRecord later. On retry this same method is re-invoked, so a
          new run_id is minted and active_run_id is overwritten.
@@ -310,7 +310,7 @@ async def _run_task(
     # too-low count.
     base_attempt = len(await ctx.swarm_store.list_attempts(claimed.id)) + 1
     for _attempt in range(max_task_retries + 1):
-        # Phase-5A: each attempt mints a FRESH child RunRecord id + scratch
+        # Each attempt mints a FRESH child RunRecord id + scratch
         # session, not just the first one. Reusing one child_run_id across
         # attempts made AgentRunner.execute()'s run_store.create() collide on
         # the same primary key from attempt #2 onward -- a real

@@ -273,7 +273,7 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
     """contract cursor-pagination guard: propfind with a small limit must page
     through every matching resource exactly once, via successive cursors,
     terminating with cursor=None. Catches the regression where cursor was
-    accepted but ignored (the Phase-1 stub always returned cursor=None after
+    accepted but ignored (the initial implementation always returned cursor=None after
     truncating to limit, dropping items past the first page)."""
     store = ResourceStore(primary=backend_factory())
     # Seed 5 resources under /r/. Sorted by path: /r/1.txt ... /r/5.txt.

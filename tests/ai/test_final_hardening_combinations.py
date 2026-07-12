@@ -59,6 +59,7 @@ async def test_large_security_event_is_persisted_through_managed_adapter(tmp_pat
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
         security_event_emitter=emitter,
         run_context=ctx,
     )
@@ -132,7 +133,7 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(kind="mcp", name="risk"),),
     )
-    inspection = await rt.inspect(agent, execution=None)
+    inspection = await rt.inspect(agent)
 
     assert inspection.tools == ()
     assert any("security degraded" in w for w in inspection.warnings)
@@ -161,6 +162,7 @@ async def test_dynamic_business_key_policy_fails_before_tool_execution():
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
         policy_provider=_BusinessKeyNoIdempotentProvider(),
         run_context=SimpleNamespace(run_id="r1"),
     )

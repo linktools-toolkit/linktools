@@ -64,6 +64,9 @@ class _CountingPipeline:
 
 
 class _SpecProvider:
+    def __init__(self, *, enabled_tools=None):
+        self.enabled_tools = enabled_tools
+
     async def list_ids(self):
         return ("demo",)
 
@@ -73,6 +76,7 @@ class _SpecProvider:
             name=server_id,
             transport="stdio",
             command=("demo",),
+            enabled_tools=self.enabled_tools,
         )
 
 
@@ -115,6 +119,15 @@ def _router():
                 parts=[ToolCallPart(tool_name="demo.lookup", args={"key": "x"})]
             )
         return ModelResponse(parts=[TextPart(content="mcp-value")])
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(model_fn))
+    return ModelRouter(registry=registry)
+
+
+def _text_router():
+    def model_fn(messages, info: AgentInfo):
+        return ModelResponse(parts=[TextPart(content="no tools needed")])
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(model_fn))
@@ -196,3 +209,27 @@ async def test_runtime_mcp_governance_executes_exactly_once(tmp_path):
     )
     assert sum(isinstance(event, ToolStarted) for event in payloads) == 1
     assert sum(isinstance(event, ToolCompleted) for event in payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_empty_mcp_allowlist_exposes_and_calls_no_tools(tmp_path):
+    manager = _Manager()
+    provider = MCPProvider(_SpecProvider(enabled_tools=()), manager)
+    runtime = Runtime.build(
+        storage=FileStorage(root=tmp_path),
+        model_router=_text_router(),
+        providers=ProviderBundle(capabilities=(provider,)),
+    )
+    spec = AgentSpec(
+        id="agent",
+        name="agent",
+        model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="do not use tools"),
+        tools=(ToolRef(kind="mcp", name="demo"),),
+    )
+
+    inspection = await runtime.inspect(spec)
+    assert inspection.tools == ()
+    result = await runtime.run(spec, "answer without tools")
+    assert "no tools needed" in str(getattr(result, "output", result))
+    assert manager.calls == []

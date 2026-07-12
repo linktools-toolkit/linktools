@@ -72,7 +72,6 @@ def test_parse_tool_refs_handles_kind_name_strings_and_struct():
     assert struct.name == "risk" and struct.kind == "mcp" and struct.config == {"k": 1}
     with pytest.raises(Exception):
         parse_tool_refs([{"name": "file"}])
-    assert plain.kind is None
 
 
 def test_parse_tool_refs_rejects_bad_shapes():

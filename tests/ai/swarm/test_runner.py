@@ -286,7 +286,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
     stores = _Stores(tmp_path)
     # construct the in-flight state directly: a RUNNING SwarmRun with one
     # CLAIMED task whose active_run_id points at a RUNNING child RunRecord
-    # (the Phase-5A invariant: task.active_run_id == child RunRecord.id,
+    # (the invariant: task.active_run_id == child RunRecord.id,
     # NOT task.id == child RunRecord.id).
     now = _NOW
 
@@ -322,7 +322,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
                 updated_at=now,
             )
         )
-        # child RunRecord in RUNNING state. Phase-5A: its id is DIFFERENT from
+        # child RunRecord in RUNNING state. Its id is DIFFERENT from
         # the task's id -- cancel() must locate it via task.active_run_id.
         await stores.run_store.create(
             RunRecord(
@@ -1080,13 +1080,13 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     assert driving.status is RunStatus.SUCCEEDED
 
 
-# --- 7. Phase-5A: end-to-end active_run_id decoupling (real FileSwarmStore) ---
+# --- 7. End-to-end active_run_id decoupling (real FileSwarmStore) ---
 
 
 def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
     """End-to-end through the real FileSwarmStore: after runner.run() completes,
     every SUCCEEDED task has active_run_id set, DIFFERENT from task.id, and
-    matching a real child RunRecord id. This is the Phase-5A invariant the
+    matching a real child RunRecord id. This is the invariant the
     design note contract mandates (禁止 SwarmTask.id == child_run_id)."""
     from linktools.ai.swarm.runner import SwarmRunner
 
@@ -1147,7 +1147,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
         )
 
 
-# --- recover() (Phase-5B / design note contract) --------------------------------
+# --- recover() contract -------------------------------------------------------
 
 
 def _seed_recover_state(

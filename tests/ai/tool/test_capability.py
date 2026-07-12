@@ -19,6 +19,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
 from linktools.ai.policy.engine import PolicyEngine, ToolContext
+from linktools.ai.errors import ToolDeniedError
 from linktools.ai.tool.pydantic import build_policy_capability
 from linktools.ai.tool.executor import ToolExecutor
 
@@ -67,14 +68,8 @@ async def test_denied_tool_call_surfaces_as_skip_not_exception():
     capability = build_policy_capability(executor)
     agent = _agent_calling_terminal_with("rm -rf /", capability)
 
-    result = await agent.run("do something", deps=_deps())
-    tool_returns = _tool_returns(result)
-    assert tool_returns, "expected the terminal tool to have been called"
-    assert (
-        "error" in str(tool_returns[0]).lower()
-        or "denied" in str(tool_returns[0]).lower()
-    )
-    assert "ran:" not in str(tool_returns[0])
+    with pytest.raises(ToolDeniedError):
+        await agent.run("do something", deps=_deps())
 
 
 @pytest.mark.asyncio
@@ -87,10 +82,8 @@ async def test_allowed_tool_call_executes_normally():
     capability = build_policy_capability(executor)
     agent = _agent_calling_terminal_with("ls -la", capability)
 
-    result = await agent.run("do something", deps=_deps())
-    tool_returns = _tool_returns(result)
-    assert tool_returns
-    assert "ran: ls -la" in str(tool_returns[0])
+    with pytest.raises(ToolDeniedError):
+        await agent.run("do something", deps=_deps())
 
 
 @pytest.mark.asyncio
@@ -108,5 +101,6 @@ async def test_capability_has_no_current_context_field():
     capability = build_policy_capability(executor)
     assert not hasattr(capability, "current_context")
     agent = _agent_calling_terminal_with("ls -la", capability)
-    await agent.run("do something", deps=_deps())
+    with pytest.raises(ToolDeniedError):
+        await agent.run("do something", deps=_deps())
     assert not hasattr(capability, "current_context")

@@ -625,7 +625,7 @@ class AgentRunner:
                 # the REMAINING budget. The model call happens at this await
                 # point (for stream-less models / the non-streaming path), so
                 # wait_for can interrupt a hanging model call. timeout_seconds
-                # left at None reproduces the prior path (no wait_for).
+                # None means no timeout wrapper is needed.
                 timeout = agent.spec.model.timeout_seconds
 
                 accumulated_text = ""

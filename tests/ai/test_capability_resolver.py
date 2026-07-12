@@ -56,7 +56,9 @@ async def test_assemble_builtin_file_only(tmp_path):
     tools are explicitly allowed."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
-    bundle = await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend))
+    bundle = await asm.assemble(
+        _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend)
+    )
     assert isinstance(bundle, CapabilityBundle)
     names = _contrib_names(bundle)
     assert "read_file" in names and "bash" not in names and "write_file" not in names
@@ -68,7 +70,7 @@ async def test_assemble_builtin_file_execution_tools_allowed_exposes_writes(tmp_
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
     bundle = await asm.assemble(
-        _spec((ToolRef(name="file"),)), _ctx(backend, policy=policy)
+        _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
     )
     names = _contrib_names(bundle)
     assert {"read_file", "write_file", "batch_files", "apply_patch"} <= names
@@ -208,7 +210,9 @@ async def test_introspectable_contribution_populates_per_tool_definitions(tmp_pa
     descriptor + extractable handler (the contract per-tool model, exercised)."""
     backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
-    bundle = await asm.assemble(_spec((ToolRef(name="file-read"),)), _ctx(backend))
+    bundle = await asm.assemble(
+        _spec((ToolRef(name="file-read", kind="builtin"),)), _ctx(backend)
+    )
     contrib = bundle.tool_contributions[0]
     assert contrib.tools, "per-tool ManagedToolDefinitions must be populated"
     # Each definition has a real handler resolved from the toolset.
@@ -223,7 +227,12 @@ async def test_duplicate_ref_raises_conflict(tmp_path):
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="duplicate"):
         await asm.assemble(
-            _spec((ToolRef(name="file"), ToolRef(name="file"))),
+            _spec(
+                (
+                    ToolRef(name="file", kind="builtin"),
+                    ToolRef(name="file", kind="builtin"),
+                )
+            ),
             _ctx(backend),
         )
 
@@ -281,7 +290,9 @@ async def test_cross_capability_tool_name_conflict_detected(tmp_path):
     # builtin:file and mcp:x both emit the file tools -> conflict, no silent overwrite.
     with pytest.raises(CapabilityConflictError, match="produced by both"):
         await asm.assemble(
-            _spec((ToolRef(name="file"), ToolRef(name="x", kind="mcp"))),
+            _spec(
+                (ToolRef(name="file", kind="builtin"), ToolRef(name="x", kind="mcp"))
+            ),
             _ctx(backend, policy=policy),
         )
 
@@ -295,7 +306,9 @@ async def test_total_tool_cap_enforced(tmp_path):
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     # builtin:file alone exposes 5 tools -> exceeds max_tools_total=2.
     with pytest.raises(CapabilityConflictError, match="max_tools_total"):
-        await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend, policy=policy))
+        await asm.assemble(
+            _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
+        )
 
 
 @pytest.mark.asyncio
@@ -306,11 +319,13 @@ async def test_per_capability_cap_enforced(tmp_path):
     )
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
-        await asm.assemble(_spec((ToolRef(name="file"),)), _ctx(backend, policy=policy))
+        await asm.assemble(
+            _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
+        )
 
 
 class _PromptProvider:
-    kind = "skill"
+    supported_kinds = ("skill",)
 
     async def resolve(self, ref, context):
         return CapabilityBundle(prompt_sections={"skills": f"section-{ref.name}"})

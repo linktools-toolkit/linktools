@@ -96,7 +96,7 @@ def _row_to_task(row: SwarmTaskRow) -> SwarmTask:
         lease_expires_at=_as_utc(row.lease_expires_at),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
-        # getattr covers rows written before Phase-5A added the column (raw
+        # getattr covers rows written before the column was added (raw
         # SQL rows from an old DB won't have it; SQLAlchemy unmapped-column
         # access raises AttributeError).
         active_run_id=getattr(row, "active_run_id", None),
@@ -458,7 +458,7 @@ class SqlAlchemySwarmStore:
         active_run_id: "str | None" = None,
     ) -> SwarmTask:
         # expected_version is now
-        # MANDATORY -- there is no more unconditional prior path. DB-level
+        # MANDATORY -- there is no unconditional fallback. DB-level
         # CAS via UPDATE ... WHERE version=:expected AND status='claimed'
         # AND (active_run_id IS NULL OR active_run_id=:active_run_id): a
         # worker whose lease already expired and was reclaimed to a new

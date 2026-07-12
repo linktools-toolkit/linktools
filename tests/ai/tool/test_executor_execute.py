@@ -111,15 +111,5 @@ def test_policy_capability_on_tool_execute_error_surfaces_as_skip():
             ),
         )
 
-    result = asyncio.run(_run())
-    tool_returns = [
-        part.content
-        for message in result.all_messages()
-        for part in message.parts
-        if getattr(part, "part_kind", None) == "tool-return"
-    ]
-    assert tool_returns
-    assert (
-        "handler crashed" in str(tool_returns[0])
-        or "error" in str(tool_returns[0]).lower()
-    )
+    with pytest.raises(ToolDeniedError):
+        asyncio.run(_run())

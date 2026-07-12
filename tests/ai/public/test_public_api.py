@@ -16,6 +16,30 @@ def test_top_level_runtime_import():
     assert "Runtime" in ai_pkg.__all__
 
 
+def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
+    import importlib.util
+
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.storage.facade import FileStorage
+
+    assert not hasattr(Runtime, "assemble")
+    runtime = Runtime.build(storage=FileStorage(root=tmp_path))
+    assert not hasattr(runtime, "runner")
+    assert not hasattr(runtime, "compiler")
+    assert not hasattr(runtime, "capability_assembler")
+    for module_name in (
+        "linktools.ai.capability.resolver",
+        "linktools.ai.tool.policy_adapter",
+        "linktools.ai.tool.idempotency_key",
+        "linktools.ai.tool.legacy",
+    ):
+        assert importlib.util.find_spec(module_name) is None
+
+    import linktools.ai.capability as capability
+
+    assert not hasattr(capability, "CapabilityResolver")
+
+
 def test_agent_domain_imports():
     from linktools.ai.agent import AgentSpec
 

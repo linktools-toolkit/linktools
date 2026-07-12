@@ -31,16 +31,16 @@ def _registry():
     return registry
 
 
-def test_runtime_build_assembles_storage_compiler_runner(tmp_path):
+def test_runtime_build_hides_internal_components(tmp_path):
     from linktools.ai.model.router import ModelRouter
 
     storage = FileStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_registry())
     )
-    assert runtime.storage is storage
-    assert runtime.runner is not None
-    assert runtime.compiler is not None
+    assert not hasattr(runtime, "storage")
+    assert not hasattr(runtime, "runner")
+    assert not hasattr(runtime, "compiler")
 
 
 def test_runtime_build_no_longer_accepts_workdir(tmp_path):
@@ -72,7 +72,7 @@ def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
         model_router=ModelRouter(registry=_registry()),
         execution=backend,
     )
-    assert runtime.runner._execution is backend
+    assert runtime._components.execution is backend
 
 
 def test_runtime_run_creates_session_when_none_given_and_returns_result(tmp_path):
@@ -317,8 +317,8 @@ def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
         storage=storage, model_router=ModelRouter(registry=_echo_registry())
     )
     # Memory is on-by-default: the runner's memory_store is the facade's memories.
-    assert isinstance(runtime.runner._memory_store, FileMemoryStore)
-    assert runtime.runner._memory_store is storage.memories
+    assert isinstance(runtime._components.runner._memory_store, FileMemoryStore)
+    assert runtime._components.runner._memory_store is storage.memories
 
 
 def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):

@@ -31,7 +31,10 @@ from linktools.ai.agent.checkpoint import deserialize_messages
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.runner import AgentRunner
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.models import CapabilityBundle
+from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
@@ -46,8 +49,40 @@ from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import (
+    ManagedToolDefinition,
+    ToolContribution,
+    ToolDescriptor,
+)
 
 TOOL_NAME = "risky"
+
+
+class _RiskyProvider(CapabilityProvider):
+    supported_kinds = ("test",)
+
+    async def resolve(self, ref, context):
+        async def risky(x: int) -> int:
+            return x * 2
+
+        return CapabilityBundle(
+            tool_contributions=(
+                ToolContribution(
+                    tools=(
+                        ManagedToolDefinition(
+                            descriptor=ToolDescriptor(
+                                name=TOOL_NAME,
+                                source="test",
+                                category="discovery",
+                                risk="high",
+                                mutating=False,
+                            ),
+                            handler=risky,
+                        ),
+                    )
+                ),
+            )
+        )
 
 
 # -- Model fixtures ---------------------------------------------------------
@@ -101,13 +136,15 @@ def _seed_session(store, session_id) -> None:
     )
 
 
-def _make_runner(tmp_path, *, approval_store=None) -> AgentRunner:
+def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentRunner:
     return AgentRunner(
         run_store=FileRunStore(root=tmp_path / "runs"),
         session_store=FileSessionStore(root=tmp_path / "sessions"),
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
         approval_store=approval_store,
+        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        managed_tool_executor=tool_executor,
     )
 
 
@@ -132,18 +169,17 @@ def _compile(
                 model=ModelPolicy(primary="test-model"),
                 instructions=PromptSpec(instructions="hi"),
                 output_schema=str,
+                tools=(ToolRef(kind="test", name=TOOL_NAME),),
             )
         )
     )
 
     # Register a real pydantic-ai tool whose name matches the ApprovalRule.
-    @compiled.pydantic_agent.tool
-    async def risky(ctx, x: int) -> int:  # noqa: ANN001
-        return x * 2
-
     # P0-6/G1: the runner (not the executor) persists the ApprovalRequest now
     # -- it must share the SAME approval_store instance the test asserts against.
-    runner = _make_runner(tmp_path, approval_store=approval_store)
+    runner = _make_runner(
+        tmp_path, approval_store=approval_store, tool_executor=executor
+    )
     return runner, compiled, approval_store
 
 
