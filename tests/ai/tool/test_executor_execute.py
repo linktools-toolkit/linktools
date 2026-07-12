@@ -19,6 +19,16 @@ from linktools.ai.policy.engine import (
 )
 from linktools.ai.tool.pydantic import build_policy_capability
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.policy import EffectiveToolPolicy
+
+# ToolExecutor.execute now requires the finalized descriptor + policy (a
+# mutating non-idempotent tool must not be retried), so every direct test call
+# passes a concrete non-mutating descriptor + default policy.
+_DESC = ToolDescriptor(
+    name="t", source="test", category="misc", risk="low", mutating=False
+)
+_POLICY = EffectiveToolPolicy()
 
 
 def test_execute_runs_check_then_handler_and_returns_result():
@@ -32,6 +42,8 @@ def test_execute_runs_check_then_handler_and_returns_result():
             ToolRequest(tool_name="double", arguments={"value": 21}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
         )
 
     assert asyncio.run(_run()) == 42
@@ -56,6 +68,8 @@ def test_execute_raises_before_handler_when_policy_denies():
             ToolRequest(tool_name="double", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
         )
 
     with pytest.raises(ToolDeniedError):

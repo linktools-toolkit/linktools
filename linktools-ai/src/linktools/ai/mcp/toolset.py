@@ -25,7 +25,12 @@ def final_tool_name(
     """
     if tool_prefix is False:
         return tool_name
-    prefix = server_id if tool_prefix in (None, True) else str(tool_prefix)
+    if tool_prefix is True or tool_prefix is None:
+        prefix = server_id
+    else:
+        # A string prefix -- its type/emptiness is enforced by MCPServerSpec, so
+        # use it directly rather than coercing via str().
+        prefix = tool_prefix
     return f"{prefix}.{tool_name}"
 
 

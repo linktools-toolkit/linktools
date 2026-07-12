@@ -6,6 +6,8 @@ the markdown body becomes the PromptSpec.instructions."""
 
 from typing import Any
 
+from collections.abc import Mapping
+
 from ..agent.spec import AgentSpec, MiddlewareRef, PromptSpec
 from ..errors import InvalidSpecError, RegistryNotFoundError
 from .parser import (
@@ -18,31 +20,34 @@ from .parser import (
 
 
 def _parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
-    """Build a tuple[MiddlewareRef] from a list of names or {name, config} dicts."""
+    """Build a tuple[MiddlewareRef] from a list of names or {name, config}
+    mappings. Unknown fields are rejected and names are stripped."""
     if items is None:
         return ()
     if not isinstance(items, (list, tuple)):
         raise InvalidSpecError("middleware must be a list")
     refs: list[MiddlewareRef] = []
-    for item in items:
+    for index, item in enumerate(items):
         if isinstance(item, str):
-            refs.append(MiddlewareRef(name=item))
-        elif isinstance(item, dict) and "name" in item:
-            if not isinstance(item["name"], str) or not item["name"].strip():
-                raise InvalidSpecError("middleware name must be a non-empty string")
-            config = item.get("config")
-            if config is None:
-                config = {}
-            elif not isinstance(config, dict):
-                raise InvalidSpecError("middleware config must be a mapping")
-            refs.append(
-                MiddlewareRef(
-                    name=item["name"],
-                    config=config,
-                )
+            name = item.strip()
+            if not name:
+                raise InvalidSpecError(f"middleware[{index}]: name must not be blank")
+            refs.append(MiddlewareRef(name=name))
+            continue
+        if not isinstance(item, Mapping):
+            raise InvalidSpecError(
+                f"middleware[{index}]: invalid middleware ref: {item!r}"
             )
-        else:
-            raise InvalidSpecError(f"invalid middleware ref: {item!r}")
+        item_reader = StrictConfigReader(
+            item,
+            allowed={"name", "config"},
+            context=f"middleware[{index}]",
+        )
+        name = item_reader.required_str("name").strip()
+        if not name:
+            raise InvalidSpecError(f"middleware[{index}]: name must not be blank")
+        config = item_reader.mapping("config") or {}
+        refs.append(MiddlewareRef(name=name, config=config))
     return tuple(refs)
 
 

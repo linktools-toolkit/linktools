@@ -7,6 +7,8 @@ dropped so the next get() re-reads and re-parses the YAML."""
 
 from typing import Any
 
+from collections.abc import Mapping
+
 from ..agent.spec import MiddlewareRef
 from ..errors import InvalidSpecError, RegistryNotFoundError
 from ..swarm.aggregation import AggregationMode, AggregationPolicy
@@ -22,20 +24,31 @@ from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
 
 
 def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
-    """Build an AgentRef from a string or {agent_id, role?} mapping."""
+    """Build an AgentRef from a string or {agent_id, role?} mapping. String and
+    agent_id forms are stripped; unknown fields are rejected."""
     if isinstance(item, str):
-        return AgentRef(agent_id=item)
-    if isinstance(item, dict) and "agent_id" in item:
-        role_raw = item.get("role")
-        if not isinstance(item["agent_id"], str) or not item["agent_id"].strip():
-            raise InvalidSpecError(f"swarm {swarm_id}: agent_id must be a string")
-        if role_raw is not None and not isinstance(role_raw, str):
-            raise InvalidSpecError(f"swarm {swarm_id}: role must be a string")
-        return AgentRef(
-            agent_id=item["agent_id"],
-            role=role_raw,
-        )
-    raise InvalidSpecError(f"swarm {swarm_id}: invalid {kind} ref: {item!r}")
+        agent_id = item.strip()
+        if not agent_id:
+            raise InvalidSpecError(
+                f"swarm {swarm_id}: {kind} agent_id must not be blank"
+            )
+        return AgentRef(agent_id=agent_id)
+    if not isinstance(item, Mapping):
+        raise InvalidSpecError(f"swarm {swarm_id}: invalid {kind} ref: {item!r}")
+    item_reader = StrictConfigReader(
+        item,
+        allowed={"agent_id", "role"},
+        context=f"swarm {swarm_id}: {kind}",
+    )
+    agent_id = item_reader.required_str("agent_id").strip()
+    if not agent_id:
+        raise InvalidSpecError(f"swarm {swarm_id}: {kind} agent_id must not be blank")
+    role = item_reader.optional_str("role")
+    if role is not None:
+        role = role.strip()
+        if not role:
+            raise InvalidSpecError(f"swarm {swarm_id}: {kind} role must not be blank")
+    return AgentRef(agent_id=agent_id, role=role)
 
 
 def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
@@ -170,7 +183,12 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
                 f"swarm {swarm_id}: unknown aggregation mode: {agg_raw!r}"
             ) from exc
     elif isinstance(agg_raw, dict):
-        mode_raw = agg_raw.get("mode", AggregationMode.CONCAT.value)
+        agg_reader = StrictConfigReader(
+            agg_raw,
+            allowed={"mode"},
+            context=f"swarm {swarm_id}.aggregation",
+        )
+        mode_raw = agg_reader.optional_str("mode") or AggregationMode.CONCAT.value
         try:
             aggregation = AggregationPolicy(mode=AggregationMode(mode_raw))
         except ValueError as exc:

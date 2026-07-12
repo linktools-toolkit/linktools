@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Pluggable context-injection strategies, kept out of AgentRunner so the runner
 does not hardcode memory limits, owner-resolution semantics, or prompt section
-titles. Default implementations preserve the prior behavior; downstream systems
-can substitute any of these Protocols.
+titles. Default implementations provide the built-in semantics; downstream
+systems can substitute any of these Protocols.
 
 - MemoryPolicy: selects which MemoryRecords to inject (and may write new ones).
 - RetrievalPolicy: retrieves knowledge items for the run.

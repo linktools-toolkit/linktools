@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """AgentDependencies: the per-Run context passed to pydantic-ai capabilities
-via dependency injection. Replaces the prior mutable per-Run field pattern.
+via dependency injection.
 
-``CompiledAgent`` is compiled once and
-reused across many real Runs. Previously, ``PolicyCapability`` and
-``MiddlewareCapability`` each carried a mutable per-Run ToolContext field that
-``AgentRunner`` set/clear around each ``agent.pydantic_agent.run()`` call --
-a data race waiting to happen whenever two Runs shared one ``CompiledAgent``.
+``CompiledAgent`` is compiled once and reused across many real Runs, so the
+per-Run context must NOT live in a mutable field on the compiled
+capabilities -- two Runs sharing one ``CompiledAgent`` would race on it.
 
 ``AgentDependencies`` is the per-Run object pydantic-ai threads through every
 capability hook as ``ctx.deps``. The runner constructs one per Run and passes

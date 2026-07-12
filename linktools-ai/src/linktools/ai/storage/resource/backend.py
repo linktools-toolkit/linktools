@@ -60,8 +60,8 @@ class ResourceBackend(Protocol):
     # to run all three steps inside a single transaction. The File backend
     # implements them under an in-process lock (the best a non-transactional
     # filesystem can do). The Memory backend does NOT implement them:
-    # ResourceStore probes with hasattr() and, when absent, falls back to the
-    # prior 3-step orchestration -- so Memory keeps today's behavior unchanged.
+    # ResourceStore probes with hasattr() and, when absent, falls back to its
+    # own 3-step orchestration.
     # `request_hash` is computed by ResourceStore (which owns the hash recipe)
     # and passed in so the backend can do the idempotency comparison atomically.
 
@@ -90,8 +90,8 @@ class ResourceBackend(Protocol):
     # that has a real transaction primitive (SqlAlchemy) implements raw_move as
     # ONE transaction. The File backend implements it under self._lock with an
     # os.replace for the data file. The Memory backend does NOT implement it:
-    # ResourceStore probes with hasattr() and, when absent, falls back to the
-    # prior put+delete orchestration -- so Memory keeps today's behavior.
+    # ResourceStore probes with hasattr() and, when absent, falls back to its
+    # own put+delete orchestration.
 
     async def raw_move(
         self,

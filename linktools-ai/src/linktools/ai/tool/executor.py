@@ -38,6 +38,8 @@ from .idempotency import IdempotencyStatus, IdempotencyStore, compute_request_ha
 if TYPE_CHECKING:
     from ..agent.approval import ApprovalRequest, ApprovalStore
     from ..events.store import EventStore
+    from .models import ToolDescriptor
+    from .policy import EffectiveToolPolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,8 +72,8 @@ class ToolExecutor:
         # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
         # ToolError) so PolicyCapability's catch list does not translate it
         # into SkipToolExecution -- it propagates out of pydantic-ai's
-        # tool-execution stack to AgentRunner ( catch it). Default
-        # False preserves today's behavior byte-for-byte.
+        # tool-execution stack to AgentRunner (which catches it). Default
+        # False is the direct-raise mode (ToolApprovalRequiredError).
         self._pause_on_approval = pause_on_approval
         self._security_audit_failure_mode = getattr(
             security_audit_failure_mode, "value", security_audit_failure_mode
@@ -166,12 +168,11 @@ class ToolExecutor:
         None when no store is wired. Best-effort audit: event-emission failures
         are logged and swallowed (the approval record is the source of truth);
         the caller (check) still raises afterward regardless of outcome here.
-        With approval_store=None this is a no-op (default-None path: behavior
-        identical to today).
+        With approval_store=None this is a no-op.
 
-        Only used by the prior ``pause_on_approval=False`` direct-raise path
-        -- the pause path does NOT call this; it defers persistence
-        to AgentRunner's suspension handler instead (see ``check``).
+        Only used by the direct-raise mode (``pause_on_approval=False``) -- the
+        pause path does NOT call this; it defers persistence to AgentRunner's
+        suspension handler instead (see ``check``).
 
         Event emission is best-effort: the EventStore assigns the sequence
         itself, so a failure here is logged and swallowed --
@@ -189,8 +190,8 @@ class ToolExecutor:
         # Prefer the pydantic-ai ToolCallPart id threaded through ToolContext
         # by PolicyCapability (the linchpin of resume: a re-driven call after
         # approve() must find the matching approval). Fall back to a fresh uuid
-        # when unset (e.g. tests that construct ToolContext directly without a
-        # tool_call_id -- test_executor_approval.py relies on this path).
+        # when the context carries no tool_call_id (e.g. a directly-constructed
+        # ToolContext with no stable call id).
         tool_call_id = context.tool_call_id or str(uuid.uuid4())
         approval = build_approval_request(
             run_id=run_id,
@@ -240,23 +241,32 @@ class ToolExecutor:
         context: ToolContext,
         handler: "Callable[..., Awaitable[Any]]",
         *,
+        descriptor: "ToolDescriptor",
+        effective_policy: "EffectiveToolPolicy",
         timeout: "float | None" = None,
         max_retries: int = 0,
         idempotency_key: "str | None" = None,
         schema_version: str = "1",
-        descriptor: Any = None,
-        effective_policy: Any = None,
         idempotency_scope: "str | None" = None,
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
+
+        ``descriptor`` and ``effective_policy`` are required: the retry decision
+        reads ``descriptor.mutating`` and ``effective_policy.idempotent`` (a
+        mutating non-idempotent tool is never retried), so a caller that omits
+        them would let the executor invent a non-mutating default policy and
+        retry a write it must not. Every real call site
+        (ManagedToolAdapter) passes the finalized descriptor and policy it just
+        resolved; a direct executor call with no descriptor/policy is a
+        programming error, surfaced as ``TypeError`` by the signature itself.
 
         ``timeout`` wraps each handler call in :func:`asyncio.wait_for`; an
         :class:`asyncio.TimeoutError` is caught like any other exception
         (retried if attempts remain, raised otherwise). ``max_retries`` is the
         number of additional attempts after the first -- on any exception the
         call is retried up to ``max_retries`` times, after which the last error
-        is re-raised. Defaults (``timeout=None``, ``max_retries=0``) preserve
-        the prior single-call-no-timeout behavior exactly.
+        is re-raised. The defaults (``timeout=None``, ``max_retries=0``) mean a
+        single handler call with no timeout wrap.
 
         ``idempotency_key`` enables persistent tool-call idempotency. When the
         executor was constructed with an
@@ -270,7 +280,7 @@ class ToolExecutor:
         - RESERVED  + same request hash -> ``IdempotencyInProgressError``
           (another in-flight call owns the reservation).
         - FAILED    + same request hash -> retry: the handler runs again and
-          the terminal transition overwrites the prior FAILED record.
+          the terminal transition overwrites the FAILED record.
         - Same (scope, key) with a different request hash -> reserve raises
           ``IdempotencyConflictError`` (same key reused for different args).
         - Fresh reservation -> handler runs; ``complete`` on success,
@@ -280,12 +290,10 @@ class ToolExecutor:
         so a ToolSpec whose input contract changed shape bumps its
         schema_version and gets a fresh hash -- a stale idempotency record
         from before the change is never mistaken for a match. Callers that
-        have a ``ToolSpec`` in hand should pass ``spec.schema_version`` here;
-        omitting it preserves the prior hash formula's default.
+        have a ``ToolSpec`` in hand should pass ``spec.schema_version`` here.
 
-        Default ``idempotency_store=None`` (or ``idempotency_key=None``)
-        preserves today's no-idempotency behavior: the handler runs every
-        call and nothing is persisted."""
+        With no ``idempotency_store`` (or no ``idempotency_key``), idempotency
+        is off: the handler runs every call and nothing is persisted."""
         await self.check(request, context)
         # Idempotency is scoped to context.run_id so the same idempotency_key
         # can be reused across different runs without colliding. ``scope`` is
@@ -323,26 +331,12 @@ class ToolExecutor:
                         f"idempotent request in progress: key={idempotency_key!r}"
                     )
                 # FAILED: fall through to re-execute. The handler runs again
-                # and complete()/fail() overwrites the prior terminal record
+                # and complete()/fail() overwrites the existing terminal record
                 # FAILED allows retry per policy.
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
-        # Defaults for the retry decision when the caller didn't supply a
-        # descriptor/effective_policy (e.g. a direct executor call): treat the
-        # tool as non-mutating with default policy, so the retry decision is
-        # governed purely by the error type.
-        from ..tool.models import ToolDescriptor as _Desc
-        from .policy import EffectiveToolPolicy as _Eff
         from .retry import backoff_delay
 
-        retry_desc = descriptor or _Desc(
-            name=request.tool_name,
-            source="executor",
-            category="custom",
-            risk="medium",
-            mutating=False,
-        )
-        retry_pol = effective_policy or _Eff()
         attempt = 0
         while True:
             try:
@@ -362,7 +356,10 @@ class ToolExecutor:
                 if attempt >= max_retries:
                     break
                 if not self._retry_policy.should_retry(
-                    error=exc, attempt=attempt, policy=retry_pol, descriptor=retry_desc
+                    error=exc,
+                    attempt=attempt,
+                    policy=effective_policy,
+                    descriptor=descriptor,
                 ):
                     break
                 # Transient: back off (cancellable) and retry.

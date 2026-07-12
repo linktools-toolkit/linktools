@@ -7,6 +7,7 @@ import pytest
 
 from linktools.ai.registry.parser import SpecLoader
 from linktools.ai.storage.resource.memory import MemoryResourceBackend
+from linktools.ai.storage.resource.models import WriteOptions
 from linktools.ai.storage.resource.path import ResourcePath
 from linktools.ai.storage.resource.store import ResourceStore
 
@@ -59,10 +60,55 @@ async def test_from_resources_prefix_leading_slash_tolerated():
 
 
 @pytest.mark.asyncio
-async def test_from_resources_revision_is_constant_zero():
+async def test_from_resources_revision_reflects_modify_add_delete():
+    """revision() is a stable hash over live resource metadata, so the registry
+    cache refreshes after any change -- not pinned to a constant 0."""
+    store = await _store_with({"/specs/agents/a.md": "v1"})
+    loader = SpecLoader.from_resources(store, prefix="specs/agents")
+    rev_initial = await loader.revision()
+    assert rev_initial != 0, "revision must not be a constant 0"
+
+    # Modify: overwrite a.md with new content -> etag/size/version change.
+    await store.put(
+        ResourcePath("/specs/agents/a.md"),
+        b"v2",
+        options=WriteOptions(content_type="text/markdown"),
+    )
+    rev_after_modify = await loader.revision()
+    assert rev_after_modify != rev_initial, "revision must change on modify"
+
+    # Add: a new resource -> revision changes again.
+    await store.put(
+        ResourcePath("/specs/agents/b.md"),
+        b"x",
+        options=WriteOptions(content_type="text/markdown"),
+    )
+    rev_after_add = await loader.revision()
+    assert rev_after_add != rev_after_modify, "revision must change on add"
+
+    # Delete: b.md removed -> revision changes again, and list_ids drops it.
+    await store.delete(ResourcePath("/specs/agents/b.md"))
+    rev_after_delete = await loader.revision()
+    assert rev_after_delete != rev_after_add, "revision must change on delete"
+
+
+@pytest.mark.asyncio
+async def test_from_resources_revision_stable_across_unchanged_reads():
+    """An unchanged resource set yields the same revision (no spurious cache
+    invalidation), and list_ids tracks adds/deletes."""
     store = await _store_with({"/specs/agents/a.md": "x"})
     loader = SpecLoader.from_resources(store, prefix="specs/agents")
-    assert await loader.revision() == 0
+    first = await loader.revision()
+    second = await loader.revision()
+    assert first == second, "unchanged set must keep a stable revision"
+    assert await loader.list_ids(".md") == ("a",)
+
+    await store.put(
+        ResourcePath("/specs/agents/b.md"),
+        b"y",
+        options=WriteOptions(content_type="text/markdown"),
+    )
+    assert await loader.list_ids(".md") == ("a", "b"), "list_ids must see new id"
 
 
 @pytest.mark.asyncio

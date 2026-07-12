@@ -180,8 +180,7 @@ class AgentRunner:
         # builtin file/terminal FunctionToolset from it at execution time,
         # passing it via ``agent.iter(prompt, toolsets=[...])``. ``None``
         # (default) means the compiled agent exposes no builtin tools -- a
-        # conversational-only run, byte-for-byte identical to the prior
-        # ``workdir=None`` path. Holding the backend on the runner (not the
+        # conversational-only run. Holding the backend on the runner (not the
         # compiler) is what decouples AgentCompiler from the filesystem.
         self._execution = execution
         # File-mode approval persistence for
@@ -194,8 +193,8 @@ class AgentRunner:
         # Capability Runtime: when an AgentSpec declares non-
         # empty tools and an assembler is wired, execute() resolves those tools
         # into prompt sections + toolsets via the capability providers. Default
-        # None preserves the prior behavior (empty tools -> default builtin
-        # toolset when an execution backend is present).
+        # None means empty tools resolve to the default builtin toolset when an
+        # execution backend is present.
         self._capability_assembler = capability_assembler
         self._capability_options = capability_options
         self._security_pipeline = security_pipeline
@@ -322,8 +321,7 @@ class AgentRunner:
         # cancelled to interrupt any hanging await inside the model call.
         # When ``run_controller`` is None (default), ``token`` stays None and
         # every check below is skipped -- cancellation then works purely via
-        # asyncio's CancelledError path (the prior behavior, so the
-        # default-None path is observationally identical to before).
+        # asyncio's CancelledError path (cooperative cancellation only).
         token: "CancellationToken | None" = None
         if self._run_controller is not None:
             token = CancellationToken()
@@ -533,12 +531,12 @@ class AgentRunner:
                     # whether a tool is ManagedToolsetWrapper-wrapped) can
                     # classify calls by category/risk/mutating too -- not just
                     # by tool name.
-                    # Build the per-run descriptor lookup from BOTH contribution
-                    # forms (per-tool ``tools`` and prior ``descriptors``) -- the
-                    # assembler normalizes introspectable contributions to the
-                    # tools form (descriptors empty), so reading descriptors alone
-                    # would leave the lookup empty and defeat the single-check
-                    # (PolicyCapability would not recognize these as managed).
+                    # Build the per-run descriptor lookup from every
+                    # contribution's tool descriptors via
+                    # ``_contribution_descriptors`` -- the single helper that
+                    # reads the per-tool definitions, so PolicyCapability can
+                    # recognize every managed tool (reading only one shape
+                    # would leave the lookup empty for the other).
                     from ..capability.assembler import _contribution_descriptors
 
                     descriptor_lookup = {

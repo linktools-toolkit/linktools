@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Shared text parsers and strict registry configuration helpers."""
 
+import hashlib
 import json
 import math
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Sequence
 
 from ..errors import InvalidSpecError, RegistryNotFoundError, RegistryParseError
 from ..registry._config import load_markdown_text, load_yaml_text
@@ -41,6 +42,30 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
     return data
 
 
+def _stable_resource_revision(items: "Sequence[Any]") -> int:
+    """Process-stable revision over a resource-info set: a SHA-256 digest of
+    each item's path/etag/version/modified_at/size, so changing one item,
+    adding one, or removing one yields a different revision and a registry
+    refreshes its cache. Sorted by path so reordering does not perturb the
+    hash; ``sort_keys=True`` makes the JSON deterministic."""
+    state = [
+        {
+            "path": info.path.value,
+            "etag": info.etag,
+            "version": info.version,
+            "modified_at": (
+                info.modified_at.isoformat() if info.modified_at is not None else None
+            ),
+            "size": info.size,
+        }
+        for info in sorted(items, key=lambda v: v.path.value)
+    ]
+    digest = hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
 class SpecLoader:
     """Reads spec text + lists ids from either the filesystem or a ResourceStore."""
 
@@ -71,13 +96,27 @@ class SpecLoader:
             return tuple(ids)
 
         async def revision() -> int:
-            best = 0
+            # High-resolution revision over the full file set: (relative path,
+            # mtime_ns, size) per file. mtime_ns (nanosecond, not second-level)
+            # avoids same-second collisions; hashing path+size too means an add or
+            # delete changes the revision (the max-mtime approach missed those
+            # and same-second modifies). A file that disappears between rglob
+            # and stat is skipped -- the next revision reflects the final state.
+            state: "list[tuple[str, int, int]]" = []
             for root in roots_t:
-                if root.is_dir():
-                    for p in root.rglob("*"):
-                        if p.is_file():
-                            best = max(best, int(p.stat().st_mtime))
-            return best
+                if not root.is_dir():
+                    continue
+                for p in root.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    try:
+                        stat = p.stat()
+                    except FileNotFoundError:
+                        continue
+                    state.append(
+                        (str(p.relative_to(root)), stat.st_mtime_ns, stat.st_size)
+                    )
+            return hash(tuple(sorted(state)))
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 
@@ -85,8 +124,10 @@ class SpecLoader:
     def from_resources(cls, resource_store: Any, *, prefix: str) -> "SpecLoader":
         # ResourceStore exposes get(ResourcePath) + propfind(ResourcePath); it has
         # no .list() and no global .revision(). Build paths via ResourcePath so the
-        # store's own normalization + sandbox apply; pin revision at 0 (the store
-        # owns per-resource etag/version, not a global revision clock).
+        # store's own normalization + sandbox apply. The revision is a stable hash
+        # over the live resource metadata (path/etag/version/modified_at/size) so
+        # the registry cache refreshes after any add/modify/delete instead of
+        # pinning to a constant.
         from ..storage.resource.models import Depth
         from ..storage.resource.path import ResourcePath
 
@@ -98,6 +139,21 @@ class SpecLoader:
                 raise RegistryNotFoundError(f"invalid spec resource path: {path!r}")
             return ResourcePath(f"/{joined}")
 
+        async def _list_items() -> "list[Any]":
+            # Follow propfind cursor pagination so the full resource set is read
+            # (the revision must reflect every item, not just the first page).
+            root = ResourcePath(f"/{base}") if base else ResourcePath("/")
+            items: "list[Any]" = []
+            cursor = None
+            while True:
+                page = await resource_store.propfind(
+                    root, depth=Depth.ONE, limit=1000, cursor=cursor
+                )
+                items.extend(page.items)
+                if page.cursor is None:
+                    return items
+                cursor = page.cursor
+
         async def read(path: str) -> str:
             full = _full(path)
             resource = await resource_store.get(full)
@@ -106,17 +162,15 @@ class SpecLoader:
             return resource.text()
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
-            root = ResourcePath(f"/{base}") if base else ResourcePath("/")
-            page = await resource_store.propfind(root, depth=Depth.ONE, limit=1000)
             ids: "list[str]" = []
-            for item in page.items:
+            for item in await _list_items():
                 name = item.path.value.rstrip("/").rsplit("/", 1)[-1]
                 if name.endswith(suffix):
                     ids.append(name[: -len(suffix)])
             return tuple(sorted(ids))
 
         async def revision() -> int:
-            return 0
+            return _stable_resource_revision(await _list_items())
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 
@@ -149,29 +203,18 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
     primary = reader.required_str("primary").strip()
     if not primary:
         raise InvalidSpecError("model policy primary must not be empty")
-    fallbacks = reader.string_tuple("fallbacks") if "fallbacks" in payload else ()
-    max_retries = payload.get("max_retries", 1)
-    timeout = payload.get("timeout_seconds", 30.0)
-    if (
-        isinstance(max_retries, bool)
-        or not isinstance(max_retries, int)
-        or max_retries < 0
-    ):
-        raise InvalidSpecError(
-            "model policy max_retries must be a non-negative integer"
-        )
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or timeout <= 0
-    ):
-        raise InvalidSpecError("model policy timeout_seconds must be positive")
+    fallbacks = reader.string_tuple("fallbacks", default=())
+    # Route every typed field through the reader so a missing field uses its
+    # default, an explicit null is rejected, and (for timeout) NaN/Infinity are
+    # rejected via math.isfinite -- positive_number centralizes that check.
+    max_retries = reader.non_negative_int("max_retries", default=1)
+    timeout = reader.positive_number("timeout_seconds", default=30.0)
     budget = reader.non_negative_decimal("budget")
     return ModelPolicy(
         primary=primary,
         fallbacks=fallbacks,
         max_retries=max_retries,
-        timeout_seconds=float(timeout),
+        timeout_seconds=timeout,
         max_tokens=reader.positive_int("max_tokens"),
         budget=budget,
     )
@@ -180,7 +223,9 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
 def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     """Build a tuple[ToolRef] from a list of tool declarations.
 
-    Tool declarations are explicit mappings with string ``kind`` and ``name``.
+    Tool declarations are explicit mappings with string ``kind`` and ``name``;
+    unknown fields are rejected and the names are normalized (stripped) so a
+    stray space cannot silently turn into a different tool identity.
     """
     from ..agent.spec import ToolRef
 
@@ -191,158 +236,139 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     if not isinstance(items, (list, tuple)):
         raise InvalidSpecError("tools must be a list")
     refs: list[Any] = []
-    for item in items:
-        if isinstance(item, dict) and "name" in item and "kind" in item:
-            kind = item.get("kind")
-            name = item.get("name")
-            if not isinstance(kind, str) or not kind.strip():
-                raise InvalidSpecError(
-                    f"tool ref kind must be a non-empty string: {item!r}"
-                )
-            if not isinstance(name, str) or not name.strip():
-                raise InvalidSpecError(
-                    f"tool ref name must be a non-empty string: {item!r}"
-                )
-            config = item.get("config")
-            if config is None:
-                config = {}
-            elif not isinstance(config, dict):
-                raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
-            refs.append(
-                ToolRef(
-                    name=name,
-                    kind=kind,
-                    config=config,
-                )
-            )
-        else:
-            raise InvalidSpecError(f"invalid tool ref: {item!r}")
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise InvalidSpecError(f"tools[{index}]: invalid tool ref: {item!r}")
+        item_reader = StrictConfigReader(
+            item,
+            allowed={"kind", "name", "config"},
+            context=f"tools[{index}]",
+        )
+        kind = item_reader.required_str("kind").strip()
+        if not kind:
+            raise InvalidSpecError(f"tools[{index}]: kind must not be blank")
+        name = item_reader.required_str("name").strip()
+        if not name:
+            raise InvalidSpecError(f"tools[{index}]: name must not be blank")
+        config = item_reader.mapping("config") or {}
+        refs.append(ToolRef(name=name, kind=kind, config=config))
     return tuple(refs)
 
 
 class StrictConfigReader:
-    """Strict, unknown-field-rejecting reader over a parsed config mapping (spec
+    """Strict, unknown-field-rejecting reader over a parsed config mapping.
+
     Centralizes the primitive parsing every registry entity needs
     (bool / int / str / string-tuple / mapping) so each entity stops rolling its
-    own ``_parse_bool`` / ``_validate_unknown``. Init rejects unknown keys."""
+    own ``_parse_bool`` / ``_validate_unknown``. Init rejects unknown keys. Each
+    accessor distinguishes a MISSING field (returns its default) from an
+    explicit ``null`` (raises InvalidSpecError) -- the two must not be
+    conflated, or a typo'd ``field: null`` silently becomes "use the default".
+    """
 
     def __init__(self, payload, *, allowed, context):
         self._payload = payload
         self._context = context
         unknown = sorted(set(payload) - set(allowed))
         if unknown:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{context}: unknown fields: {', '.join(unknown)}")
 
-    def required_str(self, name):
+    def _present(self, name):
+        """Return (present, value) for ``name``. ``present`` is False when the
+        field is absent (the caller applies its default). An explicit ``null``
+        is present-but-invalid and raises here so every accessor rejects it
+        uniformly instead of treating it as missing."""
         if name not in self._payload:
-            from ..errors import InvalidSpecError
-
-            raise InvalidSpecError(f"{self._context}: {name} is required")
+            return False, None
         value = self._payload[name]
-        if not isinstance(value, str):
-            from ..errors import InvalidSpecError
+        if value is None:
+            raise InvalidSpecError(f"{self._context}: {name} must not be null")
+        return True, value
 
+    def required_str(self, name):
+        present, value = self._present(name)
+        if not present:
+            raise InvalidSpecError(f"{self._context}: {name} is required")
+        if not isinstance(value, str):
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         return value
 
     def optional_str(self, name):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return None
         if not isinstance(value, str):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         return value
 
     def bool(self, name, default=None):
-        if name not in self._payload:
+        present, value = self._present(name)
+        if not present:
             return default
-        value = self._payload[name]
         if not isinstance(value, bool):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a boolean")
         return value
 
     def non_negative_int(self, name, default=None):
-        if name not in self._payload:
+        present, value = self._present(name)
+        if not present:
             return default
-        value = self._payload[name]
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(
                 f"{self._context}: {name} must be a non-negative integer"
             )
         return value
 
     def positive_number(self, name, default=None):
-        if name not in self._payload:
+        present, value = self._present(name)
+        if not present:
             return default
-        value = self._payload[name]
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
             or value <= 0
         ):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a positive number")
         return float(value)
 
     def positive_int(self, name, default=None):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return default
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(
                 f"{self._context}: {name} must be a positive integer"
             )
         return value
 
     def non_negative_decimal(self, name):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a number")
         try:
             result = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(
                 f"{self._context}: {name} must be a valid number"
             ) from exc
         if not result.is_finite() or result < 0:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(
                 f"{self._context}: {name} must be finite and non-negative"
             )
         return result
 
     def string_mapping(self, name):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return None
         if not isinstance(value, Mapping):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a mapping")
         result = {}
         for key, item in value.items():
             if not isinstance(key, str) or not key.strip() or not isinstance(item, str):
-                from ..errors import InvalidSpecError
-
                 raise InvalidSpecError(
                     f"{self._context}: {name} must be a string mapping"
                 )
@@ -350,47 +376,37 @@ class StrictConfigReader:
         return result
 
     def str_or_bool(self, name):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return None
         if isinstance(value, bool):
             return value
         if isinstance(value, str) and value.strip():
             return value.strip()
-        from ..errors import InvalidSpecError
-
         raise InvalidSpecError(f"{self._context}: {name} must be a string or boolean")
 
     def enum(self, name, enum_type, *, default=None):
-        value = self._payload.get(name, default)
-        if value is None:
-            return None
+        present, value = self._present(name)
+        if not present:
+            return default
         if not isinstance(value, str):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         try:
             return enum_type(value)
         except ValueError as exc:
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(
                 f"{self._context}: invalid {name}: {value!r}"
             ) from exc
 
-    def string_tuple(self, name):
-        value = self._payload.get(name)
-        if value is None:
-            return ()
+    def string_tuple(self, name, *, default=None):
+        present, value = self._present(name)
+        if not present:
+            return default
         if not isinstance(value, list):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a list")
         result = []
         for index, item in enumerate(value):
             if not isinstance(item, str) or not item.strip():
-                from ..errors import InvalidSpecError
-
                 raise InvalidSpecError(
                     f"{self._context}: {name}[{index}] must be a non-empty string"
                 )
@@ -398,11 +414,9 @@ class StrictConfigReader:
         return tuple(result)
 
     def mapping(self, name):
-        value = self._payload.get(name)
-        if value is None:
+        present, value = self._present(name)
+        if not present:
             return None
         if not isinstance(value, Mapping):
-            from ..errors import InvalidSpecError
-
             raise InvalidSpecError(f"{self._context}: {name} must be a mapping")
         return dict(value)

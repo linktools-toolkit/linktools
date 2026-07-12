@@ -398,7 +398,7 @@ class SqlAlchemyResourceBackend:
             # bump version/revision. Python comparison is a tiny race window
             # (another writer between our SELECT and return); the consequence is
             # returning slightly stale info for a same-content PUT, which is
-            # benign and matches the prior implementation's behavior.
+            # benign (a same-content PUT changes nothing observable).
             if (
                 row.deleted_at is None
                 and row.content == content
@@ -606,7 +606,7 @@ class SqlAlchemyResourceBackend:
     async def _apply_delete_unconditional(
         self, session: AsyncSession, path: ResourcePath
     ) -> "ResourceInfo | None":
-        """Unconditional delete used by the prior raw_delete path. Loops:
+        """Unconditional delete. Loops:
         SELECT then mask-the-live-row via conditional UPDATE on version. If a
         concurrent writer bumps version first, our UPDATE misses and we retry
         against the new committed state. A row that is already masked gets its
@@ -635,7 +635,7 @@ class SqlAlchemyResourceBackend:
                 return None
             if row.deleted_at is not None:
                 # Already masked: atomically bump the whiteout counter so the
-                # lineage version keeps advancing (matches prior semantics).
+                # lineage version keeps advancing.
                 stmt = (
                     update(ResourceRow)
                     .where(
@@ -708,7 +708,7 @@ class SqlAlchemyResourceBackend:
                                 f"if-match precondition failed: {path}"
                             )
                         # No-op for the caller, but ensure a tombstone exists so
-                        # subsequent reads see Masked (matches prior semantics).
+                        # subsequent reads see Masked.
                         if row is None:
                             session.add(
                                 ResourceRow(

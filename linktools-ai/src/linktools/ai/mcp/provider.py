@@ -38,6 +38,7 @@ from ..errors import (
     CapabilityConflictError,
     CapabilityResolutionError,
     MCPServerNotFoundError,
+    RuntimeInitializationError,
 )
 from ..providers.mcp import MCPServerSpecProvider
 from .client import MCPConnectionManager
@@ -116,13 +117,26 @@ class MCPDiscoveryResult:
 class MCPProvider:
     """CapabilityProvider for MCP servers. Both the spec provider and the
     connection manager are injectable so tests can supply fakes; production
-    wiring passes a real MCPRegistry + MCPConnectionManager."""
+    wiring passes a real MCPRegistry + MCPConnectionManager.
+
+    A connection manager is REQUIRED: without one the provider cannot enumerate
+    live tools, so governance (filtering, conflict detection, max_tools,
+    ToolExposurePolicy, ToolPolicyProvider) would all be silently skipped. A
+    missing manager is a configuration error and fails at construction -- it
+    must never surface as a verified-but-empty discovery result."""
 
     mcp_provider: MCPServerSpecProvider
-    connection_manager: "MCPConnectionManager | None" = None
+    connection_manager: MCPConnectionManager
     allow_mcp_wildcard: bool = False
     kind: str = "mcp"
     supported_kinds: "ClassVar[tuple[str, ...]]" = ("mcp",)
+
+    def __post_init__(self) -> None:
+        if self.connection_manager is None:
+            raise RuntimeInitializationError(
+                "MCPProvider requires an MCPConnectionManager; a server declared "
+                "without a connection manager cannot verify tool governance"
+            )
 
     async def resolve(
         self,
@@ -145,24 +159,15 @@ class MCPProvider:
             # max_tools, conflict detection, ToolExposurePolicy, and
             # ToolPolicyProvider all need the real tool set to do their job;
             # proceeding on an empty/unknown set would silently skip every one
-            # of them. ``connection_manager is None`` is a distinct, explicit
-            # "MCP declared but not wired" no-op mode, not a discovery failure.
+            # of them.
             discovery_mode = getattr(spec, "discovery_mode", "strict")
-            if (
-                not discovery.verified
-                and self.connection_manager is not None
-                and discovery_mode == "strict"
-            ):
+            if not discovery.verified and discovery_mode == "strict":
                 raise CapabilityResolutionError(
                     f"mcp server {server_id!r}: strict discovery mode cannot verify "
                     f"tool governance without live enumeration (list_tools "
                     f"returned no tools) -- set discovery_mode='best_effort' to opt out"
                 )
-            if (
-                not discovery.verified
-                and self.connection_manager is not None
-                and discovery_mode == "best_effort"
-            ):
+            if not discovery.verified and discovery_mode == "best_effort":
                 from ..events.payloads import SecurityDegraded
 
                 if context.security_event_emitter is None:
@@ -198,9 +203,7 @@ class MCPProvider:
                     f"(max_tools_per_capability={max_per_cap})"
                 )
             final_names_by_server[server_id] = final
-            if self.connection_manager is not None and not hasattr(
-                self.connection_manager, "call_tool"
-            ):
+            if not hasattr(self.connection_manager, "call_tool"):
                 raise CapabilityResolutionError(
                     "MCP connection manager must implement call_tool(connection_ref=...)"
                 )
@@ -270,8 +273,6 @@ class MCPProvider:
             raise MCPServerNotFoundError(f"mcp server not found: {server_id}") from None
 
     async def _discover(self, spec) -> MCPDiscoveryResult:
-        if self.connection_manager is None:
-            return MCPDiscoveryResult((), True, None)
         result_getter = getattr(self.connection_manager, "list_tools_result", None)
         if result_getter is None:
             from ..errors import MCPDiscoveryUnsupportedError

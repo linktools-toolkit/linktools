@@ -52,8 +52,7 @@ class SymlinkPolicy(str, Enum):
 
 def _filename(path: ResourcePath) -> str:
     # Percent-encode so the mapping from ResourcePath -> filename is reversible:
-    # "/" and "%" are escaped, so distinct paths can never collide on one filename
-    # (unlike the previous "__"-joining scheme, where "/a/b" and "/a__b" collided).
+    # "/" and "%" are escaped, so distinct paths can never collide on one filename.
     return urllib.parse.quote(path.value.strip("/"), safe="")
 
 
@@ -359,7 +358,7 @@ class FileResourceBackend:
     ) -> Resource:
         """Precondition + idempotency + put under self._lock (best-effort
         in-process atomicity; see self._lock docstring). Mirrors what
-        ResourceStore.put does in the prior 3-step path, but the three steps
+        ResourceStore.put does in the 3-step path, but the three steps
         run without interleaving from another in-process caller."""
         with self._lock:
             idem_key = (

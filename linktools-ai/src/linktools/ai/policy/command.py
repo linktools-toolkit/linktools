@@ -39,9 +39,8 @@ class CommandRule:
             # Compat fallback: request.category is only populated by callers
             # that resolved a ToolDescriptor (ManagedToolAdapter, or
             # PolicyCapability with a descriptor lookup wired). A caller that
-            # never threads descriptor info through falls back to the prior
-            # name check rather than silently losing command-injection
-            # protection.
+            # never threads descriptor info through falls back to the name
+            # check rather than silently losing command-injection protection.
             return PolicyDecision(
                 kind=PolicyDecisionKind.ALLOW, rule_id="command-rule", reason=None
             )

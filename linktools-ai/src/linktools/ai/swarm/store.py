@@ -63,8 +63,8 @@ class SwarmStore(Protocol):
         and (when ``active_run_id`` is supplied) on it still matching the
         task's current ``active_run_id`` -- a second fencing dimension so a
         worker driving a since-superseded child Run cannot complete the task
-        even if it somehow still held a matching version. There is no more
-        ``expected_version=None`` prior bypass."""
+        even if it somehow still held a matching version. There is no
+        ``expected_version=None`` bypass."""
         ...
 
     async def fail_task(

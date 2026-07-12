@@ -42,7 +42,7 @@ class AgentCompiler:
         # ``pause_on_approval`` threads through so a directly-constructed
         # compiler can opt into the pause path when it also builds its own
         # (rule-less) executor below -- note, however, that pausing without an
-        # ``approval_store`` wired falls through to the prior
+        # ``approval_store`` wired falls through to a direct
         # ToolApprovalRequiredError raise. When ``tool_executor`` is explicit
         # the flag is purely informational: the supplied executor already
         # carries its own setting.

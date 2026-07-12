@@ -16,6 +16,13 @@ from linktools.ai.errors import IdempotencyConflictError, IdempotencyInProgressE
 from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
 from linktools.ai.storage.file.idempotency import FileIdempotencyStore
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.policy import EffectiveToolPolicy
+
+_DESC = ToolDescriptor(
+    name="t", source="test", category="misc", risk="low", mutating=False
+)
+_POLICY = EffectiveToolPolicy()
 
 
 def _file_store(tmp_path) -> FileIdempotencyStore:
@@ -42,12 +49,16 @@ def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_p
             ToolRequest(tool_name="double", arguments={"value": 21}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="op-1",
         )
         second = await executor.execute(
             ToolRequest(tool_name="double", arguments={"value": 21}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="op-1",
         )
         return first, second
@@ -81,6 +92,8 @@ def test_same_key_with_different_args_raises_conflict(tmp_path):
             ToolRequest(tool_name="echo", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="shared-key",
         )
         # Same key, different arguments -> the second reserve sees a hash
@@ -90,6 +103,8 @@ def test_same_key_with_different_args_raises_conflict(tmp_path):
                 ToolRequest(tool_name="echo", arguments={"value": 2}),
                 ToolContext(run_id="r1", session_id="s1"),
                 _handler,
+                descriptor=_DESC,
+                effective_policy=_POLICY,
                 idempotency_key="shared-key",
             )
 
@@ -118,11 +133,15 @@ def test_no_idempotency_key_means_no_caching_handler_runs_each_call():
             ToolRequest(tool_name="echo", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
         )
         await executor.execute(
             ToolRequest(tool_name="echo", arguments={"value": 2}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
         )
 
     asyncio.run(_run())
@@ -145,6 +164,8 @@ def test_idempotency_key_without_store_fails_closed():
             ToolRequest(tool_name="echo", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="some-key",
         )
 
@@ -171,12 +192,16 @@ def test_different_idempotency_keys_do_not_collide(tmp_path):
             ToolRequest(tool_name="double", arguments={"value": 1}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="key-a",
         )
         b = await executor.execute(
             ToolRequest(tool_name="double", arguments={"value": 2}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="key-b",
         )
         return a, b
@@ -207,12 +232,16 @@ def test_same_key_under_different_run_id_does_not_collide(tmp_path):
             ToolRequest(tool_name="triple", arguments={"value": 5}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="shared",
         )
         b = await executor.execute(
             ToolRequest(tool_name="triple", arguments={"value": 5}),
             ToolContext(run_id="r2", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="shared",
         )
         return a, b
@@ -246,6 +275,8 @@ def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_pat
                 ToolRequest(tool_name="flaky", arguments={}),
                 ToolContext(run_id="r1", session_id="s1"),
                 _handler,
+                descriptor=_DESC,
+                effective_policy=_POLICY,
                 idempotency_key="k",
             )
         # The failed reservation is persisted as FAILED.
@@ -261,6 +292,8 @@ def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_pat
             ToolRequest(tool_name="flaky", arguments={}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="k",
         )
         return result
@@ -305,6 +338,8 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
                 ToolRequest(tool_name="tool-x", arguments={"a": 1}),
                 ToolContext(run_id="r1", session_id="s1"),
                 _handler,
+                descriptor=_DESC,
+                effective_policy=_POLICY,
                 idempotency_key="key-r",
             )
 
@@ -359,6 +394,8 @@ def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path
             ToolRequest(tool_name="double", arguments={"value": 21}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="op-1",
             schema_version="1",
         )
@@ -367,6 +404,8 @@ def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path
                 ToolRequest(tool_name="double", arguments={"value": 21}),
                 ToolContext(run_id="r1", session_id="s1"),
                 _handler,
+                descriptor=_DESC,
+                effective_policy=_POLICY,
                 idempotency_key="op-1",
                 schema_version="2",
             )
@@ -391,6 +430,8 @@ def test_completed_record_survives_executor_replacement(tmp_path):
             ToolRequest(tool_name="inc", arguments={"value": 41}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="op-9",
         )
 
@@ -407,6 +448,8 @@ def test_completed_record_survives_executor_replacement(tmp_path):
             ToolRequest(tool_name="inc", arguments={"value": 41}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             idempotency_key="op-9",
         )
 

@@ -7,8 +7,8 @@ BaseAgent.fallback_models field was accepted but never read anywhere.
 : ModelPolicy.max_retries is now enforced -- each model_type is
 retried up to ``max_retries`` times (catching ModelClientUnavailable) before the
 router moves on to the next fallback. Total attempts per resolve =
-``(1 + max_retries) * len(attempted)``. The default max_retries=0 reproduces the
-prior behavior (exactly one attempt per model_type)."""
+``(1 + max_retries) * len(attempted)``. The default max_retries=0 yields
+exactly one attempt per model_type."""
 
 from ..model.registry import (
     ModelBundle,
@@ -28,7 +28,7 @@ class ModelRouter:
         attempted = [policy.primary, *policy.fallbacks]
         last_error: "Exception | None" = None
         # retry each model_type up to max_retries times before falling
-        # back. max_retries=0 -> one attempt per model_type (prior behavior).
+        # back. max_retries=0 -> one attempt per model_type.
         for model_type in attempted:
             for _attempt in range(policy.max_retries + 1):
                 try:

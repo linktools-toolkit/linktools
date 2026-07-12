@@ -3,9 +3,8 @@
 """IdempotencyStore: persistent tool-call idempotency.
 
 ToolExecutor consults an IdempotencyStore when an ``idempotency_key`` is
-supplied to ``execute()``. The store persists reservations so tool
-idempotency survives process restart -- the prior in-process dict is gone
-("禁止仅使用进程内字典").
+supplied to ``execute()``. The store persists reservations so tool idempotency
+survives process restart -- an in-process dict would not (and is forbidden).
 
 Lifecycle:
 

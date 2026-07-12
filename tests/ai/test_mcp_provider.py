@@ -371,12 +371,17 @@ async def test_mcp_best_effort_discovery_mode_opts_out_of_fail_closed():
 
 
 @pytest.mark.asyncio
-async def test_mcp_no_connection_manager_yields_empty(tmp_path):
+async def test_mcp_provider_rejects_missing_connection_manager():
+    """A server declared without a connection manager cannot verify tool
+    governance (no live enumeration), so MCPProvider fails at construction --
+    never surfacing as a verified-but-empty discovery result."""
+    from linktools.ai.errors import RuntimeInitializationError
+
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), None)
-    _bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
+    with pytest.raises(RuntimeInitializationError, match="MCPConnectionManager"):
+        MCPProvider(_FakeSpecProvider({"risk": spec}), None)
 
 
 @pytest.mark.asyncio

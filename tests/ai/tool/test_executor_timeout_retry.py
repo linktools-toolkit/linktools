@@ -6,6 +6,13 @@ import pytest
 
 from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.policy import EffectiveToolPolicy
+
+_DESC = ToolDescriptor(
+    name="t", source="test", category="misc", risk="low", mutating=False
+)
+_POLICY = EffectiveToolPolicy()
 
 
 def test_execute_timeout_raises_asyncio_timeout_error_when_handler_exceeds_timeout():
@@ -22,6 +29,8 @@ def test_execute_timeout_raises_asyncio_timeout_error_when_handler_exceeds_timeo
             ToolRequest(tool_name="slow", arguments={"seconds": 0.5}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             timeout=0.05,
         )
 
@@ -48,6 +57,8 @@ def test_execute_max_retries_succeeds_after_failures():
             ToolRequest(tool_name="flaky", arguments={}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             max_retries=2,
         )
 
@@ -70,6 +81,8 @@ def test_execute_does_not_retry_permanent_error():
             ToolRequest(tool_name="broken", arguments={}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             max_retries=3,
         )
 
@@ -95,6 +108,8 @@ def test_execute_max_retries_raises_after_all_attempts_fail():
             ToolRequest(tool_name="broken", arguments={}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
             max_retries=1,
         )
 
@@ -118,6 +133,8 @@ def test_execute_default_no_timeout_no_retry_runs_handler_once():
             ToolRequest(tool_name="double", arguments={"value": 21}),
             ToolContext(run_id="r1", session_id="s1"),
             _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
         )
 
     assert asyncio.run(_run()) == 42

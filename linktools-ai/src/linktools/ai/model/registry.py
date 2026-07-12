@@ -3,8 +3,7 @@
 
 """Model configuration and pydantic-ai runtime factory.
 
-The hand-rolled OpenAI-compatible ReAct loop that previously lived here has been
-replaced by pydantic-ai (see `base.py`). This module now owns:
+This module owns:
 
 - the shared error types raised/caught across the pipeline
   (`ModelClientUnavailable`, `ModelOutputError`, `ModelTurnLimitExceeded`);
@@ -71,8 +70,8 @@ class RuntimeModelConfig:
     timeout_seconds: int
     raw: "dict[str, Any]"
     # base_url is passed through literally by default. Some OpenAI-compatible
-    # gateways use custom paths that any normalization would corrupt, so the
-    # prior "ensure trailing /v1" behavior is opt-in via append_v1_if_missing.
+    # gateways use custom paths that any normalization would corrupt, so
+    # appending a trailing /v1 is opt-in via append_v1_if_missing.
     base_url_mode: "Literal['literal', 'append_v1_if_missing']" = "literal"
 
     @property
@@ -153,7 +152,7 @@ model_registry = ModelRegistry()
 
 def _resolve_base_url(config: RuntimeModelConfig) -> str:
     """Resolve the OpenAI provider base_url. Literal pass-through by default;
-    the prior auto-append ``/v1`` is opt-in via ``base_url_mode``. Never strips
+    appending ``/v1`` is opt-in via ``base_url_mode``. Never strips
     a user-supplied path or suffix -- some gateways rely on custom paths."""
     if not config.base_url:
         raise ModelClientUnavailable(

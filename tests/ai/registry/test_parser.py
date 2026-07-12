@@ -116,8 +116,11 @@ def test_spec_loader_from_filesystem_revision_is_deterministic(tmp_path):
         return await loader.revision()
 
     first = asyncio.run(run())
+    second = asyncio.run(run())
     assert isinstance(first, int)
-    assert first > 0
+    # The revision is a stable hash over the file set -- it need only be a
+    # deterministic int that changes when files change, not a positive timestamp.
+    assert first == second
 
 
 # 4b. SpecLoader.from_resources is exercised against the real ResourceStore API

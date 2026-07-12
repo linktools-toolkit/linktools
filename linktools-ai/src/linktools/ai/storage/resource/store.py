@@ -241,7 +241,7 @@ class ResourceStore:
         # atomic checked operation, delegate precondition + idempotency + mutate
         # to it as a single atomic call so a concurrent writer cannot interleave
         # the three steps. The Memory backend does not implement it, so the
-        # prior 3-step orchestration below remains as the fallback.
+        # 3-step orchestration below is the fallback.
         if hasattr(self._primary, "raw_put_checked"):
             return await self._primary.raw_put_checked(
                 path, content, options=options, request_hash=req_hash
@@ -356,7 +356,7 @@ class ResourceStore:
         would expose. The revision counter bumps exactly once for the whole
         move.
 
-        Two cases keep the prior put+delete orchestration: (1) the Memory
+        Two cases use the put+delete orchestration: (1) the Memory
         backend has no transaction primitive, so it never implements raw_move;
         (2) an OVERLAY-only source must be copied across backends, which
         cannot be made fully atomic -- this path copies the overlay
@@ -370,8 +370,7 @@ class ResourceStore:
         self._require_writable_primary()
         if hasattr(self._primary, "raw_move"):
             # Atomic raw_move handles only primary-resident sources. An
-            # overlay-only source falls through to the prior cross-backend
-            # copy path.
+            # overlay-only source falls through to the cross-backend copy path.
             source_in_primary = (
                 await self._primary.raw_stat(src) is not None
                 if hasattr(self._primary, "raw_stat")

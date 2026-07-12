@@ -289,9 +289,9 @@ class SwarmRunner:
             # strategy.run() (child agent call, store I/O, ...) or from one of
             # the token.raise_if_cancelled() checks above. Mirrors
             # AgentRunner.execute()'s own CancelledError handler exactly,
-            # including the race AgentRunner already defends against but this
-            # handler previously did not: Runtime.cancel(run_id) may have
-            # ALREADY transitioned the driving Run to CANCELLING (via
+            # including the race AgentRunner defends against: Runtime.cancel(
+            # run_id) may have ALREADY transitioned the driving Run to
+            # CANCELLING (via
             # run_controller.cancel(), which is what triggered this
             # CancelledError in the first place) before this handler runs. A
             # naive "always transition RUNNING -> CANCELLING first" would then

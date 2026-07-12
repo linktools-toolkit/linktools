@@ -113,7 +113,9 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
             return ("search",)
 
         async def get(self, server_id):
-            return MCPServerSpec(id="search", name="search", transport="stdio")
+            return MCPServerSpec(
+                id="search", name="search", transport="stdio", command=("demo",)
+            )
 
     class _FakeConnMgr:
         async def list_tools_result(self, spec):

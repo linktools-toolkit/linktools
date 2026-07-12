@@ -4,8 +4,8 @@
 and an approval_store is wired, the executor must persist a PENDING
 ApprovalRequest, emit an ApprovalRequested event (if an event_store is
 wired), and STILL raise ToolApprovalRequiredError so PolicyCapability
-translates it into SkipToolExecution. Default-None (no stores wired)
-preserves today's behavior identically."""
+translates it into SkipToolExecution. With no stores wired the raise still
+fires but nothing is persisted or emitted."""
 
 import asyncio
 import uuid
@@ -29,6 +29,13 @@ from linktools.ai.policy.engine import (
     ToolRequest,
 )
 from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.tool.policy import EffectiveToolPolicy
+
+_DESC = ToolDescriptor(
+    name="t", source="test", category="misc", risk="low", mutating=False
+)
+_POLICY = EffectiveToolPolicy()
 
 
 class _Require:
@@ -225,7 +232,13 @@ def test_execute_with_approval_store_raises_and_handler_not_called_request_persi
         return "should-not-reach"
 
     async def _run():
-        await executor.execute(_request(), _context(), _handler)
+        await executor.execute(
+            _request(),
+            _context(),
+            _handler,
+            descriptor=_DESC,
+            effective_policy=_POLICY,
+        )
 
     with pytest.raises(ToolApprovalRequiredError):
         asyncio.run(_run())
