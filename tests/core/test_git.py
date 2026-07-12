@@ -73,6 +73,57 @@ class TestGit(unittest.TestCase):
             f.write("changed")
         self.assertTrue(repo.is_dirty())
 
+    def test_head_sha_matches_remote_after_clone(self):
+        with DulwichRepo(self.remote_path) as remote_repo:
+            expected = remote_repo.head().decode()
+
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+
+        sha = repo.head_sha()
+        self.assertEqual(sha, expected)
+        self.assertEqual(len(sha), 40)
+
+    def test_head_sha_changes_after_commit(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        before = repo.head_sha()
+
+        with open(os.path.join(self.clone_path, "b.txt"), "w") as f:
+            f.write("new file")
+        repo.add("b.txt")
+        after = repo.commit("add b.txt", author="Test <test@example.com>")
+
+        self.assertNotEqual(before, after)
+        self.assertEqual(repo.head_sha(), after)
+
+    def test_current_branch_on_default_branch(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        self.assertEqual(repo.current_branch(), "master")
+
+    def test_current_branch_after_checkout_or_create(self):
+        porcelain.branch_create(self.remote_path, "feature")
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+
+        repo.checkout_or_create("feature")
+
+        self.assertEqual(repo.current_branch(), "feature")
+
+    def test_current_branch_is_none_when_detached(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        sha = repo.head_sha()
+        porcelain.update_head(self.clone_path, sha, detached=True)
+
+        self.assertIsNone(repo.current_branch())
+
     def test_status(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)

@@ -97,3 +97,13 @@ def test_inspect_missing_path_is_supported_but_unobserved(fresh_manager, tmp_pat
     assert info["supported"] is True
     assert info["revision"] is None
     assert info["reason"] is None
+
+
+def test_repo_service_add_remote_url_while_unavailable_leaves_no_trace(fresh_manager, git_unavailable):
+    """End-to-end through RepoService.add() (not just the RepoGit adapter):
+    a remote `repo add` while Git is unavailable must fail non-zero and
+    never write the repo into INSTALLED_REPOS."""
+    with pytest.raises(ContainerError):
+        fresh_manager.repos.add("https://example.com/some/repo.git")
+
+    assert fresh_manager.repos.get_all() == {}
