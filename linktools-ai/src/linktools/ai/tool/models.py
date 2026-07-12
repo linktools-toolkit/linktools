@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The Tool domain model (spec §11.1): the single place the tool data classes
+"""The Tool domain model: the single place the tool data classes
 live. ToolDescriptor (structured metadata classifying a tool for policy
 decisions) + default_risk_for_category + ManagedToolDefinition + ToolContribution
 + declared_tool_definitions. Moved out of security/descriptor.py + tool/contribution.py
-so the tool domain owns its descriptors; security/ no longer exports ToolDescriptor
-(§18.2), keeping the dependency one-way (tool -> security, not the reverse)."""
+so the tool domain owns its descriptors; keeping the dependency one-way."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§8.4 Sanitizer produces JSON-compatible values.
+"""Sanitizer produces JSON-compatible values.
 
 The sanitized event must round-trip through ``json.dumps`` without a
 ``default=`` fallback: containers normalize to lists, bytes/Enum/UUID/datetime

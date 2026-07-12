@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§8.3 Registry idempotency_key_field strict type.
+"""Registry idempotency_key_field strict type.
 
 The key field must be a string (coercion via ``str()`` is forbidden): non-string
 values are rejected, and whitespace-only values are rejected after stripping.

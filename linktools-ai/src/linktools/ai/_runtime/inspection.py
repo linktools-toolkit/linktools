@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime capability inspection (spec §9.6).
+"""Runtime capability inspection.
 
 ``inspect_capabilities`` is the single assembly-inspection entry point behind
 Runtime.inspect. It resolves a spec's capabilities under an in-memory
@@ -26,11 +26,13 @@ def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, .
     sanitizer-redacted) reason -- so inspection never leaks a secret or exposes
     the raw event objects."""
     warnings: "list[str]" = []
-    from ..events.payloads import SecurityDegraded
+    from ..events.payloads import SecurityDegraded, TruncatedSecurityEvent
 
     for event in events:
         if isinstance(event, SecurityDegraded):
             warnings.append(f"security degraded: {event.reason}")
+        elif isinstance(event, TruncatedSecurityEvent):
+            warnings.append(f"security event truncated: {event.original_event_type}")
     return tuple(warnings)
 
 
@@ -47,8 +49,16 @@ async def _assemble_internal(
     so a resolution that degrades can emit its SecurityDegraded event instead
     of failing for want of an emitter."""
     from ..capability.provider import CapabilityContext
-    from ..capability.models import CapabilityBundle
+    from ..capability.models import CapabilityBundle, requires_capability_assembler
 
+    if assembler is None and requires_capability_assembler(
+        tools=spec.tools, execution=execution
+    ):
+        from ..errors import RuntimeInitializationError
+
+        raise RuntimeInitializationError(
+            "Runtime cannot inspect tools without CapabilityAssembler"
+        )
     if assembler is None:
         return CapabilityBundle.empty()
     context = CapabilityContext(

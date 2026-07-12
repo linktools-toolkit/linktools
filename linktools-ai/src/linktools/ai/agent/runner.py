@@ -464,7 +464,11 @@ class AgentRunner:
                 # tools -- must have BOTH an assembler and a managed executor
                 # wired before any resolution work. tools=() needs neither and
                 # never raises; tools=None without execution is a model-only run.
-                requires_tools = needs_default or bool(agent.spec.tools)
+                from ..capability.models import requires_capability_assembler
+
+                requires_tools = requires_capability_assembler(
+                    tools=agent.spec.tools, execution=deps.execution
+                )
                 if requires_tools and not has_assembler:
                     from ..errors import RuntimeInitializationError
 
@@ -580,10 +584,7 @@ class AgentRunner:
                             for md in contrib.tools:
                                 toolsets.append(
                                     ManagedToolsetWrapper(
-                                        build_managed_toolset(
-                                            md,
-                                            tool_executor=self._tool_executor_for_managed,
-                                        ),
+                                        build_managed_toolset(md),
                                         descriptors={md.descriptor.name: md.descriptor},
                                         **wrap_kw,
                                     )

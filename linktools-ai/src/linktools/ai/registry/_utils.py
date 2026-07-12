@@ -53,15 +53,6 @@ def truthy(value: Any) -> bool:
     return bool(value)
 
 
-def model_type(value: Any) -> str:
-    """Extract the model type string from a config value (str or dict)."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return str(value.get("type") or value.get("model") or "standard")
-    return "standard"
-
-
 def deep_merge_dicts(
     base: "Mapping[str, Any]", override: "Mapping[str, Any] | None"
 ) -> "dict[str, Any]":

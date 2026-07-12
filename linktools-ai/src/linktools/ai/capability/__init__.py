@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.capability: the capability domain's public model (spec §18.2).
+"""linktools.ai.capability: the capability domain's public model.
 The minimal surface: CapabilityRef / CapabilityRuntimeOptions /
 CapabilityInspection / CapabilityProvider. The bundle, context, assembler,
 builtin provider, and exposure policy live in their submodules

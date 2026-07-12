@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Final config-format snapshots (spec §7.4).
+"""Final config-format snapshots.
 
 Each fixture under ``tests/ai/fixtures/config/`` is loaded through its registry
 so the canonical config format is locked: a later phase that silently renames a

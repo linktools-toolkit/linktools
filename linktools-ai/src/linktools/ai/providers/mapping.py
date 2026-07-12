@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MappingProvider: a generic mapping-backed spec provider (spec §14.3).
+"""MappingProvider: a generic mapping-backed spec provider.
 
 Given ``{id: spec}``, it provides ``list_ids`` + ``get`` -- the two methods
 every spec-provider Protocol requires. Used for built-in registries and test

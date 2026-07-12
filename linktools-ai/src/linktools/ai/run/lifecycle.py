@@ -47,7 +47,9 @@ async def prepare_run(
         run_id=resolved_run,
         session_id=resolved_session,
         runnable_id=spec.id,
-        runnable_type=RunnableType.SWARM if isinstance(spec, SwarmSpec) else RunnableType.AGENT,
+        runnable_type=RunnableType.SWARM
+        if isinstance(spec, SwarmSpec)
+        else RunnableType.AGENT,
         user_id=user_id,
         tenant_id=tenant_id,
     )

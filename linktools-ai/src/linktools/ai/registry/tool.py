@@ -149,7 +149,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         schema_version=schema_version,
         idempotency_strategy=strategy,
         idempotency_key_field=key_field,
-        metadata=dict(payload.get("metadata") or {}),
+        metadata=reader.mapping("metadata") or {},
     )
 
 

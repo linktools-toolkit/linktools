@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.tool: the tool domain's public model (spec §18.2). ToolExecutor
+"""linktools.ai.tool: the tool domain's public model. ToolExecutor
 + idempotency records live in their submodules (``tool.executor``,
 ``tool.idempotency``); the package re-exports only the descriptor / definition /
 policy types callers need."""

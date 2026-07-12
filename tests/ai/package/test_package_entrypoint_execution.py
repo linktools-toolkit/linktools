@@ -43,7 +43,7 @@ async def test_call_without_executor_raises_not_reserved():
         for md in c.tools
         if md.descriptor.name == "call_package_entrypoint"
     )
-    with pytest.raises(Exception):  # PackageEntrypointDeniedError (no executor)
+    with pytest.raises(Exception):  # PackageEntrypointDeniedError
         await call("pkg", "agent", "grader", "do it")
 
 

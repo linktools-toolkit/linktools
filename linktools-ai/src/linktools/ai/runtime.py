@@ -89,9 +89,7 @@ class Runtime:
         c = build_runtime_components(config)
         return cls(components=c)
 
-    async def inspect(
-        self, spec: AgentSpec
-    ) -> "CapabilityInspection":
+    async def inspect(self, spec: AgentSpec) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
         tool descriptors, merged prompt sections, and any warnings. Leaks no
         mutable internal state (no handlers); a capability that degrades during
@@ -130,8 +128,12 @@ class Runtime:
         from .run.lifecycle import prepare_run
 
         prepared = await prepare_run(
-            storage=self._components.storage, spec=spec, session_id=session_id,
-            run_id=run_id, user_id=user_id, tenant_id=tenant_id,
+            storage=self._components.storage,
+            spec=spec,
+            session_id=session_id,
+            run_id=run_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
 
         if isinstance(spec, SwarmSpec):
@@ -184,9 +186,7 @@ class Runtime:
         ):
             return
 
-        in_flight = (
-            controller is not None and controller.get_token(run_id) is not None
-        )
+        in_flight = controller is not None and controller.get_token(run_id) is not None
         if in_flight:
             if record.status == RunStatus.CANCELLING:
                 await controller.cancel(run_id)
@@ -240,8 +240,12 @@ class Runtime:
             raise SwarmError("run_stream does not support SwarmSpec")
 
         prepared = await prepare_run(
-            storage=self._components.storage, spec=spec, session_id=session_id,
-            run_id=run_id, user_id=user_id, tenant_id=tenant_id,
+            storage=self._components.storage,
+            spec=spec,
+            session_id=session_id,
+            run_id=run_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
         compiled = await self._components.compiler.compile(spec)
         async for event in self._components.runner.run_stream(

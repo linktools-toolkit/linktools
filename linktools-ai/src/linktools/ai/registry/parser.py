@@ -3,8 +3,9 @@
 """Shared text parsers and strict registry configuration helpers."""
 
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from ..errors import InvalidSpecError, RegistryNotFoundError, RegistryParseError
@@ -143,18 +144,40 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
     fallbacks = tuple(fallbacks_raw)
     max_retries = payload.get("max_retries", 1)
     timeout = payload.get("timeout_seconds", 30.0)
-    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
-        raise InvalidSpecError("model policy max_retries must be a non-negative integer")
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    if (
+        isinstance(max_retries, bool)
+        or not isinstance(max_retries, int)
+        or max_retries < 0
+    ):
+        raise InvalidSpecError(
+            "model policy max_retries must be a non-negative integer"
+        )
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
         raise InvalidSpecError("model policy timeout_seconds must be positive")
-    budget_raw = payload.get("budget")
-    budget = Decimal(str(budget_raw)) if budget_raw is not None else None
+    reader = StrictConfigReader(
+        payload,
+        allowed={
+            "primary",
+            "model",
+            "fallbacks",
+            "max_retries",
+            "timeout_seconds",
+            "max_tokens",
+            "budget",
+        },
+        context="model policy",
+    )
+    budget = reader.non_negative_decimal("budget")
     return ModelPolicy(
         primary=primary,
         fallbacks=fallbacks,
         max_retries=max_retries,
         timeout_seconds=float(timeout),
-        max_tokens=payload.get("max_tokens"),
+        max_tokens=reader.positive_int("max_tokens"),
         budget=budget,
     )
 
@@ -178,9 +201,13 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
             kind = item.get("kind")
             name = item.get("name")
             if not isinstance(kind, str) or not kind.strip():
-                raise InvalidSpecError(f"tool ref kind must be a non-empty string: {item!r}")
+                raise InvalidSpecError(
+                    f"tool ref kind must be a non-empty string: {item!r}"
+                )
             if not isinstance(name, str) or not name.strip():
-                raise InvalidSpecError(f"tool ref name must be a non-empty string: {item!r}")
+                raise InvalidSpecError(
+                    f"tool ref name must be a non-empty string: {item!r}"
+                )
             config = item.get("config") or {}
             if not isinstance(config, dict):
                 raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
@@ -194,8 +221,6 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
         else:
             raise InvalidSpecError(f"invalid tool ref: {item!r}")
     return tuple(refs)
-
-
 
 
 class StrictConfigReader:
@@ -263,17 +288,86 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must be a positive number")
         return float(value)
 
+    def positive_int(self, name, default=None):
+        value = self._payload.get(name)
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(
+                f"{self._context}: {name} must be a positive integer"
+            )
+        return value
+
+    def non_negative_decimal(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a number")
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(
+                f"{self._context}: {name} must be a valid number"
+            ) from exc
+        if not result.is_finite() or result < 0:
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(
+                f"{self._context}: {name} must be finite and non-negative"
+            )
+        return result
+
+    def string_mapping(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            from ..errors import InvalidSpecError
+
+            raise InvalidSpecError(f"{self._context}: {name} must be a mapping")
+        result = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip() or not isinstance(item, str):
+                from ..errors import InvalidSpecError
+
+                raise InvalidSpecError(
+                    f"{self._context}: {name} must be a string mapping"
+                )
+            result[key] = item
+        return result
+
+    def str_or_bool(self, name):
+        value = self._payload.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        from ..errors import InvalidSpecError
+
+        raise InvalidSpecError(f"{self._context}: {name} must be a string or boolean")
+
     def enum(self, name, enum_type, *, default=None):
         value = self._payload.get(name, default)
         if value is None:
             return None
         if not isinstance(value, str):
             from ..errors import InvalidSpecError
+
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         try:
             return enum_type(value)
         except ValueError as exc:
             from ..errors import InvalidSpecError
+
             raise InvalidSpecError(
                 f"{self._context}: invalid {name}: {value!r}"
             ) from exc
@@ -290,7 +384,10 @@ class StrictConfigReader:
         for index, item in enumerate(value):
             if not isinstance(item, str) or not item.strip():
                 from ..errors import InvalidSpecError
-                raise InvalidSpecError(f"{self._context}: {name}[{index}] must be a non-empty string")
+
+                raise InvalidSpecError(
+                    f"{self._context}: {name}[{index}] must be a non-empty string"
+                )
             result.append(item.strip())
         return tuple(result)
 
@@ -298,7 +395,7 @@ class StrictConfigReader:
         value = self._payload.get(name)
         if value is None:
             return None
-        if not isinstance(value, dict):
+        if not isinstance(value, Mapping):
             from ..errors import InvalidSpecError
 
             raise InvalidSpecError(f"{self._context}: {name} must be a mapping")

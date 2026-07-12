@@ -86,10 +86,17 @@ def test_importing_root_does_not_pull_sqlalchemy():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [os.path.join(root, "linktools", "src"), os.path.join(root, "linktools-ai", "src")]
+        [
+            os.path.join(root, "linktools", "src"),
+            os.path.join(root, "linktools-ai", "src"),
+        ]
     )
     subprocess.run(
-        [sys.executable, "-c", "import sys; import linktools.ai; assert 'sqlalchemy' not in sys.modules"],
+        [
+            sys.executable,
+            "-c",
+            "import sys; import linktools.ai; assert 'sqlalchemy' not in sys.modules",
+        ],
         check=True,
         env=env,
     )

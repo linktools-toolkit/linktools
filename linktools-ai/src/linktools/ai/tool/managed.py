@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ManagedToolAdapter: the single entry point through which every model-driven
-    tool call must pass. Wraps a handler with the full governance chain:
+tool call must pass. Wraps a handler with the full governance chain:
 
     descriptor -> ToolPolicyProvider -> SecurityBaseline merge ->
     SecurityPipeline.before_tool -> ToolExecutor.check (policy/approval) ->
     handler (timeout + retry) -> SecurityPipeline.after_tool -> stable result
 
-Providers supply raw handlers + descriptors; the adapter handles ALL generic
-governance. When a ToolExecutor is wired, the adapter delegates policy/approval
-to it (reusing the existing PolicyEngine + approval store) so there is no
-duplicate governance. When no executor is wired, the adapter applies its own
-timeout/retry from the merged ResolvedToolPolicy."""
+Providers supply handlers and descriptors; execution and governance are owned by
+ToolExecutor."""
 
 import asyncio
 import logging
@@ -70,9 +67,7 @@ class ManagedToolAdapter:
         security_event_emitter: Any = None,
     ) -> None:
         if tool_executor is None:
-            raise RuntimeInitializationError(
-                "ManagedToolAdapter requires ToolExecutor"
-            )
+            raise RuntimeInitializationError("ManagedToolAdapter requires ToolExecutor")
         self._descriptor = descriptor
         self._handler = handler
         self._tool_executor = tool_executor
@@ -187,8 +182,6 @@ class ManagedToolAdapter:
             """Resume gate for managed-path approval: a re-driven call after
             external approval must NOT re-raise RunPaused (a stateless pipeline
             otherwise would, looping the run forever)."""
-            if self._tool_executor is None:
-                return False
             return await self._tool_executor.is_approved(run_id, call_id)
 
         # 1. Resolve + merge policy, then collapse the tri-state result to
@@ -355,76 +348,66 @@ class ManagedToolAdapter:
         # max_retries was declared upstream.
         from ..events.payloads import ToolCompleted, ToolFailed, ToolStarted
 
-        if policy.idempotent and self._tool_executor is None:
-            from ..errors import IdempotencyConfigurationError
-
-            raise IdempotencyConfigurationError(
-                f"tool {self._descriptor.name!r} is idempotent but has no persistent executor"
-            )
         await self._emit_observability(
             ToolStarted(tool_name=self._descriptor.name, tool_call_id=call_id)
         )
         can_retry = not (self._descriptor.mutating and not policy.idempotent)
         effective_retries = policy.max_retries if can_retry else 0
         try:
-            if self._tool_executor is not None:
-                # ToolExecutor.execute is the single real execution entry point:
-                # it runs PolicyEngine.evaluate() (deny/approval) THEN the handler
-                # with timeout/retry -- never call handler directly when an
-                # executor is wired.
-                from ..policy.engine import ToolContext, ToolRequest
+            # ToolExecutor.execute is the single real execution entry point.
+            from ..policy.engine import ToolContext, ToolRequest
 
-                tc = ToolContext(
-                    run_id=run_id or "",
-                    session_id=getattr(ctx, "session_id", None) if ctx else None,
-                    tool_call_id=call_id,
-                )
-                request = ToolRequest(
-                    tool_name=self._descriptor.name,
+            tc = ToolContext(
+                run_id=run_id or "",
+                session_id=getattr(ctx, "session_id", None) if ctx else None,
+                tool_call_id=call_id,
+            )
+            request = ToolRequest(
+                tool_name=self._descriptor.name,
+                arguments=arguments,
+                category=self._descriptor.category,
+                risk=self._descriptor.risk,
+                mutating=self._descriptor.mutating,
+            )
+            # When the policy declares the tool idempotent, derive a stable
+            # idempotency key (run + tool + canonical args + schema_version)
+            # so replays return the cached result; pass schema_version so a
+            # contract change is a fresh idempotency record. The executor
+            # fail-closes if no IdempotencyStore is wired.
+            idempotency_key = None
+            if policy.idempotent:
+                from .idempotency import DefaultIdempotencyKeyBuilder
+
+                idempotency_key = DefaultIdempotencyKeyBuilder().build(
+                    descriptor=self._descriptor,
                     arguments=arguments,
-                    category=self._descriptor.category,
-                    risk=self._descriptor.risk,
-                    mutating=self._descriptor.mutating,
+                    run_context=ctx,
+                    schema_version=policy.schema_version,
+                    policy=policy,
                 )
-                # When the policy declares the tool idempotent, derive a stable
-                # idempotency key (run + tool + canonical args + schema_version)
-                # so replays return the cached result; pass schema_version so a
-                # contract change is a fresh idempotency record. The executor
-                # fail-closes if no IdempotencyStore is wired.
-                idempotency_key = None
-                if policy.idempotent:
-                    from .idempotency import DefaultIdempotencyKeyBuilder
-
-                    idempotency_key = DefaultIdempotencyKeyBuilder().build(
-                        descriptor=self._descriptor,
-                        arguments=arguments,
-                        run_context=ctx,
-                        schema_version=policy.schema_version,
-                        policy=policy,
-                    )
-                try:
-                    result = await self._tool_executor.execute(
-                        request,
-                        tc,
-                        self._handler,
-                        timeout=policy.timeout_seconds,
-                        max_retries=effective_retries,
-                        descriptor=self._descriptor,
-                        effective_policy=policy,
-                        idempotency_key=idempotency_key,
-                        schema_version=policy.schema_version,
-                        idempotency_scope=(
-                            f"{getattr(ctx, 'tenant_id', '')}|{getattr(ctx, 'workspace', '')}|"
-                            f"{self._descriptor.name}|{policy.schema_version}"
-                            if getattr(policy, "idempotency_strategy", None).value
-                            == "business_key"
-                            else None
-                        ),
-                    )
-                except asyncio.TimeoutError:
-                    raise ToolTimeoutError(
-                        f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
-                    )
+            try:
+                result = await self._tool_executor.execute(
+                    request,
+                    tc,
+                    self._handler,
+                    timeout=policy.timeout_seconds,
+                    max_retries=effective_retries,
+                    descriptor=self._descriptor,
+                    effective_policy=policy,
+                    idempotency_key=idempotency_key,
+                    schema_version=policy.schema_version,
+                    idempotency_scope=(
+                        f"{getattr(ctx, 'tenant_id', '')}|{getattr(ctx, 'workspace', '')}|"
+                        f"{self._descriptor.name}|{policy.schema_version}"
+                        if getattr(policy, "idempotency_strategy", None).value
+                        == "business_key"
+                        else None
+                    ),
+                )
+            except asyncio.TimeoutError:
+                raise ToolTimeoutError(
+                    f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
+                )
         except Exception as exec_exc:
             # Tool execution failed (timeout/transient-exhausted/handler error).
             # Emit the execution-error audit event, then re-raise so the caller

@@ -332,6 +332,7 @@ class SwarmRunner:
             # cause for the caller. The warnings keep the transition failures
             # visible rather than silent.
             from ..security.redact import redact_exception
+
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=redact_exception(exc)
             )
@@ -451,6 +452,7 @@ class SwarmRunner:
             return result
         except Exception as exc:
             from ..security.redact import redact_exception
+
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=redact_exception(exc)
             )

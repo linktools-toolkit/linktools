@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§8.1 before_tool exception audit.
+"""before_tool exception audit.
 
 When the before_tool pipeline fails (raises OR returns an after-only action),
 the adapter must: emit the right audit event, raise ToolDeniedError, and never

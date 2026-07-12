@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Architecture invariants for the simplified linktools.ai (spec §7.3).
+"""Architecture invariants for the simplified linktools.ai.
 
 Each invariant is asserted against the TARGET architecture. Invariants that
 the current code does not yet satisfy are marked ``xfail(strict=True)`` with a
@@ -43,31 +43,31 @@ def _router():
     return ModelRouter(registry=_registry())
 
 
-# --- §7.3 invariant 1: Runtime has no `assemble` -------------------------------
+# --- Runtime has no `assemble` --------------------------------------------------
 def test_invariant_runtime_has_no_assemble():
     assert not hasattr(Runtime, "assemble")
 
 
-# --- §7.3 invariant 2: Runtime exposes no public capability_assembler -----------
+# --- Runtime exposes no public capability_assembler -----------------------------
 def test_invariant_runtime_has_no_public_capability_assembler(tmp_path):
     runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
     assert not hasattr(runtime, "capability_assembler")
     assert not hasattr(runtime, "assembler")
 
 
-# --- §7.3 invariant 3: CapabilityBundle carries no raw toolset -----------------
+# --- CapabilityBundle carries no raw toolset ------------------------------------
 def test_invariant_capability_bundle_has_no_raw_toolset():
     field_names = {f.name for f in dataclasses.fields(CapabilityBundle)}
     assert "toolsets" not in field_names
 
 
-# --- §7.3 invariant 4: ToolContribution carries only `tools` -------------------
+# --- ToolContribution carries only `tools` --------------------------------------
 def test_invariant_tool_contribution_has_only_tools_field():
     field_names = [f.name for f in dataclasses.fields(ToolContribution)]
     assert field_names == ["tools"]
 
 
-# --- §7.3 invariant 5: AgentRunner requires an Assembler when tools are needed --
+# --- AgentRunner requires an Assembler when tools are needed --------------------
 def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
     from linktools.ai.errors import RuntimeInitializationError
 
@@ -96,7 +96,7 @@ def test_invariant_runner_empty_tools_does_not_require_assembler(tmp_path):
     assert result is not None
 
 
-# --- §7.3 invariant 6: MCPProvider returns ManagedToolDefinition ----------------
+# --- MCPProvider returns ManagedToolDefinition ----------------------------------
 def test_invariant_mcp_provider_returns_managed_tool_definitions():
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.capability.provider import CapabilityContext
@@ -141,7 +141,7 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
     assert isinstance(contrib.tools[0], ManagedToolDefinition)
 
 
-# --- §7.3 invariant 7: Runtime.inspect returns no handler ----------------------
+# --- Runtime.inspect returns no handler ----------------------------------------
 def test_invariant_inspect_returns_no_handler(tmp_path):
     runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
     spec = AgentSpec(
@@ -157,7 +157,7 @@ def test_invariant_inspect_returns_no_handler(tmp_path):
     assert not hasattr(inspection, "handler")
 
 
-# --- §7.3 invariant 8: ManagedToolAdapter delegates to ToolExecutor.execute -----
+# --- ManagedToolAdapter delegates to ToolExecutor.execute ----------------------
 def test_invariant_managed_adapter_delegates_to_executor_execute():
     from linktools.ai.tool.models import ToolDescriptor
     from linktools.ai.tool.managed import ManagedToolAdapter

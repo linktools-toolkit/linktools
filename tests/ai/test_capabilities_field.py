@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 7 §14.2: ProviderBundle.capabilities lets a caller pass pre-built
+"""ProviderBundle.capabilities lets a caller pass pre-built
 CapabilityProviders that override the bundle-constructed ones."""
 
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy

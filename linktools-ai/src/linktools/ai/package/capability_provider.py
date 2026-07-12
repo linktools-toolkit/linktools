@@ -40,7 +40,9 @@ class PackageProvider:
     # Declares every kind this one provider handles, so the runtime registers
     # it once under all three instead of alias-registering three copies.
     supported_kinds: "ClassVar[tuple[str, ...]]" = (
-        "package", "package-resource", "package-entrypoint"
+        "package",
+        "package-resource",
+        "package-entrypoint",
     )
     resource_provider: "PackageResourceProvider | None" = None
     entrypoint_resolver: "EntrypointResolver | None" = None

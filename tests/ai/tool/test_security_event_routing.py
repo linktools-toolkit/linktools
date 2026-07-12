@@ -56,7 +56,10 @@ async def test_policy_resolved_routes_to_security_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, tool_executor=_executor(), security_event_emitter=em
+        descriptor=_descriptor(),
+        handler=handler,
+        tool_executor=_executor(),
+        security_event_emitter=em,
     )
     await adapter.invoke(x="hi")
 
@@ -71,7 +74,10 @@ async def test_lifecycle_events_route_to_observability_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, tool_executor=_executor(), security_event_emitter=em
+        descriptor=_descriptor(),
+        handler=handler,
+        tool_executor=_executor(),
+        security_event_emitter=em,
     )
     await adapter.invoke(x="hi")
 

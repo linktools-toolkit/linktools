@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Public API contract: ``linktools.ai`` exports only ``Runtime`` at the root
-(spec §18.1). Every other type lives behind its domain submodule; old root
+(public API). Every other type lives behind its domain submodule; the root
 imports (AgentSpec, Storage, SwarmSpec, ModelPolicy, ...) must FAIL so a stale
 caller is caught at import time rather than silently binding to a moved symbol."""
 

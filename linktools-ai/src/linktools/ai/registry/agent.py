@@ -35,7 +35,8 @@ def _parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
                 raise InvalidSpecError("middleware config must be a mapping")
             refs.append(
                 MiddlewareRef(
-                    name=item["name"], config=config,
+                    name=item["name"],
+                    config=config,
                 )
             )
         else:
@@ -52,10 +53,10 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
     if not isinstance(model_payload, dict):
         raise InvalidSpecError(f"agent {agent_id}: 'model' must be a mapping")
     model = parse_model_policy(model_payload)
-    sections = payload.get("sections")
+    sections = reader.mapping("sections") or {}
     instructions = PromptSpec(
         instructions=body.strip(),
-        sections=dict(sections) if isinstance(sections, dict) else {},
+        sections=sections,
     )
     return AgentSpec(
         id=agent_id,
@@ -65,7 +66,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
         tools=parse_tool_refs(payload.get("tools")),
         middleware=_parse_middleware_refs(payload.get("middleware")),
         output_schema=None,
-        metadata=dict(payload.get("metadata") or {}),
+        metadata=reader.mapping("metadata") or {},
     )
 
 

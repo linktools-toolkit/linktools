@@ -12,7 +12,10 @@ def test_agent_spec_construction():
         name="security-agent",
         model=ModelPolicy(primary="gpt-4"),
         instructions=PromptSpec(instructions="You are a security analyst."),
-        tools=(ToolRef(kind="builtin", name="file"), ToolRef(kind="builtin", name="terminal")),
+        tools=(
+            ToolRef(kind="builtin", name="file"),
+            ToolRef(kind="builtin", name="terminal"),
+        ),
         middleware=(MiddlewareRef(name="budget", config={"budget_usd": 5.0}),),
     )
     assert spec.id == "agent-1"
@@ -59,16 +62,16 @@ def test_parse_tool_refs_handles_kind_name_strings_and_struct():
     from linktools.ai.registry.parser import parse_tool_refs
 
     import pytest
+
     with pytest.raises(Exception):
         parse_tool_refs(["file"])
-    # kind:name string -> split
-    (prefixed,) = parse_tool_refs(["skill:sql"])
-    assert prefixed.name == "sql" and prefixed.kind == "skill"
+    with pytest.raises(Exception):
+        parse_tool_refs(["skill:sql"])
     # structured mapping
     (struct,) = parse_tool_refs([{"kind": "mcp", "name": "risk", "config": {"k": 1}}])
     assert struct.name == "risk" and struct.kind == "mcp" and struct.config == {"k": 1}
-    # mapping without kind keeps kind None
-    (plain,) = parse_tool_refs([{"name": "file"}])
+    with pytest.raises(Exception):
+        parse_tool_refs([{"name": "file"}])
     assert plain.kind is None
 
 

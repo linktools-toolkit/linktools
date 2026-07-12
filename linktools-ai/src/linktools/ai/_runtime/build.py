@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The single Runtime build kernel (spec §9.2-§9.4).
+"""The single Runtime build kernel.
 
 ``build_runtime_components(RuntimeBuildConfig) -> RuntimeComponents`` is the one
 place the Runtime's sub-components are assembled. Runtime.build is a thin wrapper
@@ -64,7 +64,7 @@ class RuntimeComponents:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RuntimeBuildConfig:
-    """The final set of inputs Runtime.build accepts (spec §9.3). Capability
+    """The final set of inputs Runtime.build accepts. Capability
     providers come exclusively via ``providers``."""
 
     storage: Storage
@@ -257,6 +257,7 @@ def _make_runtime_subagent_executor(
             )
         except Exception as exc:  # child failures surface as structured errors
             from ..security.redact import redact_exception
+
             safe_error = redact_exception(exc)
             await _evt(SubagentErrored(agent_id=agent_spec.id, reason=safe_error))
             return SubagentResult(

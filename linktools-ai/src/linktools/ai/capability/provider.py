@@ -63,9 +63,13 @@ def provider_kinds(provider: "CapabilityProvider") -> "frozenset[str]":
     kinds = provider.supported_kinds
     if not kinds:
         from ..errors import CapabilityResolutionError
-        raise CapabilityResolutionError("CapabilityProvider.supported_kinds cannot be empty")
+
+        raise CapabilityResolutionError(
+            "CapabilityProvider.supported_kinds cannot be empty"
+        )
     if any(not isinstance(kind, str) or not kind for kind in kinds):
         from ..errors import CapabilityResolutionError
+
         raise CapabilityResolutionError("Capability provider kinds must be strings")
     return frozenset(kinds)
 

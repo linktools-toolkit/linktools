@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EventContext + append_event (spec §12.2). Bundles the six lineage fields every
+"""EventContext + append_event. Bundles the six lineage fields every
 event-store append needs, so callers stop repeating ``stream_id=...,
 run_id=..., root_run_id=..., parent_run_id=..., session_id=...,
 runnable_id=...`` at each call site. ``append_event(store, context, payload)``

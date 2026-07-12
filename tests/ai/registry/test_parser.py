@@ -127,7 +127,7 @@ def test_spec_loader_from_filesystem_revision_is_deterministic(tmp_path):
 
 # 5. parse_model_policy
 def test_parse_model_policy_builds_policy_with_decimal_budget():
-    policy = parse_model_policy({"primary": "gpt-4o", "budget": "1.50"})
+    policy = parse_model_policy({"primary": "gpt-4o", "budget": 1.50})
     assert isinstance(policy, ModelPolicy)
     assert policy.primary == "gpt-4o"
     assert policy.budget == Decimal("1.50")
@@ -145,10 +145,12 @@ def test_parse_model_policy_rejects_missing_primary():
 
 # 6. parse_tool_refs
 def test_parse_tool_refs_builds_tuple_from_strings_and_dicts():
-    refs = parse_tool_refs([
-        {"kind": "builtin", "name": "tool_a"},
-        {"kind": "skill", "name": "tool_b"},
-    ])
+    refs = parse_tool_refs(
+        [
+            {"kind": "builtin", "name": "tool_a"},
+            {"kind": "skill", "name": "tool_b"},
+        ]
+    )
     assert isinstance(refs, tuple)
     assert len(refs) == 2
     assert all(isinstance(r, ToolRef) for r in refs)

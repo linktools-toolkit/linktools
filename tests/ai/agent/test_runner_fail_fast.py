@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§8.2 AgentRunner missing-dependency fail-fast (parameterized, spec §17.3).
+"""AgentRunner missing-dependency fail-fast.
 
 A spec that needs tools must fail eagerly when the assembler or the managed
 executor is missing -- before any capability resolution work. ``tools=()`` is
@@ -119,7 +119,7 @@ def test_eager_fail_fast_when_tools_declared(tmp_path, assembler, executor, matc
 
 
 def test_empty_tools_never_raises_even_without_assembler_or_executor(tmp_path):
-    """tools=() is a model-only run: no assembler, no executor, no raise."""
+    """tools=() is a model-only run and does not require tool wiring."""
     runner = _make_runner(
         tmp_path,
         capability_assembler=None,

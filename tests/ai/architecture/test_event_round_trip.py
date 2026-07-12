@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Event payload round-trip through FileEventStore (spec §7.5).
+"""Event payload round-trip through FileEventStore.
 
 Every standard EventPayload must survive: dataclass -> FileEventStore.append
 -> JSON on disk -> list() -> reconstructed dataclass with identical type and

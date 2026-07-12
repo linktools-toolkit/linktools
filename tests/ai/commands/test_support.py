@@ -91,7 +91,7 @@ class TestValidateSessionId(unittest.TestCase):
 
 
 class TestBuildRuntimeLink(unittest.TestCase):
-    """§2.8 / §22 CLI: build_runtime() wires the minimal Runtime link
+    """CLI build_runtime() wires the minimal Runtime link
     (storage + model router + execution) without touching private Storage
     directories or Runtime private fields."""
 

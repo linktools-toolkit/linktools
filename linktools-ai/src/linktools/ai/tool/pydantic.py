@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import SkipToolExecution
-from pydantic_ai.toolsets import WrapperToolset
+from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
 
 from ..errors import RunPaused, ToolDeniedError
 from .executor import ToolExecutor
 from .managed import ManagedToolAdapter
-from .models import ToolDescriptor
+from .models import ManagedToolDefinition, ToolDescriptor
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
@@ -80,8 +80,11 @@ class PolicyCapability(AbstractCapability[None]):
         # handler instead of surfacing a skip-result and continuing.
         if isinstance(error, RunPaused):
             raise error
+        from ..security.redact import redact_exception
+
+        safe_error = redact_exception(error)
         raise SkipToolExecution(
-            {"error": f"{type(error).__name__}: {error}"}
+            {"error_type": type(error).__name__, "error": safe_error}
         ) from error
 
 
@@ -89,7 +92,7 @@ def build_policy_capability(executor: ToolExecutor) -> PolicyCapability:
     return PolicyCapability(executor=executor)
 
 
-def build_managed_toolset(definition: Any, *, tool_executor: ToolExecutor) -> Any:
+def build_managed_toolset(definition: ManagedToolDefinition) -> AbstractToolset:
     """Adapt one managed definition to the model toolset API."""
     from pydantic_ai.toolsets import FunctionToolset
 

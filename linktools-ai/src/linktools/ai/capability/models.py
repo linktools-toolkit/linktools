@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The Capability domain model (spec §10.1): the single place the capability
+"""The Capability domain model: the single place the capability
 data classes live. CapabilityRef / CapabilityRuntimeOptions / CapabilityBundle /
 CapabilityInspection. The exposure policy lives in :mod:`.exposure`, the
 CapabilityProvider Protocol in :mod:`.provider`."""
@@ -11,6 +11,15 @@ from typing import TYPE_CHECKING, Any, Mapping
 from ..tool.models import ToolDescriptor
 from ..utils.freeze import freeze_value
 from .exposure import CapabilityToolExposurePolicy
+
+
+def requires_capability_assembler(*, tools, execution) -> bool:
+    if tools == ():
+        return False
+    if tools is None:
+        return execution is not None
+    return bool(tools)
+
 
 if TYPE_CHECKING:
     from ..prompt.window import SessionWindowPolicy

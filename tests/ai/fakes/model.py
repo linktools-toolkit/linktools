@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared test fakes for the model layer (spec §17.1).
+"""Shared test fakes for the model layer.
 
 Every test that drives a Runtime needs a FunctionModel + ModelRegistry; this
 module centralizes that setup so individual tests stop duplicating it."""

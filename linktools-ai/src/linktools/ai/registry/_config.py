@@ -51,10 +51,3 @@ def load_markdown_text(
 def load_markdown_file(path: Path) -> "tuple[dict[str, object], str]":
     """Parse a Markdown file with optional YAML frontmatter."""
     return load_markdown_text(path.read_text(encoding="utf-8"), source=str(path))
-
-
-def as_str_dict(value: object) -> "dict[str, str]":
-    """Coerce a dict-like value to dict[str, str], skipping falsy values."""
-    if not isinstance(value, dict):
-        return {}
-    return {str(k): str(v) for k, v in value.items() if v}  # type: ignore[union-attr]

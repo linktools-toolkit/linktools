@@ -93,12 +93,12 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
                 f"mcp {mcp_id}: {transport} transport requires 'url'"
             )
 
-    env = reader.mapping("env") or {}
-    headers = reader.mapping("headers") or {}
+    env = reader.string_mapping("env") or {}
+    headers = reader.string_mapping("headers") or {}
     metadata = reader.mapping("metadata") or {}
     cwd = reader.optional_str("cwd")
     timeout_seconds = reader.positive_number("timeout_seconds")
-    tool_prefix = payload.get("tool_prefix")
+    tool_prefix = reader.str_or_bool("tool_prefix")
     enabled_tools = reader.string_tuple("enabled_tools") or None
     disabled_tools = reader.string_tuple("disabled_tools")
     discovery_mode = reader.optional_str("discovery_mode") or "strict"

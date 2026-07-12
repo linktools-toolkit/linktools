@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§14.3 MappingProvider: a generic mapping-backed spec provider."""
+"""MappingProvider: a generic mapping-backed spec provider."""
 
 import asyncio
 
