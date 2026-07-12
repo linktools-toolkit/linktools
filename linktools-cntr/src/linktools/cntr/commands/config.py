@@ -50,13 +50,20 @@ class ConfigCommand(BaseCommandGroup):
             target_containers = _shared.manager.resolver.resolve_dependencies(target_containers)
 
         entries = []
-        seen_entries = set()
+        seen_keys = set()
 
         def add_entries(config, keys):
+            # Dedup by key name alone, not (id(config), key): every
+            # container/repo Config shares the same underlying Environment/
+            # RuntimeOverride/PersistentSource namespace (only the local-file
+            # layer differs per repo), so the exact same key persisted once
+            # resolves identically through any of them. Keeping the first
+            # occurrence (added earliest, from the owning container's own
+            # env_config) is also the most specific one when a repo's own
+            # local file overrides it.
             for key in keys:
-                entry = (id(config), key)
-                if entry not in seen_entries:
-                    seen_entries.add(entry)
+                if key not in seen_keys:
+                    seen_keys.add(key)
                     entries.append((key, config))
 
         for container in target_containers:
