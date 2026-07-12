@@ -152,8 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(
         dest="command",
-        required=True,
     )
+    # `add_subparsers(required=True)` only accepts this kwarg from Python
+    # 3.7+; setting the attribute afterwards works identically on every
+    # version, including the 3.6 floor this repo still supports.
+    subparsers.required = True
 
     # -------- init 子命令 --------
     init_parser = subparsers.add_parser(
