@@ -69,6 +69,7 @@ def test_inspect_unavailable_reports_unsupported_with_reason(fresh_manager, git_
 
     info = git.inspect(str(repo_path))
 
+    assert info["applicable"] is True
     assert info["supported"] is False
     assert info["revision"] is None
     assert info["dirty"] is None
@@ -94,9 +95,27 @@ def test_inspect_missing_path_is_supported_but_unobserved(fresh_manager, tmp_pat
     error, just nothing to report."""
     git = RepoGit(fresh_manager)
     info = git.inspect(str(tmp_path / "does-not-exist"))
+    assert info["applicable"] is True
     assert info["supported"] is True
     assert info["revision"] is None
     assert info["reason"] is None
+
+
+def test_inspect_non_git_directory_is_applicable(fresh_manager, tmp_path):
+    """A real directory that just isn't a Git checkout -- distinct from
+    "nothing exists yet" -- must still report applicable=True (this is a
+    Git-capable code path, it just found no repo there)."""
+    git = RepoGit(fresh_manager)
+    repo_path = tmp_path / "not-a-repo"
+    repo_path.mkdir()
+
+    info = git.inspect(str(repo_path))
+
+    assert info["applicable"] is True
+    assert info["supported"] is True
+    assert info["revision"] is None
+    assert info["dirty"] is None
+    assert info["reason"] == "Not a git repository."
 
 
 def test_repo_service_add_remote_url_while_unavailable_leaves_no_trace(fresh_manager, git_unavailable):

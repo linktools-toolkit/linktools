@@ -6,6 +6,7 @@ proper home for persistent user state (e.g. cntr's INSTALLED_CONTAINERS) that
 the spec says must NOT live in the cache.
 """
 import json
+import os
 import threading
 
 import pytest
@@ -89,6 +90,48 @@ def test_missing_file_is_empty(store):
     assert store.keys() == []
     store.set("k", 1)  # creates the file
     assert (store.path).exists()
+
+
+def test_dangling_symlink_raises(tmp_path):
+    # os.path.exists()/Path.exists() follow symlinks and return False for a
+    # dangling one -- indistinguishable from "genuinely missing" unless the
+    # symlink itself is checked. Fail-closed: this must raise, not silently
+    # report an empty store.
+    lm = LockManager(tmp_path / "locks")
+    path = tmp_path / "settings.json"
+    os.symlink(str(tmp_path / "does-not-exist"), str(path))
+    with pytest.raises(ConfigError):
+        ConfigStore(path, lock_manager=lm)
+
+
+def test_dangling_symlink_not_overridden_by_set(tmp_path):
+    """A construction failure must not be recoverable by writing through
+    the half-built instance -- there is no instance to write through."""
+    lm = LockManager(tmp_path / "locks")
+    path = tmp_path / "settings.json"
+    os.symlink(str(tmp_path / "does-not-exist"), str(path))
+    with pytest.raises(ConfigError):
+        ConfigStore(path, lock_manager=lm)
+
+    # The dangling symlink itself is untouched -- no store construction
+    # ever got far enough to attempt a write.
+    assert path.is_symlink()
+    assert not path.exists()
+
+
+def test_directory_path_raises(tmp_path):
+    lm = LockManager(tmp_path / "locks")
+    path = tmp_path / "settings.json"
+    path.mkdir()
+    with pytest.raises(ConfigError):
+        ConfigStore(path, lock_manager=lm)
+
+
+def test_root_not_an_object_raises(store, tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        store.reload()
 
 
 def test_concurrent_writes_do_not_lose_keys(store, tmp_path):

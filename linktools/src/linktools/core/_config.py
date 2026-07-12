@@ -891,7 +891,14 @@ class Config:
             except (TypeError, ValueError) as exc:
                 if default is not MISSING:
                     return default
-                raise ConfigCastError("cannot cast %r for %s: %s" % (value, key, exc))
+                field = self._schema.get(key)
+                shown = redact_config_value(field, value)
+                # The underlying cast exception's OWN message may also embed
+                # the raw value (e.g. Python's builtin `int("...")` ValueError
+                # repeats its argument verbatim) -- for a secret field, drop
+                # it entirely rather than risk leaking it back in via %s.
+                detail = exc.__class__.__name__ if (field is not None and field.secret) else str(exc)
+                raise ConfigCastError("cannot cast %r for %s: %s" % (shown, key, detail))
         return value
 
     def require(self, key: str, type: "type | None" = None) -> "Any":

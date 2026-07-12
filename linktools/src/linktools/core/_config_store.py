@@ -47,11 +47,18 @@ class ConfigStore(object):
     # -- load / flush -------------------------------------------------------
 
     def reload(self) -> None:
-        """Re-read the file; missing -> empty, corrupt -> ConfigError."""
+        """Re-read the file; genuinely missing -> empty, anything else
+        unreadable -> ConfigError (fail-closed, never a silent empty
+        config: a dangling symlink or non-regular path must never be
+        mistaken for "nothing configured")."""
         if not self._path.exists():
+            if self._path.is_symlink():
+                raise ConfigError("config store path is a dangling symlink: %s" % self._path)
             self._data = {}
             self._touch()
             return
+        if not self._path.is_file():
+            raise ConfigError("config store path is not a regular file: %s" % self._path)
         try:
             text = self._path.read_text(encoding="utf-8")
         except OSError as exc:

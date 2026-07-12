@@ -63,6 +63,9 @@ def _validate_file_data(data, path):
             _validate_key(key, "requires", path)
             if not isinstance(value, str) or not value.strip():
                 raise ConfigValidationError("'requires.%s' must be a non-empty string in %s" % (key, path))
+            if value != value.strip():
+                raise ConfigValidationError(
+                    "'requires.%s' must not contain leading or trailing spaces in %s" % (key, path))
             try:
                 SpecifierSet(value)
             except InvalidSpecifier as exc:

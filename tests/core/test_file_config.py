@@ -144,6 +144,17 @@ def test_requires_whitespace_only_value_raises(tmp_path):
         loader.load(local_root=tmp_path / "repo")
 
 
+@pytest.mark.parametrize("value", [" >=1.0", ">=1.0 ", "\t>=1.0", ">=1.0\n"])
+def test_requires_leading_or_trailing_space_in_value_raises(tmp_path, value):
+    # A padded value can still be a perfectly valid PEP 440 specifier once
+    # parsed (packaging.SpecifierSet tolerates surrounding whitespace) --
+    # this must be rejected at the file-config layer regardless, the same
+    # as a padded key.
+    loader = _loader(tmp_path, {"requires": {"linktools-cntr": value}})
+    with pytest.raises(ConfigValidationError):
+        loader.load(local_root=tmp_path / "repo")
+
+
 def test_invalid_json_raises(tmp_path):
     loader = _loader(tmp_path, "{not json")
     with pytest.raises(ConfigError):

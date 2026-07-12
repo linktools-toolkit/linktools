@@ -108,8 +108,12 @@ class RepoService(object):
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
-                self.git.clone(url, repo_path, branch)
-                self._validate_new_repo_requirement(repo_path)
+                try:
+                    self.git.clone(url, repo_path, branch)
+                    self._validate_new_repo_requirement(repo_path)
+                except Exception:
+                    self._cleanup_failed_add(repo_path)
+                    raise
                 repos[url] = dict(type=_REPO_TYPE_GIT, repo_path=repo_path, repo_name=repo_name)
             else:
                 path = os.path.abspath(os.path.expanduser(url))
@@ -121,10 +125,27 @@ class RepoService(object):
                 repo_name = utils.guess_file_name(path)
                 repo_path = self._choose_repo_path(repo_name)
                 os.symlink(path, repo_path, target_is_directory=True)
-                self._validate_new_repo_requirement(repo_path)
+                try:
+                    self._validate_new_repo_requirement(repo_path)
+                except Exception:
+                    self._cleanup_failed_add(repo_path)
+                    raise
                 repos[path] = dict(type=_REPO_TYPE_LOCAL, repo_path=repo_path, repo_name=repo_name)
 
             self._dump(repos)
+
+    def _cleanup_failed_add(self, repo_path: str) -> None:
+        """The single cleanup path for a repository ``add()`` never
+        finished (clone succeeded but requirement validation failed, clone
+        itself failed after creating a partial directory, ...) -- never
+        leaves a half-added directory behind, and never lets a cleanup
+        failure hide the original error that triggered it."""
+        if not os.path.lexists(repo_path):
+            return
+        try:
+            self._remove_repo_file(dict(repo_path=repo_path))
+        except Exception as cleanup_exc:  # noqa: BLE001 - never mask the original error
+            self.logger.warning(f"Failed to clean repository directory {repo_path}: {cleanup_exc}")
 
     def _validate_repo_root(self, repo_path: "str | None") -> str:
         """Fail closed on any repository root that isn't a genuinely usable
@@ -360,16 +381,17 @@ class RepoService(object):
 
     def _validate_new_repo_requirement(self, repo_path: str) -> None:
         # Read .linktools.json (if any) and check requires.linktools-cntr
-        # before this repo is ever written to INSTALLED_REPOS; on failure,
-        # clean up the just-cloned/linked path rather than leaving a
-        # half-added repo. The resolved file config is intentionally not
-        # persisted into INSTALLED_REPOS itself, to avoid stale metadata
-        # drifting from the on-disk .linktools.json.
+        # before this repo is ever written to INSTALLED_REPOS. Cleanup of a
+        # failed add is centralized in add()/_cleanup_failed_add -- this
+        # only raises, so the clone-failure and requirement-failure paths
+        # share one cleanup responsibility instead of two. The resolved
+        # file config is intentionally not persisted into INSTALLED_REPOS
+        # itself, to avoid stale metadata drifting from the on-disk
+        # .linktools.json.
         try:
             file_config = self.manager.environ.load_file_config(local_root=repo_path)
             ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
         except Exception as exc:
-            self._remove_repo_file(dict(repo_path=repo_path))
             raise ContainerError(f"Repository `{repo_path}` is not usable: {exc}") from exc
 
     def _choose_repo_path(self, name: str) -> str:

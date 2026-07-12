@@ -132,3 +132,55 @@ def test_explain_does_not_leak_secret_raw_or_resolved_value(tmp_path):
     import json
     payload = json.dumps(config.explain("CREDENTIAL"), default=str)
     assert _SECRET_VALUE not in payload
+
+
+def test_explicit_type_cast_redacts_secret(tmp_path):
+    """``Config.get(key, type=...)`` is a caller-supplied conversion,
+    separate from the field's own declared ``cast`` -- it must be
+    redacted identically when it fails on a secret value.
+
+    Regression: the explicit-type-conversion branch of Config.get()
+    interpolated the raw value (and the underlying int()/etc. ValueError's
+    own message, which repeats its argument verbatim) straight into
+    ConfigCastError with no secret-awareness at all.
+    """
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="CREDENTIAL", secret=True))
+    config = _make_config(tmp_path, schema)
+    config.set("CREDENTIAL", _SECRET_VALUE)  # not a valid int
+
+    with pytest.raises(ConfigCastError) as excinfo:
+        config.get("CREDENTIAL", type=int)
+
+    message = str(excinfo.value)
+    assert _SECRET_VALUE not in message
+    assert "***" in message
+
+
+def test_explicit_type_cast_redacts_secret_via_alias(tmp_path):
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="CREDENTIAL", secret=True, aliases=("CRED",)))
+    config = _make_config(tmp_path, schema)
+    config.set("CREDENTIAL", _SECRET_VALUE)
+
+    with pytest.raises(ConfigCastError) as excinfo:
+        config.get("CRED", type=int)
+
+    message = str(excinfo.value)
+    assert _SECRET_VALUE not in message
+    assert "***" in message
+
+
+def test_explicit_type_cast_on_non_secret_field_keeps_raw_value(tmp_path):
+    """Sanity: the secret-only special-casing must not swallow the raw
+    value or the underlying exception's own detail for an ordinary,
+    non-secret field."""
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="PORT", secret=False))
+    config = _make_config(tmp_path, schema)
+    config.set("PORT", "not-a-number")
+
+    with pytest.raises(ConfigCastError) as excinfo:
+        config.get("PORT", type=int)
+
+    assert "not-a-number" in str(excinfo.value)
