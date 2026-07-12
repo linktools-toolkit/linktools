@@ -122,7 +122,7 @@ class MCPProvider:
     connection_manager: "MCPConnectionManager | None" = None
     allow_mcp_wildcard: bool = False
     kind: str = "mcp"
-    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"mcp"})
+    supported_kinds: "ClassVar[tuple[str, ...]]" = ("mcp",)
 
     async def resolve(
         self,

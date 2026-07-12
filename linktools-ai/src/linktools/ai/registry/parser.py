@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared spec-loading primitives for the registry package: text parsers
-(YAML/Markdown/JSON), a SpecLoader that reads from filesystem OR ResourceStore,
-and helpers (parse_model_policy, parse_tool_refs) shared by the agent/swarm parsers."""
+"""Shared text parsers and strict registry configuration helpers."""
 
 import json
 from decimal import Decimal
@@ -135,16 +133,27 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
     from ..model.policy import ModelPolicy
 
     primary = payload.get("primary") or payload.get("model")
-    if not primary:
+    if not isinstance(primary, str) or not primary.strip():
         raise InvalidSpecError("model policy requires 'primary' (or 'model')")
-    fallbacks = tuple(payload.get("fallbacks") or ())
+    fallbacks_raw = payload.get("fallbacks") or ()
+    if not isinstance(fallbacks_raw, (list, tuple)) or any(
+        not isinstance(value, str) for value in fallbacks_raw
+    ):
+        raise InvalidSpecError("model policy fallbacks must be a list of strings")
+    fallbacks = tuple(fallbacks_raw)
+    max_retries = payload.get("max_retries", 1)
+    timeout = payload.get("timeout_seconds", 30.0)
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+        raise InvalidSpecError("model policy max_retries must be a non-negative integer")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise InvalidSpecError("model policy timeout_seconds must be positive")
     budget_raw = payload.get("budget")
     budget = Decimal(str(budget_raw)) if budget_raw is not None else None
     return ModelPolicy(
-        primary=str(primary),
+        primary=primary,
         fallbacks=fallbacks,
-        max_retries=int(payload.get("max_retries", 1)),
-        timeout_seconds=float(payload.get("timeout_seconds", 30.0)),
+        max_retries=max_retries,
+        timeout_seconds=float(timeout),
         max_tokens=payload.get("max_tokens"),
         budget=budget,
     )
@@ -153,12 +162,7 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
 def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     """Build a tuple[ToolRef] from a list of tool declarations.
 
-    Accepted shapes:
-      - "file"                 -> ToolRef(name="file")            (kind None -> builtin)
-      - "builtin:file"         -> ToolRef(name="file", kind="builtin")
-      - "skill:sql"            -> ToolRef(name="sql",  kind="skill")
-      - {name: "file"}         -> ToolRef(name="file")
-      - {kind: "skill", name: "sql", config: {...}} -> ToolRef(name, kind, config)
+    Tool declarations are explicit mappings with string ``kind`` and ``name``.
     """
     from ..agent.spec import ToolRef
 
@@ -170,17 +174,20 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
         raise InvalidSpecError("tools must be a list")
     refs: list[Any] = []
     for item in items:
-        if isinstance(item, str):
-            refs.append(_tool_ref_from_string(item))
-        elif isinstance(item, dict) and "name" in item:
+        if isinstance(item, dict) and "name" in item and "kind" in item:
             kind = item.get("kind")
+            name = item.get("name")
+            if not isinstance(kind, str) or not kind.strip():
+                raise InvalidSpecError(f"tool ref kind must be a non-empty string: {item!r}")
+            if not isinstance(name, str) or not name.strip():
+                raise InvalidSpecError(f"tool ref name must be a non-empty string: {item!r}")
             config = item.get("config") or {}
             if not isinstance(config, dict):
                 raise InvalidSpecError(f"tool ref config must be a mapping: {item!r}")
             refs.append(
                 ToolRef(
-                    name=str(item["name"]),
-                    kind=str(kind) if kind else None,
+                    name=name,
+                    kind=kind,
                     config=config,
                 )
             )
@@ -189,27 +196,11 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     return tuple(refs)
 
 
-def _tool_ref_from_string(text: str) -> Any:
-    """Split a 'kind:name' tool string; a bare name keeps kind None (resolver
-    treats it as builtin) so prior ``tools: [file, terminal]`` is unchanged."""
-    from ..agent.spec import ToolRef
-
-    if ":" in text:
-        kind, name = text.split(":", 1)
-        kind = kind.strip()
-        name = name.strip()
-        if not kind or not name:
-            raise InvalidSpecError(f"invalid tool ref: {text!r}")
-        return ToolRef(name=name, kind=kind)
-    name = text.strip()
-    if not name:
-        raise InvalidSpecError(f"invalid tool ref: {text!r}")
-    return ToolRef(name=name)
 
 
 class StrictConfigReader:
     """Strict, unknown-field-rejecting reader over a parsed config mapping (spec
-    §13.1). Centralizes the primitive parsing every registry entity needs
+    Centralizes the primitive parsing every registry entity needs
     (bool / int / str / string-tuple / mapping) so each entity stops rolling its
     own ``_parse_bool`` / ``_validate_unknown``. Init rejects unknown keys."""
 
@@ -272,15 +263,36 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must be a positive number")
         return float(value)
 
+    def enum(self, name, enum_type, *, default=None):
+        value = self._payload.get(name, default)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            from ..errors import InvalidSpecError
+            raise InvalidSpecError(f"{self._context}: {name} must be a string")
+        try:
+            return enum_type(value)
+        except ValueError as exc:
+            from ..errors import InvalidSpecError
+            raise InvalidSpecError(
+                f"{self._context}: invalid {name}: {value!r}"
+            ) from exc
+
     def string_tuple(self, name):
         value = self._payload.get(name)
         if value is None:
             return ()
-        if not isinstance(value, (list, tuple)):
+        if not isinstance(value, list):
             from ..errors import InvalidSpecError
 
             raise InvalidSpecError(f"{self._context}: {name} must be a list")
-        return tuple(str(item) for item in value)
+        result = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str) or not item.strip():
+                from ..errors import InvalidSpecError
+                raise InvalidSpecError(f"{self._context}: {name}[{index}] must be a non-empty string")
+            result.append(item.strip())
+        return tuple(result)
 
     def mapping(self, name):
         value = self._payload.get(name)

@@ -76,7 +76,7 @@ class ManagedToolDefinition:
 @dataclass(frozen=True, slots=True)
 class ToolContribution:
     """A capability's exposed tools, one ManagedToolDefinition per tool. This is
-    the single contribution form -- raw toolsets/descriptors tuples are not
+    the single contribution form -- unmanaged toolsets/descriptors tuples are not
     accepted; providers build ManagedToolDefinition entries (e.g. via
     :func:`declared_tool_definitions`)."""
 

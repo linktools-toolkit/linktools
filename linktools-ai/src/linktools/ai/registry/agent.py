@@ -28,10 +28,14 @@ def _parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
         if isinstance(item, str):
             refs.append(MiddlewareRef(name=item))
         elif isinstance(item, dict) and "name" in item:
+            if not isinstance(item["name"], str) or not item["name"].strip():
+                raise InvalidSpecError("middleware name must be a non-empty string")
+            config = item.get("config") or {}
+            if not isinstance(config, dict):
+                raise InvalidSpecError("middleware config must be a mapping")
             refs.append(
                 MiddlewareRef(
-                    name=str(item["name"]),
-                    config=dict(item.get("config") or {}),
+                    name=item["name"], config=config,
                 )
             )
         else:
@@ -55,7 +59,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
     )
     return AgentSpec(
         id=agent_id,
-        name=str(name),
+        name=name,
         model=model,
         instructions=instructions,
         tools=parse_tool_refs(payload.get("tools")),

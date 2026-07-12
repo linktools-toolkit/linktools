@@ -52,7 +52,7 @@ async def test_assembler_returns_explicit_managed_definitions(tmp_path):
         name="a1",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file"),),
+        tools=(ToolRef(kind="builtin", name="file"),),
     )
     ctx = CapabilityContext(
         agent_id="a1",
@@ -80,7 +80,7 @@ async def test_managed_adapter_from_assembler_output_deny(tmp_path):
         name="a1",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file"),),
+        tools=(ToolRef(kind="builtin", name="file"),),
     )
     ctx = CapabilityContext(
         agent_id="a1",

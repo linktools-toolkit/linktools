@@ -44,16 +44,12 @@ class CapabilityContext:
 
 @runtime_checkable
 class CapabilityProvider(Protocol):
-    """Resolves one or more capability kinds. ``kind`` is the provider's primary
-    selector (left side of a ``kind:name`` tool ref); ``supported_kinds`` is the
-    full set of kinds this provider handles -- a provider that owns several
-    related kinds (e.g. PackageProvider: package / package-resource /
-    package-entrypoint) declares them all here instead of being registered
-    multiple times under aliases. Single-kind providers set ``kind`` and inherit
-    ``supported_kinds = frozenset({kind})`` via the helper."""
+    """Resolves one or more capability kinds. ``supported_kinds`` is the complete
+    declaration of the kinds this provider
+    handles. Providers owning related kinds declare all of them in one tuple.
+    """
 
-    kind: str
-    supported_kinds: "frozenset[str]"
+    supported_kinds: "tuple[str, ...]"
 
     async def resolve(
         self,
@@ -63,13 +59,15 @@ class CapabilityProvider(Protocol):
 
 
 def provider_kinds(provider: "CapabilityProvider") -> "frozenset[str]":
-    """All capability kinds a provider handles. Prefers an explicit
-    ``supported_kinds`` declaration; falls back to ``{kind}`` for single-kind
-    providers (and older/test providers that only set ``kind``)."""
-    multi = getattr(provider, "supported_kinds", None)
-    if multi:
-        return frozenset(multi)
-    return frozenset({provider.kind})
+    """Return the explicitly declared capability kinds."""
+    kinds = provider.supported_kinds
+    if not kinds:
+        from ..errors import CapabilityResolutionError
+        raise CapabilityResolutionError("CapabilityProvider.supported_kinds cannot be empty")
+    if any(not isinstance(kind, str) or not kind for kind in kinds):
+        from ..errors import CapabilityResolutionError
+        raise CapabilityResolutionError("Capability provider kinds must be strings")
+    return frozenset(kinds)
 
 
 async def _noop_emit(payload: Any) -> None:

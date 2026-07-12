@@ -58,6 +58,7 @@ class RuntimeComponents:
     run_controller: RunController
     capability_assembler: "_CapabilityAssembler | None"
     tool_executor: ToolExecutor
+    execution: "ExecutionBackend | None"
     mcp_connection_manager: "MCPConnectionManager | None"
 
 
@@ -255,14 +256,16 @@ def _make_runtime_subagent_executor(
                 error={"reason": f"timeout after {timeout_seconds}s"},
             )
         except Exception as exc:  # child failures surface as structured errors
-            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=str(exc)))
+            from ..security.redact import redact_exception
+            safe_error = redact_exception(exc)
+            await _evt(SubagentErrored(agent_id=agent_spec.id, reason=safe_error))
             return SubagentResult(
                 agent_id=agent_spec.id,
                 scope=scope_dict,
                 session_id=child_session,
                 run_id=child_run,
                 status="failed",
-                error={"reason": str(exc)},
+                error={"error_type": type(exc).__name__, "reason": safe_error},
             )
         finally:
             _CURRENT_DEPTH.reset(token)
@@ -410,5 +413,6 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         run_controller=run_controller,
         capability_assembler=assembler,
         tool_executor=resolved_executor,
+        execution=config.execution,
         mcp_connection_manager=mcp_manager,
     )

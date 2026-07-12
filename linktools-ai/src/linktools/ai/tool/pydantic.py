@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The single place in the tool domain that imports the pydantic-ai Tool API
-(spec §11.5). PolicyCapability adapts ToolExecutor into a pydantic-ai
+"""The single place in the tool domain that imports the pydantic-ai Tool API.
+PolicyCapability adapts ToolExecutor into a pydantic-ai
 AbstractCapability; ManagedToolsetWrapper wraps any AbstractToolset so every
 call_tool passes through the ManagedToolAdapter governance chain. Keeping these
-here means ``from pydantic_ai`` appears in exactly one tool/ file (§23.6)."""
+here means ``from pydantic_ai`` appears in exactly one tool module."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.toolsets import WrapperToolset
 
-from ..errors import RunPaused, ToolApprovalRequiredError, ToolDeniedError
-from ..policy.engine import ToolRequest
+from ..errors import RunPaused, ToolDeniedError
 from .executor import ToolExecutor
 from .managed import ManagedToolAdapter
 from .models import ToolDescriptor
@@ -51,27 +50,8 @@ class PolicyCapability(AbstractCapability[None]):
     ) -> Any:
         lookup = getattr(ctx.deps, "descriptor_lookup", None)
         descriptor = lookup.get(tool_def.name) if lookup else None
-        # Managed tools (descriptor in the per-run lookup) are governed by
-        # ManagedToolAdapter -> ToolExecutor.execute, which already runs this
-        # PolicyEngine. Running check() here too would double-execute every
-        # rule. So this hook only governs LEGACY/raw tools (no descriptor).
-        if descriptor is not None:
-            return args
-        request = ToolRequest(
-            tool_name=tool_def.name,
-            arguments=args,
-            category=None,
-            risk=None,
-            mutating=None,
-        )
-        base = ctx.deps.tool_context
-        context = replace(base, tool_call_id=call.tool_call_id)
-        try:
-            await self.executor.check(request, context)
-        except ToolDeniedError as exc:
-            raise SkipToolExecution({"error": str(exc)}) from exc
-        except ToolApprovalRequiredError as exc:
-            raise SkipToolExecution({"error": str(exc)}) from exc
+        if descriptor is None:
+            raise ToolDeniedError(f"tool {tool_def.name!r} is not managed")
         return args
 
     async def after_tool_execute(
@@ -109,6 +89,31 @@ def build_policy_capability(executor: ToolExecutor) -> PolicyCapability:
     return PolicyCapability(executor=executor)
 
 
+def build_managed_toolset(definition: Any, *, tool_executor: ToolExecutor) -> Any:
+    """Adapt one managed definition to the model toolset API."""
+    from pydantic_ai.toolsets import FunctionToolset
+
+    toolset = FunctionToolset()
+    if definition.parameters_json_schema:
+        from pydantic_ai.tools import Tool
+
+        toolset.add_tool(
+            Tool.from_schema(
+                function=definition.handler,
+                name=definition.descriptor.name,
+                description=definition.description or definition.descriptor.name,
+                json_schema=dict(definition.parameters_json_schema),
+            )
+        )
+    else:
+        toolset.add_function(
+            definition.handler,
+            name=definition.descriptor.name,
+            description=definition.description,
+        )
+    return toolset
+
+
 class ManagedToolsetWrapper(WrapperToolset):
     """Wraps an AbstractToolset (e.g. MCPToolset) so every call_tool is
     dispatched through a per-tool ManagedToolAdapter -- descriptor resolution,
@@ -121,7 +126,7 @@ class ManagedToolsetWrapper(WrapperToolset):
         *,
         descriptors: "Mapping[str, ToolDescriptor]",
         security_pipeline: "SecurityPipeline | None" = None,
-        tool_executor: Any = None,
+        tool_executor: Any,
         policy_provider: "ToolPolicyProvider | None" = None,
         baseline_policy: "ResolvedToolPolicy | None" = None,
         run_context: "_RunContext | None" = None,
@@ -129,6 +134,8 @@ class ManagedToolsetWrapper(WrapperToolset):
         security_audit_failure_mode: Any = "fail_closed",
         security_event_emitter: Any = None,
     ) -> None:
+        if tool_executor is None:
+            raise ToolDeniedError("ManagedToolsetWrapper requires ToolExecutor")
         super().__init__(wrapped)
         self._descriptors = dict(descriptors)
         self._pipeline = security_pipeline

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ManagedToolAdapter: the single entry point through which every model-driven
-tool call must pass. Wraps a raw handler with the full governance chain:
+    tool call must pass. Wraps a handler with the full governance chain:
 
     descriptor -> ToolPolicyProvider -> SecurityBaseline merge ->
     SecurityPipeline.before_tool -> ToolExecutor.check (policy/approval) ->
@@ -24,6 +24,7 @@ from ..errors import (
     ToolTimeoutError,
     ToolSecurityAuditError,
     ToolResultDeniedError,
+    RuntimeInitializationError,
 )
 from ..tool.models import ToolDescriptor
 from ..security.redact import redact_for_audit, redact_exception
@@ -50,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ManagedToolAdapter:
-    """Wraps a raw tool handler with unified security governance. When a
+    """Wraps a tool handler with unified security governance. When a
     ToolExecutor is wired, delegates policy/approval/idempotency to it; the
     adapter adds pipeline before/after and policy resolution on top."""
 
@@ -59,7 +60,7 @@ class ManagedToolAdapter:
         *,
         descriptor: ToolDescriptor,
         handler: "Callable[..., Awaitable[Any]]",
-        tool_executor: Any = None,
+        tool_executor: Any,
         policy_provider: "ToolPolicyProvider | None" = None,
         security_pipeline: "SecurityPipeline | None" = None,
         baseline_policy: "ResolvedToolPolicy | None" = None,
@@ -68,6 +69,10 @@ class ManagedToolAdapter:
         security_audit_failure_mode: Any = "fail_closed",
         security_event_emitter: Any = None,
     ) -> None:
+        if tool_executor is None:
+            raise RuntimeInitializationError(
+                "ManagedToolAdapter requires ToolExecutor"
+            )
         self._descriptor = descriptor
         self._handler = handler
         self._tool_executor = tool_executor
@@ -286,7 +291,7 @@ class ManagedToolAdapter:
                         tool_name=self._descriptor.name,
                         call_id=call_id,
                         action=PipelineAction.DENY.value,
-                        reason=str(exc) or "invalid before-action",
+                        reason=redact_exception(exc) or "invalid before-action",
                         stage="before",
                     )
                 )
@@ -420,43 +425,6 @@ class ManagedToolAdapter:
                     raise ToolTimeoutError(
                         f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
                     )
-            else:
-                # No executor wired (e.g. a standalone adapter in tests): apply
-                # timeout/retry from the resolved policy directly, governed by
-                # the same DefaultRetryPolicy (transient-only; mutating
-                # non-idempotent never retries).
-                from .retry import DefaultRetryPolicy, backoff_delay
-
-                retry_policy = DefaultRetryPolicy()
-                max_attempts = 1 + effective_retries
-                result = None
-                attempt = 0
-                while True:
-                    try:
-                        if policy.timeout_seconds is not None:
-                            result = await asyncio.wait_for(
-                                self._handler(**arguments),
-                                timeout=policy.timeout_seconds,
-                            )
-                        else:
-                            result = await self._handler(**arguments)
-                        break
-                    except asyncio.TimeoutError:
-                        raise ToolTimeoutError(
-                            f"tool {self._descriptor.name!r} timed out after {policy.timeout_seconds}s"
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        if attempt >= max_attempts - 1:
-                            raise
-                        if not retry_policy.should_retry(
-                            error=exc,
-                            attempt=attempt,
-                            policy=policy,
-                            descriptor=self._descriptor,
-                        ):
-                            raise
-                        await asyncio.sleep(backoff_delay(attempt + 1))
-                        attempt += 1
         except Exception as exec_exc:
             # Tool execution failed (timeout/transient-exhausted/handler error).
             # Emit the execution-error audit event, then re-raise so the caller
@@ -513,6 +481,17 @@ class ManagedToolAdapter:
             try:
                 validate_tool_decision(after_decision, stage="after")
             except Exception as exc:
+                safe_error = redact_exception(exc)
+                await self._emit_security(
+                    ToolPipelineDecision(
+                        run_id=run_id,
+                        tool_name=self._descriptor.name,
+                        call_id=call_id,
+                        action=PipelineAction.DENY_RESULT.value,
+                        reason=safe_error,
+                        stage="after",
+                    )
+                )
                 await self._emit_observability(
                     ToolCompleted(
                         tool_name=self._descriptor.name,
@@ -522,7 +501,9 @@ class ManagedToolAdapter:
                         result_action="denied",
                     )
                 )
-                raise ToolResultDeniedError(str(exc)) from exc
+                raise ToolResultDeniedError(
+                    "after_tool returned an invalid decision"
+                ) from exc
             await self._emit_security(
                 ToolPipelineDecision(
                     run_id=run_id,

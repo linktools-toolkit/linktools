@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Run lifecycle helpers (spec §15). Centralizes the run-state
+"""Shared Run lifecycle helpers. Centralizes the run-state
 transitions both AgentRunner and SwarmRunner drive (mark_completed /
 mark_failed / mark_cancelled) so the status enum + transition call live in one
-place. PreparedRun + prepare_run bundle the session/run/context setup the two
-runners duplicate."""
+place. ``prepare_run`` also owns session and context setup for Runtime entry
+points."""
 
 import uuid
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from .context import RunContext
 from .models import RunStatus
+from ..run.models import RunnableType
 
 if TYPE_CHECKING:
     from ..storage.facade import Storage
@@ -24,42 +25,36 @@ class PreparedRun:
 
     run_id: str
     session_id: str
-    run_context: RunContext
+    context: RunContext
 
 
 async def prepare_run(
-    storage: "Storage",
     *,
+    storage: "Storage",
+    spec: Any,
     session_id: "str | None",
-    run_id: "str | None" = None,
-    runnable_id: str = "",
-    runnable_type: Any = None,
-    user_id: "str | None" = None,
-    tenant_id: "str | None" = None,
-    root_run_id: "str | None" = None,
-    parent_run_id: "str | None" = None,
+    run_id: "str | None",
+    user_id: "str | None",
+    tenant_id: "str | None",
 ) -> PreparedRun:
-    """Resolve (or create) a session and mint a RunContext for a new run.
-    Returns a PreparedRun bundling the resolved ids + context. Shared by
-    Runtime.run / run_stream / resume (§15.3)."""
+    """Resolve a session and mint the context shared by run and streaming."""
     from .._runtime.lifecycle import create_run_context, resolve_session
+    from ..swarm.spec import SwarmSpec
 
     resolved_session = await resolve_session(storage, session_id)
     resolved_run = run_id or str(uuid.uuid4())
     run_context = create_run_context(
         run_id=resolved_run,
         session_id=resolved_session,
-        runnable_id=runnable_id,
-        runnable_type=runnable_type,
+        runnable_id=spec.id,
+        runnable_type=RunnableType.SWARM if isinstance(spec, SwarmSpec) else RunnableType.AGENT,
         user_id=user_id,
         tenant_id=tenant_id,
-        root_run_id=root_run_id,
-        parent_run_id=parent_run_id,
     )
     return PreparedRun(
         run_id=resolved_run,
         session_id=resolved_session,
-        run_context=run_context,
+        context=run_context,
     )
 
 

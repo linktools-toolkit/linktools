@@ -227,7 +227,7 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
         name="a",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file-read"),),
+        tools=(ToolRef(kind="builtin", name="file-read"),),
     )
     await rt.run(spec, "list it")
     assert calls["n"] == 1, f"PolicyEngine rule must run once, ran {calls['n']}"
@@ -343,7 +343,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
         name="a",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file-write"),),
+        tools=(ToolRef(kind="builtin", name="file-write"),),
     )
     # The run must complete. Before storage.idempotency was wired into the
     # managed executor, policy.idempotent + ManagedToolAdapter raised

@@ -56,7 +56,7 @@ def _runtime(tmp_path, *capabilities) -> Runtime:
 @pytest.mark.asyncio
 async def test_inspect_surfaces_security_degradation_as_warning(tmp_path):
     rt = _runtime(tmp_path, _DegradingProvider())
-    inspection = await rt.inspect(_spec(), execution=None)
+    inspection = await rt.inspect(_spec())
     assert inspection.tools == ()
     assert any("security degraded" in w for w in inspection.warnings)
 
@@ -69,7 +69,7 @@ async def test_inspect_warning_does_not_leak_secret_from_event(tmp_path):
             reason="enumeration failed for https://srv/cb?token=secret-value"
         ),
     )
-    inspection = await rt.inspect(_spec(), execution=None)
+    inspection = await rt.inspect(_spec())
     rendered = "\n".join(inspection.warnings)
     assert "secret-value" not in rendered
     assert "security degraded" in rendered
@@ -85,7 +85,7 @@ async def test_inspect_without_degradation_has_no_security_warnings(tmp_path):
             return CapabilityBundle.empty()
 
     rt = _runtime(tmp_path, _CleanProvider())
-    inspection = await rt.inspect(_spec(), execution=None)
+    inspection = await rt.inspect(_spec())
     assert inspection.tools == ()
     assert not any("security degraded" in w for w in inspection.warnings)
 
@@ -113,7 +113,7 @@ async def test_inspection_warnings_reflect_only_security_degraded(tmp_path):
             return CapabilityBundle.empty()
 
     rt = _runtime(tmp_path, _MixedProvider())
-    inspection = await rt.inspect(_spec(), execution=None)
+    inspection = await rt.inspect(_spec())
     degraded = [w for w in inspection.warnings if "security degraded" in w]
     assert len(degraded) == 1
 
@@ -159,7 +159,7 @@ async def test_inspection_does_not_leak_handlers_or_managed_definitions(tmp_path
             return bundle
 
     rt = _runtime(tmp_path, _BundleProvider())
-    inspection = await rt.inspect(_spec(), execution=None)
+    inspection = await rt.inspect(_spec())
 
     # Only safe ToolDescriptors are exposed; the handler and the
     # ManagedToolDefinition that carries it are not reachable from the snapshot.

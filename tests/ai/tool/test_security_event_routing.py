@@ -11,6 +11,18 @@ from linktools.ai.security.pipeline import (
 from linktools.ai.tool.managed import ManagedToolAdapter
 
 
+class _Executor:
+    async def is_approved(self, run_id, call_id):
+        return False
+
+    async def execute(self, request, context, handler, **kwargs):
+        return await handler(**request.arguments)
+
+
+def _executor():
+    return _Executor()
+
+
 class _RecordingEmitter:
     """Captures which channel (security vs observability) each event is sent to.
     The adapter must pick the channel explicitly at the call site; this records
@@ -44,7 +56,7 @@ async def test_policy_resolved_routes_to_security_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_event_emitter=em
+        descriptor=_descriptor(), handler=handler, tool_executor=_executor(), security_event_emitter=em
     )
     await adapter.invoke(x="hi")
 
@@ -59,7 +71,7 @@ async def test_lifecycle_events_route_to_observability_channel():
 
     em = _RecordingEmitter()
     adapter = ManagedToolAdapter(
-        descriptor=_descriptor(), handler=handler, security_event_emitter=em
+        descriptor=_descriptor(), handler=handler, tool_executor=_executor(), security_event_emitter=em
     )
     await adapter.invoke(x="hi")
 
@@ -88,6 +100,7 @@ async def test_pipeline_decision_routes_to_security_channel():
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
+        tool_executor=_executor(),
         security_pipeline=_AllowPipeline(),
         security_event_emitter=em,
     )
@@ -118,6 +131,7 @@ async def test_security_degraded_routes_to_security_channel():
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
+        tool_executor=_executor(),
         policy_provider=_BoomProvider(),
         security_event_emitter=em,
         run_context=SimpleNamespace(run_id="r1"),
@@ -155,6 +169,7 @@ async def test_security_audit_failure_is_fail_closed_via_store():
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
+        tool_executor=_executor(),
         event_store=_FailingStore(),
         security_audit_failure_mode="fail_closed",
     )

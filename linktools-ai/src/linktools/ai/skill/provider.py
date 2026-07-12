@@ -30,7 +30,7 @@ class SkillProvider:
 
     skill_provider: SkillSpecProvider
     kind: str = "skill"
-    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"skill"})
+    supported_kinds: "ClassVar[tuple[str, ...]]" = ("skill",)
 
     async def resolve(
         self,

@@ -38,5 +38,5 @@ class AgentDependencies:
     # CapabilityAssembler has resolved this run's tool contributions. Lets
     # PolicyCapability (the global before-every-tool-call hook) classify a
     # call by category/risk/mutating instead of only by tool name -- None
-    # (default) when no assembler ran, preserving the prior name-only path.
+    # (default) when no assembler ran.
     descriptor_lookup: "Mapping[str, ToolDescriptor] | None" = None

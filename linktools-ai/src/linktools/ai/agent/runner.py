@@ -75,6 +75,7 @@ from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
 from ..policy.engine import ToolContext
+from ..security.redact import redact_exception
 from ..run.cancellation import CancellationToken
 from ..run.checkpoint import CheckpointStore
 from ..run.context import RunContext
@@ -122,31 +123,6 @@ async def _noop_span():
     fallback for :meth:`AgentRunner._span` when observability is not wired,
     so the lifecycle body has a single ``async with`` shape regardless."""
     yield None
-
-
-def _toolset_for_definition(md) -> Any:
-    """Build a one-tool FunctionToolset from a ManagedToolDefinition. When the
-    definition carries parameters_json_schema (a ``**kwargs`` handler like an
-    MCP forwarding closure has no signature to derive one from), register via
-    Tool.from_schema so the model sees the correct parameters; otherwise let
-    pydantic-ai derive the schema from the handler signature."""
-    from pydantic_ai.toolsets import FunctionToolset
-
-    ts: "FunctionToolset" = FunctionToolset()
-    if md.parameters_json_schema:
-        from pydantic_ai.tools import Tool
-
-        ts.add_tool(
-            Tool.from_schema(
-                function=md.handler,
-                name=md.descriptor.name,
-                description=md.description or md.descriptor.name,
-                json_schema=dict(md.parameters_json_schema),
-            )
-        )
-    else:
-        ts.add_function(md.handler, name=md.descriptor.name, description=md.description)
-    return ts
 
 
 class AgentRunner:
@@ -576,10 +552,13 @@ class AgentRunner:
                     # configured. The managed path owns more than security --
                     # timeout, retry, idempotency, stable errors, events, call
                     # id -- so disabling the baseline must NOT route tools back
-                    # to a raw toolset.
+                    # to an unmanaged toolset.
                     effective_pipeline = self._security_pipeline
                     if cap_bundle.tool_contributions:
-                        from ..tool.pydantic import ManagedToolsetWrapper
+                        from ..tool.pydantic import (
+                            ManagedToolsetWrapper,
+                            build_managed_toolset,
+                        )
 
                         wrap_kw = dict(
                             security_pipeline=effective_pipeline,
@@ -601,7 +580,10 @@ class AgentRunner:
                             for md in contrib.tools:
                                 toolsets.append(
                                     ManagedToolsetWrapper(
-                                        _toolset_for_definition(md),
+                                        build_managed_toolset(
+                                            md,
+                                            tool_executor=self._tool_executor_for_managed,
+                                        ),
                                         descriptors={md.descriptor.name: md.descriptor},
                                         **wrap_kw,
                                     )
@@ -619,7 +601,7 @@ class AgentRunner:
                     # same source the assembler used for conflict/cap checks.
                     total = 0
                     for c in cap_bundle.tool_contributions:
-                        total += len(c.tools) if c.tools else len(c.descriptors)
+                        total += len(c.tools)
                     await append_event(
                         self._event_store,
                         EventContext.from_run_context(context),
@@ -1202,7 +1184,8 @@ class AgentRunner:
         except Exception as exc:
             # Generic error path: transition FAILED, run on_error, append
             # RunFailed, record metrics. Re-raise so the caller sees the error.
-            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
+            safe_error = redact_exception(exc)
+            error_info = RunErrorInfo(error_type=type(exc).__name__, message=safe_error)
             # Run status update. The FAILED transition is kept
             # best-effort ONLY because we are already in the failing path:
             # letting the transition error escape would replace the ORIGINAL
@@ -1235,7 +1218,7 @@ class AgentRunner:
                     RunFailed(
                         run_id=context.run_id,
                         error_type=type(exc).__name__,
-                        message=str(exc),
+                        message=safe_error,
                     ),
                 )
             except Exception as event_exc:  # noqa: BLE001

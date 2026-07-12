@@ -28,9 +28,12 @@ def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
         return AgentRef(agent_id=item)
     if isinstance(item, dict) and "agent_id" in item:
         role_raw = item.get("role")
+        if not isinstance(item["agent_id"], str) or not item["agent_id"].strip():
+            raise InvalidSpecError(f"swarm {swarm_id}: agent_id must be a string")
+        if role_raw is not None and not isinstance(role_raw, str):
+            raise InvalidSpecError(f"swarm {swarm_id}: role must be a string")
         return AgentRef(
-            agent_id=str(item["agent_id"]),
-            role=str(role_raw) if role_raw is not None else None,
+            agent_id=item["agent_id"], role=role_raw,
         )
     raise InvalidSpecError(f"swarm {swarm_id}: invalid {kind} ref: {item!r}")
 
@@ -72,10 +75,10 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
         strategy = SwarmStrategySpec(kind="coordinator_delegation")
     elif isinstance(strat_raw, dict):
         kind = strat_raw.get("kind")
-        if not kind:
+        if not isinstance(kind, str) or not kind.strip():
             raise InvalidSpecError(f"swarm {swarm_id}: 'strategy.kind' is required")
         strategy = SwarmStrategySpec(
-            kind=str(kind),
+            kind=kind,
             config=dict(strat_raw.get("config") or {}),
         )
     else:
@@ -89,15 +92,30 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
 
         def _int_field(key: str) -> "int | None":
             v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            return None if v is None else int(v)
+            if v is None:
+                return None
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise InvalidSpecError(f"swarm {swarm_id}: limits.{key} must be an integer")
+            return v
 
         def _decimal_field(key: str) -> "Decimal | None":
             v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            return None if v is None else Decimal(str(v))
+            if v is None:
+                return None
+            if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+                raise InvalidSpecError(f"swarm {swarm_id}: limits.{key} has an invalid number")
+            try:
+                return Decimal(v)
+            except Exception as exc:
+                raise InvalidSpecError(f"swarm {swarm_id}: limits.{key} has an invalid number") from exc
 
         def _float_field(key: str) -> "float | None":
             v = limits_raw.get(key, getattr(DEFAULT_SWARM_LIMITS, key))
-            return None if v is None else float(v)
+            if v is None:
+                return None
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise InvalidSpecError(f"swarm {swarm_id}: limits.{key} must be a number")
+            return float(v)
 
         limits = SwarmLimits(
             max_rounds=_int_field("max_rounds"),
@@ -160,7 +178,7 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
 
     return SwarmSpec(
         id=swarm_id,
-        name=str(name),
+        name=name,
         agents=agents,
         coordinator=coordinator,
         strategy=strategy,

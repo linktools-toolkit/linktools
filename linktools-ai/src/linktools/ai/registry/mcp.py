@@ -35,10 +35,15 @@ class MCPServerSpec:
 
 
 def _as_command_tuple(command_raw: Any) -> "tuple[str, ...]":
-    if isinstance(command_raw, (list, tuple)):
-        return tuple(str(p) for p in command_raw)
-    text = str(command_raw).strip()
-    return tuple(text.split()) if text else ()
+    if isinstance(command_raw, str):
+        if not command_raw.strip():
+            raise InvalidSpecError("mcp command must not be empty")
+        return (command_raw,)
+    if not isinstance(command_raw, list) or any(
+        not isinstance(part, str) or not part for part in command_raw
+    ):
+        raise InvalidSpecError("mcp command must be a string or list of strings")
+    return tuple(command_raw)
 
 
 def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:

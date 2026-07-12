@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Final public API surface, locked at Phase 0.
+"""Final public API surface.
 
 These are the only imports the simplified architecture promises. The test
-exists so any later phase that silently drops or renames a public symbol fails
-here instead of in downstream code. Old/legacy import paths are NOT exercised
-here -- their removal is asserted by the Phase 12 / Phase 13 acceptance suite.
+exists so any silent public API change fails here instead of in downstream code.
 """
 
 
@@ -81,10 +79,17 @@ def test_storage_optional_dependency_is_lazy():
 def test_importing_root_does_not_pull_sqlalchemy():
     """``import linktools.ai`` must succeed without the optional SQLAlchemy
     extra installed (the dependency is loaded lazily only on access)."""
+    import os
+    import subprocess
     import sys
 
-    import linktools.ai  # noqa: F401
-
-    assert "sqlalchemy" not in sys.modules or True  # presence is allowed, not required
-    # The hard contract: the root package exposes no SqlAlchemyStorage attr.
-    assert not hasattr(linktools.ai, "SqlAlchemyStorage")
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.join(root, "linktools", "src"), os.path.join(root, "linktools-ai", "src")]
+    )
+    subprocess.run(
+        [sys.executable, "-c", "import sys; import linktools.ai; assert 'sqlalchemy' not in sys.modules"],
+        check=True,
+        env=env,
+    )

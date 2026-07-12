@@ -30,7 +30,7 @@ class BuiltinProvider:
     error, not a silent no-op."""
 
     kind = "builtin"
-    supported_kinds = frozenset({"builtin"})
+    supported_kinds = ("builtin",)
 
     async def resolve(
         self,

@@ -12,7 +12,6 @@ AgentSpec.tools are then resolved into prompt sections + toolsets via the
 registered capability providers. Runtime is an async context manager that
 releases MCP connections on close."""
 
-import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
@@ -20,11 +19,12 @@ from typing import TYPE_CHECKING, Any, Mapping
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-from ._runtime.build import RuntimeBuildConfig, build_runtime_components
-from .agent.compiler import AgentCompiler
-from .agent.runner import AgentRunner
+from ._runtime.build import (
+    RuntimeBuildConfig,
+    RuntimeComponents,
+    build_runtime_components,
+)
 from .agent.spec import AgentSpec
-from .capability.assembler import CapabilityAssembler
 from .capability.models import CapabilityRuntimeOptions
 from .errors import SwarmError
 from .execution.protocols import ExecutionBackend
@@ -32,10 +32,8 @@ from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
 from .mcp.client import MCPConnectionManager
 from .providers.bundle import ProviderBundle
-from .run.controller import RunController
-from .run.models import RunInput, RunnableType
+from .run.models import RunInput
 from .storage.facade import Storage
-from .swarm.runner import SwarmRunner
 from .swarm.spec import SwarmSpec
 from .tool.executor import ToolExecutor
 
@@ -48,33 +46,9 @@ class Runtime:
     def __init__(
         self,
         *,
-        storage: Storage,
-        compiler: AgentCompiler,
-        runner: AgentRunner,
-        swarm_runner: SwarmRunner,
-        model_router: ModelRouter,
-        run_controller: "RunController | None" = None,
-        capability_assembler: "CapabilityAssembler | None" = None,
-        mcp_connection_manager: "MCPConnectionManager | None" = None,
-        options: "CapabilityRuntimeOptions | None" = None,
-        provider_bundle: "ProviderBundle | None" = None,
+        components: RuntimeComponents,
     ) -> None:
-        self.storage = storage
-        self.compiler = compiler
-        self.runner = runner
-        self.swarm_runner = swarm_runner
-        self.model_router = model_router
-        # Tracks in-flight asyncio.Tasks so cancel(run_id)
-        # can actually stop a running task, not just flip the DB status.
-        self.run_controller = run_controller
-        # Capability Runtime wiring. When non-None, AgentRunner uses
-        # this assembler to resolve declared AgentSpec.tools into toolsets.
-        self._capability_assembler = capability_assembler
-        self._mcp_connection_manager = mcp_connection_manager
-        self._options = options or CapabilityRuntimeOptions()
-        # The declaration bundle wired at build time; held so the runtime can
-        # resolve capabilities against the configured providers.
-        self._provider_bundle = provider_bundle
+        self._components = components
 
     @classmethod
     def build(
@@ -113,21 +87,10 @@ class Runtime:
             mcp_connection_manager=mcp_connection_manager,
         )
         c = build_runtime_components(config)
-        return cls(
-            storage=c.storage,
-            compiler=c.compiler,
-            runner=c.runner,
-            swarm_runner=c.swarm_runner,
-            model_router=c.model_router,
-            run_controller=c.run_controller,
-            capability_assembler=c.capability_assembler,
-            mcp_connection_manager=c.mcp_connection_manager,
-            options=c.options,
-            provider_bundle=c.provider_bundle,
-        )
+        return cls(components=c)
 
     async def inspect(
-        self, spec: AgentSpec, *, execution: "ExecutionBackend | None"
+        self, spec: AgentSpec
     ) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
         tool descriptors, merged prompt sections, and any warnings. Leaks no
@@ -136,10 +99,10 @@ class Runtime:
         from ._runtime.inspection import inspect_capabilities
 
         return await inspect_capabilities(
-            assembler=self._capability_assembler,
-            options=self._options,
+            assembler=self._components.capability_assembler,
+            options=self._components.options,
             spec=spec,
-            execution=execution,
+            execution=self._components.execution,
         )
 
     async def __aenter__(self) -> "Runtime":
@@ -150,9 +113,8 @@ class Runtime:
 
     async def aclose(self) -> None:
         """Release runtime-owned resources (MCP connections). Idempotent."""
-        if self._mcp_connection_manager is not None:
-            await self._mcp_connection_manager.close()
-            self._mcp_connection_manager = None
+        if self._components.mcp_connection_manager is not None:
+            await self._components.mcp_connection_manager.close()
 
     async def run(
         self,
@@ -165,39 +127,24 @@ class Runtime:
         tenant_id: "str | None" = None,
         agents: "Mapping[str, AgentSpec] | None" = None,
     ):
-        from ._runtime.lifecycle import create_run_context, resolve_session
+        from .run.lifecycle import prepare_run
 
-        resolved_session_id = await resolve_session(self.storage, session_id)
-        resolved_run_id = run_id or str(uuid.uuid4())
+        prepared = await prepare_run(
+            storage=self._components.storage, spec=spec, session_id=session_id,
+            run_id=run_id, user_id=user_id, tenant_id=tenant_id,
+        )
 
         if isinstance(spec, SwarmSpec):
             if agents is None:
                 raise SwarmError("agents mapping is required to run a SwarmSpec")
-            context = create_run_context(
-                run_id=resolved_run_id,
-                session_id=resolved_session_id,
-                runnable_id=spec.id,
-                runnable_type=RunnableType.SWARM,
-                user_id=user_id,
-                tenant_id=tenant_id,
-            )
-            return await self.swarm_runner.run(
-                spec,
-                RunInput(prompt=prompt),
-                context,
-                agents=agents,
+            return await self._components.swarm_runner.run(
+                spec, RunInput(prompt=prompt), prepared.context, agents=agents
             )
 
-        compiled = await self.compiler.compile(spec)
-        context = create_run_context(
-            run_id=resolved_run_id,
-            session_id=resolved_session_id,
-            runnable_id=spec.id,
-            runnable_type=RunnableType.AGENT,
-            user_id=user_id,
-            tenant_id=tenant_id,
+        compiled = await self._components.compiler.compile(spec)
+        return await self._components.runner.run(
+            compiled, RunInput(prompt=prompt), prepared.context
         )
-        return await self.runner.run(compiled, RunInput(prompt=prompt), context)
 
     async def cancel(self, run_id: str) -> None:
         """Cancel an in-flight Run.
@@ -225,7 +172,9 @@ class Runtime:
         from .errors import RunConflictError, RunNotFoundError
         from .run.models import RunStatus
 
-        record = await self.storage.runs.get(run_id)
+        storage = self._components.storage
+        controller = self._components.run_controller
+        record = await storage.runs.get(run_id)
         if record is None:
             raise RunNotFoundError(f"run not found: {run_id}")
         if record.status in (
@@ -236,22 +185,21 @@ class Runtime:
             return
 
         in_flight = (
-            self.run_controller is not None
-            and self.run_controller.get_token(run_id) is not None
+            controller is not None and controller.get_token(run_id) is not None
         )
         if in_flight:
             if record.status == RunStatus.CANCELLING:
-                await self.run_controller.cancel(run_id)
+                await controller.cancel(run_id)
                 return
 
             try:
-                await self.storage.runs.transition(
+                await storage.runs.transition(
                     run_id,
                     RunStatus.CANCELLING,
                     expected_version=record.version,
                 )
             except RunConflictError:
-                fresh = await self.storage.runs.get(run_id)
+                fresh = await storage.runs.get(run_id)
                 if fresh is None:
                     raise RunNotFoundError(f"run not found: {run_id}")
                 if fresh.status in (
@@ -261,13 +209,13 @@ class Runtime:
                 ):
                     return
                 if fresh.status == RunStatus.CANCELLING:
-                    await self.run_controller.cancel(run_id)
+                    await controller.cancel(run_id)
                     return
                 raise
 
-            await self.run_controller.cancel(run_id)
+            await controller.cancel(run_id)
         else:
-            await self.storage.runs.transition(
+            await storage.runs.transition(
                 run_id,
                 RunStatus.CANCELLED,
                 expected_version=record.version,
@@ -286,25 +234,18 @@ class Runtime:
         """Streaming variant of :meth:`run`. Only ``AgentSpec`` is supported --
         a ``SwarmSpec`` raises :class:`SwarmError` because swarm streaming is not
         implemented. Session resolution mirrors :meth:`run` exactly."""
-        from ._runtime.lifecycle import create_run_context, resolve_session
-
-        resolved_session_id = await resolve_session(self.storage, session_id)
-        resolved_run_id = run_id or str(uuid.uuid4())
+        from .run.lifecycle import prepare_run
 
         if isinstance(spec, SwarmSpec):
             raise SwarmError("run_stream does not support SwarmSpec")
 
-        compiled = await self.compiler.compile(spec)
-        context = create_run_context(
-            run_id=resolved_run_id,
-            session_id=resolved_session_id,
-            runnable_id=spec.id,
-            runnable_type=RunnableType.AGENT,
-            user_id=user_id,
-            tenant_id=tenant_id,
+        prepared = await prepare_run(
+            storage=self._components.storage, spec=spec, session_id=session_id,
+            run_id=run_id, user_id=user_id, tenant_id=tenant_id,
         )
-        async for event in self.runner.run_stream(
-            compiled, RunInput(prompt=prompt), context
+        compiled = await self._components.compiler.compile(spec)
+        async for event in self._components.runner.run_stream(
+            compiled, RunInput(prompt=prompt), prepared.context
         ):
             yield event
 
@@ -328,23 +269,24 @@ class Runtime:
         from .errors import InvalidRunTransitionError, RunNotFoundError
         from .run.models import RunStatus
 
-        record = await self.storage.runs.get(run_id)
+        storage = self._components.storage
+        record = await storage.runs.get(run_id)
         if record is None:
             raise RunNotFoundError(f"run not found: {run_id}")
         if record.status != RunStatus.WAITING_APPROVAL:
             raise InvalidRunTransitionError(
                 f"cannot resume run in status {record.status}"
             )
-        checkpoint = await self.storage.checkpoints.latest(run_id)
+        checkpoint = await storage.checkpoints.latest(run_id)
         if checkpoint is None:
             raise RunNotFoundError(f"no checkpoint for run: {run_id}")
         messages = deserialize_messages(checkpoint.payload)
-        await self.storage.runs.transition(
+        await storage.runs.transition(
             run_id,
             RunStatus.RUNNING,
             expected_version=record.version,
         )
-        compiled = await self.compiler.compile(spec)
+        compiled = await self._components.compiler.compile(spec)
         from ._runtime.lifecycle import create_run_context
 
         context = create_run_context(
@@ -358,7 +300,7 @@ class Runtime:
             parent_run_id=record.parent_run_id,
         )
         yield {"type": "resumed", "run_id": run_id}
-        async for event in self.runner.run_stream(
+        async for event in self._components.runner.run_stream(
             compiled,
             RunInput(prompt=""),
             context,

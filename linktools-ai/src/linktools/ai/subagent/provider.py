@@ -41,7 +41,7 @@ class SubagentProvider:
     # executor updates it per child run.
     depth_provider: "Callable[[], int]" = field(default=current_depth)
     kind: str = "subagent"
-    supported_kinds: "ClassVar[frozenset[str]]" = frozenset({"subagent"})
+    supported_kinds: "ClassVar[tuple[str, ...]]" = ("subagent",)
 
     async def resolve(
         self,

@@ -31,7 +31,9 @@ def test_managed_tool_definition_has_optional_description():
 
 
 def test_toolset_uses_definition_description_when_present():
-    from linktools.ai.agent.runner import _toolset_for_definition
+    from linktools.ai.tool.pydantic import build_managed_toolset
+    from linktools.ai.policy.engine import PolicyEngine
+    from linktools.ai.tool.executor import ToolExecutor
 
     md = ManagedToolDefinition(
         descriptor=_descriptor(),
@@ -39,13 +41,15 @@ def test_toolset_uses_definition_description_when_present():
         parameters_json_schema={"type": "object", "properties": {}},
         description="A tool that does a thing",
     )
-    ts = _toolset_for_definition(md)
+    ts = build_managed_toolset(md, tool_executor=ToolExecutor(policy=PolicyEngine(rules=())))
     tool = ts.tools["t"]
     assert getattr(tool, "description", None) == "A tool that does a thing"
 
 
 def test_toolset_falls_back_to_descriptor_name_without_description():
-    from linktools.ai.agent.runner import _toolset_for_definition
+    from linktools.ai.tool.pydantic import build_managed_toolset
+    from linktools.ai.policy.engine import PolicyEngine
+    from linktools.ai.tool.executor import ToolExecutor
 
     md = ManagedToolDefinition(
         descriptor=_descriptor(),
@@ -53,7 +57,7 @@ def test_toolset_falls_back_to_descriptor_name_without_description():
         parameters_json_schema={"type": "object", "properties": {}},
         description=None,
     )
-    ts = _toolset_for_definition(md)
+    ts = build_managed_toolset(md, tool_executor=ToolExecutor(policy=PolicyEngine(rules=())))
     tool = ts.tools["t"]
     # Falls back to the descriptor name so the model always sees a description.
     assert getattr(tool, "description", None) == "t"

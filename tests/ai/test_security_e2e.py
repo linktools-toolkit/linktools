@@ -145,7 +145,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="terminal"),),
+        tools=(ToolRef(kind="builtin", name="terminal"),),
     )
     result = await rt.run(spec, "wipe it")
     # The dangerous command was denied by the default baseline denylist before
@@ -195,7 +195,7 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="terminal"),),
+        tools=(ToolRef(kind="builtin", name="terminal"),),
     )
     result = await rt.run(spec, "say ok")
     # No denylist wired -> the safe command actually executed.
@@ -252,7 +252,7 @@ async def test_pipeline_attached_to_runtime(tmp_path):
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file"),),
+        tools=(ToolRef(kind="builtin", name="file"),),
     )
     result = await rt.run(spec, "read it")
     # The pipeline's before_tool hook fired on the real tool call -- the
@@ -335,7 +335,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file"),),
+        tools=(ToolRef(kind="builtin", name="file"),),
     )
 
     # Drive 1: the managed tool's pipeline-approval must PAUSE the run.
@@ -439,7 +439,7 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="file-read"),),
+        tools=(ToolRef(kind="builtin", name="file-read"),),
     )
     result = await rt.run(spec, "read it")
     # The pipeline rewrote path -> real.txt, so the model saw its content.
@@ -479,7 +479,7 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
         name="e2e",
         model=ModelPolicy(primary="m"),
         instructions=PromptSpec(instructions="hi"),
-        tools=(ToolRef(name="*"),),  # builtin:* but mutating tools gated off
+        tools=(ToolRef(kind="builtin", name="*"),),
     )
     inspection = await rt.inspect(spec, execution=backend)
     names = {tool.name for tool in inspection.tools}

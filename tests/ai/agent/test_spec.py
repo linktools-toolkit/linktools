@@ -12,7 +12,7 @@ def test_agent_spec_construction():
         name="security-agent",
         model=ModelPolicy(primary="gpt-4"),
         instructions=PromptSpec(instructions="You are a security analyst."),
-        tools=(ToolRef(name="file"), ToolRef(name="terminal")),
+        tools=(ToolRef(kind="builtin", name="file"), ToolRef(kind="builtin", name="terminal")),
         middleware=(MiddlewareRef(name="budget", config={"budget_usd": 5.0}),),
     )
     assert spec.id == "agent-1"
@@ -42,16 +42,14 @@ def test_prompt_spec_defaults():
 
 
 def test_tool_ref_and_middleware_ref():
-    assert ToolRef(name="file").name == "file"
+    assert ToolRef(kind="builtin", name="file").name == "file"
     ref = MiddlewareRef(name="budget")
     assert ref.name == "budget"
     assert dict(ref.config) == {}
 
 
 def test_tool_ref_kind_and_config_defaults():
-    # Legacy bare names keep kind None (resolver treats None as builtin).
-    assert ToolRef(name="file").kind is None
-    assert dict(ToolRef(name="file").config) == {}
+    assert dict(ToolRef(kind="builtin", name="file").config) == {}
     structured = ToolRef(name="sql", kind="skill", config={"limit": 5})
     assert structured.kind == "skill"
     assert structured.config == {"limit": 5}
@@ -60,9 +58,9 @@ def test_tool_ref_kind_and_config_defaults():
 def test_parse_tool_refs_handles_kind_name_strings_and_struct():
     from linktools.ai.registry.parser import parse_tool_refs
 
-    # bare name -> kind None (backward compat)
-    (bare,) = parse_tool_refs(["file"])
-    assert bare.name == "file" and bare.kind is None
+    import pytest
+    with pytest.raises(Exception):
+        parse_tool_refs(["file"])
     # kind:name string -> split
     (prefixed,) = parse_tool_refs(["skill:sql"])
     assert prefixed.name == "sql" and prefixed.kind == "skill"

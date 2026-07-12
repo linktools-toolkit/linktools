@@ -145,7 +145,10 @@ def test_parse_model_policy_rejects_missing_primary():
 
 # 6. parse_tool_refs
 def test_parse_tool_refs_builds_tuple_from_strings_and_dicts():
-    refs = parse_tool_refs(["tool_a", {"name": "tool_b"}])
+    refs = parse_tool_refs([
+        {"kind": "builtin", "name": "tool_a"},
+        {"kind": "skill", "name": "tool_b"},
+    ])
     assert isinstance(refs, tuple)
     assert len(refs) == 2
     assert all(isinstance(r, ToolRef) for r in refs)
@@ -155,7 +158,7 @@ def test_parse_tool_refs_builds_tuple_from_strings_and_dicts():
 
 def test_parse_tool_refs_rejects_invalid_item():
     with pytest.raises(InvalidSpecError):
-        parse_tool_refs(["ok", 42])
+        parse_tool_refs(["ok"])
 
 
 def test_parse_tool_refs_none_is_unset():

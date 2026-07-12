@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Run lifecycle helpers used by Runtime.run / run_stream / resume
-(spec §9.5). Centralizing session resolution + RunContext minting here keeps
+"""Shared Run lifecycle helpers used by Runtime.run / run_stream / resume.
+Centralizing session resolution + RunContext minting here keeps
 the three entry points single-shape and ensures they resolve sessions and
 lineage identically."""
 

@@ -53,6 +53,7 @@ from ..agent.runner import AgentRunner
 from ..errors import SwarmConflictError, SwarmError, SwarmLimitExceededError
 from ..run.context import RunContext
 from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
+from ..security.redact import redact_exception
 from ..session.models import SessionRecord, SessionStatus
 from .aggregation import aggregate
 from .limits import SwarmLimits
@@ -420,7 +421,7 @@ async def _run_task(
                     finished_at=_now(),
                     error=RunErrorInfo(
                         error_type=type(exc).__name__,
-                        message=str(exc),
+                        message=redact_exception(exc),
                     ),
                 )
             )
@@ -527,7 +528,7 @@ async def _run_task(
                 error_type=type(last_exc).__name__
                 if last_exc is not None
                 else "Unknown",
-                message=str(last_exc) if last_exc is not None else "",
+                message=(redact_exception(last_exc) if last_exc is not None else ""),
             ),
             expected_version=v,
             active_run_id=child_run_id,

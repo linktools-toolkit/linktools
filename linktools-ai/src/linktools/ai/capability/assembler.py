@@ -12,8 +12,7 @@ Resolution rules:
     CapabilityToolExposurePolicy caps            -> CapabilityConflictError
   - failures carry agent_id + ref for diagnostics
 
-A bare ToolRef with kind None (prior ``tools: [file]``) is treated as
-``builtin`` so existing specs resolve unchanged."""
+"""
 
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -220,8 +219,9 @@ class CapabilityAssembler:
 
 
 def _to_capability_ref(agent_id: str, tool_ref: ToolRef) -> CapabilityRef:
-    kind = tool_ref.kind or "builtin"
-    return CapabilityRef(kind=kind, name=tool_ref.name, config=dict(tool_ref.config))
+    return CapabilityRef(
+        kind=tool_ref.kind, name=tool_ref.name, config=dict(tool_ref.config)
+    )
 
 
 def _contribution_descriptors(contrib) -> "tuple":
@@ -252,7 +252,3 @@ def filter_contribution(contrib, policy):
 
     kept = tuple(md for md in contrib.tools if md.descriptor.name in allowed_names)
     return ToolContribution(tools=kept), dropped
-
-
-# Both names refer to the same orchestrator.
-CapabilityResolver = CapabilityAssembler

@@ -168,6 +168,7 @@ class MCPConnectionManager:
                     MCPDiscoveryUnsupportedError(
                         f"MCP server {server.id!r} cannot enumerate tools"
                     ),
+                    handle.connection_ref,
                 )
             raw_tools = await lister()
             tools = tuple(self._convert_tool_info(t) for t in raw_tools or ())

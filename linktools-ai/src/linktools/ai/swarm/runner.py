@@ -331,7 +331,10 @@ class SwarmRunner:
             # exc (the actual cause) with a store/version error, losing the
             # cause for the caller. The warnings keep the transition failures
             # visible rather than silent.
-            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
+            from ..security.redact import redact_exception
+            error_info = RunErrorInfo(
+                error_type=type(exc).__name__, message=redact_exception(exc)
+            )
             try:
                 await mark_failed(
                     self._run_store,
@@ -447,7 +450,10 @@ class SwarmRunner:
             )
             return result
         except Exception as exc:
-            error_info = RunErrorInfo(error_type=type(exc).__name__, message=str(exc))
+            from ..security.redact import redact_exception
+            error_info = RunErrorInfo(
+                error_type=type(exc).__name__, message=redact_exception(exc)
+            )
             # kept best-effort ONLY because we are
             # already in the failing path -- letting the transition error
             # escape would replace the ORIGINAL exc with a store/version error.

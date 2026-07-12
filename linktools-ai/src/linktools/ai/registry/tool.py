@@ -58,7 +58,9 @@ def _parse_permissions(items: Any) -> "frozenset[Permission]":
         raise InvalidSpecError("permissions must be a list")
     perms: "set[Permission]" = set()
     for item in items:
-        key = item if isinstance(item, str) else str(item)
+        if not isinstance(item, str):
+            raise InvalidSpecError(f"permission must be a string: {item!r}")
+        key = item
         if key not in _PERMISSION_LOOKUP:
             raise InvalidSpecError(f"unknown permission: {item!r}")
         perms.add(_PERMISSION_LOOKUP[key])
@@ -83,13 +85,22 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         "name",
     }
     reader = StrictConfigReader(payload, allowed=allowed, context=f"tool {name}")
-    risk_key = str(payload.get("risk", "LOW")).upper()
+    risk_raw = payload.get("risk", "LOW")
+    if not isinstance(risk_raw, str):
+        raise InvalidSpecError("risk must be a string")
+    risk_key = risk_raw.upper()
     if risk_key not in _RISK_LOOKUP:
         raise InvalidSpecError(f"unknown risk level: {payload.get('risk')!r}")
-    side_key = str(payload.get("side_effect", "read_only")).lower()
+    side_raw = payload.get("side_effect", "read_only")
+    if not isinstance(side_raw, str):
+        raise InvalidSpecError("side_effect must be a string")
+    side_key = side_raw.lower()
     if side_key not in _SIDE_EFFECT_LOOKUP:
         raise InvalidSpecError(f"unknown side_effect: {side_key!r}")
-    approval_key = str(payload.get("approval", "never")).lower()
+    approval_raw = payload.get("approval", "never")
+    if not isinstance(approval_raw, str):
+        raise InvalidSpecError("approval must be a string")
+    approval_key = approval_raw.lower()
     if approval_key not in _APPROVAL_LOOKUP:
         raise InvalidSpecError(f"unknown approval mode: {approval_key!r}")
     enabled = reader.bool("enabled", default=True)
@@ -97,7 +108,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
     timeout = reader.positive_number("timeout_seconds")
     retries = reader.non_negative_int("max_retries")
     schema_version = payload.get("schema_version", "1")
-    if schema_version is None or not str(schema_version).strip():
+    if not isinstance(schema_version, str) or not schema_version.strip():
         raise InvalidSpecError("schema_version must be non-empty")
     strategy = payload.get("idempotency_strategy")
     if strategy is not None and strategy not in ("exact_call", "business_key"):
@@ -126,7 +137,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         raise InvalidSpecError(str(exc)) from exc
     return ToolSpec(
         name=name,
-        description=str(payload.get("description", "")),
+        description=reader.optional_str("description") or "",
         enabled=enabled,
         permissions=_parse_permissions(payload.get("permissions")),
         risk=_RISK_LOOKUP[risk_key],
@@ -135,7 +146,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         idempotent=idempotent,
         timeout_seconds=timeout,
         max_retries=retries,
-        schema_version=str(schema_version),
+        schema_version=schema_version,
         idempotency_strategy=strategy,
         idempotency_key_field=key_field,
         metadata=dict(payload.get("metadata") or {}),

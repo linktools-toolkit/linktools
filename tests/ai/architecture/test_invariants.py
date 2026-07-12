@@ -151,7 +151,7 @@ def test_invariant_inspect_returns_no_handler(tmp_path):
         instructions=PromptSpec(instructions="hi"),
         tools=(),
     )
-    inspection = asyncio.run(runtime.inspect(spec, execution=None))
+    inspection = asyncio.run(runtime.inspect(spec))
     fields = {f.name for f in dataclasses.fields(inspection)}
     assert "handler" not in fields
     assert not hasattr(inspection, "handler")

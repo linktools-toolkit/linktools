@@ -39,8 +39,8 @@ class PackageProvider:
     kind: str = "package"
     # Declares every kind this one provider handles, so the runtime registers
     # it once under all three instead of alias-registering three copies.
-    supported_kinds: "ClassVar[frozenset[str]]" = frozenset(
-        {"package", "package-resource", "package-entrypoint"}
+    supported_kinds: "ClassVar[tuple[str, ...]]" = (
+        "package", "package-resource", "package-entrypoint"
     )
     resource_provider: "PackageResourceProvider | None" = None
     entrypoint_resolver: "EntrypointResolver | None" = None
