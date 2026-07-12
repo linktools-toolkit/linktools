@@ -57,3 +57,19 @@ def test_list_registers_container_configs_before_checking_status(tmp_path, monke
     # LLDAP_PORT is declared only by lldap's own `configs`; it only becomes a
     # resolvable env_config key once that container's configs are registered.
     assert manager.env_config.get("LLDAP_PORT", type=int) == 0
+
+
+def test_list_never_queries_the_docker_runtime(tmp_path, monkeypatch):
+    """`list` must stay a fast, local-only read: it shows persisted running
+    state, never live state -- so it must never shell out to `docker`/
+    `docker compose` at all. Use `ct-cntr status` for a live query."""
+    manager = _make_unprepared_manager(tmp_path)
+    monkeypatch.setattr(cntr_shared, "manager", manager)
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("list must not query the Docker runtime")
+
+    monkeypatch.setattr(manager.runtime, "create_docker_process", _fail)
+    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", _fail)
+
+    cntr_main.command.on_command_list()  # must not raise

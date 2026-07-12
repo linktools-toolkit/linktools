@@ -67,17 +67,16 @@ class Command(StatusCommands, BaseCommandGroup):
     def on_command_list(self, names: "list[str]" = None, detail: bool = False):
         manager = _shared.manager
         # Registers every resolved-installed container's own config defaults
-        # before anything below can indirectly render a container's own
-        # compose/Dockerfile template (get_effective -> get_actual ->
-        # DockerInspector iterates container.services, a cached_property
-        # that renders docker_compose) -- otherwise a template referencing
-        # its own container's config key sees it as genuinely undefined.
+        # into env_config -- `list` is often the first command run against a
+        # project, so it must not depend on some other command having done
+        # this already.
         manager.prepare_installed_containers()
         install_containers = manager.installed_state.get(resolve=False)
         all_install_containers = manager.resolver.resolve_dependencies(install_containers)
-        # Prefer live state, fall back to persisted when Docker is unavailable
-        # so `list` never crashes.
-        running_names = set(manager.running_state.get_effective(install_containers))
+        # Persisted state only -- `list` must stay a fast, local-only read and
+        # never shell out to `docker compose ps`/`docker inspect`. Use
+        # `ct-cntr status` for a live runtime query.
+        running_names = set(manager.running_state.get_persisted())
         for container in sorted(manager.containers.values(), key=lambda o: o.order):
             if names and container.name not in names:
                 continue
