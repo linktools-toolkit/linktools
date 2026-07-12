@@ -199,7 +199,7 @@ class ConfigSchema:
         """Every defined field, in definition order (insertion order of a
         Python dict). Lets a caller copy a schema's fields verbatim (e.g. a
         per-repository Config starting from the same base fields as its
-        manager's Config, spec §35) without re-deriving them from scratch.
+        manager's Config) without re-deriving them from scratch.
         """
         return list(self._fields.values())
 
@@ -305,7 +305,7 @@ class PersistentSource(ConfigSource):
 
 class FileSource(ConfigSource):
     """A read-only source backed by a plain dict, e.g. a
-    ``LinktoolsFileConfig.environment`` (spec §21).
+    ``LinktoolsFileConfig.environment``.
 
     ``name`` lets two instances (local-file / global-file) report distinct
     ``explain()`` source names instead of both showing up as ``"file"``.
@@ -589,7 +589,8 @@ class ConfigResolver:
         Source *order* (not this ``before_provider`` flag) is the only thing
         deciding relative priority among these sources -- this method never
         hardcodes a source class beyond the flag check, so a new
-        ``before_provider`` source needs no change here (spec §22-23).
+        ``before_provider`` source (e.g. ``ManagerConfigSource``) needs no
+        change here.
         """
         for source in self._sources:
             if not source.before_provider:
@@ -810,26 +811,31 @@ class Config:
         if runtime is None:
             raise ConfigError("no RuntimeOverrideSource configured")
         runtime.set(key, value)
-        self._resolver.clear_memo(key)
+        # Clears every memoized key, not just `key`: a field resolved via
+        # AliasProvider/LazyProvider/ChainProvider (or any custom provider
+        # reading another field through the resolver) may depend on this
+        # value without that dependency being tracked anywhere, so a
+        # narrower `clear_memo(key)` would leave those stale.
+        self._resolver.clear_memo()
 
     def persist(self, key: str, value: "Any") -> None:
         persistent = self._find(PersistentSource)
         if persistent is None:
             raise ConfigError("no PersistentSource configured")
         persistent.set(key, value)
-        self._resolver.clear_memo(key)
+        self._resolver.clear_memo()
 
     def unset(self, key: str) -> None:
         runtime = self._find(RuntimeOverrideSource)
         if runtime:
             runtime.clear(key)
-        self._resolver.clear_memo(key)
+        self._resolver.clear_memo()
 
     def remove(self, key: str) -> None:
         persistent = self._find(PersistentSource)
         if persistent:
             persistent.delete(key)
-        self._resolver.clear_memo(key)
+        self._resolver.clear_memo()
 
     def explain(self, key: str) -> dict:
         return self._resolver.explain(key)

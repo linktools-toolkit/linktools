@@ -27,7 +27,29 @@ if TYPE_CHECKING:
 
 
 _REPO_KEY = "INSTALLED_REPOS"
-_GIT_PREFIXES = ("http://", "https://", "ssh://", "git@")
+
+# Recognized protocol prefixes for a remote Git URL. SCP-like addresses
+# (`git@host:repo.git`, `user@host:path`) are deliberately not recognized --
+# they are indistinguishable from a bare local path without also parsing
+# Windows drive letters/UNC prefixes, so they are left as local paths rather
+# than risk misrouting one into Git cloning.
+_GIT_PREFIXES = ("http://", "https://", "ssh://", "git://", "file://")
+
+_REPO_TYPE_GIT = "git"
+_REPO_TYPE_LOCAL = "local"
+_SUPPORTED_REPO_TYPES = frozenset((_REPO_TYPE_GIT, _REPO_TYPE_LOCAL))
+
+
+def _is_remote_git_url(value: "Any") -> bool:
+    """Whether ``value`` is a Git URL this module clones/updates via
+    RepoGit, as opposed to a local filesystem path it symlinks in as-is.
+
+    Only explicit protocol prefixes count -- a Windows drive path
+    (``C:\\repo``, ``C:/repo``), a UNC path (``\\\\server\\share``), or a
+    relative/absolute local path never matches one, so they always fall
+    through to the local-repository branch below.
+    """
+    return isinstance(value, str) and value.startswith(_GIT_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -81,14 +103,14 @@ class RepoService(object):
                 self._remove_repo_file(repos.pop(key))
                 self._dump(repos)
 
-            if url.startswith(_GIT_PREFIXES):
+            if _is_remote_git_url(url):
                 ensure_repo_not_exist(url)
                 self.logger.info(f"Add git repository: {url}")
                 repo_name = utils.guess_file_name(url)
                 repo_path = self._choose_repo_path(repo_name)
                 self.git.clone(url, repo_path, branch)
                 self._validate_new_repo_requirement(repo_path)
-                repos[url] = dict(type="git", repo_path=repo_path, repo_name=repo_name)
+                repos[url] = dict(type=_REPO_TYPE_GIT, repo_path=repo_path, repo_name=repo_name)
             else:
                 path = os.path.abspath(os.path.expanduser(url))
                 if not os.path.exists(path) or not os.path.isdir(path):
@@ -100,9 +122,22 @@ class RepoService(object):
                 repo_path = self._choose_repo_path(repo_name)
                 os.symlink(path, repo_path, target_is_directory=True)
                 self._validate_new_repo_requirement(repo_path)
-                repos[path] = dict(type="local", repo_path=repo_path, repo_name=repo_name)
+                repos[path] = dict(type=_REPO_TYPE_LOCAL, repo_path=repo_path, repo_name=repo_name)
 
             self._dump(repos)
+
+    def _get_repo_type(self, url: str, meta: "dict[str, Any]") -> str:
+        """The repository's business type, as recorded in ``meta['type']``.
+
+        The single place every update/describe/validate call routes a
+        repository's type through, so a corrupt/unrecognized persisted
+        ``type`` fails loudly here instead of each caller silently guessing
+        "local" or "git" on its own.
+        """
+        repo_type = meta.get("type")
+        if repo_type not in _SUPPORTED_REPO_TYPES:
+            raise ContainerError(f"Repository `{url}` has an unsupported type: {repo_type!r}")
+        return repo_type
 
     def update(self, branch: str = None, reset: bool = False) -> "list[RepoUpdateResult]":
         """Sync every repository, then re-check each one's requires.linktools-cntr.
@@ -114,29 +149,41 @@ class RepoService(object):
         ``ContainerLoader``, simply not loaded again until it's compatible);
         the caller decides whether any result should make the command exit
         non-zero.
+
+        A local (non-git) repository is already linked straight to its
+        source directory -- there is no Git sync step, so it never reaches
+        ``RepoGit`` (and therefore never triggers a Git-unavailable warning).
+        ``updated=True`` for a local repo means "this pass re-validated it
+        successfully", not "its Git content changed".
         """
         results = []
         for url, meta in self.get_all().items():
             repo_path = meta.get("repo_path")
             if not repo_path:
+                results.append(RepoUpdateResult(url=url, updated=False, revision=None,
+                                                 compatible=False, error="Repository path is missing."))
                 continue
 
             try:
-                git_result = self.git.update(url, repo_path, branch=branch, reset=reset)
+                repo_type = self._get_repo_type(url, meta)
+
+                if repo_type == _REPO_TYPE_GIT:
+                    git_result = self.git.update(url, repo_path, branch=branch, reset=reset)
+                    if not git_result.success:
+                        results.append(RepoUpdateResult(url=url, updated=False, revision=git_result.revision,
+                                                         compatible=False, error=git_result.error))
+                        continue
+                    revision = git_result.revision
+                else:
+                    revision = None
+
+                compatible, error = self._revalidate_after_update(repo_path)
+                results.append(RepoUpdateResult(
+                    url=url, updated=True, revision=revision, compatible=compatible, error=error,
+                ))
             except Exception as exc:  # noqa: BLE001 - one repo's sync failure must not hide the rest
                 results.append(RepoUpdateResult(url=url, updated=False, revision=None,
                                                  compatible=False, error=str(exc)))
-                continue
-
-            if not git_result.success:
-                results.append(RepoUpdateResult(url=url, updated=False, revision=git_result.revision,
-                                                 compatible=False, error=git_result.error))
-                continue
-
-            compatible, error = self._revalidate_after_update(repo_path)
-            results.append(RepoUpdateResult(
-                url=url, updated=True, revision=git_result.revision, compatible=compatible, error=error,
-            ))
         return results
 
     def _revalidate_after_update(self, repo_path: str) -> "tuple[bool, str | None]":
@@ -164,31 +211,74 @@ class RepoService(object):
     def describe(self, url: str, meta: "dict[str, Any]") -> "dict[str, Any]":
         """Read-only status: local file config presence, declared
         ``requires.linktools-cntr``, compatibility, and Git revision/dirty
-        state. Never imports the repository's ``container.py``."""
+        state. Never imports the repository's ``container.py``.
+
+        Never raises for a single bad repository (an unsupported/corrupt
+        persisted ``type``, a dangling ``.linktools.json`` symlink, ...) --
+        every problem is reported inline in the returned dict, so one repo's
+        problem can never hide the rest of a multi-repo ``status``/``validate``
+        call.
+        """
         repo_path = meta.get("repo_path")
         info: "dict[str, Any]" = dict(url=url, type=meta.get("type", "unknown"), repo_path=repo_path)
 
+        try:
+            repo_type = self._get_repo_type(url, meta)
+        except ContainerError as exc:
+            info["compatible"] = False
+            info["local_config"] = "unknown"
+            info["local_config_error"] = str(exc)
+            info["git"] = {"applicable": False, "supported": False, "revision": None,
+                            "dirty": None, "reason": str(exc)}
+            return info
+
+        # ``.linktools.json`` presence is reported as a raw filesystem fact
+        # (lexists -- a dangling symlink counts as "present", not "absent")
+        # separately from whether it actually loads: the real Loader (never
+        # re-implemented here) is the only thing that decides load success,
+        # so a present-but-broken file is reported as present + incompatible
+        # rather than silently downgraded to absent.
         local_path = (os.path.join(repo_path, LinktoolsFileConfigLoader.local_file_name)
                       if repo_path else None)
-        if local_path and os.path.exists(local_path):
-            info["local_config"] = "present"
-            try:
-                file_config = self.manager.environ.load_file_config(local_root=repo_path)
-                info["requires"] = dict(file_config.local_config.requires)
-                ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
-                info["compatible"] = True
-            except ConfigValidationError as exc:
-                info["compatible"] = False
-                info["compatibility_issues"] = [str(exc)]
-            except ConfigError as exc:
-                info["local_config_error"] = str(exc)
-                info["compatible"] = False
-        else:
-            info["local_config"] = "absent"
-            info["compatible"] = True
+        info["local_config"] = "present" if local_path and os.path.lexists(local_path) else "absent"
 
-        info["git"] = self.git.inspect(repo_path)
+        try:
+            file_config = self.manager.environ.load_file_config(local_root=repo_path)
+            info["requires"] = dict(file_config.local_config.requires)
+            info["ignored_environment_keys"] = self._find_reserved_environment_keys(file_config)
+            ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+            info["compatible"] = True
+        except ConfigValidationError as exc:
+            info["compatible"] = False
+            info["compatibility_issues"] = [str(exc)]
+        except ConfigError as exc:
+            info["local_config_error"] = str(exc)
+            info["compatible"] = False
+
+        if repo_type == _REPO_TYPE_GIT:
+            info["git"] = self.git.inspect(repo_path)
+        else:
+            info["git"] = {
+                "applicable": False,
+                "supported": True,
+                "revision": None,
+                "dirty": None,
+                "reason": "Local repository.",
+            }
         return info
+
+    def _find_reserved_environment_keys(self, file_config: "Any") -> "list[str]":
+        """Manager-owned keys (``ContainerManager._get_manager_config_keys``)
+        this repository's own ``.linktools.json`` declares under
+        ``environment`` -- these are silently ignored by
+        ``ManagerConfigSource`` (the manager's value always wins), so
+        ``describe()``/``validate()`` surface them as a warning instead of
+        leaving the mismatch invisible. Never rejects the repository over
+        this -- an existing file with a reserved key must keep loading.
+        """
+        local_environment = file_config.local_config.environment
+        reserved = self.manager._get_manager_config_keys()
+        return sorted(key for key in local_environment if key in reserved)
 
     def validate(self, url: str = None) -> "tuple[dict[str, Any], list[str]]":
         """Describe one or all repositories; also report which are incompatible."""

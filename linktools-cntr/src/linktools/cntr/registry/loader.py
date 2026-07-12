@@ -74,6 +74,7 @@ class ContainerLoader:
             repo_context = RepositoryConfigContext(
                 root_path=repo_path, file_config=file_config,
                 config=manager.build_repository_config(repo_path), url=url, builtin=False,
+                repo_name=meta.get("repo_name"),
             )
             for container in self._walk(repo_path, max_level=2, repository=repo_context):
                 containers.append(container)

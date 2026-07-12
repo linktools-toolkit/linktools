@@ -21,6 +21,7 @@ from ._config import (
     ErrorProvider,
     ChainProvider,
     ResolvedConfig,
+    redact_config_value,
 )
 from ._tools import Tools, Tool, ToolStub
 from ._tools_installer import ToolInstaller
@@ -59,7 +60,7 @@ __all__ = [
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource",
     "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
-    "ConfigStore",
+    "ConfigStore", "redact_config_value",
     # download
     "DownloadRequest", "DownloadResult", "DownloadManager", "DownloadValidator",
     "SizeValidator", "HashValidator", "CompositeValidator", "FileTransport",

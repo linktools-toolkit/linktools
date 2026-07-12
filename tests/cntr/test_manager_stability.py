@@ -22,7 +22,14 @@ class _FakeLogger:
         return lambda *a, **kw: None
 
 
+class _FakeSchema:
+    def fields(self):
+        return []
+
+
 class _FakeEnvConfig:
+    schema = _FakeSchema()
+
     def update_defaults(self, **kwargs):
         pass
 

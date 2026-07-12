@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from collections import namedtuple
+
 from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
 from linktools.cli.argparse import KeyValueAction, LazyChoices
-from linktools.core import ConfigField
+from linktools.core import ConfigField, redact_config_value
+from linktools.errors import ConfigNotFoundError
 from ..container import ContainerError
 from . import _shared
 from ._order import CONFIG_COMMAND_ORDER
+
+# A single displayable config entry: which Config object it resolves
+# through (identity is what dedup/ownership keys off -- two containers can
+# share one Config, e.g. same-repo siblings or the shared builtin Config)
+# and the human-facing owner label for it.
+ConfigListEntry = namedtuple("ConfigListEntry", ["owner", "key", "config"])
 
 
 class ConfigCommand(BaseCommandGroup):
@@ -49,49 +58,89 @@ class ConfigCommand(BaseCommandGroup):
         if with_dependencies and names:
             target_containers = _shared.manager.resolver.resolve_dependencies(target_containers)
 
-        entries = []
-        seen_keys = set()
+        seen_entries = set()
+        declared_keys = set()
+        entries: "list[ConfigListEntry]" = []
 
-        def add_entries(config, keys):
-            # Dedup by key name alone, not (id(config), key): every
-            # container/repo Config shares the same underlying Environment/
-            # RuntimeOverride/PersistentSource namespace (only the local-file
-            # layer differs per repo), so the exact same key persisted once
-            # resolves identically through any of them. Keeping the first
-            # occurrence (added earliest, from the owning container's own
-            # env_config) is also the most specific one when a repo's own
-            # local file overrides it.
+        def owner_of(container):
+            context = container.repository_context
+            if context is not None and context.repo_name:
+                return context.repo_name
+            return container.name
+
+        def add_container_entries(container, keys):
+            config = container.env_config
+            owner = owner_of(container)
             for key in keys:
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    entries.append((key, config))
+                declared_keys.add(key)
+                # Dedup by (id(config), key), not key alone: different
+                # repositories never share a Config object (only the
+                # shared Environment/RuntimeOverride/Persistent triple, plus
+                # each repo's own local-file layer), so the SAME key can
+                # legitimately resolve to a DIFFERENT value per repository
+                # and must be listed once per distinct Config, not collapsed
+                # to a single, arbitrarily-first-seen entry.
+                identity = (id(config), key)
+                if identity in seen_entries:
+                    continue
+                seen_entries.add(identity)
+                entries.append(ConfigListEntry(owner=owner, key=key, config=config))
 
         for container in target_containers:
-            add_entries(container.env_config, container.configs.keys())
+            add_container_entries(container, container.configs.keys())
         for container in target_containers:
-            add_entries(container.env_config, container.extend_configs.keys())
+            add_container_entries(container, container.extend_configs.keys())
         if not names:
-            add_entries(
-                _shared.manager.env_config,
-                [key for key, value in _shared.manager.configs.items() if not isinstance(value, ConfigField)],
-            )
+            for key, value in _shared.manager.configs.items():
+                if isinstance(value, ConfigField):
+                    continue
+                declared_keys.add(key)
+                identity = (id(_shared.manager.env_config), key)
+                if identity in seen_entries:
+                    continue
+                seen_entries.add(identity)
+                entries.append(ConfigListEntry(owner="manager", key=key, config=_shared.manager.env_config))
             # Only keys someone has actually set (persisted_keys()), not every
             # schema-declared field name (keys()) -- otherwise a manager-level
             # field that's never actually been configured (e.g.
             # DOCKER_DOWNLOAD_PATH) gets force-resolved just because it's
             # *possible* to set, prompting for it even though nothing needs it.
-            add_entries(_shared.manager.env_config, _shared.manager.env_config.persisted_keys())
-        for key, config in sorted(entries, key=lambda entry: (entry[0], id(entry[1]))):
-            value = config.get(key)
+            for key in _shared.manager.env_config.persisted_keys():
+                if key in declared_keys:
+                    continue
+                entries.append(ConfigListEntry(owner="manager", key=key, config=_shared.manager.env_config))
+
+        # Owner is only shown when the same key is genuinely ambiguous (more
+        # than one distinct owner listing it) -- keeps `KEY=VALUE` output
+        # stable for the common single-owner case.
+        owners_by_key = {}
+        for entry in entries:
+            owners_by_key.setdefault(entry.key, set()).add(entry.owner)
+
+        for entry in sorted(entries, key=lambda e: (e.key, e.owner, id(e.config))):
+            try:
+                value = entry.config.get(entry.key)
+            except ConfigNotFoundError:
+                # Declared (e.g. an optional secret extend_config) but never
+                # actually configured -- nothing to list, and never worth
+                # force-prompting for just to render a listing.
+                continue
+
+            field = entry.config.schema.get(entry.key)
+            label = f"{entry.owner}:{entry.key}" if len(owners_by_key[entry.key]) > 1 else entry.key
             if show_secret:
                 # self.logger.info goes through the logging redaction filter,
                 # which masks anything that looks like a secret/password/token
                 # (by design -- never leak one into a log file/CI output by
                 # accident). --show-secret is an explicit, opt-in request to
                 # see the real value, so print it directly instead.
-                print(f"{key}={value}")
+                print(f"{label}={value}")
             else:
-                self.logger.info(f"{key}={value}")
+                # Redact via the field's own `secret` flag first (not just
+                # the logger's key-name heuristic) -- a field explicitly
+                # marked secret must never rely on its name happening to
+                # match the logger's pattern.
+                self.logger.info(f"{label}={redact_config_value(field, value)}")
 
     @subcommand("get", order=CONFIG_COMMAND_ORDER["get"], help="read one or more resolved config values")
     @subcommand_argument("keys", metavar="KEY", nargs="+", help="config key(s)")

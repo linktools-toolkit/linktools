@@ -110,6 +110,7 @@ class RepoGit(object):
         if not self.available:
             self.warn_unavailable("Reading Git repository metadata")
             return {
+                "applicable": True,
                 "supported": False,
                 "revision": None,
                 "dirty": None,
@@ -117,13 +118,13 @@ class RepoGit(object):
             }
 
         if not repo_path or not os.path.exists(repo_path):
-            return {"supported": True, "revision": None, "dirty": None, "reason": None}
+            return {"applicable": True, "supported": True, "revision": None, "dirty": None, "reason": None}
 
         repo = GitRepository.open_if_valid(self.manager.environ, repo_path)
         if repo is None:
-            return {"supported": True, "revision": None, "dirty": None,
+            return {"applicable": True, "supported": True, "revision": None, "dirty": None,
                      "reason": "Not a git repository."}
 
         with repo:
-            return {"supported": True, "revision": repo.head_sha(),
+            return {"applicable": True, "supported": True, "revision": repo.head_sha(),
                      "dirty": repo.is_dirty(), "reason": None}

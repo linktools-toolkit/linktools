@@ -82,6 +82,13 @@ class ContainerManager:
             self._make_container_schema(), self.container_config_sources, local_root=None,
         )
         self.env_config.update_defaults(**self.configs)
+        # Frozen here, right after `self.configs` registers -- and before any
+        # builtin container (loaded lazily, later, onto this very schema via
+        # `self.containers`/`self.loader`) adds its own fields to it. Deriving
+        # this set later would also sweep in builtin fields like
+        # NGINX_ROOT_DOMAIN, which are not manager-owned in the sense
+        # `build_repository_config`/`ManagerConfigSource` care about.
+        self._manager_config_keys = self._compute_manager_config_keys()
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -290,6 +297,22 @@ class ContainerManager:
         from linktools.core import ConfigSchema
         return ConfigSchema(allow_unknown=True)
 
+    def _compute_manager_config_keys(self) -> "frozenset[str]":
+        keys = set()
+        for field in self.env_config.schema.fields():
+            keys.add(field.name)
+            keys.update(field.aliases)
+        return frozenset(keys)
+
+    def _get_manager_config_keys(self) -> "frozenset[str]":
+        """Field names this manager's own ``configs`` property declares
+        (HOST, DOCKER_APP_PATH, ...) -- these must resolve identically no
+        matter which repository's container reads them, so a third-party
+        repository's local ``.linktools.json`` must never override them.
+        Frozen once in ``__init__`` -- see ``_manager_config_keys``.
+        """
+        return self._manager_config_keys
+
     def build_repository_config(self, local_root: "Any") -> "Any":
         """Build the Config a third-party repository's RepositoryConfigContext
         holds: starts from a copy of this manager's own base
@@ -300,11 +323,25 @@ class ContainerManager:
         ``prepare_installed_containers``). Shares this manager's
         Environment/RuntimeOverride/Persistent state (``container_config_sources``)
         -- only the local-file layer is unique to ``local_root``.
+
+        A ``ManagerConfigSource`` sits ahead of that local-file layer so a
+        manager-owned key (``_get_manager_config_keys()``) always resolves
+        through this manager's own Config -- a repository-declared field of
+        the same name is simply never consulted for it. Any other key (the
+        repository's own custom fields) falls through the ManagerConfigSource
+        untouched, straight to the repository's local/global file/provider/
+        default, exactly as before this boundary existed.
         """
+        from .repo.context import ManagerConfigSource
+
         schema = self._make_container_schema()
         for field in self.env_config.schema.fields():
             schema.define(field)
-        return self.environ.build_config(schema, self.container_config_sources, local_root=local_root)
+        manager_source = ManagerConfigSource(self.env_config, self._get_manager_config_keys())
+        return self.environ.build_config(
+            schema, self.container_config_sources, local_root=local_root,
+            extra_sources=(manager_source,),
+        )
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
         self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
