@@ -73,6 +73,15 @@ class ManagerConfigSource(ConfigSource):
         self._config = manager_config
         self._keys = frozenset(keys)
 
+    @property
+    def revision(self) -> "Any":
+        # Delegates to the manager's own Config revision (schema + every
+        # source it reads through, including its own local/global file) so
+        # a repository's Resolver notices a manager-side change -- a
+        # persisted/runtime write, a manager local-file reload, or a schema
+        # update -- without this source maintaining any counter of its own.
+        return self._config.revision
+
     def get(self, key: str) -> "tuple[Any, bool]":
         if key not in self._keys:
             return (MISSING, False)

@@ -126,6 +126,36 @@ class RepoService(object):
 
             self._dump(repos)
 
+    def _validate_repo_root(self, repo_path: "str | None") -> str:
+        """Fail closed on any repository root that isn't a genuinely usable
+        directory: missing, nonexistent, a dangling symlink, or a non-
+        directory. The single choke point every caller that's about to read
+        from or Git-sync a repository root routes through -- so "the root
+        is unusable" is always an explicit, typed failure (never silently
+        treated as compatible/updated, never a fallback to
+        ``load_file_config(local_root=None)`` -- which would read the
+        process's CWD instead of this repository).
+
+        Check order matters: lexists before the dangling-symlink check
+        before isdir, so a dangling symlink is reported as exactly that
+        rather than the less specific "not a directory".
+        """
+        if not repo_path:
+            raise ContainerError("Repository path is missing.")
+
+        path = os.path.abspath(os.path.expanduser(str(repo_path)))
+
+        if not os.path.lexists(path):
+            raise ContainerError(f"Repository path does not exist: {path}")
+
+        if os.path.islink(path) and not os.path.exists(path):
+            raise ContainerError(f"Repository link is dangling: {path}")
+
+        if not os.path.isdir(path):
+            raise ContainerError(f"Repository path is not a directory: {path}")
+
+        return path
+
     def _get_repo_type(self, url: str, meta: "dict[str, Any]") -> str:
         """The repository's business type, as recorded in ``meta['type']``.
 
@@ -155,13 +185,20 @@ class RepoService(object):
         ``RepoGit`` (and therefore never triggers a Git-unavailable warning).
         ``updated=True`` for a local repo means "this pass re-validated it
         successfully", not "its Git content changed".
+
+        The repository root is validated *before* dispatching to Git, for
+        every type -- ``RepoGit.update()`` itself would clone into a missing
+        directory on demand, but ``update`` and ``add`` stay separate
+        responsibilities here: a missing/dangling checkout root is always a
+        hard failure the user re-``add``s, never an implicit self-heal.
         """
         results = []
         for url, meta in self.get_all().items():
-            repo_path = meta.get("repo_path")
-            if not repo_path:
+            try:
+                repo_path = self._validate_repo_root(meta.get("repo_path"))
+            except ContainerError as exc:
                 results.append(RepoUpdateResult(url=url, updated=False, revision=None,
-                                                 compatible=False, error="Repository path is missing."))
+                                                 compatible=False, error=str(exc)))
                 continue
 
             try:
@@ -186,17 +223,17 @@ class RepoService(object):
                                                  compatible=False, error=str(exc)))
         return results
 
-    def _revalidate_after_update(self, repo_path: str) -> "tuple[bool, str | None]":
-        if not repo_path or not os.path.exists(repo_path):
-            return True, None
-
+    def _revalidate_after_update(self, repo_path: "str | None") -> "tuple[bool, str | None]":
         try:
+            repo_path = self._validate_repo_root(repo_path)
             file_config = self.manager.environ.load_file_config(local_root=repo_path)
             ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
         except ConfigValidationError as exc:
             return False, f"incompatible with this host after update: {exc}"
         except ConfigError as exc:
             return False, f".linktools.json is invalid after update: {exc}"
+        except ContainerError as exc:
+            return False, str(exc)
         return True, None
 
     def remove(self, url: str) -> None:
@@ -214,23 +251,51 @@ class RepoService(object):
         state. Never imports the repository's ``container.py``.
 
         Never raises for a single bad repository (an unsupported/corrupt
-        persisted ``type``, a dangling ``.linktools.json`` symlink, ...) --
-        every problem is reported inline in the returned dict, so one repo's
-        problem can never hide the rest of a multi-repo ``status``/``validate``
-        call.
+        persisted ``type``, a missing/dangling repository root, a dangling
+        ``.linktools.json``, ...) -- every problem is reported inline in the
+        returned dict, so one repo's problem can never hide the rest of a
+        multi-repo ``status``/``validate`` call.
         """
-        repo_path = meta.get("repo_path")
-        info: "dict[str, Any]" = dict(url=url, type=meta.get("type", "unknown"), repo_path=repo_path)
+        info: "dict[str, Any]" = dict(
+            url=url,
+            type=meta.get("type", "unknown"),
+            repo_type=meta.get("type"),
+            repo_name=meta.get("repo_name"),
+            repo_path=meta.get("repo_path"),
+            available=False,
+            compatible=False,
+            local_config="unknown",
+            requires={},
+            compatibility_issues=[],
+        )
+
+        # The repository root itself is validated before anything ever
+        # reads from it -- a missing/dangling/non-directory root must never
+        # fall through to ``load_file_config(local_root=None)``, which would
+        # silently read the *process's* CWD instead of this repository.
+        try:
+            repo_path = self._validate_repo_root(meta.get("repo_path"))
+        except ContainerError as exc:
+            info["repository_error"] = str(exc)
+            info["git"] = {
+                "applicable": meta.get("type") == _REPO_TYPE_GIT,
+                "supported": False,
+                "revision": None,
+                "dirty": None,
+                "reason": str(exc),
+            }
+            return info
 
         try:
             repo_type = self._get_repo_type(url, meta)
         except ContainerError as exc:
-            info["compatible"] = False
-            info["local_config"] = "unknown"
+            info["available"] = True
             info["local_config_error"] = str(exc)
             info["git"] = {"applicable": False, "supported": False, "revision": None,
                             "dirty": None, "reason": str(exc)}
             return info
+
+        info["available"] = True
 
         # ``.linktools.json`` presence is reported as a raw filesystem fact
         # (lexists -- a dangling symlink counts as "present", not "absent")
@@ -238,9 +303,8 @@ class RepoService(object):
         # re-implemented here) is the only thing that decides load success,
         # so a present-but-broken file is reported as present + incompatible
         # rather than silently downgraded to absent.
-        local_path = (os.path.join(repo_path, LinktoolsFileConfigLoader.local_file_name)
-                      if repo_path else None)
-        info["local_config"] = "present" if local_path and os.path.lexists(local_path) else "absent"
+        local_path = os.path.join(repo_path, LinktoolsFileConfigLoader.local_file_name)
+        info["local_config"] = "present" if os.path.lexists(local_path) else "absent"
 
         try:
             file_config = self.manager.environ.load_file_config(local_root=repo_path)

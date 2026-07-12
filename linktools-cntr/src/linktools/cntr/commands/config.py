@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import hashlib
+import os
 from collections import namedtuple
 
 from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
@@ -11,10 +13,51 @@ from . import _shared
 from ._order import CONFIG_COMMAND_ORDER
 
 # A single displayable config entry: which Config object it resolves
-# through (identity is what dedup/ownership keys off -- two containers can
-# share one Config, e.g. same-repo siblings or the shared builtin Config)
-# and the human-facing owner label for it.
-ConfigListEntry = namedtuple("ConfigListEntry", ["owner", "key", "config"])
+# through (identity is what dedup keys off -- two containers can share one
+# Config, e.g. same-repo siblings or the shared builtin Config), plus a
+# stable, credential-free ``owner_id`` (used to detect genuine cross-owner
+# ambiguity for a key) separate from the human-facing ``owner_label`` (which
+# two DIFFERENT repositories may share, e.g. "common" cloned from
+# team-a/common.git and team-b/common.git).
+ConfigListEntry = namedtuple("ConfigListEntry", ["owner_id", "owner_label", "key", "config"])
+
+
+def _owner_identity(container):
+    """(owner_id, owner_label) for a container's config entries.
+
+    ``owner_id`` is the repository's real, absolute root path (stable and
+    never shown raw to the user) -- never a repo_name (two different repos
+    can share one) and never a URL (may embed a Git credential). Falls back
+    to the Config object's identity only when a context/root_path is
+    genuinely unavailable (e.g. a container built directly in a test).
+    """
+    context = container.repository_context
+    root_path = context.root_path if context is not None else None
+    if root_path:
+        owner_id = os.path.realpath(str(root_path))
+    else:
+        owner_id = "config:%s" % id(container.env_config)
+    owner_label = (context.repo_name if context is not None else None) or container.name
+    return owner_id, owner_label
+
+
+def _short_owner_suffix(owner_id):
+    """An 8-hex-char stable suffix derived from ``owner_id`` -- long enough
+    to disambiguate in practice, short enough to stay readable, and never
+    the raw (potentially filesystem-revealing) owner_id itself."""
+    return hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:8]
+
+
+def _shown_config_value(config, key, value, show_secret=False):
+    """The single choke point every command output (set/get/list) routes a
+    resolved value through before display: --show-secret is an explicit,
+    opt-in bypass; otherwise a ``ConfigField(secret=True)`` value is always
+    masked, regardless of whether the logger's own key-name-pattern
+    redaction would have caught it (a field can be secret without its name
+    looking like one)."""
+    if show_secret:
+        return value
+    return redact_config_value(config.schema.get(key), value)
 
 
 class ConfigCommand(BaseCommandGroup):
@@ -32,11 +75,15 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand("set", order=CONFIG_COMMAND_ORDER["set"], help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
     def on_command_set(self, configs: "dict[str, str]"):
+        config = _shared.manager.env_config
         for key, value in configs.items():
-            _shared.manager.env_config.persist(key, value)
+            config.persist(key, value)
         for key in sorted(configs.keys()):
-            value = _shared.manager.env_config.get(key)
-            self.logger.info(f"{key}: {value}")
+            # Always redacted -- config set intentionally has no
+            # --show-secret; the whole point of `set` is to confirm the
+            # write happened, not to echo the value back.
+            shown = _shown_config_value(config, key, config.get(key), show_secret=False)
+            self.logger.info(f"{key}: {shown}")
 
     @subcommand("unset", order=CONFIG_COMMAND_ORDER["unset"], help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
@@ -62,15 +109,9 @@ class ConfigCommand(BaseCommandGroup):
         declared_keys = set()
         entries: "list[ConfigListEntry]" = []
 
-        def owner_of(container):
-            context = container.repository_context
-            if context is not None and context.repo_name:
-                return context.repo_name
-            return container.name
-
         def add_container_entries(container, keys):
             config = container.env_config
-            owner = owner_of(container)
+            owner_id, owner_label = _owner_identity(container)
             for key in keys:
                 declared_keys.add(key)
                 # Dedup by (id(config), key), not key alone: different
@@ -84,7 +125,7 @@ class ConfigCommand(BaseCommandGroup):
                 if identity in seen_entries:
                     continue
                 seen_entries.add(identity)
-                entries.append(ConfigListEntry(owner=owner, key=key, config=config))
+                entries.append(ConfigListEntry(owner_id=owner_id, owner_label=owner_label, key=key, config=config))
 
         for container in target_containers:
             add_container_entries(container, container.configs.keys())
@@ -99,7 +140,8 @@ class ConfigCommand(BaseCommandGroup):
                 if identity in seen_entries:
                     continue
                 seen_entries.add(identity)
-                entries.append(ConfigListEntry(owner="manager", key=key, config=_shared.manager.env_config))
+                entries.append(ConfigListEntry(owner_id="manager", owner_label="manager",
+                                               key=key, config=_shared.manager.env_config))
             # Only keys someone has actually set (persisted_keys()), not every
             # schema-declared field name (keys()) -- otherwise a manager-level
             # field that's never actually been configured (e.g.
@@ -108,16 +150,22 @@ class ConfigCommand(BaseCommandGroup):
             for key in _shared.manager.env_config.persisted_keys():
                 if key in declared_keys:
                     continue
-                entries.append(ConfigListEntry(owner="manager", key=key, config=_shared.manager.env_config))
+                entries.append(ConfigListEntry(owner_id="manager", owner_label="manager",
+                                               key=key, config=_shared.manager.env_config))
 
-        # Owner is only shown when the same key is genuinely ambiguous (more
-        # than one distinct owner listing it) -- keeps `KEY=VALUE` output
-        # stable for the common single-owner case.
-        owners_by_key = {}
+        # Owner is only shown when a key is genuinely ambiguous -- more than
+        # one distinct REPOSITORY (owner_id) lists it, not merely more than
+        # one Config object -- keeping `KEY=VALUE` stable for the common
+        # single-owner case. Two different repositories that happen to
+        # share a repo_name (e.g. both cloned as "common") get a stable
+        # hash suffix instead of colliding under one ambiguous label.
+        owner_ids_by_key = {}
+        labels_by_key = {}
         for entry in entries:
-            owners_by_key.setdefault(entry.key, set()).add(entry.owner)
+            owner_ids_by_key.setdefault(entry.key, set()).add(entry.owner_id)
+            labels_by_key.setdefault(entry.key, {}).setdefault(entry.owner_label, set()).add(entry.owner_id)
 
-        for entry in sorted(entries, key=lambda e: (e.key, e.owner, id(e.config))):
+        for entry in sorted(entries, key=lambda e: (e.key, e.owner_label, e.owner_id)):
             try:
                 value = entry.config.get(entry.key)
             except ConfigNotFoundError:
@@ -126,8 +174,13 @@ class ConfigCommand(BaseCommandGroup):
                 # force-prompting for just to render a listing.
                 continue
 
-            field = entry.config.schema.get(entry.key)
-            label = f"{entry.owner}:{entry.key}" if len(owners_by_key[entry.key]) > 1 else entry.key
+            if len(owner_ids_by_key[entry.key]) <= 1:
+                label = entry.key
+            elif len(labels_by_key[entry.key][entry.owner_label]) > 1:
+                label = f"{entry.owner_label}@{_short_owner_suffix(entry.owner_id)}:{entry.key}"
+            else:
+                label = f"{entry.owner_label}:{entry.key}"
+
             if show_secret:
                 # self.logger.info goes through the logging redaction filter,
                 # which masks anything that looks like a secret/password/token
@@ -136,23 +189,25 @@ class ConfigCommand(BaseCommandGroup):
                 # see the real value, so print it directly instead.
                 print(f"{label}={value}")
             else:
-                # Redact via the field's own `secret` flag first (not just
-                # the logger's key-name heuristic) -- a field explicitly
-                # marked secret must never rely on its name happening to
-                # match the logger's pattern.
-                self.logger.info(f"{label}={redact_config_value(field, value)}")
+                shown = _shown_config_value(entry.config, entry.key, value, show_secret=False)
+                self.logger.info(f"{label}={shown}")
 
     @subcommand("get", order=CONFIG_COMMAND_ORDER["get"], help="read one or more resolved config values")
     @subcommand_argument("keys", metavar="KEY", nargs="+", help="config key(s)")
     @subcommand_argument("--show-secret", action="store_true", default=False,
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
     def on_command_get(self, keys: "list[str]", show_secret: bool = False):
+        config = _shared.manager.env_config
         for key in keys:
-            value = _shared.manager.env_config.get(key)
+            value = config.get(key)
             if show_secret:
+                # Bypasses the logger's redaction filter entirely (an
+                # explicit request to see the real value), never routes
+                # back through it -- printing here, not logging.
                 print(f"{key}={value}")
             else:
-                self.logger.info(f"{key}={value}")
+                shown = _shown_config_value(config, key, value, show_secret=False)
+                self.logger.info(f"{key}={shown}")
 
     @subcommand("explain", order=CONFIG_COMMAND_ORDER["explain"],
                help="show a value's resolved source, default, persisted state and sensitivity")

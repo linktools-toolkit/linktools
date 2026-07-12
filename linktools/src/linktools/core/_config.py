@@ -172,6 +172,11 @@ class ConfigSchema:
         self._fields: "dict[str, ConfigField]" = {}
         self._alias_to_name: "dict[str, str]" = {}
         self.allow_unknown = allow_unknown
+        self._revision = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     def define(self, field: "ConfigField") -> "ConfigSchema":
         previous = self._fields.get(field.name)
@@ -182,6 +187,7 @@ class ConfigSchema:
         self._fields[field.name] = field
         for alias in field.aliases:
             self._alias_to_name[alias] = field.name
+        self._revision += 1
         return self
 
     def get(self, name: str) -> "ConfigField | None":
@@ -220,6 +226,16 @@ class ConfigSource:
     # Only FileSource instances ever set this to something else.
     base_path: "PathLike | None" = None
 
+    @property
+    def revision(self) -> "Any":
+        """Opaque, comparable-by-equality token that changes whenever this
+        source's data changes. ``ConfigResolver`` uses it to detect a write
+        made through a *different* Config sharing this same source instance
+        (e.g. sibling per-repository Configs sharing one
+        RuntimeOverrideSource/PersistentSource) -- 0 for an immutable source
+        that never changes after construction (Environment, Default)."""
+        return 0
+
     def get(self, key: str) -> "tuple[Any, bool]":
         raise NotImplementedError
 
@@ -250,15 +266,28 @@ class RuntimeOverrideSource(ConfigSource):
 
     def __init__(self) -> None:
         self._data: "dict[str, Any]" = {}
+        self._revision = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    def _touch(self) -> None:
+        self._revision += 1
 
     def set(self, key: str, value: "Any") -> None:
         self._data[key] = value
+        self._touch()
 
     def clear(self, key: "str | None" = None) -> None:
         if key is None:
-            self._data.clear()
-        else:
-            self._data.pop(key, None)
+            if self._data:
+                self._data.clear()
+                self._touch()
+            return
+        if key in self._data:
+            del self._data[key]
+            self._touch()
 
     def get(self, key: str) -> "tuple[Any, bool]":
         if key in self._data:
@@ -275,6 +304,15 @@ class PersistentSource(ConfigSource):
     def __init__(self, store: "Any", namespace: str = "config") -> None:
         self._store = store
         self._prefix = (namespace + ".") if namespace else ""
+
+    @property
+    def revision(self) -> "Any":
+        # Delegates to the underlying ConfigStore rather than maintaining a
+        # separate counter: multiple PersistentSource instances (different
+        # namespaces, or the same namespace built independently) can wrap
+        # the very same ConfigStore, and the store's own revision is what
+        # lets all of them observe a write made through any one of them.
+        return self._store.revision
 
     def _full(self, key: str) -> str:
         return self._prefix + key
@@ -325,6 +363,11 @@ class FileSource(ConfigSource):
         self.name = name
         self.base_path = base_path
         self._reload_fn = reload_fn
+        self._revision = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     def get(self, key: str) -> "tuple[Any, bool]":
         if key in self._data:
@@ -337,6 +380,7 @@ class FileSource(ConfigSource):
     def replace(self, data: dict, base_path: "PathLike | None" = None) -> None:
         self._data = dict(data or {})
         self.base_path = base_path
+        self._revision += 1
 
     def reload(self) -> None:
         if self._reload_fn is None:
@@ -451,7 +495,8 @@ class ConfigResolver:
     def __init__(self, schema: "ConfigSchema", sources: "Sequence[ConfigSource]") -> None:
         self._schema = schema
         self._sources = list(sources)
-        self._memo: "dict[str, ResolvedConfig]" = {}
+        # key -> (revision_token_at_resolve_time, ResolvedConfig).
+        self._memo: "dict[str, tuple[Any, ResolvedConfig]]" = {}
 
     def clear_memo(self, key: "str | None" = None) -> None:
         """Clear the resolution memo. If key given, invalidate only that key."""
@@ -459,6 +504,16 @@ class ConfigResolver:
             self._memo.pop(key, None)
         else:
             self._memo.clear()
+
+    def revision_token(self) -> "Any":
+        """A token that changes whenever this schema or any of its sources
+        changes -- including a source shared with a sibling Config (e.g. a
+        RuntimeOverrideSource/PersistentSource shared between a manager's
+        Config and every per-repository Config), so a write made through
+        that sibling is visible here without either Config needing to know
+        the other exists. Not guaranteed stable across process runs or
+        Source implementations -- comparable only by equality, never parsed."""
+        return (self._schema.revision, tuple(source.revision for source in self._sources))
 
     def get(self, key: str, type: "Any" = None, default: "Any" = MISSING) -> "Any":
         """Convenience: resolve and return the value (for LazyProvider lambdas)."""
@@ -530,14 +585,27 @@ class ConfigResolver:
             try:
                 value = _cast_value(field.cast, raw, base_path=base_path)
             except Exception as exc:
-                raise ConfigCastError("cannot cast %r for %s: %s" % (raw, field.name, exc))
+                shown_raw = redact_config_value(field, raw)
+                # The underlying cast exception's OWN message may also embed
+                # the raw value (e.g. Python's builtin `int("...")` ValueError
+                # repeats its argument verbatim) -- redacting only shown_raw
+                # above is not enough, the same secret would still leak back
+                # in through this %s.
+                detail = exc.__class__.__name__ if field.secret else str(exc)
+                raise ConfigCastError("cannot cast %r for %s: %s" % (shown_raw, field.name, detail))
         if field.validator is not None:
             try:
                 ok = field.validator(value)
             except Exception as exc:
-                raise ConfigValidationError("validator for %s raised: %s" % (field.name, exc))
+                # A validator's own exception message may itself embed the
+                # raw value (Core has no way to scrub arbitrary third-party
+                # exception text) -- for a secret field, drop that message
+                # entirely rather than risk forwarding a leaked value.
+                detail = exc.__class__.__name__ if (field is not None and field.secret) else str(exc)
+                raise ConfigValidationError("validator for %s raised: %s" % (field.name, detail))
             if not ok:
-                raise ConfigValidationError("value %r failed validation for %s" % (value, field.name))
+                shown_value = redact_config_value(field, value)
+                raise ConfigValidationError("value %r failed validation for %s" % (shown_value, field.name))
         return value
 
     def _first_present(self, field: "ConfigField") -> "tuple[ConfigSource | None, Any, bool]":
@@ -602,11 +670,26 @@ class ConfigResolver:
         return (None, MISSING, False)
 
     def resolve(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
-        if _stack is None and key in self._memo:
-            return self._memo[key]
-        result = self._resolve_inner(key, _stack)
         if _stack is None:
-            self._memo[key] = result
+            cached = self._memo.get(key)
+            if cached is not None:
+                cached_token, cached_result = cached
+                if cached_token == self.revision_token():
+                    return cached_result
+                # Some shared source (or this schema) changed since this was
+                # memoized -- any other memoized key may have depended on it
+                # through an Alias/Lazy/Chain provider, so the whole memo
+                # (not just `key`) is stale now.
+                self._memo.clear()
+
+        result = self._resolve_inner(key, _stack)
+
+        if _stack is None:
+            # Recompute the token AFTER resolving, not before: a cached=True
+            # provider can write PersistentSource as a side effect of this
+            # very call, which would otherwise be memoized under a
+            # now-stale pre-write token.
+            self._memo[key] = (self.revision_token(), result)
         return result
 
     def _resolve_alias(self, provider: "AliasProvider", key: str,
@@ -767,6 +850,15 @@ class Config:
     @property
     def schema(self) -> "ConfigSchema":
         return self._schema
+
+    @property
+    def revision(self) -> "Any":
+        """Opaque token, comparable only by equality, that changes whenever
+        this Config's schema or any of its sources changes -- including a
+        source shared with a sibling Config (see ``ManagerConfigSource``,
+        which uses this to observe the owning manager's Config from a
+        repository's own Config). Not a stable/parseable structure."""
+        return self._resolver.revision_token()
 
     def define(self, field: "ConfigField") -> "Config":
         self._schema.define(field)

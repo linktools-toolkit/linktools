@@ -127,3 +127,39 @@ def test_manager_persistent_extra_shown_once_and_unambiguous(monkeypatch, tmp_pa
     assert out.count("DOCKER_DOWNLOAD_PATH=/srv/downloads") == 1
     # Manager-owned, not ambiguous with anything else -- no owner prefix.
     assert "manager:DOCKER_DOWNLOAD_PATH" not in out
+
+
+def test_same_repo_name_different_repos_get_disambiguated_labels(monkeypatch, tmp_path, capsys):
+    """Two DIFFERENT repositories that happen to share a repo_name (both
+    named "common", e.g. cloned from team-a/common.git and
+    team-b/common.git) must never collapse into one indistinguishable
+    "common:PORT=..." label -- each gets a stable, distinct suffix, and the
+    output must never leak either repository's absolute filesystem path."""
+    import linktools.cntr.commands._shared as cntr_shared
+    from linktools.cntr.commands.config import ConfigCommand
+
+    team_a = tmp_path / "team-a"
+    team_a.mkdir()
+    team_b = tmp_path / "team-b"
+    team_b.mkdir()
+    repo_a = _repo_with_port(team_a, "common", "8001")
+    repo_b = _repo_with_port(team_b, "common", "8002")
+
+    manager = _fresh_standalone_manager(tmp_path)
+    manager.repos.add(str(repo_a))
+    manager.repos.add(str(repo_b))
+    manager.installed_state.add("common", "common_0")
+    manager.prepare_installed_containers()
+    monkeypatch.setattr(cntr_shared, "manager", manager)
+
+    ConfigCommand().on_command_list(names=[], show_secret=True)
+    out = capsys.readouterr().out
+
+    lines = [line for line in out.splitlines() if "PORT=" in line]
+    assert len(lines) == 2
+    assert lines[0] != lines[1]
+    for line in lines:
+        assert line.startswith("common@")
+        assert str(tmp_path) not in line  # never leak an absolute path
+    values = {line.split("=")[1] for line in lines}
+    assert values == {"8001", "8002"}

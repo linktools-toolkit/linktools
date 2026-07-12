@@ -61,7 +61,7 @@
       ],
       "environment": [
         "AAD_LOGLEVEL=DEBUG",
-        "AAD_AUTHELIA_DOMAIN=_:0",
+        "AAD_AUTHELIA_DOMAIN=_:443",
         "AAD_AUTHELIA_COOKIE_NAME=aio-auth-session",
         "AAD_AUTHELIA_MIN_AUTH_LEVEL=1",
         "AAD_DIRECTORY_TYPE=lldap-graphql",
@@ -71,7 +71,7 @@
         "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST=lldap",
         "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT=3890",
         "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN=dc=_",
-        "TRUSTED_ORIGINS=https://_:0",
+        "TRUSTED_ORIGINS=https://_",
         "NODE_TLS_REJECT_UNAUTHORIZED=0"
       ],
       "hostname": "authelia-admin",

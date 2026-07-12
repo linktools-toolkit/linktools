@@ -25,11 +25,24 @@ class ConfigStore(object):
         self._path = Path(str(path))
         self._lock_manager = lock_manager
         self._data: "dict[str, Any]" = {}
+        self._revision = 0
         self.reload()
 
     @property
     def path(self) -> "Path":
         return self._path
+
+    @property
+    def revision(self) -> int:
+        """Bumped on every successful reload/set/save/remove -- lets a
+        PersistentSource wrapping this store (and anything comparing a
+        cached revision token against it, e.g. ConfigResolver) detect a
+        change made through a *different* PersistentSource/Config instance
+        wrapping the same underlying file."""
+        return self._revision
+
+    def _touch(self) -> None:
+        self._revision += 1
 
     # -- load / flush -------------------------------------------------------
 
@@ -37,6 +50,7 @@ class ConfigStore(object):
         """Re-read the file; missing -> empty, corrupt -> ConfigError."""
         if not self._path.exists():
             self._data = {}
+            self._touch()
             return
         try:
             text = self._path.read_text(encoding="utf-8")
@@ -51,6 +65,7 @@ class ConfigStore(object):
         if not isinstance(data, dict):
             raise ConfigError("config %s must be a JSON object, got %s" % (self._path, type(data).__name__))
         self._data = data
+        self._touch()
 
     def _flush(self) -> None:
         atomic_write(
@@ -101,11 +116,13 @@ class ConfigStore(object):
         with self._locked():
             self._data[key] = value
             self._flush()
+            self._touch()
 
     def save(self, **kwargs: "Any") -> None:
         with self._locked():
             self._data.update(kwargs)
             self._flush()
+            self._touch()
 
     def remove(self, *keys: str) -> bool:
         removed = False
@@ -114,7 +131,9 @@ class ConfigStore(object):
                 if key in self._data:
                     self._data.pop(key, None)
                     removed = True
-            self._flush()
+            if removed:
+                self._flush()
+                self._touch()
         return removed
 
     def __repr__(self) -> str:

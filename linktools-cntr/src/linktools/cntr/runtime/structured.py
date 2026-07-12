@@ -122,19 +122,29 @@ class StructuredCommandRunner:
         started = time.monotonic()
         stdout_chunks: "list[str]" = []
         stderr_chunks: "list[str]" = []
+        # `None` here means "fetch() never reaped it" -- captured right after
+        # the loop, before recursive_kill()'s own unconditional reap (below)
+        # would otherwise mask a real timeout by giving the process a
+        # real returncode.
+        returncode = None
         try:
             for out, err in process.fetch(timeout=timeout):
                 if out:
                     stdout_chunks.append(_decode(out))
                 if err:
                     stderr_chunks.append(_decode(err))
+            returncode = process.returncode
         finally:
-            # Always reap the process tree, timed out or not -- mirrors
-            # Process.exec()'s own finally-block cleanup.
+            # Always reap the process tree and close its pipes, timed out or
+            # not -- mirrors Process.exec()'s own finally-block cleanup, so
+            # a runner that reads via fetch() (never exec()) doesn't leak
+            # the same stdin/stdout/stderr pipe FDs Process.close() exists
+            # to release deterministically, and doesn't leave a zombie
+            # process behind after a timeout kill.
             process.recursive_kill()
+            process.close()
         duration = time.monotonic() - started
 
-        returncode = process.returncode
         timed_out = returncode is None
 
         result = CommandResult(

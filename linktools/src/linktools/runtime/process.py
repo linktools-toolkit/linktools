@@ -243,6 +243,28 @@ class Process(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._popen.wait()
+        self.close()
+
+    def close(self) -> None:
+        """Explicitly close this process's stdin/stdout/stderr pipes.
+
+        ``subprocess.Popen`` otherwise relies on ``__del__`` (CPython
+        reference-counting, but not guaranteed prompt -- a cached_property
+        or another lingering reference can defer it) to release these pipe
+        file descriptors. Fine for one ad-hoc subprocess; anything that
+        runs many short-lived subprocesses within one long-lived process
+        (the test suite, in particular) can accumulate enough GC-deferred
+        pipe FDs to exceed ``select()``'s ``FD_SETSIZE`` limit. Every
+        completion path (``__exit__``, ``exec()``,
+        ``StructuredCommandRunner.execute()``) closes explicitly instead of
+        waiting on GC. Idempotent and safe to call more than once.
+        """
+        for stream in (self._popen.stdin, self._popen.stdout, self._popen.stderr):
+            if stream is not None and not stream.closed:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     @classmethod
     def start(cls, *args: "Any", **kwargs: "Any") -> "Process":
@@ -352,6 +374,7 @@ class Process(object):
 
         finally:
             self.recursive_kill()
+            self.close()
 
     def recursive_kill(self) -> None:
         import psutil
@@ -369,6 +392,21 @@ class Process(object):
             _get_logger().debug(f"List children process failed: {e}")
 
         self.terminate()
+        try:
+            # Reap this process before returning -- terminate() only sends
+            # the signal, it never waits. Without this, a process this call
+            # terminates (e.g. after a fetch() timeout, which never reaches
+            # its own wait_process()) stays an unreaped zombie with
+            # returncode still None, and Popen.__del__ later emits
+            # "ResourceWarning: subprocess N is still running" when this
+            # Process is garbage collected.
+            self._popen.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                self._popen.kill()
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _get_logger().debug(f"Process {self.pid} did not exit after kill")
 
     @cached_property(lock=True)
     def _output(self):

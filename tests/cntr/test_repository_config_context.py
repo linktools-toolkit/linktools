@@ -143,3 +143,24 @@ def test_repo_without_reserved_keys_reports_empty_list(tmp_path):
     info = manager.repos.describe(url, meta)
 
     assert info["ignored_environment_keys"] == []
+
+
+def test_manager_config_source_reflects_already_cached_manager_write(tmp_path):
+    """ManagerConfigSource.revision delegates to the manager's own Config
+    revision, so a repository's Resolver notices a manager-side write even
+    if it already cached the manager-owned key's old value."""
+    manager = _fresh_standalone_manager(tmp_path)
+    repo_dir = _repo_with_container(tmp_path, "repo_a")
+    manager.repos.add(str(repo_dir))
+    manager.installed_state.add("repo_a")
+    manager.prepare_installed_containers()
+
+    container = manager.containers["repo_a"]
+    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "first-app"))
+    assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "first-app")  # cache it
+
+    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "second-app"))
+    assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "second-app")
+
+    manager.env_config.set("DOCKER_APP_PATH", str(tmp_path / "runtime-app"))
+    assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "runtime-app")
