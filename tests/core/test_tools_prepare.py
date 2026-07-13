@@ -18,11 +18,10 @@ from linktools.cache import CacheStore
 from linktools.core import DownloadManager
 from linktools.core._locks import LockManager
 from linktools.core._tools import Tools
-from linktools.types import MISSING
 
 
 class _DummyConfig:
-    """Stand-in for environ.wrap_config(): env overrides are never set in tests."""
+    """Stand-in for environ.build_config(): env overrides are never set in tests."""
 
     def get(self, key, type=None, default=None):
         return default
@@ -71,7 +70,7 @@ class FakeEnviron:
     def get_logger(self, name):
         return logging.getLogger("test." + name)
 
-    def wrap_config(self, namespace=MISSING, env_prefix=MISSING):
+    def build_config(self, namespace, env_prefix=""):
         return _DummyConfig()
 
 

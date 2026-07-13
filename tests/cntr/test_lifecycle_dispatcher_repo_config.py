@@ -55,8 +55,8 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
     manager.prepare_installed_containers()
 
     container = manager.containers["repo_src"]
-    assert container.repository_context is not None
-    assert not container.repository_context.builtin
+    assert container.repo_context is not None
+    assert not container.repo_context.builtin
     # Every container, builtin or third-party, shares the manager's own
     # env_config outright.
     assert container.env_config is manager.env_config

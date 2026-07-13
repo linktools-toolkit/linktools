@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Where a container came from -- attached to each loaded ``BaseContainer``
-as ``container.repository_context`` by ``ContainerLoader``."""
+as ``container.repo_context`` by ``ContainerLoader``."""
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,9 +12,9 @@ if TYPE_CHECKING:
 class RepositoryConfigContext(object):
     """Private container-side record of where a container came from.
 
-    Not exposed as public BaseContainer API beyond ``repository_context``
+    Not exposed as public BaseContainer API beyond ``repo_context``
     -- Plan and the compose template context read it off
-    ``container.repository_context``.
+    ``container.repo_context``.
 
     ``file_config`` is this repository's own local-only ``ProjectProfile``
     (``None`` for the shared builtin context, which has no third-party

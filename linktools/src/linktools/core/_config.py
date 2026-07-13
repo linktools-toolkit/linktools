@@ -668,7 +668,7 @@ class ConfigResolver:
             return default
         if type is not None and value is not MISSING:
             try:
-                value = type(value)
+                value = _cast_value(type, value)
             except (TypeError, ValueError):
                 return default
         return value
@@ -1079,7 +1079,7 @@ class Config:
             return default
         if type is not None and value is not MISSING:
             try:
-                value = type(value)
+                value = _cast_value(type, value)
             except (TypeError, ValueError) as exc:
                 if default is not MISSING:
                     return default

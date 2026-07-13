@@ -614,7 +614,7 @@ class Tools(object):
     def __init__(self, environ: "BaseEnviron", config: "dict[str, Any]"):
         self.environ = environ
         self.logger = environ.get_logger("tools")
-        self.config = environ.wrap_config(env_prefix="")
+        self.config = environ.build_config("main", "")
         self.all = self._parse_items(config)
 
     @cached_property

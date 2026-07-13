@@ -39,7 +39,7 @@ def _owner_identity(container):
     to the Config object's identity only when a context/root_path is
     genuinely unavailable (e.g. a container built directly in a test).
     """
-    context = container.repository_context
+    context = container.repo_context
     root_path = context.root_path if context is not None else None
     if root_path:
         owner_id = os.path.realpath(str(root_path))
