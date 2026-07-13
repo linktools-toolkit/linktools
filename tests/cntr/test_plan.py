@@ -217,7 +217,7 @@ def test_dry_run_and_plan_command_share_one_model(fresh_manager, monkeypatch):
 # -- Command exactness/redaction (review issues #1-#4) -----------------------
 
 def test_plan_command_includes_full_docker_compose_prefix(fresh_manager, monkeypatch):
-    monkeypatch.setattr(fresh_manager, "container_type", "docker-rootless")
+    fresh_manager.env_config.set("DOCKER_TYPE", "docker-rootless")
     plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
     up_command = next(c for c in plan.commands if c.phase == "up")
     assert up_command.args[:2] == ("docker", "compose")
@@ -227,9 +227,9 @@ def test_plan_command_includes_full_docker_compose_prefix(fresh_manager, monkeyp
 
 
 def test_plan_display_args_show_sudo_for_rootful_docker(fresh_manager, monkeypatch):
-    monkeypatch.setattr(fresh_manager, "container_type", "docker")
-    monkeypatch.setattr(fresh_manager, "system", "linux")
-    monkeypatch.setattr(fresh_manager, "uid", 1000)
+    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
+    monkeypatch.setattr(type(fresh_manager), "system", "linux")
+    monkeypatch.setattr(type(fresh_manager), "uid", 1000)
     plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
     up_command = next(c for c in plan.commands if c.phase == "up")
     assert up_command.privilege is True
@@ -239,7 +239,7 @@ def test_plan_display_args_show_sudo_for_rootful_docker(fresh_manager, monkeypat
 
 
 def test_plan_display_args_no_sudo_for_rootless(fresh_manager, monkeypatch):
-    monkeypatch.setattr(fresh_manager, "container_type", "docker-rootless")
+    fresh_manager.env_config.set("DOCKER_TYPE", "docker-rootless")
     plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
     up_command = next(c for c in plan.commands if c.phase == "up")
     assert up_command.privilege is False
@@ -247,10 +247,19 @@ def test_plan_display_args_no_sudo_for_rootless(fresh_manager, monkeypatch):
 
 
 def test_plan_respects_configured_docker_host(fresh_manager, monkeypatch):
-    monkeypatch.setattr(fresh_manager, "container_type", "docker")
-    monkeypatch.setattr(fresh_manager.env_config, "get",
-                        lambda key, type=None, default=None:
-                        "tcp://10.0.0.1:2376" if key == "DOCKER_HOST" else default)
+    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
+    # Wraps (not replaces) env_config.get: container_type is a plain
+    # property now (not cached), so it also resolves through
+    # env_config.get() on every access -- a blanket replacement intercepts
+    # that too, not just the DOCKER_HOST read this is meant to override.
+    original_get = fresh_manager.env_config.get
+
+    def fake_get(key, type=None, default=None):
+        if key == "DOCKER_HOST":
+            return "tcp://10.0.0.1:2376"
+        return original_get(key, type=type, default=default)
+
+    monkeypatch.setattr(fresh_manager.env_config, "get", fake_get)
     plan = fresh_manager.planner.plan("up", names=["portainer"], build=False)
     up_command = next(c for c in plan.commands if c.phase == "up")
     assert "-H" in up_command.args

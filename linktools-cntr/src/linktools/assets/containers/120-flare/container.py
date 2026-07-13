@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-@author  : Hu Ji
-@file    : deploy.py 
-@time    : 2023/05/21
-@site    :  
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
+"""Flare container definition."""
 from typing import TYPE_CHECKING
 
 import yaml
@@ -35,6 +10,7 @@ from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
+from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
 if TYPE_CHECKING:
@@ -47,7 +23,9 @@ class Container(BaseContainer):
     @cached_property
     def configs(self):
         return dict(
-            NGINX_WILDCARD_DOMAIN=True,
+            # NGINX_WILDCARD_DOMAIN is owned by the nginx container (its own
+            # `configs` declares the field's cast/provider/default); this
+            # container must not redeclare it with a different default.
             FLARE_TAG="latest",
             FLARE_DOMAIN=self.get_nginx_domain(""),
             FLARE_PORT=ConfigField(cast=int, default=5000),
@@ -70,12 +48,12 @@ class Container(BaseContainer):
         # permanently cache "" the first time this resolves while login
         # happens to be off, and never prompt again once it's enabled.
         if not r.get("FLARE_LOGIN_ENABLE"):
-            raise LookupError("FLARE_LOGIN_ENABLE is disabled")
+            raise ConfigNotFoundError("FLARE_LOGIN_ENABLE is disabled")
         return prompt("FLARE_USER", default="admin")
 
     def _prompt_flare_password(self, r):
         if not r.get("FLARE_LOGIN_ENABLE"):
-            raise LookupError("FLARE_LOGIN_ENABLE is disabled")
+            raise ConfigNotFoundError("FLARE_LOGIN_ENABLE is disabled")
         return prompt("FLARE_PASSWORD")
 
     @cached_property

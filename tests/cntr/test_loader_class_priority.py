@@ -46,7 +46,7 @@ def test_loader_picks_the_locally_defined_subclass_not_the_imported_base(fresh_m
     _write_container_importing_a_shared_concrete_base(tmp_path)
 
     builtin_context = RepositoryConfigContext(
-        root_path=None, file_config=None, config=fresh_manager.env_config, url=None, builtin=True,
+        root_path=None, file_config=None, url=None, builtin=True,
     )
     loaded = list(ContainerLoader(fresh_manager)._load_one(str(tmp_path), builtin_context))
 

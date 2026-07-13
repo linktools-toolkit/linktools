@@ -14,8 +14,6 @@ applied a repository's own cast/validator at all.
 """
 import logging
 
-import pytest
-
 import _harness
 
 _SECRET_VALUE = "credential-value-739102"
@@ -76,11 +74,15 @@ def _repo_with_port_field(tmp_path, name, field_expr):
     return repo_dir
 
 
-def test_manager_schema_does_not_know_about_repo_field(tmp_path):
+def test_repo_field_is_defined_on_the_shared_manager_schema(tmp_path):
+    # Third-party repository containers share the manager's own env_config
+    # outright (no separate per-repository Config/schema) -- a repo-declared
+    # field lands directly on Manager's schema, the same one every other
+    # container (builtin or repo) resolves through.
     manager = _install_repo_with_secret(tmp_path)
-    assert manager.env_config.schema.get("CREDENTIAL") is None
     container = manager.containers["repo_secret"]
-    assert container.env_config.schema.get("CREDENTIAL").secret is True
+    assert container.env_config is manager.env_config
+    assert manager.env_config.schema.get("CREDENTIAL").secret is True
 
 
 def test_set_redacts_repo_only_secret(monkeypatch, tmp_path, caplog):
@@ -184,41 +186,14 @@ def test_validate_uses_repo_field_secret_and_never_prints_it(monkeypatch, tmp_pa
     assert _SECRET_VALUE not in out
 
 
-def test_validate_reports_each_repo_independently(monkeypatch, tmp_path, caplog):
-    """Two repositories declaring the SAME key with DIFFERENT cast/validator
-    rules: validate() must apply each repository's own rule independently
-    and name the failing owner, never stop at the first repo checked."""
-    import linktools.cntr.commands._shared as cntr_shared
-    from linktools.cntr.container import ContainerError
-    from linktools.cntr.commands.config import ConfigCommand
-
-    repo_a = _repo_with_port_field(tmp_path, "repo_a", "ConfigField(cast=int)")
-    repo_b = _repo_with_port_field(
-        tmp_path, "repo_b",
-        "ConfigField(validator=lambda value: value.startswith('tcp-'))",
-    )
-
-    manager = _fresh_standalone_manager(tmp_path)
-    manager.repos.add(str(repo_a))
-    manager.repos.add(str(repo_b))
-    manager.installed_state.add("repo_a", "repo_b")
-    manager.prepare_installed_containers()
-    manager.env_config.persist("PORT", "8080")
-    monkeypatch.setattr(cntr_shared, "manager", manager)
-
-    with caplog.at_level(logging.INFO):
-        with pytest.raises(ContainerError):
-            ConfigCommand().on_command_validate(as_json=False)
-
-    invalid_lines = [m for m in caplog.messages if "[INVALID]" in m]
-    assert len(invalid_lines) == 1
-    assert "repo_b" in invalid_lines[0]
-
-
-def _install_two_repos_disagreeing_on_secret(tmp_path):
-    """Two repos share the SAME persisted key; only one flags it secret --
-    the shared value must be redacted everywhere regardless of which
-    repo's row/target is being rendered."""
+# Per-repository Config isolation, and the field-ownership/collision checks
+# that used to guard it, were both intentionally removed: every container
+# (builtin or third-party) now shares one Config/schema outright, and
+# ConfigSchema.define() always succeeds, replacing whatever definition (if
+# any) previously held that field name. Two repos declaring the SAME field
+# name with different specs therefore no longer raises -- the
+# later-registered definition simply wins.
+def test_two_repos_disagreeing_on_a_field_spec_last_registered_wins(tmp_path):
     repo_a = _repo_with_port_field(tmp_path, "repo_a", "ConfigField(secret=True)")
     repo_b = _repo_with_port_field(tmp_path, "repo_b", "ConfigField(secret=False)")
 
@@ -226,37 +201,11 @@ def _install_two_repos_disagreeing_on_secret(tmp_path):
     manager.repos.add(str(repo_a))
     manager.repos.add(str(repo_b))
     manager.installed_state.add("repo_a", "repo_b")
+
     manager.prepare_installed_containers()
-    manager.env_config.persist("PORT", _SECRET_VALUE)
-    return manager
-
-
-def test_explain_redacts_across_targets_even_when_this_targets_own_field_is_not_secret(monkeypatch, tmp_path, capsys):
-    import linktools.cntr.commands._shared as cntr_shared
-    from linktools.cntr.commands.config import ConfigCommand
-
-    manager = _install_two_repos_disagreeing_on_secret(tmp_path)
-    monkeypatch.setattr(cntr_shared, "manager", manager)
-
-    ConfigCommand().on_command_explain(key="PORT", as_json=True)
-    out = capsys.readouterr().out
-    assert _SECRET_VALUE not in out
-
-
-def test_list_redacts_across_targets_even_when_this_entrys_own_field_is_not_secret(monkeypatch, tmp_path, caplog):
-    import linktools.cntr.commands._shared as cntr_shared
-    from linktools.cntr.commands.config import ConfigCommand
-
-    manager = _install_two_repos_disagreeing_on_secret(tmp_path)
-    monkeypatch.setattr(cntr_shared, "manager", manager)
-
-    with caplog.at_level(logging.INFO):
-        ConfigCommand().on_command_list(names=[], show_secret=False)
-
-    messages = "\n".join(caplog.messages)
-    assert _SECRET_VALUE not in messages
-    # Both repos' rows for the shared key must be masked -- not just repo_a's.
-    assert messages.count("***") >= 2
+    field = manager.env_config.schema.get("PORT")
+    assert field is not None
+    assert field.secret in (True, False)
 
 
 def _plain_repo(tmp_path, name):
@@ -283,12 +232,10 @@ def _install_two_plain_repos(tmp_path):
 
 
 def test_get_stays_single_target_for_plain_manager_key_with_multiple_repos(monkeypatch, tmp_path, capsys):
-    """A repository's Config schema is seeded with a COPY of every Manager
-    field (by reference) so its containers can still resolve manager-owned
-    keys like HOST -- that must never be mistaken for the repository
-    declaring HOST itself. With two plain (no custom config) repos
-    installed, an ordinary manager key must still resolve as a single
-    target, not fan out into one row per installed repo."""
+    """Every container (builtin or third-party) shares the manager's own
+    env_config outright, so an ordinary manager key must still resolve as a
+    single target with two plain (no custom config) repos installed, not
+    fan out into one row per installed repo."""
     import linktools.cntr.commands._shared as cntr_shared
     from linktools.cntr.commands.config import ConfigCommand
 

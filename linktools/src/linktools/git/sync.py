@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Git sync policies (spec §12.3 GIT-003)."""
+"""Git sync policies."""
 
 
 class GitSyncPolicy(object):
     """How a local branch is reconciled with its remote.
-
-    Values mirror spec §12.3:
 
     * ``FAST_FORWARD_ONLY`` -- update only if the remote is a fast-forward;
       raise :class:`linktools.errors.GitDivergedError` otherwise.

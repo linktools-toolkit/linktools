@@ -41,17 +41,18 @@ class _FakeEnvConfig:
 
 class _FakeEnviron:
     name = "test-env"
+    debug = False
 
     def get_logger(self, _name):
         return _FakeLogger()
 
-    def wrap_config(self, namespace=None, env_prefix=None, local_root=None):
+    def wrap_config(self, namespace=None, env_prefix=None, shared_sources=None):
         return _FakeEnvConfig()
 
     def shared_config_sources(self, namespace, env_prefix=""):
         return (None, None, None)
 
-    def build_config(self, schema, shared_sources, local_root=None):
+    def build_config(self, schema, shared_sources, extra_sources=()):
         return _FakeEnvConfig()
 
     def get_data_path(self, *parts):
@@ -84,7 +85,7 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
     monkeypatch.setattr(shutil, "which", fake_which)
 
     mgr = ContainerManager(environ=_FakeEnviron(), name="x")
-    mgr.system = "linux"  # _is_chown_supported is linux-only
+    monkeypatch.setattr(ContainerManager, "system", "linux")  # _is_chown_supported is linux-only
 
     with tempfile.NamedTemporaryFile() as fp:
         mgr.runtime.chmod(fp.name, mode=0o755)
@@ -134,13 +135,17 @@ _METHOD_SIGNATURES = {}
 _DESCRIPTOR_TYPES = {
     "debug": property,
     "configs": property,
-    "container_type": _CachedProperty,
-    "container_host": _CachedProperty,
-    "host": _CachedProperty,
-    "project_name": _CachedProperty,
+    # review P2-06: plain @property, not @cached_property -- caching these
+    # would let a set_config/persist/reload within the same process keep
+    # returning a stale value forever, since nothing ever invalidates a
+    # manager-level cached_property.
+    "container_type": property,
+    "container_host": property,
+    "host": property,
+    "project_name": property,
     "root_path": _CachedProperty,
-    "app_path": _CachedProperty,
-    "app_data_path": _CachedProperty,
+    "app_path": property,
+    "app_data_path": property,
     "data_path": _CachedProperty,
     "temp_path": _CachedProperty,
     "setting_path": _CachedProperty,

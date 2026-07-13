@@ -1,43 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-@author  : Hu Ji
-@file    : repo.py 
-@time    : 2024/3/22
-@site    : https://github.com/ice-black-tea
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
+"""``ContainerManager``: the facade owning config, container discovery,
+lifecycle, state, repos, and every other cntr subsystem."""
 import os
 import pathlib
 from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.system import get_gid, get_lan_ip, get_machine, get_system, get_uid, get_user
-from linktools.core import (
-    ConfigField, PromptProvider, LazyProvider, AliasProvider,
-)
+from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvider
 from linktools.decorator import cached_property
 
-from .container import BaseContainer, ContainerError
+from .container import BaseContainer, ContainerError, NoContainerInstalledError
 
 if TYPE_CHECKING:
     from typing import Any
@@ -58,40 +32,57 @@ if TYPE_CHECKING:
     from .execution.planner import ExecutionPlanner
 
 
+def describe_origin(container: "BaseContainer") -> str:
+    """Safe, credential-free description of where a container came from --
+    ``builtin`` or a repository's ``repo_name`` (never its URL, which may
+    embed a Git credential), plus its filesystem root_path. Used to
+    identify the two sides of a duplicate-container-name error."""
+    context = container.repo_context
+    if context is None:
+        return "container:%s" % id(container.env_config)
+    origin = "builtin" if context.builtin else (context.repo_name or "repo")
+    root_path = context.root_path
+    return f"{origin} ({root_path})" if root_path else origin
+
+
 class ContainerManager:
 
     def __init__(self, environ: "Environ", name: str = "aio"):  # all_in_one
-        self.user = get_user()
-        self.uid = get_uid()
-        self.gid = get_gid()
-        self.system = get_system()
-        self.machine = get_machine()
-
         self.environ = environ
-        self.name = name or self.environ.name
+        self.name = name or environ.name
         self.logger = environ.get_logger("container")
 
-        # Shared (env, runtime-override, persistent) triple for the
-        # "container" namespace -- reused verbatim (not rebuilt) by every
-        # per-repository RepositoryConfigContext.config, so a
-        # `ct-cntr config set`/persisted value or a runtime override applies
-        # uniformly to every repository's containers, and only the
-        # local-file layer is allowed to differ per repository.
-        self.container_config_sources = self.environ.shared_config_sources("container", "")
-        self.env_config = self.environ.build_config(
-            self._make_container_schema(), self.container_config_sources, local_root=None,
-        )
+        self.env_config = self.environ.build_config("container", "")
         self.env_config.update_defaults(**self.configs)
-        # Frozen here, right after `self.configs` registers -- and before any
-        # builtin container (loaded lazily, later, onto this very schema via
-        # `self.containers`/`self.loader`) adds its own fields to it. Deriving
-        # this set later would also sweep in builtin fields like
-        # NGINX_ROOT_DOMAIN, which are not manager-owned in the sense
-        # `build_repository_config`/`ManagerConfigSource` care about.
-        self._manager_config_keys = self._compute_manager_config_keys()
+
+        # Populated by the `containers` cached_property -- structured load
+        # failures (import/on_init errors) from the last time containers
+        # were discovered, for callers (e.g. Doctor) that want to report
+        # them instead of only the log-only warning.
+        self.container_load_errors: "list[Any]" = []
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+
+    @property
+    def user(self) -> str:
+        return get_user()
+
+    @property
+    def uid(self) -> int:
+        return get_uid()
+
+    @property
+    def gid(self) -> int:
+        return get_gid()
+
+    @property
+    def system(self) -> str:
+        return get_system()
+
+    @property
+    def machine(self) -> str:
+        return get_machine()
 
     @property
     def configs(self) -> "dict[str, Any]":
@@ -137,13 +128,22 @@ class ContainerManager:
 
     @property
     def debug(self) -> bool:
-        return os.environ.get("DEBUG", self.environ.debug)
+        # Routed through env_config (cast=bool) instead of a raw
+        # os.environ.get(...) -- DEBUG=0/DEBUG=false must parse as False,
+        # not the truthy-any-non-empty-string behavior a bare os.environ
+        # read (or Python's own bool(str)) would give.
+        return self.env_config.get("DEBUG", type=bool, default=self.environ.debug)
 
-    @cached_property
+    # Plain @property, not @cached_property -- these few config-derived
+    # values are cheap to resolve (env_config.get() is itself memoized per
+    # revision), and caching them here would let a set_config/persist/reload
+    # within the same process keep returning a stale value forever, since
+    # nothing ever invalidates a manager-level cached_property.
+    @property
     def container_type(self) -> str:
         return self.env_config.get("DOCKER_TYPE", type=str)
 
-    @cached_property
+    @property
     def container_host(self) -> str:
         host = self.env_config.get("DOCKER_HOST", type=str)
         if host:
@@ -151,11 +151,11 @@ class ContainerManager:
             return right or left
         return "/var/run/docker.sock"
 
-    @cached_property
+    @property
     def host(self) -> str:
         return self.env_config.get("HOST", type=str)
 
-    @cached_property
+    @property
     def project_name(self) -> str:
         return self.env_config.get("COMPOSE_PROJECT_NAME")
 
@@ -163,11 +163,11 @@ class ContainerManager:
     def root_path(self):
         return pathlib.Path(os.path.dirname(__file__))
 
-    @cached_property
+    @property
     def app_path(self):
         return self.env_config.get("DOCKER_APP_PATH")
 
-    @cached_property
+    @property
     def app_data_path(self):
         return self.env_config.get("DOCKER_APP_DATA_PATH")
 
@@ -198,15 +198,26 @@ class ContainerManager:
     @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
         result = dict()
-        for container in self.loader.load_all():
-            if container.name in result:
-                self.logger.debug(f"Container `{container.name}` already exists, overwrite.")
+        load_result = self.loader.load_all()
+        self.container_load_errors = load_result.errors
+        for container in load_result.containers:
+            existing = result.get(container.name)
+            if existing is not None:
+                raise ContainerError(
+                    "Duplicate container name %r: %s and %s"
+                    % (container.name, describe_origin(existing), describe_origin(container)))
             result[container.name] = container
         # Raw persisted names only -- resolving them to container objects here
         # would recurse back into this same property via InstalledStateStore.
+        errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
         for name in self.installed_state.load_names():
             if name not in result:
-                self.logger.warning(f"Not found installed container `{name}`, skip.")
+                error = errors_by_name.get(name)
+                if error is not None:
+                    self.logger.warning(
+                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
+                else:
+                    self.logger.warning(f"Not found installed container `{name}`, skip.")
         return result
 
     @cached_property
@@ -293,65 +304,30 @@ class ContainerManager:
         from .repo.service import RepoService
         return RepoService(self)
 
-    def _make_container_schema(self) -> "Any":
-        from linktools.core import ConfigSchema
-        return ConfigSchema(allow_unknown=True)
+    def load_installed_config_metadata(self) -> "list[BaseContainer]":
+        """Load installed containers and register their own config fields,
+        without running any container's ``on_prepare()`` (arbitrary
+        third-party file writes, network access, hook registration) or
+        touching ``docker_file``/``docker_compose``.
 
-    def _compute_manager_config_keys(self) -> "frozenset[str]":
-        keys = set()
-        for field in self.env_config.schema.fields():
-            keys.add(field.name)
-            keys.update(field.aliases)
-        return frozenset(keys)
-
-    def _get_manager_config_keys(self) -> "frozenset[str]":
-        """Field names this manager's own ``configs`` property declares
-        (HOST, DOCKER_APP_PATH, ...) -- these must resolve identically no
-        matter which repository's container reads them, so a third-party
-        repository's local ``.linktools.json`` must never override them.
-        Frozen once in ``__init__`` -- see ``_manager_config_keys``.
+        Safe for anything that only needs config metadata: config
+        set/get/list/explain/validate/reload, Root ``list``, Plan, Doctor.
+        Returns ``[]`` when nothing is installed instead of raising -- see
+        ``prepare_installed_containers`` for the raising, side-effectful
+        variant real execution (up/down/restart/exec) needs.
         """
-        return self._manager_config_keys
-
-    def build_repository_config(self, local_root: "Any") -> "Any":
-        """Build the Config a third-party repository's RepositoryConfigContext
-        holds: starts from a copy of this manager's own base
-        ConfigFields (HOST, DOCKER_APP_PATH, ...) so a repository's
-        container can still resolve them, then that repository's own
-        container.py module(s) add their own fields on top (via
-        ``container.env_config.update_defaults(**container.configs)`` in
-        ``prepare_installed_containers``). Shares this manager's
-        Environment/RuntimeOverride/Persistent state (``container_config_sources``)
-        -- only the local-file layer is unique to ``local_root``.
-
-        A ``ManagerConfigSource`` sits ahead of that local-file layer so a
-        manager-owned key (``_get_manager_config_keys()``) always resolves
-        through this manager's own Config -- a repository-declared field of
-        the same name is simply never consulted for it. Any other key (the
-        repository's own custom fields) falls through the ManagerConfigSource
-        untouched, straight to the repository's local/global file/provider/
-        default, exactly as before this boundary existed.
-        """
-        from .repo.context import ManagerConfigSource
-
-        schema = self._make_container_schema()
-        for field in self.env_config.schema.fields():
-            schema.define(field)
-        manager_source = ManagerConfigSource(self.env_config, self._get_manager_config_keys())
-        return self.environ.build_config(
-            schema, self.container_config_sources, local_root=local_root,
-            extra_sources=(manager_source,),
-        )
-
-    def prepare_installed_containers(self) -> "list[BaseContainer]":
-        self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
         containers = self.installed_state.get(resolve=True)
-        if not containers:
-            raise ContainerError("No container installed")
         for container in self.containers.values():
             container.enable = container in containers
         for container in reversed(containers):
-            container.env_config.update_defaults(**container.configs)
+            container.register_configs()
+        return containers
+
+    def prepare_installed_containers(self) -> "list[BaseContainer]":
+        self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
+        containers = self.load_installed_config_metadata()
+        if not containers:
+            raise NoContainerInstalledError("No container installed")
         for container in containers:
             container.on_prepare()
         for container in containers:
@@ -362,6 +338,3 @@ class ContainerManager:
             if container.exposes and self.debug:
                 self.logger.debug(f"Load exposes for {container.name}")
         return containers
-
-
-

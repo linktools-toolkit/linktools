@@ -69,8 +69,11 @@ class Command(StatusCommands, BaseCommandGroup):
         # Registers every resolved-installed container's own config defaults
         # into env_config -- `list` is often the first command run against a
         # project, so it must not depend on some other command having done
-        # this already.
-        manager.prepare_installed_containers()
+        # this already. Metadata only (never on_prepare()): `list` must work
+        # on a fresh install with nothing installed yet, and must not run
+        # any third-party container's arbitrary prepare-time side effects
+        # just to render a listing.
+        manager.load_installed_config_metadata()
         install_containers = manager.installed_state.get(resolve=False)
         all_install_containers = manager.resolver.resolve_dependencies(install_containers)
         # Persisted state only -- `list` must stay a fast, local-only read and
@@ -111,7 +114,8 @@ class Command(StatusCommands, BaseCommandGroup):
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_add(self, names: "list[str]"):
         containers = _shared.manager.installed_state.add(*names)
-        assert containers, "No container added"
+        if not containers:
+            raise ContainerError("No container added")
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Add {', '.join(result)} success")
 
@@ -121,7 +125,8 @@ class Command(StatusCommands, BaseCommandGroup):
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_remove(self, names: "list[str]", force: bool = False):
         containers = _shared.manager.installed_state.remove(*names, force=force)
-        assert containers, "No container removed"
+        if not containers:
+            raise ContainerError("No container removed")
         result = sorted(list([container.name for container in containers]))
         self.logger.info(f"Remove {', '.join(result)} success")
 

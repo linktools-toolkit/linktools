@@ -41,6 +41,10 @@ _EXCLUDED_FROM_SCAN = frozenset({
     # Asserts the *absence* of "deprecated" in real CLI output -- a
     # regression test for this exact removal, not leftover compat language.
     "test_compose_namespace.py",
+    # References `ConfigField.deprecated` -- a real Core schema attribute
+    # (part of a config field's equivalence signature) -- not compat-era
+    # language.
+    "manager.py",
 })
 
 

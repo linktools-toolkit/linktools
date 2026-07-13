@@ -5,13 +5,17 @@ Standalone build (PR 07); the legacy Config stays until cntr's DSL migrates to i
 (PR 08). Exercises source precedence, casting/validation, cycle detection,
 secret masking in explain, and multi-instance isolation.
 """
+import os
+
 import pytest
 
 from linktools.core import (
     Config, ConfigField, ConfigSchema, ConfigResolver,
     EnvironmentSource, RuntimeOverrideSource, DefaultSource, LazyProvider,
 )
-from linktools.errors import ConfigCastError, ConfigValidationError, ConfigNotFoundError, ConfigCycleError
+from linktools.errors import (
+    ConfigCastError, ConfigFieldError, ConfigValidationError, ConfigNotFoundError, ConfigCycleError,
+)
 from linktools.types import MISSING
 
 
@@ -29,7 +33,7 @@ def test_sources_isolate():
 
 def test_environment_source_reads_os_environ(monkeypatch):
     monkeypatch.setenv("LT_FOO", "bar")
-    src = EnvironmentSource("LT_")
+    src = EnvironmentSource((os.environ, "LT_"))
     assert src.get("FOO") == ("bar", True)
     assert src.get("NOPE") == (MISSING, False)
 
@@ -48,7 +52,7 @@ def test_environment_beats_default(monkeypatch):
     monkeypatch.setenv("LT_HOST", "env-host")
     schema = ConfigSchema().define(ConfigField(name="HOST", default="localhost"))
     r = ConfigResolver(schema, sources=[
-        EnvironmentSource("LT_"), DefaultSource(schema)])
+        EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     res = r.resolve("HOST")
     assert res.value == "env-host"
     assert res.source_name == "environment"
@@ -59,7 +63,7 @@ def test_runtime_override_beats_environment(monkeypatch):
     schema = ConfigSchema().define(ConfigField(name="HOST", default="def"))
     ro = RuntimeOverrideSource()
     ro.set("HOST", "runtime")
-    r = ConfigResolver(schema, sources=[ro, EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[ro, EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     assert r.resolve("HOST").value == "runtime"
     assert r.resolve("HOST").source_name == "runtime-override"
 
@@ -69,7 +73,7 @@ def test_precedence_order_is_first_wins(monkeypatch):
     monkeypatch.setenv("LT_K", "from-env")
     schema = ConfigSchema().define(ConfigField(name="K", default="def"))
     ro = RuntimeOverrideSource(); ro.set("K", "from-runtime")
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), ro, DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), ro, DefaultSource(schema)])
     assert r.resolve("K").value == "from-env"  # environment wins over runtime
 
 
@@ -83,7 +87,7 @@ def test_unknown_key_raises_not_found():
 def test_aliases_resolve(monkeypatch):
     monkeypatch.setenv("LT_OLD", "v")
     schema = ConfigSchema().define(ConfigField(name="NEW", aliases=("OLD",), default="d"))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     assert r.resolve("NEW").value == "v"  # found via alias OLD
 
 
@@ -95,6 +99,61 @@ def test_redefining_field_removes_stale_aliases():
     with pytest.raises(ConfigNotFoundError):
         r.resolve("OLD")
     assert r.resolve("CURRENT").value == "second"
+
+
+def test_define_rejects_empty_name():
+    schema = ConfigSchema()
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name=""))
+
+
+def test_define_rejects_empty_alias():
+    schema = ConfigSchema()
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="A", aliases=("",)))
+
+
+def test_define_rejects_self_alias():
+    schema = ConfigSchema()
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="A", aliases=("A",)))
+
+
+def test_define_rejects_duplicate_alias_on_same_field():
+    schema = ConfigSchema()
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="A", aliases=("X", "X")))
+
+
+def test_define_rejects_alias_colliding_with_existing_canonical_name():
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="B"))
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="A", aliases=("B",)))
+
+
+def test_define_rejects_canonical_name_colliding_with_existing_alias():
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="A", aliases=("B",)))
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="B"))
+
+
+def test_define_rejects_alias_already_claimed_by_another_field():
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="A", aliases=("X",)))
+    with pytest.raises(ConfigFieldError):
+        schema.define(ConfigField(name="C", aliases=("X",)))
+
+
+def test_define_allows_redefining_same_field_keeping_its_own_alias():
+    schema = ConfigSchema()
+    schema.define(ConfigField(name="A", aliases=("X",), default="first"))
+    # Not a collision: A is redefining itself, still claiming its own alias.
+    schema.define(ConfigField(name="A", aliases=("X",), default="second"))
+    r = ConfigResolver(schema, sources=[DefaultSource(schema)])
+    assert r.resolve("A").value == "second"
+    assert r.resolve("X").value == "second"
 
 
 def test_resolver_get_does_not_swallow_provider_errors():
@@ -112,14 +171,14 @@ def test_resolver_get_does_not_swallow_provider_errors():
 def test_cast_applied(monkeypatch):
     monkeypatch.setenv("LT_PORT", "8080")
     schema = ConfigSchema().define(ConfigField(name="PORT", default=0, cast=int))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     assert r.resolve("PORT").value == 8080
 
 
 def test_cast_failure_raises_config_cast_error(monkeypatch):
     monkeypatch.setenv("LT_PORT", "not-an-int")
     schema = ConfigSchema().define(ConfigField(name="PORT", cast=int))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_")])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_"))])
     with pytest.raises(ConfigCastError):
         r.resolve("PORT")
 
@@ -128,7 +187,7 @@ def test_validator_failure_raises(monkeypatch):
     monkeypatch.setenv("LT_PORT", "99999")
     schema = ConfigSchema().define(
         ConfigField(name="PORT", cast=int, validator=lambda v: 0 < v < 65536))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_")])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_"))])
     with pytest.raises(ConfigValidationError):
         r.resolve("PORT")
 
@@ -140,7 +199,7 @@ def test_validator_failure_raises(monkeypatch):
 def test_explain_reports_source_and_candidates(monkeypatch):
     monkeypatch.setenv("LT_HOST", "env-host")
     schema = ConfigSchema().define(ConfigField(name="HOST", default="localhost"))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     info = r.explain("HOST")
     assert info["resolved_value"] == "env-host"
     assert info["selected_source"] == "environment"
@@ -152,7 +211,7 @@ def test_explain_masks_secret_value(monkeypatch):
     # §8.9: a secret field must not expose its raw value in explain.
     monkeypatch.setenv("LT_TOKEN", "supersecret")
     schema = ConfigSchema().define(ConfigField(name="TOKEN", secret=True, default="x"))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     info = r.explain("TOKEN")
     assert info["secret"] is True
     assert info["resolved_value"] != "supersecret"
@@ -169,7 +228,7 @@ def test_explain_masks_every_secret_candidate_not_just_the_selected_one(monkeypa
         ConfigField(name="TOKEN", secret=True, aliases=("OLD_TOKEN",), default="x"))
     runtime = RuntimeOverrideSource()
     runtime.set("OLD_TOKEN", "runtime-secret")
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), runtime, DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), runtime, DefaultSource(schema)])
     info = r.explain("TOKEN")
 
     import json
@@ -210,8 +269,8 @@ def test_runtime_override_clear():
 # --------------------------------------------------------------------------- #
 
 def test_explain_unknown_persistent_key():
-    # allow_unknown: key present in a source but not defined in the schema.
-    schema = ConfigSchema(allow_unknown=True)
+    # Key present in a source but not defined in the schema.
+    schema = ConfigSchema()
     ro = RuntimeOverrideSource(); ro.set("DYNAMIC", "rt-val")
     r = ConfigResolver(schema, sources=[ro])
     info = r.explain("DYNAMIC")
@@ -224,8 +283,8 @@ def test_explain_unknown_persistent_key():
 
 def test_explain_unknown_env_key(monkeypatch):
     monkeypatch.setenv("LT_DYNAMIC", "from-env")
-    schema = ConfigSchema(allow_unknown=True)
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_")])
+    schema = ConfigSchema()
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_"))])
     info = r.explain("DYNAMIC")
     assert info["unknown"] is True
     assert info["resolved_value"] == "from-env"
@@ -233,7 +292,7 @@ def test_explain_unknown_env_key(monkeypatch):
 
 
 def test_explain_missing_key_reports_not_found():
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     r = ConfigResolver(schema, sources=[DefaultSource(schema)])
     info = r.explain("DOES_NOT_EXIST")
     assert info["found"] is False
@@ -245,14 +304,14 @@ def test_explain_missing_key_reports_not_found():
 def test_explain_known_key_has_no_unknown_warning(monkeypatch):
     monkeypatch.setenv("LT_HOST", "h")
     schema = ConfigSchema().define(ConfigField(name="HOST", default="d"))
-    r = ConfigResolver(schema, sources=[EnvironmentSource("LT_"), DefaultSource(schema)])
+    r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
     info = r.explain("HOST")
     assert info["unknown"] is False
     assert info["warnings"] == []
 
 
-def _config(allow_unknown=True):
-    schema = ConfigSchema(allow_unknown=allow_unknown)
+def _config():
+    schema = ConfigSchema()
     return Config(environ=None, schema=schema,
                   sources=[RuntimeOverrideSource(), DefaultSource(schema)])
 
@@ -262,7 +321,7 @@ def test_keys_include_persistent_values(tmp_path):
     # (it used to miss PersistentSource because it only checked _data/_ns).
     from linktools.core import ConfigStore, PersistentSource
     store = ConfigStore(tmp_path / "settings.json")
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     config = Config(environ=None, schema=schema,
                     sources=[PersistentSource(store, "main"), DefaultSource(schema)])
     config.persist("MY_KEY", "value")
@@ -296,17 +355,3 @@ def test_require_present_returns_value():
 def test_environ_debug_is_bool():
     from linktools.core import environ
     assert isinstance(environ.debug, bool)
-
-
-def test_unknown_key_raises_when_allow_unknown_false():
-    # With allow_unknown disabled, an unknown key must raise (not resolve to a
-    # value); explain() still returns a found=False dict rather than crashing.
-    schema = ConfigSchema(allow_unknown=False)
-    r = ConfigResolver(schema, sources=[DefaultSource(schema)])
-    with pytest.raises(ConfigNotFoundError):
-        r.resolve("NOPE")
-    info = r.explain("NOPE")
-    assert info["found"] is False
-    cfg = Config(environ=None, schema=schema, sources=[DefaultSource(schema)])
-    with pytest.raises(ConfigNotFoundError):
-        cfg.get("NOPE")

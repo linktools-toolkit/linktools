@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities.cntr import __cap_cntr__
+from .repo.service import safe_display_url
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -33,6 +34,8 @@ REPO_CONFIG_INVALID = "repo.config_invalid"
 REPO_INCOMPATIBLE = "repo.incompatible"
 REPO_DIRTY = "repo.dirty"
 ARTIFACT_STALE = "artifact.stale"
+ARTIFACT_LEGACY_REPOSITORY_URL = "artifact.legacy_repository_url"
+ARTIFACT_INDEX_INVALID = "artifact.index_invalid"
 SECURITY_DOCKER_SOCKET_MOUNT = "security.docker_socket_mount"
 SECURITY_LATEST_IMAGE = "security.latest_image"
 SECURITY_TLS_DISABLED = "security.tls_disabled"
@@ -213,9 +216,15 @@ class Doctor:
 
     def check_repos(self) -> "list[Finding]":
         findings: "list[Finding]" = []
-        from linktools.core import ensure_requirement
+        from linktools.core import ProjectProfile
+        from linktools.cntr.repo.requirements import ensure_requirement
         from linktools.errors import ConfigError, ConfigValidationError
-        for url, meta in self.manager.repos.get_all().items():
+        for raw_url, meta in self.manager.repos.get_all().items():
+            # Never the raw dict key -- a repository persisted before P1-07
+            # rejected credential-bearing URLs at add() time may still carry
+            # one (e.g. https://user:token@host/repo.git), and every finding
+            # here is user-visible output (text log and --json).
+            url = safe_display_url(raw_url)
             repo_path = meta.get("repo_path")
             if not repo_path or not os.path.exists(repo_path):
                 continue
@@ -226,7 +235,7 @@ class Doctor:
             # just because it has nothing to check.
             file_config = None
             try:
-                file_config = self.manager.environ.load_file_config(local_root=repo_path)
+                file_config = ProjectProfile(ProjectProfile.local_path(repo_path))
             except ConfigError as exc:
                 findings.append(Finding(
                     WARN, f"repo `{url}` has an invalid .linktools.json: {exc}",
@@ -234,7 +243,7 @@ class Doctor:
 
             if file_config is not None:
                 try:
-                    ensure_requirement(file_config.local_config, "linktools-cntr", __cap_cntr__.version)
+                    ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
                 except ConfigValidationError as exc:
                     findings.append(Finding(
                         WARN, f"repo `{url}` {exc}",
@@ -252,9 +261,18 @@ class Doctor:
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":
         """Report an indexed artifact whose container no longer produces it.
         Report-only: never deletes the stale index entry."""
-        from .artifacts import collect_candidates
+        from .artifacts import ArtifactIndexError, collect_candidates
         findings: "list[Finding]" = []
-        indexed = self.manager.artifact_index.load()
+        try:
+            indexed = self.manager.artifact_index.load()
+        except ArtifactIndexError as exc:
+            # Fail-closed, not silently treated as an empty index (which
+            # would report every real artifact as newly generated the next
+            # time it's actually written) -- report and stop, never
+            # overwrite it ourselves.
+            findings.append(Finding(
+                WARN, f"artifact index is unusable: {exc}", code=ARTIFACT_INDEX_INVALID))
+            return findings
         if not indexed:
             return findings
         candidates = collect_candidates(self.manager, tuple(containers))
@@ -266,13 +284,23 @@ class Doctor:
             findings.append(Finding(
                 INFO, f"generated artifact `{path}` is no longer produced by any installed container.",
                 code=ARTIFACT_STALE, component=path))
+        for path in self.manager.artifact_index.entries_with_legacy_repository_url():
+            findings.append(Finding(
+                INFO, f"generated artifact `{path}` still has a legacy `repository_url` field "
+                      f"(removed -- may have carried a Git credential); it will be rebuilt "
+                      f"credential-free the next time this artifact is generated.",
+                code=ARTIFACT_LEGACY_REPOSITORY_URL, component=path))
         return findings
 
     def run(self, runtime: bool = False) -> "list[Finding]":
         findings = self.check_runtime()
         findings.extend(self.check_repos())
         try:
-            containers = self.manager.prepare_installed_containers()
+            # Metadata only -- Doctor is documented read-only and must never
+            # run a third-party container's on_prepare() (arbitrary file
+            # writes/network access/hook registration) just to check compose
+            # files and artifacts.
+            containers = self.manager.load_installed_config_metadata()
             findings.extend(self.check_compose(containers))
             findings.extend(self.check_artifacts(containers))
             if runtime:

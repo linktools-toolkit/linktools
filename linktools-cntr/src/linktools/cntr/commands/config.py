@@ -56,17 +56,43 @@ def _short_owner_suffix(owner_id):
     return hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:8]
 
 
+def build_display_owner_labels(targets):
+    """owner_id -> display label for a set of same-key targets/entries
+    (anything with ``.owner_id``/``.owner_label``, i.e. ``ConfigTarget`` or
+    ``ConfigListEntry``).
+
+    The plain ``owner_label`` when it already disambiguates every owner
+    declaring this key, else ``owner_label@<hash>`` -- two different
+    repositories that happen to share a repo_name (e.g. both cloned as
+    "common") must never be shown under one ambiguous label. Every
+    set/get/list/explain/validate owner display goes through this single
+    helper so a duplicate repo_name is disambiguated identically
+    everywhere, instead of only in ``list``.
+    """
+    pairs = {(t.owner_id, t.owner_label) for t in targets}
+    owner_ids_by_label = {}
+    for owner_id, owner_label in pairs:
+        owner_ids_by_label.setdefault(owner_label, set()).add(owner_id)
+    return {
+        owner_id: (
+            f"{owner_label}@{_short_owner_suffix(owner_id)}"
+            if len(owner_ids_by_label[owner_label]) > 1
+            else owner_label
+        )
+        for owner_id, owner_label in pairs
+    }
+
+
 def _installed_containers_or_empty():
-    """``prepare_installed_containers()`` raises ``ContainerError`` when
-    nothing is installed yet -- fine for ``list``, which has nothing
-    meaningful to show either way, but ``set``/``get``/``explain``/
-    ``validate`` must keep working against Manager Config alone before any
-    repository is ever added (e.g. setting HOST as one of the very first
-    commands run on a fresh install)."""
-    try:
-        return _shared.manager.prepare_installed_containers()
-    except ContainerError:
-        return []
+    """Config metadata only -- registers every installed container's own
+    config fields without running any container's ``on_prepare()`` (a
+    config command must never trigger a third-party container's arbitrary
+    file writes/network access/hook registration) and without requiring
+    anything to be installed at all: ``set``/``get``/``list``/``explain``/
+    ``validate``/``reload`` must keep working against Manager Config alone
+    before any repository is ever added (e.g. setting HOST as one of the
+    very first commands run on a fresh install)."""
+    return _shared.manager.load_installed_config_metadata()
 
 
 def _iter_unique_configs(containers):
@@ -89,9 +115,9 @@ def _iter_unique_configs(containers):
 def _find_config_targets(key, containers):
     """Every Config -- Manager's and each distinct repository's -- that
     declares its OWN field for ``key``. A key can resolve fine through
-    Manager Config's allow_unknown source chain while still being a secret
-    ONLY a repository's own schema knows about, so callers must not assume
-    "found via Manager" == "the only definition".
+    Manager Config's source chain (unknown keys still resolve) while still
+    being a secret ONLY a repository's own schema knows about, so callers
+    must not assume "found via Manager" == "the only definition".
 
     ``build_repository_config`` seeds every repository's schema with a copy
     of Manager's OWN field objects (by reference) so a repo container can
@@ -164,8 +190,27 @@ class ConfigCommand(BaseCommandGroup):
     def on_command_set(self, configs: "dict[str, str]"):
         config = _shared.manager.env_config
         containers = _installed_containers_or_empty()
+
+        # Validate every key against every schema that declares it (Manager's
+        # own, and each distinct repository's own cast/validator) BEFORE
+        # persisting anything -- a later key failing validation must never
+        # leave an earlier key already written, and a key with a
+        # repository-specific cast/validator must be checked against that
+        # repository's own rules, not just Manager's.
         for key, value in configs.items():
-            config.persist(key, value)
+            targets = _find_config_targets(key, containers)
+            if targets:
+                for target in targets:
+                    target.config.validate_value(key, value)
+            else:
+                config.validate_value(key, value)
+
+        # One atomic write for every key -- the raw CLI strings, not any
+        # target's cast value (different repositories may cast the same key
+        # differently; persisting one repo's cast result would corrupt what
+        # another repo -- or Manager itself -- reads back).
+        config.persist_many(configs)
+
         for key in sorted(configs.keys()):
             # Always redacted -- config set intentionally has no
             # --show-secret; the whole point of `set` is to confirm the
@@ -191,7 +236,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("--show-secret", action="store_true", default=False,
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
     def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False):
-        containers = _shared.manager.prepare_installed_containers()
+        containers = _installed_containers_or_empty()
         target_containers = [c for c in containers if c.name in names] if names else containers
         if with_dependencies and names:
             target_containers = _shared.manager.resolver.resolve_dependencies(target_containers)
@@ -249,12 +294,11 @@ class ConfigCommand(BaseCommandGroup):
         # one Config object -- keeping `KEY=VALUE` stable for the common
         # single-owner case. Two different repositories that happen to
         # share a repo_name (e.g. both cloned as "common") get a stable
-        # hash suffix instead of colliding under one ambiguous label.
-        owner_ids_by_key = {}
-        labels_by_key = {}
+        # hash suffix instead of colliding under one ambiguous label -- see
+        # build_display_owner_labels, shared with get/explain/validate.
+        entries_by_key = {}
         for entry in entries:
-            owner_ids_by_key.setdefault(entry.key, set()).add(entry.owner_id)
-            labels_by_key.setdefault(entry.key, {}).setdefault(entry.owner_label, set()).add(entry.owner_id)
+            entries_by_key.setdefault(entry.key, []).append(entry)
 
         # Redaction is decided per key across EVERY installed repository
         # (the full, unfiltered `containers`, not the possibly name-filtered
@@ -276,12 +320,12 @@ class ConfigCommand(BaseCommandGroup):
                 # force-prompting for just to render a listing.
                 continue
 
-            if len(owner_ids_by_key[entry.key]) <= 1:
+            key_entries = entries_by_key[entry.key]
+            if len({e.owner_id for e in key_entries}) <= 1:
                 label = entry.key
-            elif len(labels_by_key[entry.key][entry.owner_label]) > 1:
-                label = f"{entry.owner_label}@{_short_owner_suffix(entry.owner_id)}:{entry.key}"
             else:
-                label = f"{entry.owner_label}:{entry.key}"
+                owner_label = build_display_owner_labels(key_entries)[entry.owner_id]
+                label = f"{owner_label}:{entry.key}"
 
             if show_secret:
                 # self.logger.info goes through the logging redaction filter,
@@ -305,9 +349,9 @@ class ConfigCommand(BaseCommandGroup):
             targets = _find_config_targets(key, containers)
             if len(targets) <= 1:
                 # Zero targets: genuinely unknown key, fall back to
-                # Manager's allow_unknown source-chain read. One target:
-                # resolve through THAT Config so its own cast/validator
-                # apply, not just Manager's.
+                # Manager's source-chain read (unknown keys still resolve).
+                # One target: resolve through THAT Config so its own
+                # cast/validator apply, not just Manager's.
                 config = targets[0].config if targets else manager_config
                 value = config.get(key)
                 if show_secret:
@@ -322,9 +366,10 @@ class ConfigCommand(BaseCommandGroup):
                 # Same key declared by more than one repository -- each may
                 # resolve to a different value (own cast) and must be shown
                 # with its owner, never silently collapsed to one.
+                labels = build_display_owner_labels(targets)
                 for target in targets:
                     value = target.config.get(key)
-                    label = f"{target.owner_label}:{key}"
+                    label = f"{labels[target.owner_id]}:{key}"
                     if show_secret:
                         print(f"{label}={value}")
                     else:
@@ -348,11 +393,12 @@ class ConfigCommand(BaseCommandGroup):
             # so a repo whose own field isn't flagged secret never shows a
             # value another repo's field on the same persisted key protects.
             force_secret = _is_secret_targets(targets)
+            labels = build_display_owner_labels(targets)
             info = {
                 "key": key,
                 "targets": [
                     {
-                        "owner": target.owner_label,
+                        "owner": labels[target.owner_id],
                         "explain": (
                             _force_redact_explain(target.config.explain(key))
                             if force_secret else target.config.explain(key)
@@ -396,11 +442,12 @@ class ConfigCommand(BaseCommandGroup):
             # -- a key shared by two repositories with different rules
             # (spec: one requires int, the other a "tcp-" prefix) can pass
             # for one and fail for the other, and both outcomes must surface.
+            labels = build_display_owner_labels(targets)
             for target in targets:
                 try:
                     target.config.get(key)
                 except Exception as exc:  # noqa: BLE001 - collect every bad target, not just the first
-                    errors.append(dict(key=key, owner=target.owner_label, error=str(exc)))
+                    errors.append(dict(key=key, owner=labels[target.owner_id], error=str(exc)))
 
         if as_json:
             import json
@@ -426,4 +473,4 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand("reload", order=CONFIG_COMMAND_ORDER["reload"], help="reload container configs")
     def on_command_reload(self):
         _shared.manager.env_config.reload()
-        _shared.manager.prepare_installed_containers()
+        _shared.manager.load_installed_config_metadata()

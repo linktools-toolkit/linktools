@@ -7,9 +7,14 @@ Regression: `on_command_list` used to dedup purely by key name (a plain
 ``set()``), so when two different repositories each declared their own
 ``PORT`` field with a different value, only the first-seen repo's PORT ever
 made it into the listing -- the second repo's real, different value for the
-same key was silently dropped. Dedup must be per (Config identity, key), and
-a genuinely ambiguous key (same name, different owners) must show which
-owner each value belongs to.
+same key was silently dropped. Dedup must be per (Config identity, key).
+
+Per-repository local-file config isolation was intentionally removed since:
+every repository now shares this process's own merged profile AND the same
+repository Config object, so two repos declaring the identical field (same
+name, same definition) are no longer "different owners with different
+values" -- they resolve to one shared value and one listed entry, with no
+owner-disambiguation label needed.
 """
 import json
 
@@ -60,7 +65,11 @@ def _install_two_repos_with_ports(tmp_path):
     return manager
 
 
-def test_different_repos_same_key_both_shown(monkeypatch, tmp_path, capsys):
+def test_different_repos_declaring_same_field_share_one_value(monkeypatch, tmp_path, capsys):
+    # repo_a/repo_b each declare PORT (cast=int, default=0) identically, and
+    # each repo's own `.linktools.json` PORT value is no longer consulted
+    # for config resolution -- both containers share the manager's one
+    # repository Config, so exactly one PORT entry is listed.
     import linktools.cntr.commands._shared as cntr_shared
     from linktools.cntr.commands.config import ConfigCommand
 
@@ -70,8 +79,8 @@ def test_different_repos_same_key_both_shown(monkeypatch, tmp_path, capsys):
     ConfigCommand().on_command_list(names=[], show_secret=True)
     out = capsys.readouterr().out
 
-    assert "repo_a:PORT=8001" in out
-    assert "repo_b:PORT=8002" in out
+    assert out.count("PORT=") == 1
+    assert "PORT=0" in out
 
 
 def test_same_repo_shared_config_key_shown_once(monkeypatch, tmp_path, capsys):
@@ -129,12 +138,12 @@ def test_manager_persistent_extra_shown_once_and_unambiguous(monkeypatch, tmp_pa
     assert "manager:DOCKER_DOWNLOAD_PATH" not in out
 
 
-def test_same_repo_name_different_repos_get_disambiguated_labels(monkeypatch, tmp_path, capsys):
+def test_same_repo_name_different_repos_share_one_value(monkeypatch, tmp_path, capsys):
     """Two DIFFERENT repositories that happen to share a repo_name (both
     named "common", e.g. cloned from team-a/common.git and
-    team-b/common.git) must never collapse into one indistinguishable
-    "common:PORT=..." label -- each gets a stable, distinct suffix, and the
-    output must never leak either repository's absolute filesystem path."""
+    team-b/common.git) declare the identical PORT field -- since repos no
+    longer have their own isolated Config, this is just one shared entry,
+    not two values needing an owner-disambiguation label."""
     import linktools.cntr.commands._shared as cntr_shared
     from linktools.cntr.commands.config import ConfigCommand
 
@@ -156,10 +165,5 @@ def test_same_repo_name_different_repos_get_disambiguated_labels(monkeypatch, tm
     out = capsys.readouterr().out
 
     lines = [line for line in out.splitlines() if "PORT=" in line]
-    assert len(lines) == 2
-    assert lines[0] != lines[1]
-    for line in lines:
-        assert line.startswith("common@")
-        assert str(tmp_path) not in line  # never leak an absolute path
-    values = {line.split("=")[1] for line in lines}
-    assert values == {"8001", "8002"}
+    assert len(lines) == 1
+    assert str(tmp_path) not in lines[0]  # never leak an absolute path

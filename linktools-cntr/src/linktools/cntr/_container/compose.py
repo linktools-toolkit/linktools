@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Compose/Dockerfile data loading, default completion, and file output for
 a container."""
+import hashlib
 import os
 from typing import TYPE_CHECKING
 
@@ -52,8 +53,14 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                 )):
                     service.setdefault("hostname", name)
                 if "image" not in service:
-                    dockerfile = container.get_docker_file_path()
-                    if dockerfile and os.path.exists(dockerfile):
+                    # Referenced without writing anything -- this function
+                    # must stay a pure read (Plan/Doctor/config-list all
+                    # access `container.docker_compose` and must never
+                    # trigger a Dockerfile write as a side effect). The
+                    # real write happens only via write_docker_compose_file,
+                    # for actual execution.
+                    if container.docker_file:
+                        dockerfile = container.get_docker_file_destination()
                         build = service.get("build")
                         if build is None:
                             build = service["build"] = {}
@@ -110,9 +117,17 @@ def _record_artifact(container: "BaseContainer", destination, kind: str, content
             source = str(candidate)
             break
     entry = dict(kind=kind, container=container.name, sha256=sha256_of(content), source=source)
-    repository = getattr(container, "_repository_context", None)
+    repository = container.repo_context
     if repository is not None and not repository.builtin and repository.url:
-        entry["repository_url"] = repository.url
+        # repo_name + a hash of the (never credential-bearing) root_path --
+        # never repository.url itself, which may embed a Git credential
+        # (`https://user:token@host/repo.git`). This must stay identifying
+        # enough to tell repositories apart without ever being able to leak
+        # a secret through the Artifact Index.
+        entry["repo_name"] = repository.repo_name
+        if repository.root_path:
+            entry["repo_id"] = hashlib.sha256(
+                str(repository.root_path).encode("utf-8")).hexdigest()[:8]
         revision = _git_revision(manager, repository.root_path)
         if revision is not None:
             entry["repository_revision"] = revision
@@ -141,14 +156,27 @@ def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
         content = yaml.safe_dump(container.docker_compose, sort_keys=True, allow_unicode=False)
         atomic_write_text_if_changed(destination, content)
         _record_artifact(container, destination, "compose", content, container.manager.docker_compose_names)
+        # The compose model's `build.dockerfile` field (see
+        # load_docker_compose) may reference docker_file_destination()
+        # without that file having been written yet -- real execution
+        # needs it to actually exist on disk, so write it alongside the
+        # compose file itself. A no-op when this container has no
+        # Dockerfile template.
+        write_docker_file(container)
     return destination
+
+
+def docker_file_destination(container: "BaseContainer") -> "Path":
+    """Pure path computation, no write -- see
+    ``BaseContainer.get_docker_file_destination``."""
+    return utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
 
 
 def write_docker_file(container: "BaseContainer") -> "Path | None":
     destination = None
     if container.docker_file:
         from ..artifacts import atomic_write_text_if_changed
-        destination = utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
+        destination = docker_file_destination(container)
         destination.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text_if_changed(destination, container.docker_file)
         _record_artifact(container, destination, "dockerfile", container.docker_file, ("Dockerfile",))

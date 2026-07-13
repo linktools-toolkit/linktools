@@ -12,6 +12,7 @@ from ._config import (
     RuntimeOverrideSource,
     PersistentSource,
     FileSource,
+    DictSource,
     DefaultSource,
     ConfigProvider,
     AliasProvider,
@@ -41,23 +42,18 @@ from ._download import (
 )
 from ._environ import BaseEnviron, Environ, environ
 from ._capability import Updater, DevelopUpdater, GitUpdater, PypiUpdater, BaseCapability, Capability
-from ._file_config import (
-    LinktoolsFileConfig,
-    ResolvedLinktoolsFileConfig,
-    LinktoolsFileConfigLoader,
-    merge_file_config,
-    ensure_requirement,
+from ._profile import (
+    ProjectProfile,
 )
 
 __all__ = [
     # environ
     "BaseEnviron", "Environ", "environ",
-    # file config
-    "LinktoolsFileConfig", "ResolvedLinktoolsFileConfig", "LinktoolsFileConfigLoader",
-    "merge_file_config", "ensure_requirement",
+    # project profile
+    "ProjectProfile",
     # config
     "Config", "ConfigField", "ConfigSchema", "ConfigResolver", "ConfigSource",
-    "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource",
+    "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource", "DictSource",
     "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
     "ConfigStore", "redact_config_value",

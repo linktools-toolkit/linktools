@@ -99,7 +99,7 @@ class ConfigStore(object):
     # -- read ---------------------------------------------------------------
 
     def get(self, key: str, default: "Any" = MISSING) -> "Any":
-        """Return the value for ``key``, or ``default`` if absent (v4 §3.4).
+        """Return the value for ``key``, or ``default`` if absent.
 
         Uses MISSING as the sentinel so stored None is distinguishable from
         a missing key (``key in store`` vs ``store.get(key) is None``).
@@ -121,27 +121,46 @@ class ConfigStore(object):
 
     def set(self, key: str, value: "Any") -> None:
         with self._locked():
+            previous = self._data
+            self._data = dict(self._data)
             self._data[key] = value
-            self._flush()
+            self._flush_or_rollback(previous)
             self._touch()
 
     def save(self, **kwargs: "Any") -> None:
         with self._locked():
+            previous = self._data
+            self._data = dict(self._data)
             self._data.update(kwargs)
-            self._flush()
+            self._flush_or_rollback(previous)
             self._touch()
 
     def remove(self, *keys: str) -> bool:
         removed = False
         with self._locked():
+            previous = self._data
+            self._data = dict(self._data)
             for key in keys:
                 if key in self._data:
                     self._data.pop(key, None)
                     removed = True
             if removed:
-                self._flush()
+                self._flush_or_rollback(previous)
                 self._touch()
         return removed
+
+    def _flush_or_rollback(self, previous: "dict[str, Any]") -> None:
+        """Write ``self._data`` to disk; on failure, restore ``previous``
+        before re-raising -- a failed flush (disk full, permission error)
+        must never leave the in-memory store reflecting a value that was
+        never actually persisted, which a caller reading it back (without
+        an intervening ``reload()``) would otherwise see as if it had
+        succeeded."""
+        try:
+            self._flush()
+        except Exception:
+            self._data = previous
+            raise
 
     def __repr__(self) -> str:
         return "ConfigStore(path=%r, keys=%d)" % (str(self._path), len(self._data))

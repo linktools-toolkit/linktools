@@ -7,8 +7,9 @@ possibly run under Python 3.6 (match/case, walrus, positional-only
 parameters, `from __future__ import annotations`, except*, unquoted PEP
 604/585 annotations) plus a short list of stdlib imports that need a
 backport or a try/except fallback below 3.7/3.8. It is not a substitute for
-actually running ``python3.6 -m compileall`` -- that remains the final
-authority (see the project's Python 3.6 CI job).
+actually running ``python3.6 -m compileall`` on a real Python 3.6
+interpreter -- that remains the final authority; run it locally when one is
+available (there is no CI job for this).
 
 Usage:
     python scripts/check_python36_compat.py

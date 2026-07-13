@@ -31,7 +31,7 @@ def _linux(monkeypatch, fresh_manager):
     # get_gid are mocked too so this test only exercises path resolution,
     # not whatever chown/chmod binaries or user database happen to be on
     # the host running the suite.
-    monkeypatch.setattr(fresh_manager, "system", "linux")
+    monkeypatch.setattr(type(fresh_manager), "system", "linux")
     monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(process_module, "get_uid", lambda user: 1000)
     monkeypatch.setattr(process_module, "get_gid", lambda user: 1000)

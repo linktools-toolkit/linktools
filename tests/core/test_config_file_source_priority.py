@@ -7,6 +7,8 @@ DefaultSource, exactly as _environ.py wires them in Commit 3. This file
 covers Commit 2 in isolation: the resolver-level priority mechanics, not the
 BaseEnviron bootstrap wiring itself.
 """
+import os
+
 from linktools.core import (
     Config, ConfigField, ConfigSchema, DefaultSource, EnvironmentSource,
     FileSource, LazyProvider, PersistentSource, PromptProvider, RuntimeOverrideSource,
@@ -17,11 +19,11 @@ from linktools.core._locks import LockManager
 
 def _make_config(tmp_path, local_data=None, global_data=None, env_prefix=""):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     local_source = FileSource(local_data or {}, name="local-file")
     global_source = FileSource(global_data or {}, name="global-file")
     return Config(None, schema, sources=[
-        EnvironmentSource(env_prefix),
+        EnvironmentSource((os.environ, env_prefix)),
         RuntimeOverrideSource(),
         PersistentSource(store, "test"),
         local_source,
@@ -114,10 +116,10 @@ def test_explain_reports_global_file_source_when_local_absent(tmp_path):
 def test_reload_replaces_file_source_data_via_reload_fn(tmp_path):
     state = {"data": {"KEY": "v1"}}
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     local_source = FileSource(state["data"], name="local-file", reload_fn=lambda: (state["data"], None))
     config = Config(None, schema, sources=[
-        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        EnvironmentSource((os.environ, "")), RuntimeOverrideSource(), PersistentSource(store, "test"),
         local_source, DefaultSource(schema),
     ])
     assert config.get("KEY") == "v1"
@@ -145,11 +147,11 @@ def test_reload_clears_runtime_when_requested(tmp_path):
 
 def test_relative_path_field_resolves_against_local_file_base_path(tmp_path):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     local_root = tmp_path / "repo-root"
     local_source = FileSource({"DATA_DIR": "./data"}, name="local-file", base_path=str(local_root))
     config = Config(None, schema, sources=[
-        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        EnvironmentSource((os.environ, "")), RuntimeOverrideSource(), PersistentSource(store, "test"),
         local_source, DefaultSource(schema),
     ])
     config.define(ConfigField(name="DATA_DIR", cast="path"))
@@ -159,12 +161,12 @@ def test_relative_path_field_resolves_against_local_file_base_path(tmp_path):
 
 def test_relative_path_field_resolves_against_global_file_base_path(tmp_path):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     global_root = tmp_path / "home" / ".linktools"
     local_source = FileSource({}, name="local-file", base_path=str(tmp_path / "cwd"))
     global_source = FileSource({"DATA_DIR": "./data"}, name="global-file", base_path=str(global_root))
     config = Config(None, schema, sources=[
-        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        EnvironmentSource((os.environ, "")), RuntimeOverrideSource(), PersistentSource(store, "test"),
         local_source, global_source, DefaultSource(schema),
     ])
     config.define(ConfigField(name="DATA_DIR", cast="path"))
@@ -174,11 +176,11 @@ def test_relative_path_field_resolves_against_global_file_base_path(tmp_path):
 
 def test_absolute_path_field_ignores_base_path(tmp_path):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     absolute = str(tmp_path / "elsewhere")
     local_source = FileSource({"DATA_DIR": absolute}, name="local-file", base_path=str(tmp_path / "repo"))
     config = Config(None, schema, sources=[
-        EnvironmentSource(""), RuntimeOverrideSource(), PersistentSource(store, "test"),
+        EnvironmentSource((os.environ, "")), RuntimeOverrideSource(), PersistentSource(store, "test"),
         local_source, DefaultSource(schema),
     ])
     config.define(ConfigField(name="DATA_DIR", cast="path"))

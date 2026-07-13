@@ -38,6 +38,15 @@ class ContainerTemplateError(ContainerError):
     pass
 
 
+class NoContainerInstalledError(ContainerError):
+    """No container is installed -- raised only by the full-prepare path
+    (``prepare_installed_containers``), never by the metadata-only path
+    (``load_installed_config_metadata``), so a metadata-only caller (config
+    commands, Root ``list``, Plan, Doctor) can still run against a fresh,
+    nothing-installed project instead of hard-failing."""
+    pass
+
+
 class AbstractMetaClass(type):
 
     def __new__(mcs, name, bases, namespace):
@@ -49,12 +58,10 @@ class AbstractMetaClass(type):
 class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     __abstract__ = True
 
-    # Set by ContainerLoader after construction. None for a container built
-    # directly (e.g. in a test) without going through the loader --
-    # env_config then falls back to the manager's own Config.
-    _repository_context = None
-
     def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
+        self.manager = manager
+        self.logger = manager.logger
+        self.root_path = root_path
         name = name or self.__module__
         index = name.rfind(".")
         if index >= 0:
@@ -67,9 +74,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             self._order = 900
             self._name = name
         self._enable = False
-        self.manager = manager
-        self.logger = manager.logger
-        self.root_path = root_path
+        self._repo_context = None
 
     @property
     def name(self) -> str:
@@ -121,16 +126,20 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self.manager.environ
 
     @property
-    def repository_context(self):
-        """Where this container came from, and the Config it resolves
-        fields through -- ``None`` if never attached by ContainerLoader
-        (e.g. a container built directly in a test)."""
-        return self._repository_context
+    def repo_context(self):
+        """Where this container came from -- ``None`` if never attached by
+        ContainerLoader (e.g. a container built directly in a test)."""
+        return self._repo_context
+
+    @repo_context.setter
+    def repo_context(self, context) -> None:
+        self._repo_context = context
 
     @property
     def env_config(self):
-        context = self._repository_context
-        return context.config if context is not None else self.manager.env_config
+        # Every container, builtin or third-party, resolves fields through
+        # the manager's own shared Config.
+        return self.manager.env_config
 
     @property
     def runtime(self):
@@ -286,6 +295,17 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_unmount_file(self, service_name: str = None):
         return _actions.umount(self, service_name=service_name)
 
+    def register_configs(self) -> None:
+        """Register this container's own ``configs`` onto its Config."""
+        for key, spec in self.configs.items():
+            self.env_config.define(ConfigField.coerce(key, spec))
+
+    def register_dynamic_config_field(self, field: "ConfigField") -> str:
+        """Register a single ad-hoc ``ConfigField`` this container defines
+        at call time (``get_config(ConfigField(...))``)."""
+        self.env_config.define(field)
+        return field.name
+
     def _resolve_config_key(self, key: "ConfigKeyType") -> str:
         """Accept either a plain field name or a ``ConfigField`` to define.
 
@@ -299,8 +319,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         if isinstance(key, ConfigField):
             if not key.name:
                 raise ValueError("ConfigField passed as a config key must have a name")
-            self.env_config.define(key)
-            return key.name
+            return self.register_dynamic_config_field(key)
         return key
 
     def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
@@ -339,7 +358,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return path
 
     def get_temp_path(self, *paths: str, create_parent: bool = False) -> "Path":
-        path = utils.join_path(self.manager.temp_path, "container", self.name, *paths)
+        # manager.temp_path is already environ.get_temp_path("container") --
+        # joining another "container" segment here double-nested it into
+        # .../temp/container/container/<name>.
+        path = utils.join_path(self.manager.temp_path, self.name, *paths)
         if create_parent:
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
@@ -366,6 +388,17 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def get_docker_file_path(self) -> "Path | None":
         return _compose.write_docker_file(self)
+
+    def get_docker_file_destination(self) -> "Path":
+        """Pure path computation, no write -- where a rendered Dockerfile
+        WOULD go, regardless of whether it has actually been written yet.
+        Used by ``load_docker_compose`` (a read-only render, referenced by
+        Plan/Doctor/config-list) to fill in a build service's
+        ``dockerfile`` field without writing anything; the real write only
+        ever happens via ``get_docker_file_path()``, itself only called
+        during real compose file generation (``write_docker_compose_file``)
+        for actual execution."""
+        return _compose.docker_file_destination(self)
 
     def get_docker_context_path(self) -> "Path":
         return self.get_source_path()

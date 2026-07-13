@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RepoService.describe() must defer entirely to the real
-LinktoolsFileConfigLoader for whether a repository's ``.linktools.json`` is
+ProjectProfile for whether a repository's ``.linktools.json`` is
 usable -- never re-implement that judgment with its own filesystem check.
 
 Regression: describe() used ``os.path.exists(local_path)`` to decide
@@ -29,7 +29,7 @@ def _repo_dir(tmp_path, name="repo_src"):
 
 
 def _describe(fresh_manager, repo_dir):
-    fresh_manager.repos.add(str(repo_dir), force=True)
+    fresh_manager.repos.add(str(repo_dir), replace=True)
     meta = fresh_manager.repos.get_all()[str(repo_dir)]
     return fresh_manager.repos.describe(str(repo_dir), meta)
 
@@ -40,7 +40,7 @@ def _add_then_corrupt(fresh_manager, repo_dir, corrupt):
     afterward -- the realistic way a repo ends up broken post-install (a
     hand-edit, a bad `repo update`), which is exactly what `status` must
     catch."""
-    fresh_manager.repos.add(str(repo_dir), force=True)
+    fresh_manager.repos.add(str(repo_dir), replace=True)
     corrupt()
     meta = fresh_manager.repos.get_all()[str(repo_dir)]
     return fresh_manager.repos.describe(str(repo_dir), meta)
@@ -118,5 +118,5 @@ def test_add_rejects_dangling_symlink_before_it_ever_reaches_status(fresh_manage
 
     import pytest
     with pytest.raises(ContainerError):
-        fresh_manager.repos.add(str(repo_dir), force=True)
+        fresh_manager.repos.add(str(repo_dir), replace=True)
     assert fresh_manager.repos.get_all() == {}

@@ -52,7 +52,11 @@ class ExecutionPlanner:
             raise ContainerError(f"Unsupported plan action: {action!r}; expected up/restart/down")
 
         manager = self.manager
-        selection = manager.compose_operations.select(names)
+        # Metadata only -- Plan is documented read-only and must never run
+        # a third-party container's on_prepare() (arbitrary file writes/
+        # network access/hook registration) just to describe what a real
+        # up/restart/down would do.
+        selection = manager.compose_operations.select(names, metadata_only=True)
 
         candidates = collect_candidates(manager, selection.project_containers)
         artifacts = [

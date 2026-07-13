@@ -43,7 +43,7 @@ def test_oidc_clients_reloaded_from_store_is_a_set_again(fresh_manager):
     from linktools.cntr.registry.loader import ContainerLoader
     from linktools.cntr.repo.context import RepositoryConfigContext
     builtin_context = RepositoryConfigContext(
-        root_path=None, file_config=None, config=fresh_manager.env_config, url=None, builtin=True,
+        root_path=None, file_config=None, url=None, builtin=True,
     )
     fresh_containers = list(ContainerLoader(fresh_manager)._load_one(authelia.root_path, builtin_context))
     reloaded = fresh_containers[0]

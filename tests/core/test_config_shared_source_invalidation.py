@@ -22,8 +22,6 @@ computed; a stale token forces recomputation, so a sibling Config's write
 is visible on the next read through ANY Config sharing that source, cache
 or no cache.
 """
-import json
-
 from linktools.core._config import ConfigSchema, AliasProvider, LazyProvider, ConfigField
 from linktools.core._environ import BaseEnviron, Environ
 from linktools.types import MISSING
@@ -42,19 +40,11 @@ def _make_environ(monkeypatch, tmp_path):
     return Environ()
 
 
-def _write(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
-
-
 def _two_sibling_configs(monkeypatch, tmp_path):
     env = _make_environ(monkeypatch, tmp_path)
-    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
-    repo_a.mkdir()
-    repo_b.mkdir()
     shared = env.shared_config_sources("container", "")
-    config_a = env.build_config(ConfigSchema(allow_unknown=True), shared, local_root=repo_a)
-    config_b = env.build_config(ConfigSchema(allow_unknown=True), shared, local_root=repo_b)
+    config_a = env.build_config(ConfigSchema(), shared)
+    config_b = env.build_config(ConfigSchema(), shared)
     return config_a, config_b
 
 
@@ -124,16 +114,16 @@ def test_lazy_across_sibling_configs_reflects_shared_write(monkeypatch, tmp_path
     assert config_b.get("DERIVED") == "value:new"
 
 
-def test_file_source_reload_invalidates_cache(monkeypatch, tmp_path):
-    env = _make_environ(monkeypatch, tmp_path)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _write(repo / ".linktools.json", {"environment": {"KEY": "before"}})
+def test_reload_does_not_raise_and_clears_memo(monkeypatch, tmp_path):
+    # The profile-backed EnvironmentSource is a one-time snapshot (no
+    # reload_fn -- there is no more per-repo local-file layer to re-read),
+    # so reload() no longer picks up an on-disk profile change; it must
+    # still run without error and still clear the resolver's memo so a
+    # PersistentSource/RuntimeOverrideSource write is picked up.
+    config_a, config_b = _two_sibling_configs(monkeypatch, tmp_path)
+    config_a.persist("KEY", "before")
+    assert config_b.get("KEY") == "before"  # cache it
 
-    shared = env.shared_config_sources("container", "")
-    config = env.build_config(ConfigSchema(allow_unknown=True), shared, local_root=repo)
-
-    assert config.get("KEY") == "before"  # cache it
-    _write(repo / ".linktools.json", {"environment": {"KEY": "after"}})
-    config.reload()
-    assert config.get("KEY") == "after"
+    config_a.persist("KEY", "after")
+    config_b.reload()
+    assert config_b.get("KEY") == "after"

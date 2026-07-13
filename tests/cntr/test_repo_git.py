@@ -118,6 +118,78 @@ def test_inspect_non_git_directory_is_applicable(fresh_manager, tmp_path):
     assert info["reason"] == "Not a git repository."
 
 
+def test_inspect_corrupted_repo_fails_closed_not_raises(fresh_manager, tmp_path, monkeypatch):
+    """review P2-04: a corrupted object store/permission error while
+    reading head_sha()/is_dirty() must be reported structurally, not
+    propagate -- inspect() is used by describe()/validate(), which promise
+    one bad repo can never hide the rest of a multi-repo status/validate."""
+    from linktools.git.repository import GitRepository
+
+    git = RepoGit(fresh_manager)
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    from dulwich import porcelain
+    porcelain.init(str(repo_path))
+    (repo_path / "a.txt").write_text("hello")
+    porcelain.add(str(repo_path), [str(repo_path / "a.txt")])
+    porcelain.commit(str(repo_path), message=b"first",
+                     author=b"T <t@example.com>", committer=b"T <t@example.com>")
+
+    def broken_head_sha(self):
+        raise RuntimeError("corrupted object store")
+
+    monkeypatch.setattr(GitRepository, "head_sha", broken_head_sha)
+
+    info = git.inspect(str(repo_path))
+
+    assert info["applicable"] is True
+    assert info["supported"] is False
+    assert info["revision"] is None
+    assert info["dirty"] is None
+    assert "corrupted object store" in info["reason"]
+
+
+def test_describe_isolates_one_bad_repo_from_others(fresh_manager, tmp_path, monkeypatch):
+    """A repo whose Git inspection raises must not prevent describe()/
+    validate() from reporting every other repository."""
+    from linktools.git.repository import GitRepository
+    from dulwich import porcelain
+
+    good_repo = tmp_path / "good"
+    good_repo.mkdir()
+    porcelain.init(str(good_repo))
+    (good_repo / "a.txt").write_text("hello")
+    porcelain.add(str(good_repo), [str(good_repo / "a.txt")])
+    porcelain.commit(str(good_repo), message=b"first",
+                     author=b"T <t@example.com>", committer=b"T <t@example.com>")
+
+    bad_repo = tmp_path / "bad"
+    bad_repo.mkdir()
+    porcelain.init(str(bad_repo))
+    (bad_repo / "b.txt").write_text("hello")
+    porcelain.add(str(bad_repo), [str(bad_repo / "b.txt")])
+    porcelain.commit(str(bad_repo), message=b"first",
+                     author=b"T <t@example.com>", committer=b"T <t@example.com>")
+
+    def broken_head_sha(self):
+        if str(self._path) == str(bad_repo):
+            raise RuntimeError("corrupted object store")
+        return "deadbeef" * 5
+
+    monkeypatch.setattr(GitRepository, "head_sha", broken_head_sha)
+
+    fresh_manager.repos._dump({
+        "good-url": dict(type="git", repo_path=str(good_repo), repo_name="good"),
+        "bad-url": dict(type="git", repo_path=str(bad_repo), repo_name="bad"),
+    })
+
+    results, _ = fresh_manager.repos.validate()
+
+    assert results["good-url"]["git"]["supported"] is True
+    assert results["bad-url"]["git"]["supported"] is False
+    assert "corrupted object store" in results["bad-url"]["git"]["reason"]
+
+
 def test_repo_service_add_remote_url_while_unavailable_leaves_no_trace(fresh_manager, git_unavailable):
     """End-to-end through RepoService.add() (not just the RepoGit adapter):
     a remote `repo add` while Git is unavailable must fail non-zero and

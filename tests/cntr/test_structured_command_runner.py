@@ -166,8 +166,8 @@ def test_long_output_is_truncated_in_error_message(runner):
 def test_sudo_is_always_interactive(fresh_manager, monkeypatch):
     """sudo never gets a `-n`: if the sudo policy needs a password, the
     call blocks on the prompt rather than failing fast."""
-    fresh_manager.system = "linux"
-    fresh_manager.uid = 1000
+    monkeypatch.setattr(type(fresh_manager), "system", "linux")
+    monkeypatch.setattr(type(fresh_manager), "uid", 1000)
     recorded = []
     monkeypatch.setattr(
         "linktools.cntr.runtime.process.popen",
@@ -179,8 +179,8 @@ def test_sudo_is_always_interactive(fresh_manager, monkeypatch):
 
 
 def test_no_privilege_never_invokes_sudo(fresh_manager, monkeypatch):
-    fresh_manager.system = "linux"
-    fresh_manager.uid = 1000
+    monkeypatch.setattr(type(fresh_manager), "system", "linux")
+    monkeypatch.setattr(type(fresh_manager), "uid", 1000)
     recorded = []
     monkeypatch.setattr(
         "linktools.cntr.runtime.process.popen",

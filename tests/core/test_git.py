@@ -314,6 +314,168 @@ class TestGit(unittest.TestCase):
         self.assertEqual(self._read(self.clone_path, "b.txt"), "remote change")
         self.assertFalse(os.path.exists(os.path.join(self.clone_path, "c.txt")))
 
+    # -- P2-01: untracked files count as dirty -------------------------------
+
+    def test_is_dirty_staged(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
+            f.write("staged change")
+        porcelain.add(self.clone_path, [os.path.join(self.clone_path, "a.txt")])
+        self.assertTrue(repo.is_dirty())
+
+    def test_is_dirty_unstaged(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
+            f.write("unstaged change")
+        self.assertTrue(repo.is_dirty())
+
+    def test_is_dirty_untracked_only(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        # A brand new, never-added file -- neither staged nor unstaged
+        # (dulwich's unstaged only covers already-tracked files).
+        with open(os.path.join(self.clone_path, "new_file.txt"), "w") as f:
+            f.write("untracked")
+        self.assertTrue(repo.is_dirty())
+
+    def test_is_dirty_clean_repo_is_false(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        self.assertFalse(repo.is_dirty())
+
+    # -- P2-02: every write goes through the same repo write lock -----------
+
+    def test_checkout_via_head_is_serialized_by_write_lock(self):
+        porcelain.branch_create(self.remote_path, "feature")
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        head = repo.create_head("feature")
+
+        calls = []
+        real_write_lock = repo._write_lock
+
+        def spy_write_lock():
+            calls.append(1)
+            return real_write_lock()
+
+        repo._write_lock = spy_write_lock
+        head.checkout()
+        self.assertEqual(calls, [1])
+
+    def test_checkout_or_create_acquires_the_lock_exactly_once(self):
+        """Verifies WP2-02's fix directly: checkout_or_create's create
+        branch must not nest two process_lock() acquisitions (which would
+        deadlock a real file-based lock) -- it must acquire the lock
+        exactly once for the whole operation."""
+        porcelain.branch_create(self.remote_path, "feature")
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+
+        calls = []
+        real_write_lock = repo._write_lock
+
+        def spy_write_lock():
+            calls.append(1)
+            return real_write_lock()
+
+        repo._write_lock = spy_write_lock
+        repo.checkout_or_create("feature")
+        self.assertEqual(calls, [1])
+
+    def test_add_is_serialized_by_write_lock(self):
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        with open(os.path.join(self.clone_path, "new_file.txt"), "w") as f:
+            f.write("content")
+
+        calls = []
+        real_write_lock = repo._write_lock
+
+        def spy_write_lock():
+            calls.append(1)
+            return real_write_lock()
+
+        repo._write_lock = spy_write_lock
+        repo.add(os.path.join(self.clone_path, "new_file.txt"))
+        self.assertEqual(calls, [1])
+
+    # -- P2-03: stash-restore failure must not mask the original error ------
+
+    def test_sync_failure_and_stash_restore_failure_both_surface(self):
+        from unittest import mock
+        from linktools.errors import GitStashRestoreError
+
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        self._commit(self.remote_path, "b.txt", "remote change", "remote second")
+        self._commit(self.clone_path, "c.txt", "local change", "local second")
+        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
+            f.write("dirty change")
+
+        with mock.patch.object(repo, "_stash_pop", side_effect=RuntimeError("pop boom")):
+            with self.assertRaises(GitStashRestoreError) as ctx:
+                repo.sync(policy=GitSyncPolicy.STASH_AND_RESTORE)
+
+        message = str(ctx.exception)
+        self.assertIn("pop boom", message)
+        # The original sync failure (diverged branch) must still be visible,
+        # not silently replaced by the restore failure.
+        self.assertTrue("diverged" in message.lower() or "GitDivergedError" in message)
+        self.assertIsInstance(ctx.exception.__cause__, Exception)
+
+    def test_stash_restore_failure_alone_raises_after_successful_sync(self):
+        from unittest import mock
+        from linktools.errors import GitStashRestoreError
+
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+        self._commit(self.remote_path, "b.txt", "remote change", "remote second")
+        with open(os.path.join(self.clone_path, "a.txt"), "w") as f:
+            f.write("dirty change")
+
+        with mock.patch.object(repo, "_stash_pop", side_effect=RuntimeError("pop boom")):
+            with self.assertRaises(GitStashRestoreError) as ctx:
+                repo.sync(policy=GitSyncPolicy.STASH_AND_RESTORE)
+
+        self.assertIn("pop boom", str(ctx.exception))
+        # The fast-forward itself succeeded.
+        self.assertEqual(self._read(self.clone_path, "b.txt"), "remote change")
+
+    # -- clone rejects a dangling symlink at the target ----------------------
+
+    def test_clone_target_dangling_symlink_raises(self):
+        missing = os.path.join(self._tmp_dir, "does-not-exist")
+        os.symlink(missing, self.clone_path)
+        self.assertFalse(os.path.exists(self.clone_path))  # dangling
+        with self.assertRaises(GitError):
+            GitRepository.clone(environ, self.remote_path, self.clone_path)
+
+    # -- open_if_valid broadened beyond NotGitRepository ---------------------
+
+    def test_open_if_valid_returns_none_for_non_repository(self):
+        not_a_repo = os.path.join(self._tmp_dir, "not-a-repo-2")
+        os.makedirs(not_a_repo)
+        self.assertIsNone(GitRepository.open_if_valid(environ, not_a_repo))
+
+    def test_open_if_valid_returns_none_on_any_open_failure(self):
+        from unittest import mock
+
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        with mock.patch("linktools.git.repository.DulwichRepo",
+                        side_effect=RuntimeError("corrupt object store")):
+            self.assertIsNone(GitRepository.open_if_valid(environ, self.clone_path))
+
 
 if __name__ == '__main__':
     unittest.main()

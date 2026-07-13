@@ -191,7 +191,7 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 
 ### 本地文件配置（`.linktools.json`）
 
-`.linktools.json`/`linktools.json` 是通用的 Linktools 文件配置源（`linktools.core.LinktoolsFileConfigLoader` 负责读取与合并），不是 cntr 专属格式，也不是独立的配置系统——它只是接入现有 ConfigResolver 的两个轻量文件层：用户级 `~/.linktools/linktools.json` 与本地级 `<root>/.linktools.json`。不要求 `version`/`kind`/`schema_version`/`components`。容器仓库可以在根目录放置本地文件，声明该仓库对 `linktools-cntr` 的版本要求（`requires`），以及仓库内容器的本地默认环境值（`environment`）。缺失该文件的仓库正常可用，行为不变。
+`.linktools.json`/`linktools.json` 是通用的项目清单（project profile，`linktools.core.ProjectProfile` 负责读取与合并），不是 cntr 专属格式，也不是独立的配置系统——它只是接入现有 ConfigResolver 的两个轻量文件层：用户级 `~/.linktools/linktools.json` 与本地级 `<root>/.linktools.json`。不要求 `version`/`kind`/`schema_version`/`components`。容器仓库可以在根目录放置本地文件，声明该仓库对 `linktools-cntr` 的版本要求（`requires`），以及仓库内容器的本地默认环境值（`environment`）。缺失该文件的仓库正常可用，行为不变。
 
 ```json
 {

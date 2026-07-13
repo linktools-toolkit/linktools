@@ -16,6 +16,8 @@ whether a freshly-computed answer got saved back, not whether an existing one
 was read first). ConfigResolver._first_present_before_provider now includes
 PersistentSource for exactly this reason.
 """
+import os
+
 from linktools.core import ConfigField, LazyProvider, PromptProvider, ChainProvider
 
 
@@ -48,9 +50,9 @@ def test_cached_provider_still_reuses_after_first_compute(tmp_path):
     from linktools.core._locks import LockManager
 
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     config = Config(None, schema, sources=[
-        EnvironmentSource(""), RuntimeOverrideSource(),
+        EnvironmentSource((os.environ, "")), RuntimeOverrideSource(),
         PersistentSource(store, "test"), DefaultSource(schema),
     ])
     calls = []

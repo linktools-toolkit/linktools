@@ -9,6 +9,8 @@ with no secret-awareness at all -- a secret field's value that failed to
 cast, or failed its validator, leaked straight into the exception text
 (and from there, typically, into a log line or a CLI error message).
 """
+import os
+
 import pytest
 
 from linktools.core._config import (
@@ -24,7 +26,7 @@ _SECRET_VALUE = "very-sensitive-value-78231"
 def _make_config(tmp_path, schema):
     store = ConfigStore(tmp_path / "settings.json")
     sources = [
-        EnvironmentSource("LT_"),
+        EnvironmentSource((os.environ, "LT_")),
         RuntimeOverrideSource(),
         PersistentSource(store, "test"),
         DefaultSource(schema),

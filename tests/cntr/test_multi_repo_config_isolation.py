@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Multi-repository config isolation through the real ContainerManager /
-ContainerLoader path (spec §71's exact scenario) -- not just the
-linktools.core primitive it's built on (see
-tests/core/test_shared_config_sources.py for that lower-level coverage).
+"""Multi-repository config sharing through the real ContainerManager /
+ContainerLoader path -- not just the linktools.core primitive it's built on
+(see tests/core/test_shared_config_sources.py for that lower-level
+coverage).
 
-Two third-party repos, each declaring the SAME field name with a different
-local `.linktools.json` value: each repo's container must read its own
-repo's value regardless of load order, while a persisted or runtime
-override applies to both simultaneously. Source string must never cross
-between repos.
+Per-repository local ``.linktools.json`` config isolation was intentionally
+removed: every third-party repo now shares this process's own merged
+profile and the SAME repository Config object (``build_repository_config()``
+has no per-repo variance left, so ``ContainerLoader`` builds it once and
+reuses it for every repo -- see registry/loader.py). Two repos declaring the
+SAME field name therefore see the SAME value regardless of which repo
+declared it, and a persisted or runtime override on one repo's container
+applies to the other immediately, since they share one Config instance.
 """
 import json
 import os
@@ -66,24 +69,30 @@ def _install_two_repos(tmp_path, add_order):
     return manager
 
 
-def test_each_repo_container_reads_its_own_local_value(tmp_path):
+def test_repos_share_the_same_repository_config_instance(tmp_path):
+    # build_repository_config() no longer has any per-repo variance (no
+    # local-file layer), so ContainerLoader builds it once and every
+    # repository's containers share that single Config object.
     manager = _install_two_repos(tmp_path, add_order=["repo_a", "repo_b"])
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
 
-    assert container_a.get_config("SHARED_FIELD") == "value-a"
-    assert container_b.get_config("SHARED_FIELD") == "value-b"
-    # Different repos must never share a local FileSource.
-    assert container_a.env_config is not container_b.env_config
+    assert container_a.env_config is container_b.env_config
 
 
-def test_load_order_does_not_affect_which_value_each_container_sees(tmp_path):
-    manager = _install_two_repos(tmp_path, add_order=["repo_b", "repo_a"])
+def test_repo_local_environment_no_longer_overrides_config(tmp_path):
+    # A repository's own `.linktools.json` `environment` section is only
+    # ever consulted for the `requires.linktools-cntr` compatibility gate
+    # now, never for config field resolution -- both repos here declare a
+    # different SHARED_FIELD value in their own local file, but since
+    # neither the process's own profile nor a persisted/runtime value sets
+    # it, both containers fall through to the field's builtin default.
+    manager = _install_two_repos(tmp_path, add_order=["repo_a", "repo_b"])
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
 
-    assert container_a.get_config("SHARED_FIELD") == "value-a"
-    assert container_b.get_config("SHARED_FIELD") == "value-b"
+    assert container_a.get_config("SHARED_FIELD") == "builtin-default"
+    assert container_b.get_config("SHARED_FIELD") == "builtin-default"
 
 
 def test_persisted_value_overrides_both_repos_simultaneously(tmp_path):

@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-@author  : Hu Ji
-@file    : deploy.py 
-@time    : 2023/05/21
-@site    :  
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
+"""Nginx reverse-proxy container definition."""
 import json
 import os
 import shutil
@@ -37,6 +12,7 @@ from linktools.core import (
     ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
 from linktools.decorator import cached_property
+from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 from linktools.types import MISSING
 
@@ -104,7 +80,7 @@ class Container(BaseContainer):
         # happens to be off, and never prompt again even after HTTPS is
         # enabled later.
         if not r.get("NGINX_HTTPS_ENABLE"):
-            raise LookupError("NGINX_HTTPS_ENABLE is disabled")
+            raise ConfigNotFoundError("NGINX_HTTPS_ENABLE is disabled")
         return prompt("ACME_DNS_API", choices=list(self.dnsapi.keys()))
 
     @cached_property

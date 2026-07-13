@@ -46,7 +46,7 @@ __all__ = [
     # Specific exceptions.
     "ModuleError", "DownloadHttpError", "ExecError",
     "ToolNotFound", "ToolNotSupport", "ToolExecError",
-    "NoFreePortFoundError", "GitDivergedError", "GitUnavailableError",
+    "NoFreePortFoundError", "GitDivergedError", "GitUnavailableError", "GitStashRestoreError",
     # Cache subtree (
     "CacheValueError", "CacheCodecError", "CacheTransactionError",
     "CacheBackendError", "CacheBusyError", "CacheCorruptedError",
@@ -141,6 +141,14 @@ class ConfigFieldError(ConfigError):
 
 class ConfigNotFoundError(ConfigError):
     """A requested config key has no value and no default."""
+
+
+class ConfigProviderUnavailable(ConfigNotFoundError):
+    """A ChainProvider sub-provider has no value to offer; the chain should
+    try its next sub-provider rather than treat this as a resolution
+    failure. Anything else raised by a sub-provider (cast/validator/cycle
+    errors, or a bare programming error) must propagate immediately instead
+    of being swallowed as "just try the next one"."""
 
 
 class ConfigCastError(ConfigError):
@@ -341,3 +349,10 @@ class GitDivergedError(GitError):
 
 class GitUnavailableError(GitError):
     """Git support is unavailable in this runtime."""
+
+
+class GitStashRestoreError(GitError):
+    """A STASH_AND_RESTORE sync's stash-pop failed after the sync itself
+    either succeeded or failed -- the message summarizes both outcomes so
+    the original sync failure (if any) is never silently replaced by the
+    restore failure."""

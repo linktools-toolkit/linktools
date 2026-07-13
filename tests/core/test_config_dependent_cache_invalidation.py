@@ -13,6 +13,8 @@ provider dependency graph, so the fix is to clear the whole memo on every
 write -- the field count is small enough that this costs nothing
 observable.
 """
+import os
+
 from linktools.core._config import (
     Config, ConfigField, ConfigSchema, AliasProvider, LazyProvider, ChainProvider,
     EnvironmentSource, RuntimeOverrideSource, PersistentSource, DefaultSource,
@@ -23,7 +25,7 @@ from linktools.core._config_store import ConfigStore
 def _make_config(tmp_path, schema):
     store = ConfigStore(tmp_path / "settings.json")
     sources = [
-        EnvironmentSource("LT_"),
+        EnvironmentSource((os.environ, "LT_")),
         RuntimeOverrideSource(),
         PersistentSource(store, "test"),
         DefaultSource(schema),

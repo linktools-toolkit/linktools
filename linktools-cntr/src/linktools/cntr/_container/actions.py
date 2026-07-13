@@ -28,9 +28,10 @@ def up(container: "BaseContainer", build: bool = True, pull: bool = False):
         if build:
             container.compose_runner.build(context, options)
         container.compose_runner.up(context, options)
-
-    # Record running state only after a successful up.
-    container.running_state.mark_started(context)
+        # Recorded immediately after up succeeds, still inside this `with`
+        # (before notify_start's on_started/AFTER_START hooks) -- see
+        # operations.ComposeOperations.up's identical comment for why.
+        container.running_state.mark_started(context)
 
 
 def restart(container: "BaseContainer", build: bool = True, pull: bool = False):
@@ -40,14 +41,15 @@ def restart(container: "BaseContainer", build: bool = True, pull: bool = False):
 
     with container.lifecycle.notify_stop(context):
         container.compose_runner.stop(context, services)
+        # If build/up below then fails, persisted state must reflect that
+        # the target is actually stopped.
+        container.running_state.mark_stopped(context)
 
     with container.lifecycle.notify_start(context):
         if build:
             container.compose_runner.build(context, options)
         container.compose_runner.up(context, options)
-
-    # restart ends with the target running.
-    container.running_state.mark_started(context)
+        container.running_state.mark_started(context)
 
 
 def down(container: "BaseContainer"):
@@ -56,9 +58,7 @@ def down(container: "BaseContainer"):
 
     with container.lifecycle.notify_stop(context):
         container.compose_runner.down(context, services)
-
-    # Record stopped state only after a successful down.
-    container.running_state.mark_stopped(context)
+        container.running_state.mark_stopped(context)
 
 
 def config(container: "BaseContainer"):

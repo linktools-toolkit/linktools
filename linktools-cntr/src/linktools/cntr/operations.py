@@ -47,9 +47,21 @@ class ComposeOperations:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False) -> ComposeSelection:
+    def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
+              metadata_only: bool = False) -> ComposeSelection:
+        """Resolve the target selection. ``metadata_only=True`` (used by
+        ExecutionPlanner, which must stay read-only) registers config
+        fields without running any container's ``on_prepare()`` -- real
+        execution (``up``/``restart``/``down``/``compose``) always needs
+        the full prepare instead."""
         manager = self.manager
-        project_containers = tuple(manager.prepare_installed_containers())
+        if metadata_only:
+            project_containers = tuple(manager.load_installed_config_metadata())
+            if not project_containers:
+                from .container import NoContainerInstalledError
+                raise NoContainerInstalledError("No container installed")
+        else:
+            project_containers = tuple(manager.prepare_installed_containers())
 
         if not names:
             return ComposeSelection(
@@ -132,12 +144,17 @@ class ComposeOperations:
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.up(context, options)
+            # Recorded immediately after the runtime change succeeds, still
+            # inside this `with` block -- notify_start's on_started/
+            # AFTER_START hooks run in its __exit__, after this point but
+            # still before the `with` returns. If a hook then throws, the
+            # command still fails, but persisted state already reflects
+            # what's actually running instead of lagging behind it.
+            manager.running_state.mark_started(context)
 
         with manager.lifecycle.notify_remove(context):
             pass
 
-        # Record running state only after a successful up.
-        manager.running_state.mark_started(context)
         if report:
             render_report(manager.logger, get_records(context))
 
@@ -155,6 +172,12 @@ class ComposeOperations:
             with record_phase(context, "stop", command=("stop", *selection.services),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.stop(context, selection.services)
+            # Recorded immediately after stop succeeds, still inside this
+            # `with` (before notify_stop's on_stopped/AFTER_STOP hooks) --
+            # if build/up below then fails, persisted state must reflect
+            # that the targets are actually stopped, not still show them
+            # running from before this restart began.
+            manager.running_state.mark_stopped(context)
 
         with manager.lifecycle.notify_start(context):
             if build:
@@ -164,12 +187,13 @@ class ComposeOperations:
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.up(context, options)
+            # See up()'s identical comment -- recorded before
+            # on_started/AFTER_START hooks run.
+            manager.running_state.mark_started(context)
 
         with manager.lifecycle.notify_remove(context):
             pass
 
-        # restart ends with the targets running.
-        manager.running_state.mark_started(context)
         if report:
             render_report(manager.logger, get_records(context))
 
@@ -184,12 +208,13 @@ class ComposeOperations:
             with record_phase(context, "down", command=("down", *selection.services),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.down(context, selection.services)
+            # See up()'s identical comment -- recorded before
+            # on_stopped/AFTER_STOP hooks run.
+            manager.running_state.mark_stopped(context)
 
         with manager.lifecycle.notify_remove(context):
             pass
 
-        # Record stopped state only after a successful down.
-        manager.running_state.mark_stopped(context)
         if report:
             render_report(manager.logger, get_records(context))
 

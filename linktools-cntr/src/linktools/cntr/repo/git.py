@@ -126,5 +126,17 @@ class RepoGit(object):
                      "reason": "Not a git repository."}
 
         with repo:
-            return {"applicable": True, "supported": True, "revision": repo.head_sha(),
-                     "dirty": repo.is_dirty(), "reason": None}
+            # A corrupted object store/index, or a permission error, must
+            # never propagate out of a read-only inspection -- describe()/
+            # validate() must be able to report every OTHER repository even
+            # when this one's Git state is broken, matching the contract
+            # every other structured-error path in this module already
+            # honors (RepoService.describe() never raises for one bad repo).
+            try:
+                revision = repo.head_sha()
+                dirty = repo.is_dirty()
+            except Exception as exc:
+                return {"applicable": True, "supported": False, "revision": None, "dirty": None,
+                         "reason": "Failed to read Git repository metadata: %s" % exc}
+            return {"applicable": True, "supported": True, "revision": revision,
+                     "dirty": dirty, "reason": None}

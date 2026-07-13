@@ -114,7 +114,12 @@ def test_get_source_path_override_is_used_by_docker_compose_lookup(fresh_manager
     assert calls  # get_source_path was consulted for each docker_compose_names candidate
 
 
-def test_docker_context_and_file_path_overrides_are_used_by_docker_compose(fresh_manager, tmp_path):
+def test_docker_context_and_file_destination_overrides_are_used_by_docker_compose(fresh_manager, tmp_path):
+    # get_docker_file_destination() (a pure path computation, no write) is
+    # what docker_compose rendering references -- not get_docker_file_path()
+    # (which writes), since rendering docker_compose must stay read-only
+    # (review P1-11: Plan/Doctor/config-list access docker_compose and must
+    # never trigger a Dockerfile write as a side effect).
     calls = []
 
     class _Custom(BaseContainer):
@@ -122,7 +127,7 @@ def test_docker_context_and_file_path_overrides_are_used_by_docker_compose(fresh
             calls.append("context")
             return super().get_docker_context_path()
 
-        def get_docker_file_path(self):
+        def get_docker_file_destination(self):
             calls.append("file")
             return tmp_path / "Dockerfile"
 
@@ -134,6 +139,8 @@ def test_docker_context_and_file_path_overrides_are_used_by_docker_compose(fresh
     assert compose is not None
     assert "context" in calls
     assert "file" in calls
+    # And must not have written anything.
+    assert not (tmp_path / "999-custom.Dockerfile").exists()
 
 
 def test_render_template_override_is_used_by_docker_file(fresh_manager, tmp_path):

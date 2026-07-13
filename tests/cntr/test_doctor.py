@@ -259,9 +259,11 @@ def test_check_repos_reports_unsatisfied_requirement_as_warn(fresh_manager, tmp_
 
 
 def test_doctor_reports_invalid_local_config(fresh_manager, tmp_path, monkeypatch):
-    """A `.linktools.json` that fails static validation (here: a
+    """A `.linktools.json` whose `requires` fails shape validation (here: a
     non-object `requires`) is reported, not silently treated as having
-    nothing to check."""
+    nothing to check. ``ProjectProfile`` itself does no shape validation at
+    load time -- ``ensure_requirement`` is what rejects it, so this surfaces
+    as an incompatibility finding rather than a load-error finding."""
     import json as json_module
     repo_dir = tmp_path / "repo_src"
     repo_dir.mkdir()
@@ -278,7 +280,7 @@ def test_doctor_reports_invalid_local_config(fresh_manager, tmp_path, monkeypatc
     monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
-    assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+    assert any(f.code == "repo.incompatible" and str(repo_dir) in (f.component or "") for f in findings)
 
 
 def test_doctor_reports_invalid_requirement_specifier(fresh_manager, tmp_path, monkeypatch):
@@ -298,7 +300,7 @@ def test_doctor_reports_invalid_requirement_specifier(fresh_manager, tmp_path, m
     monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
 
     findings = Doctor(fresh_manager).check_repos()
-    assert any(f.code == "repo.config_invalid" and str(repo_dir) in (f.component or "") for f in findings)
+    assert any(f.code == "repo.incompatible" and str(repo_dir) in (f.component or "") for f in findings)
 
 
 def test_doctor_and_loader_use_same_requirement_gate(fresh_manager, tmp_path, monkeypatch):
@@ -320,7 +322,7 @@ def test_doctor_and_loader_use_same_requirement_gate(fresh_manager, tmp_path, mo
     )
 
     with _pytest.raises(ContainerError):
-        fresh_manager.repos.add(str(repo_dir), force=True)
+        fresh_manager.repos.add(str(repo_dir), replace=True)
 
     # Simulate the repo having been installed anyway (e.g. pre-existing
     # before this gate existed) to exercise Doctor's independent path.

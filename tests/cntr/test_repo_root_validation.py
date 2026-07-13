@@ -4,7 +4,8 @@
 
 Regression: `_revalidate_after_update()` treated a missing repo_path as
 `(True, None)` -- compatible=True -- and `describe()` never validated the
-repository root before calling `load_file_config(local_root=repo_path)`,
+repository root before calling
+`ProjectProfile(os.path.join(repo_path, ".linktools.json"))`,
 so a missing `repo_path` (None) silently fell through to
 `local_root=None`, which reads the *process's current working directory*
 `.linktools.json` instead of failing. Both `update()` and `describe()` now
@@ -78,7 +79,7 @@ def test_deleted_local_source_directory_is_not_compatible(fresh_manager, tmp_pat
     source = tmp_path / "source"
     source.mkdir()
     (source / "container.py").write_text("# placeholder\n", encoding="utf-8")
-    fresh_manager.repos.add(str(source), force=True)
+    fresh_manager.repos.add(str(source), replace=True)
     url, meta = next(iter(fresh_manager.repos.get_all().items()))
 
     import shutil
@@ -151,7 +152,7 @@ def test_remove_still_works_on_a_broken_repo_record(fresh_manager, tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "container.py").write_text("# placeholder\n", encoding="utf-8")
-    fresh_manager.repos.add(str(source), force=True)
+    fresh_manager.repos.add(str(source), replace=True)
     url = next(iter(fresh_manager.repos.get_all().keys()))
 
     import shutil

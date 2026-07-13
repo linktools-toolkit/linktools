@@ -1,19 +1,25 @@
 """Config subsystem: Config schema/sources/resolver.
 
 ``ConfigStore`` (the persistence layer) lives in ``_config_store.py``;
-``LinktoolsFileConfig``/loader live in ``_file_config.py``.
+``ProjectProfile``/loader live in ``_profile.py``.
 """
 
 import json
 import os
+from collections import ChainMap
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..errors import (
+    CliError,
     ConfigCastError,
     ConfigCycleError,
     ConfigError,
+    ConfigFieldError,
     ConfigNotFoundError,
+    ConfigProviderUnavailable,
+    ConfigPromptError,
     ConfigValidationError,
 )
 from ..types import MISSING
@@ -21,11 +27,11 @@ from ..types import MISSING
 if TYPE_CHECKING:
     from typing import Any, Callable, Literal, Sequence, Union
 
-    # The two string literals _cast_value special-cases (mirrors the old,
-    # pre-v2 CONFIG_TYPES dispatch table): "path" expands/absolutizes a
-    # filesystem path, "json" parses a JSON string. Anything else must be a
-    # callable (including the builtins ``bool``/``str``, which _cast_value
-    # also special-cases -- see _cast_bool/_cast_str).
+    # The two string literals _cast_value special-cases: "path"
+    # expands/absolutizes a filesystem path, "json" parses a JSON string.
+    # Anything else must be a callable (including the builtins
+    # ``bool``/``str``, which _cast_value also special-cases -- see
+    # _cast_bool/_cast_str).
     ConfigLiteralType = Literal["path", "json"]
     ConfigType = Union[ConfigLiteralType, Callable[[Any], Any], None]
 
@@ -35,7 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Config", "ConfigField", "ConfigSchema",
     "ConfigResolver", "ConfigSource", "EnvironmentSource", "RuntimeOverrideSource",
-    "PersistentSource", "FileSource", "DefaultSource", "AliasProvider",
+    "PersistentSource", "FileSource", "DictSource", "DefaultSource", "AliasProvider",
     "ConfigProvider", "LazyProvider", "PromptProvider", "ConfirmProvider", "ErrorProvider",
     "ChainProvider", "ResolvedConfig",
 ]
@@ -160,18 +166,42 @@ class ConfigField:
         """
         return cls(provider=ChainProvider(*providers), **kwargs)
 
+    @classmethod
+    def coerce(cls, name: str, value: "Any") -> "ConfigField":
+        """Normalize one ``configs``-dict entry into a ``ConfigField`` named
+        ``name``, without defining it on any schema.
+
+        Shared by ``Config.update_defaults`` and any caller that needs the
+        resulting ``ConfigField`` before deciding whether/how to define it
+        (e.g. cntr's container config registration, which checks field
+        ownership/collisions first) -- ``value`` is a ``ConfigField`` (kept
+        as-is if already named ``name``, else copied under it), a bare
+        ``ConfigProvider`` (wrapped with no default), or a plain default
+        value.
+        """
+        if isinstance(value, ConfigField):
+            if value.name == name:
+                return value
+            return cls(name=name, default=value.default, cast=value.cast,
+                       validator=value.validator, aliases=value.aliases,
+                       required=value.required, secret=value.secret,
+                       description=value.description, deprecated=value.deprecated,
+                       provider=value.provider)
+        if isinstance(value, ConfigProvider):
+            return cls(name=name, provider=value)
+        return cls(name=name, default=value)
+
 
 class ConfigSchema:
     """A set of named ConfigFields with alias indexing.
 
-    When ``allow_unknown`` is True, keys not in the schema are resolved
-    through the source chain without field cast/validate.
+    Keys not in the schema are still resolved through the source chain,
+    without field cast/validate.
     """
 
-    def __init__(self, allow_unknown: bool = False) -> None:
+    def __init__(self) -> None:
         self._fields: "dict[str, ConfigField]" = {}
         self._alias_to_name: "dict[str, str]" = {}
-        self.allow_unknown = allow_unknown
         self._revision = 0
 
     @property
@@ -179,6 +209,51 @@ class ConfigSchema:
         return self._revision
 
     def define(self, field: "ConfigField") -> "ConfigSchema":
+        """Register (or re-register) ``field``.
+
+        Re-defining the same ``field.name`` is the normal update path (a
+        container/manager redeclaring its own field) and always succeeds,
+        replacing the previous definition and dropping its now-stale
+        aliases. Anything that would make two *different* fields collide --
+        a bad name, a duplicate/self alias, or an alias claimed by (or
+        claiming) another field's canonical name -- raises ConfigFieldError
+        instead of silently overwriting one field's cast/validator/secret
+        with another's, which is how a third party silently hijacking a
+        Manager-owned key, or two sibling containers racing on scan order,
+        used to go unnoticed.
+        """
+        if not isinstance(field.name, str) or not field.name:
+            raise ConfigFieldError(
+                "ConfigField.name must be a non-empty string, got %r" % (field.name,))
+
+        seen_aliases: "set" = set()
+        for alias in field.aliases:
+            if not isinstance(alias, str) or not alias:
+                raise ConfigFieldError(
+                    "field %r has an invalid alias %r: aliases must be non-empty strings"
+                    % (field.name, alias))
+            if alias == field.name:
+                raise ConfigFieldError("field %r cannot alias itself" % (field.name,))
+            if alias in seen_aliases:
+                raise ConfigFieldError(
+                    "field %r declares duplicate alias %r" % (field.name, alias))
+            seen_aliases.add(alias)
+            if alias in self._fields:
+                raise ConfigFieldError(
+                    "alias %r for field %r collides with an existing field of the same name"
+                    % (alias, field.name))
+            existing_target = self._alias_to_name.get(alias)
+            if existing_target is not None and existing_target != field.name:
+                raise ConfigFieldError(
+                    "alias %r for field %r already aliases field %r"
+                    % (alias, field.name, existing_target))
+
+        existing_alias_owner = self._alias_to_name.get(field.name)
+        if existing_alias_owner is not None and existing_alias_owner != field.name:
+            raise ConfigFieldError(
+                "field name %r collides with an existing alias of field %r"
+                % (field.name, existing_alias_owner))
+
         previous = self._fields.get(field.name)
         if previous is not None:
             for alias in previous.aliases:
@@ -246,15 +321,55 @@ class ConfigSource:
         return None
 
 
+class _UnprefixedMapping(Mapping):
+    def __init__(self, mapping: Mapping, prefix: str) -> None:
+        self._mapping = mapping
+        self._prefix = prefix
+
+    def __getitem__(self, key: str):
+        if key in self._mapping:
+            return self._mapping[key]
+        return self._mapping[self._prefix + key]
+
+    def __iter__(self):
+        prefix_length = len(self._prefix)
+        for key in self._mapping:
+            if key.startswith(self._prefix):
+                yield key[prefix_length:]
+            elif not self._prefix:
+                yield key
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+
 class EnvironmentSource(ConfigSource):
     name = "environment"
     before_provider = True
 
-    def __init__(self, prefix: str = "") -> None:
-        self._prefix = prefix
+    def __init__(self, *environment: "tuple[Mapping[str, Any], str] | None") -> None:
+        """Each positional arg is a ``(mapping, prefix)`` layer, highest
+        priority first; ``None`` is a no-op placeholder a caller can pass
+        instead of conditionally omitting a layer. An empty ``prefix``
+        reads ``mapping``'s keys as-is; a non-empty one strips it (e.g. the
+        real ``os.environ`` with this source's env prefix).
+        """
+        layers = []
+        for entry in environment:
+            if not entry:
+                continue
+            mapping, prefix = entry
+            layers.append(_UnprefixedMapping(mapping, prefix) if prefix else mapping)
+
+        if len(layers) > 1:
+            self._values = ChainMap(*layers)
+        elif len(layers) == 1:
+            self._values = layers[0]
+        else:
+            self._values = dict()
 
     def get(self, key: str) -> "tuple[Any, bool]":
-        value = os.environ.get(self._prefix + key, MISSING)
+        value = self._values.get(key, MISSING)
         if value is MISSING:
             return (MISSING, False)
         return (value, True)
@@ -326,6 +441,13 @@ class PersistentSource(ConfigSource):
     def set(self, key: str, value: "Any") -> None:
         self._store.set(self._full(key), value)
 
+    def set_many(self, values: "dict[str, Any]") -> None:
+        """Write every key in ``values`` in one atomic store flush -- unlike
+        calling ``set`` in a loop, a failure partway through never leaves
+        some keys written and others not."""
+        full_values = {self._full(key): value for key, value in values.items()}
+        self._store.save(**full_values)
+
     def delete(self, key: str) -> bool:
         return self._store.remove(self._full(key))
 
@@ -343,14 +465,14 @@ class PersistentSource(ConfigSource):
 
 class FileSource(ConfigSource):
     """A read-only source backed by a plain dict, e.g. a
-    ``LinktoolsFileConfig.environment``.
+    profile-derived mapping data.
 
     ``name`` lets two instances (local-file / global-file) report distinct
     ``explain()`` source names instead of both showing up as ``"file"``.
     ``base_path`` is the directory the backing file lives in, used to resolve
     a ``cast="path"`` field's relative value. ``reload_fn``, if given, is
     called by ``reload()`` to atomically replace this source's data and
-    base_path (e.g. from a fresh ``LinktoolsFileConfigLoader.load()``)
+    base_path (e.g. from a fresh ``ProjectProfile(path...)``)
     without ever leaving a half-updated state.
     """
 
@@ -387,6 +509,28 @@ class FileSource(ConfigSource):
             return
         data, base_path = self._reload_fn()
         self.replace(data, base_path=base_path)
+
+
+class DictSource(ConfigSource):
+    """A live read-only view over a mutable mapping."""
+
+    before_provider = True
+
+    def __init__(self, data: dict, name: str = "dict") -> None:
+        self._data = data
+        self.name = name
+
+    @property
+    def revision(self):
+        return getattr(self._data, "revision", 0)
+
+    def get(self, key: str) -> "tuple[Any, bool]":
+        if key in self._data:
+            return (self._data[key], True)
+        return (MISSING, False)
+
+    def keys(self) -> "list[str]":
+        return list(self._data.keys())
 
 
 class DefaultSource(ConfigSource):
@@ -559,14 +703,22 @@ class ConfigResolver:
                 return source
         return None
 
-    def _resolve_cached(self, field: "ConfigField", compute: "Callable[[], Any]") -> "tuple[Any, str]":
+    def _resolve_cached_provider(self, field: "ConfigField",
+                                 compute: "Callable[[], Any]") -> "ResolvedConfig":
         """Resolve a ``cached=True`` provider: reuse a persisted value if one
         exists for this field, else compute it once and persist the result.
 
-        Returns ``(value, source_name)``. Raises ``ConfigError`` if the schema
-        has no PersistentSource configured (cached=True requires one) -- this
-        surfaces the misconfiguration immediately rather than silently
-        recomputing (e.g. re-prompting or regenerating a secret) every call.
+        Casts/validates the raw value exactly once, whichever branch is
+        taken -- ``compute()`` (e.g. a prompt answer or a freshly-generated
+        secret) must not be cast/validated twice just because it is also the
+        value being persisted; a non-idempotent cast (or a validator with
+        side effects) would otherwise run twice on first resolution but only
+        once on every later, persisted-value resolution.
+
+        Raises ``ConfigError`` if the schema has no PersistentSource
+        configured (cached=True requires one) -- this surfaces the
+        misconfiguration immediately rather than silently recomputing (e.g.
+        re-prompting or regenerating a secret) every call.
         """
         persistent = self._persistent_source()
         if persistent is None:
@@ -574,10 +726,12 @@ class ConfigResolver:
                 "cached=True provider for %r requires a PersistentSource" % (field.name,))
         raw, present = persistent.get(field.name)
         if present:
-            return raw, "persistent"
-        value = self._cast_validate(field, compute())
+            value = self._cast_validate(field, raw)
+            return ResolvedConfig(value, field, "persistent", raw)
+        raw = compute()
+        value = self._cast_validate(field, raw)
         persistent.set(field.name, value)
-        return value, "persistent"
+        return ResolvedConfig(value, field, "persistent", raw)
 
     def _cast_validate(self, field: "ConfigField", raw: "Any", base_path: "PathLike | None" = None) -> "Any":
         value = raw
@@ -607,6 +761,15 @@ class ConfigResolver:
                 shown_value = redact_config_value(field, value)
                 raise ConfigValidationError("value %r failed validation for %s" % (shown_value, field.name))
         return value
+
+    def validate_raw(self, field: "ConfigField", raw: "Any") -> "Any":
+        """Cast+validate ``raw`` against ``field`` without touching any
+        Source -- pure validation, no read or write side effect. Lets a
+        caller (e.g. cntr's ``config set``) check a batch of raw values
+        against every relevant schema BEFORE persisting any of them, so a
+        later key's failure can never leave an earlier key already written.
+        """
+        return self._cast_validate(field, raw)
 
     def _first_present(self, field: "ConfigField") -> "tuple[ConfigSource | None, Any, bool]":
         for source in self._sources:
@@ -709,27 +872,41 @@ class ConfigResolver:
         """
         if isinstance(provider, LazyProvider):
             if provider.cached:
-                value, source_name = self._resolve_cached(field, lambda: provider.func(self))
-                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
+                return self._resolve_cached_provider(field, lambda: provider.func(self))
             value = provider.func(self)
             return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
 
         if isinstance(provider, PromptProvider):
+            def compute_prompt():
+                try:
+                    return self._prompt_value(provider, field)
+                except CliError as exc:
+                    # No interactive channel to ask the user through (e.g.
+                    # non-interactive/no-input mode) -- this provider simply
+                    # has no value to offer, the same as an unset Alias
+                    # target, not a data/program error. A ChainProvider
+                    # containing this as a non-final sub-provider (e.g.
+                    # "prompt, else auto-detect") relies on this to fall
+                    # through instead of hard-failing whenever no TTY is
+                    # attached.
+                    raise ConfigPromptError(str(exc)) from exc
             if provider.cached:
-                value, source_name = self._resolve_cached(
-                    field, lambda: self._prompt_value(provider, field))
-                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
-            value = self._prompt_value(provider, field)
+                return self._resolve_cached_provider(field, compute_prompt)
+            value = compute_prompt()
             return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
 
         if isinstance(provider, ConfirmProvider):
             from ..rich import confirm
             default = provider.default if provider.default is not MISSING else field.default
+
+            def compute_confirm():
+                try:
+                    return confirm(provider.message or field.name, default=default)
+                except CliError as exc:
+                    raise ConfigPromptError(str(exc)) from exc
             if provider.cached:
-                value, source_name = self._resolve_cached(
-                    field, lambda: confirm(provider.message or field.name, default=default))
-                return ResolvedConfig(self._cast_validate(field, value), field, source_name, value)
-            value = confirm(provider.message or field.name, default=default)
+                return self._resolve_cached_provider(field, compute_confirm)
+            value = compute_confirm()
             return ResolvedConfig(self._cast_validate(field, value), field, "confirm", value)
 
         if isinstance(provider, ErrorProvider):
@@ -740,12 +917,10 @@ class ConfigResolver:
     def _resolve_inner(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
         field = self._schema.get(key)
         if field is None:
-            if self._schema.allow_unknown:
-                source_name, raw, present = self._first_present_raw(key)
-                if present:
-                    return ResolvedConfig(raw, None, source_name, raw)
-                raise ConfigNotFoundError("config %r is not set and has no default" % (key,))
-            raise ConfigNotFoundError("unknown config key %r" % (key,))
+            source_name, raw, present = self._first_present_raw(key)
+            if present:
+                return ResolvedConfig(raw, None, source_name, raw)
+            raise ConfigNotFoundError("config %r is not set and has no default" % (key,))
 
         # An explicit before_provider-source value (Environment/RuntimeOverride/
         # Persistent/local-file/global-file) always outranks the field's
@@ -766,7 +941,7 @@ class ConfigResolver:
             for sub in provider.providers:
                 try:
                     return self._try_provider(sub, field, key, _stack)
-                except Exception:
+                except ConfigProviderUnavailable:
                     continue
         elif provider is not None:
             return self._resolve_leaf_provider(provider, field)
@@ -783,9 +958,26 @@ class ConfigResolver:
 
     def _try_provider(self, provider: "Any", field: "ConfigField",
                       key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
-        if isinstance(provider, AliasProvider):
-            return self._resolve_alias(provider, key, _stack)
-        return self._resolve_leaf_provider(provider, field)
+        """Resolve one ChainProvider sub-provider.
+
+        Only "this sub-provider has no value to offer" is turned into
+        ``ConfigProviderUnavailable`` so the chain moves on to the next
+        sub-provider: an AliasProvider whose target is unset
+        (ConfigNotFoundError), or a Prompt/ConfirmProvider with no
+        interactive channel to ask through (ConfigPromptError, e.g. the
+        common "prompt, else auto-detect" chain shape). Everything else --
+        a cycle, a cast/validator failure, an explicit ErrorProvider, or a
+        bare program error -- must propagate immediately instead of being
+        silently treated as "try the next one", or a high-priority
+        provider's real failure would surface as a lower-priority
+        provider's/default's value instead.
+        """
+        try:
+            if isinstance(provider, AliasProvider):
+                return self._resolve_alias(provider, key, _stack)
+            return self._resolve_leaf_provider(provider, field)
+        except (ConfigNotFoundError, ConfigPromptError) as exc:
+            raise ConfigProviderUnavailable(str(exc)) from exc
 
     def explain(self, key: str) -> dict:
         try:
@@ -924,6 +1116,33 @@ class Config:
         persistent.set(key, value)
         self._resolver.clear_memo()
 
+    def validate_value(self, key: str, raw_value: "Any") -> "Any":
+        """Cast+validate ``raw_value`` against this Config's own schema for
+        ``key``, without persisting or otherwise touching any Source.
+
+        Lets a caller check a whole batch of raw values up front -- e.g.
+        cntr's ``config set``, which must validate every key against every
+        repository's own schema before writing any of them (a later key's
+        failure must not leave an earlier key already persisted). An
+        unknown key passes through as-is, matching how it would resolve.
+        """
+        field = self._schema.get(key)
+        if field is None:
+            return raw_value
+        return self._resolver.validate_raw(field, raw_value)
+
+    def persist_many(self, values: "dict[str, Any]") -> None:
+        """Persist every key in ``values`` in one atomic write, clearing the
+        memo once afterward -- unlike calling ``persist`` in a loop, this
+        can never leave some keys written and others not if the underlying
+        store write itself fails partway (``PersistentSource.set_many``/
+        ``ConfigStore.save`` write everything in a single flush)."""
+        persistent = self._find(PersistentSource)
+        if persistent is None:
+            raise ConfigError("no PersistentSource configured")
+        persistent.set_many(values)
+        self._resolver.clear_memo()
+
     def unset(self, key: str) -> None:
         runtime = self._find(RuntimeOverrideSource)
         if runtime:
@@ -975,19 +1194,7 @@ class Config:
 
     def update_defaults(self, **kwargs: "Any") -> "Config":
         for key, value in kwargs.items():
-            if isinstance(value, ConfigField):
-                if value.name != key:
-                    value = ConfigField(
-                        name=key, default=value.default, cast=value.cast,
-                        validator=value.validator, aliases=value.aliases,
-                        required=value.required, secret=value.secret,
-                        description=value.description, deprecated=value.deprecated,
-                        provider=value.provider)
-                self._schema.define(value)
-            elif isinstance(value, ConfigProvider):
-                self._schema.define(ConfigField(name=key, provider=value))
-            else:
-                self._schema.define(ConfigField(name=key, default=value))
+            self._schema.define(ConfigField.coerce(key, value))
         # See Config.define -- any of the fields just (re)defined may change
         # what an already-memoized resolution should have returned.
         self._resolver.clear_memo()

@@ -18,7 +18,7 @@ absent or unreachable.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from ..container import BaseContainer
     from ..context import EventContext
     from ..manager import ContainerManager
@@ -42,6 +42,16 @@ class RunningStateStore:
 
     def _set(self, names: "Iterable[str]") -> None:
         self.manager._transient_ns.set(_RUNNING_KEY, sorted(set(names)))
+
+    def _mutate(self, func: "Callable[[set[str]], Iterable[str]]") -> None:
+        """Read-modify-write the persisted running set under the same
+        process lock every mutator uses -- without this, two concurrent
+        partial up/down calls (or an up racing a remove()) can each read
+        the same starting set and one's write silently clobbers the
+        other's."""
+        with self.manager.environ.locks.process_lock("cntr:settings"):
+            current = set(self._get())
+            self._set(func(current))
 
     def get_persisted(self) -> "list[str]":
         """Names recorded as running in the persisted store."""
@@ -69,26 +79,25 @@ class RunningStateStore:
 
     def mark_started(self, context: "EventContext") -> None:
         """Record the context's target containers as running (after a successful up)."""
-        targets = [c.name for c in context.target_containers]
+        targets = set(c.name for c in context.target_containers)
         if context.is_full_containers:
             # Full up writes the actual target set (drops anything no longer installed).
-            self._set(targets)
+            self._mutate(lambda current: targets)
         else:
-            self._set(set(self._get()) | set(targets))
+            self._mutate(lambda current: current | targets)
 
     def mark_stopped(self, context: "EventContext") -> None:
         """Record the context's target containers as stopped (after a successful down)."""
         targets = {c.name for c in context.target_containers}
         if context.is_full_containers:
             # Full down stops everything -> clear the persisted running set.
-            self._set([])
+            self._mutate(lambda current: set())
         else:
-            self._set(set(self._get()) - targets)
+            self._mutate(lambda current: current - targets)
 
     def remove(self, container_names: "Iterable[str]") -> None:
         """Drop ``container_names`` from the persisted running set -- used
         when a container has been fully removed from the installed set (not
-        merely stopped). Holds the transient-state lock itself; callers must
-        not also hold it."""
-        with self.manager.environ.locks.process_lock("cntr:settings"):
-            self._set(set(self._get()) - set(container_names))
+        merely stopped)."""
+        names = set(container_names)
+        self._mutate(lambda current: current - names)

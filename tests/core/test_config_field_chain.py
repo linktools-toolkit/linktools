@@ -8,6 +8,8 @@
    ``ConfigField(provider=ChainProvider(*providers), **kwargs)``, collapsing
    to a bare provider (no ChainProvider wrapper) when only one is given.
 """
+import os
+
 from linktools.core import (
     AliasProvider, Config, ConfigField, ConfigSchema, ChainProvider,
     DefaultSource, EnvironmentSource, PersistentSource, RuntimeOverrideSource,
@@ -18,9 +20,9 @@ from linktools.core._locks import LockManager
 
 def _make_config(tmp_path):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     return Config(None, schema, sources=[
-        EnvironmentSource(""),
+        EnvironmentSource((os.environ, "")),
         RuntimeOverrideSource(),
         PersistentSource(store, "test"),
         DefaultSource(schema),

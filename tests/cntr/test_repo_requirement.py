@@ -105,7 +105,7 @@ def test_loader_skips_repo_that_became_incompatible(fresh_manager, tmp_path, mon
     # after it was already installed (e.g. an in-place edit).
     _write(repo_dir / ".linktools.json", {"requires": {"linktools-cntr": ">=999.0"}})
 
-    containers = fresh_manager.loader.load_all()
+    containers = fresh_manager.loader.load_all().containers
     assert "container" not in [c.name for c in containers if str(getattr(c.repository_context, "root_path", "")) == str(repo_dir)]
 
 

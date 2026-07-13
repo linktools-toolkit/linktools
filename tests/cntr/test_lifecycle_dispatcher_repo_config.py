@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """LifecycleDispatcher.notify_remove must register a removed-but-still-
-running container's `configs` defaults onto ITS OWN env_config (the
-manager's shared Config for a builtin container, or its own repository's
-Config for a third-party one) -- not unconditionally onto the manager's
-Config, which is a different object than a repo container's env_config
-since the per-repository Config Context split."""
+running container's `configs` defaults -- since it was no longer in the
+installed list, they were never registered when containers were loaded, so
+on_removed would otherwise fail to resolve them."""
 import os
 
 import _harness
@@ -46,7 +44,7 @@ def _fresh_standalone_manager(tmp_path):
     return ContainerManager(Environ(), name="aio")
 
 
-def test_notify_remove_registers_configs_on_repo_container_own_config(tmp_path):
+def test_notify_remove_registers_configs_for_a_repo_container_removed_while_running(tmp_path):
     repo_dir = _repo_with_field_only_container(tmp_path, name="repo_src")
     manager = _fresh_standalone_manager(tmp_path)
     manager.repos.add(str(repo_dir))
@@ -59,8 +57,9 @@ def test_notify_remove_registers_configs_on_repo_container_own_config(tmp_path):
     container = manager.containers["repo_src"]
     assert container.repository_context is not None
     assert not container.repository_context.builtin
-    # Sanity: the repo container's Config is NOT the manager's shared one.
-    assert container.env_config is not manager.env_config
+    # Every container, builtin or third-party, shares the manager's own
+    # env_config outright.
+    assert container.env_config is manager.env_config
 
     manager.running_state._set(["repo_src"])
 
@@ -75,9 +74,7 @@ def test_notify_remove_registers_configs_on_repo_container_own_config(tmp_path):
     with manager.lifecycle.notify_remove(ctx):
         pass
 
-    # The field must resolve through the container's OWN (repo-scoped)
-    # Config -- this raised ConfigNotFoundError before the fix, since the
-    # default used to be registered on the manager's Config instead.
+    # The field must resolve -- this raised ConfigNotFoundError before the
+    # fix, since a removed-but-still-running container's `configs` defaults
+    # were never registered.
     assert container.env_config.get("REPO_ONLY_FIELD") == "repo-default-value"
-    # And it must NOT have leaked onto the manager's shared Config.
-    assert "REPO_ONLY_FIELD" not in manager.env_config.schema

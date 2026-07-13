@@ -5,6 +5,7 @@ import yaml
 from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
 from linktools.rich import choose, confirm, is_no_input
 from ..container import ContainerError
+from ..repo.service import safe_display_url
 from . import _shared
 from ._order import REPO_COMMAND_ORDER
 
@@ -25,7 +26,7 @@ class RepoCommand(BaseCommandGroup):
     def on_command_list(self):
         repos = _shared.manager.repos.get_all()
         for key, value in repos.items():
-            data = {key: value}
+            data = {safe_display_url(key): value}
             self.logger.info(
                 yaml.dump(data, sort_keys=False).strip()
             )
@@ -33,18 +34,23 @@ class RepoCommand(BaseCommandGroup):
     @subcommand("add", order=REPO_COMMAND_ORDER["add"], help="add repository")
     @subcommand_argument("url", help="repository url")
     @subcommand_argument("-b", "--branch", help="branch name")
-    @subcommand_argument("-f", "--force", help="force add (skip trust prompt)")
-    def on_command_add(self, url: str, branch: str = None, force: bool = False):
+    @subcommand_argument("--replace", action="store_true",
+                         help="replace an already-added repository at this URL/path")
+    def on_command_add(self, url: str, branch: str = None, replace: bool = False):
         # A repo may carry executable Python container definitions, so
-        # interactive `add` asks for confirmation unless --force.
-        # Non-interactive runs don't block.
-        if not force and not is_no_input():
+        # interactive `add` asks for confirmation; the global --yes flag (or
+        # any other non-interactive run) skips it via is_no_input() -- there
+        # is no repo-add-specific flag for this, to avoid a second way to
+        # spell the same thing. Independent of --replace: skipping this
+        # prompt never implies replacing an existing repository, and
+        # --replace never skips the prompt on its own.
+        if not is_no_input():
             if not confirm(
                     "This repository may contain executable Python container definitions. "
                     "Only add repositories you trust. Continue?",
                     default=False):
                 raise ContainerError("Canceled")
-        _shared.manager.repos.add(url, branch=branch, force=force)
+        _shared.manager.repos.add(url, branch=branch, replace=replace)
 
     @subcommand("status", order=REPO_COMMAND_ORDER["status"], help="show repository status (read-only)")
     def on_command_status(self):
@@ -54,7 +60,7 @@ class RepoCommand(BaseCommandGroup):
             return
         for url, meta in repos.items():
             info = _shared.manager.repos.describe(url, meta)
-            self.logger.info(yaml.dump({url: info}, sort_keys=False).strip())
+            self.logger.info(yaml.dump({safe_display_url(url): info}, sort_keys=False).strip())
 
     @subcommand("validate", order=REPO_COMMAND_ORDER["validate"],
                help="validate repository local config and compatibility (read-only)")
@@ -117,13 +123,17 @@ class RepoCommand(BaseCommandGroup):
             raise ContainerError("No repository found")
 
         if url is None:
-            repo = choose("Choose repository you want to remove", repos)
-            if not confirm(f"Remove repository `{repo}`?", default=False):
+            # choices is {real key: displayed label} -- choose() returns the
+            # real key (needed to actually remove it), the user only ever
+            # sees the credential-free label.
+            repo = choose("Choose repository you want to remove",
+                          {r: safe_display_url(r) for r in repos})
+            if not confirm(f"Remove repository `{safe_display_url(repo)}`?", default=False):
                 raise ContainerError("Canceled")
             _shared.manager.repos.remove(repo)
 
         elif url in repos:
-            if not confirm(f"Remove repository `{url}`?", default=False):
+            if not confirm(f"Remove repository `{safe_display_url(url)}`?", default=False):
                 raise ContainerError("Canceled")
             _shared.manager.repos.remove(url)
 

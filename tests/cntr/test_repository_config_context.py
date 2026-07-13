@@ -75,7 +75,13 @@ def test_repo_local_cannot_override_manager_key(tmp_path):
     assert str(container.get_app_path()).startswith(str(tmp_path / "manager-app"))
 
 
-def test_repo_local_custom_key_is_scoped_per_repo(tmp_path):
+def test_repo_local_custom_key_no_longer_scoped_per_repo(tmp_path):
+    # Per-repository local-file config isolation was intentionally removed:
+    # a repository's own `.linktools.json` `environment` section is only
+    # ever consulted for the `requires.linktools-cntr` gate now, never for
+    # config field resolution -- every repo shares the same Config, so two
+    # repos declaring the same custom field both resolve to its (shared)
+    # default regardless of what either repo's local file says.
     manager = _fresh_standalone_manager(tmp_path)
 
     repo_a = _repo_with_container(tmp_path, "repo_a", environment={"CUSTOM_PATH": "./a"},
@@ -89,9 +95,8 @@ def test_repo_local_custom_key_is_scoped_per_repo(tmp_path):
 
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
-    assert container_a.get_config("CUSTOM_PATH") != container_b.get_config("CUSTOM_PATH")
-    assert str(container_a.get_config("CUSTOM_PATH")).endswith(os.sep + "a")
-    assert str(container_b.get_config("CUSTOM_PATH")).endswith(os.sep + "b")
+    assert container_a.get_config("CUSTOM_PATH") == container_b.get_config("CUSTOM_PATH")
+    assert str(container_a.get_config("CUSTOM_PATH")).endswith(os.sep + "x")
 
 
 def test_runtime_override_still_wins_over_manager_and_repo(tmp_path):

@@ -78,6 +78,12 @@ def test_encoding_round_trips_non_ascii(tmp_path):
 
 # -- ArtifactIndex ------------------------------------------------------------
 
+class _FakeEnviron:
+    def __init__(self, data_path):
+        from linktools.core._locks import LockManager
+        self.locks = LockManager(data_path / "locks")
+
+
 class _FakeManager:
     """Bare manager stand-in exposing only what ArtifactIndex needs, so
     these tests aren't coupled to whatever prepare_installed_containers()
@@ -86,6 +92,7 @@ class _FakeManager:
     def __init__(self, data_path):
         self.data_path = data_path
         self.project_name = "test-project"
+        self.environ = _FakeEnviron(data_path)
 
 
 def test_index_is_canonical_json_with_trailing_newline(tmp_path):
@@ -131,12 +138,37 @@ def test_load_returns_empty_dict_when_index_missing(tmp_path):
     assert ArtifactIndex(_FakeManager(tmp_path)).load() == {}
 
 
-def test_load_returns_empty_dict_on_corrupt_index(tmp_path):
+def test_load_fails_closed_on_corrupt_index(tmp_path):
+    """review P1-12: a corrupt index must not be silently treated as an
+    empty one -- that would make record() discard every prior entry and
+    Plan/Doctor treat every real artifact as newly "added"."""
+    from linktools.cntr.artifacts import ArtifactIndexError
+
     index = ArtifactIndex(_FakeManager(tmp_path))
     os.makedirs(os.path.dirname(index.path), exist_ok=True)
     with open(index.path, "w", encoding="utf-8") as f:
         f.write("not json")
-    assert index.load() == {}
+    with pytest.raises(ArtifactIndexError):
+        index.load()
+
+
+@pytest.mark.parametrize("payload", [
+    "[]",
+    '{"schema_version": 1, "project": "x", "artifacts": []}',
+    '{"schema_version": 1, "project": "x", "artifacts": {"a": "not-an-object"}}',
+    '{"schema_version": 999, "project": "x", "artifacts": {}}',
+    '{"project": "x", "artifacts": {}}',
+    '{"schema_version": 1, "project": 123, "artifacts": {}}',
+])
+def test_load_fails_closed_on_structurally_invalid_index(tmp_path, payload):
+    from linktools.cntr.artifacts import ArtifactIndexError
+
+    index = ArtifactIndex(_FakeManager(tmp_path))
+    os.makedirs(os.path.dirname(index.path), exist_ok=True)
+    with open(index.path, "w", encoding="utf-8") as f:
+        f.write(payload)
+    with pytest.raises(ArtifactIndexError):
+        index.load()
 
 
 # -- Wired into compose/Dockerfile generation ---------------------------------
@@ -151,20 +183,30 @@ def test_get_docker_compose_file_records_compose_artifact(fresh_manager):
     assert len(artifacts["compose/nginx.yml"]["sha256"]) == 64
 
 
-def test_prepare_installed_containers_records_dockerfile_artifact_as_a_side_effect(fresh_manager):
-    # Rendering a container's compose (to auto-fill build.dockerfile)
-    # resolves get_docker_file_path() as a side effect, which is where the
-    # Dockerfile actually gets written -- exercised simply by accessing
-    # docker_compose during prepare.
+def test_prepare_installed_containers_alone_does_not_write_dockerfile(fresh_manager):
+    """review P1-11: merely preparing containers (accessing docker_compose,
+    e.g. for config list/Plan/Doctor) must never write a Dockerfile as a
+    side effect -- only real compose file generation for actual execution
+    does (see the next test)."""
+    artifacts = fresh_manager.artifact_index.load()
+    assert "dockerfile/nginx.Dockerfile" not in artifacts
+
+
+def test_real_compose_generation_writes_the_dockerfile(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    nginx.get_docker_compose_file()
+
     artifacts = fresh_manager.artifact_index.load()
     assert "dockerfile/nginx.Dockerfile" in artifacts
     assert artifacts["dockerfile/nginx.Dockerfile"]["kind"] == "dockerfile"
 
 
-def test_repo_backed_container_records_repository_url_and_revision(fresh_manager, tmp_path, monkeypatch):
-    """The Generated Artifact Index's own canonical example entry includes both repository_url
-    and repository_revision for a git-backed container -- only the former
-    was ever actually recorded."""
+def test_repo_backed_container_records_repo_name_and_revision_not_url(fresh_manager, tmp_path, monkeypatch):
+    """The Generated Artifact Index's canonical example entry includes
+    repo_name/repo_id and repository_revision for a git-backed container --
+    it must NEVER include repository_url (review P1-07): the add URL may
+    embed a Git credential (`https://user:token@host/repo.git`), and the
+    Artifact Index has no secret redaction of its own."""
     from linktools.cntr.container import BaseContainer
     from linktools.cntr.repo.context import RepositoryConfigContext
     import linktools.git as git_module
@@ -184,16 +226,19 @@ def test_repo_backed_container_records_repository_url_and_revision(fresh_manager
 
     (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    image: x:1\n")
     container = BaseContainer(fresh_manager, tmp_path, name="999-repo-backed")
-    container._repository_context = RepositoryConfigContext(
-        root_path=str(tmp_path), file_config=None, config=fresh_manager.env_config,
-        url="https://example.invalid/repo.git", builtin=False,
+    container.repo_context = RepositoryConfigContext(
+        root_path=str(tmp_path), file_config=None,
+        url="https://token@example.invalid/repo.git", builtin=False, repo_name="repo",
     )
 
     container.get_docker_compose_file()
 
     entry = fresh_manager.artifact_index.load()["compose/repo-backed.yml"]
-    assert entry["repository_url"] == "https://example.invalid/repo.git"
+    assert entry["repo_name"] == "repo"
+    assert "repo_id" in entry
     assert entry["repository_revision"] == "cafef00d"
+    assert "repository_url" not in entry
+    assert "token" not in str(entry)
 
 
 def test_non_git_local_repo_container_has_no_repository_revision(fresh_manager, tmp_path):
@@ -202,15 +247,16 @@ def test_non_git_local_repo_container_has_no_repository_revision(fresh_manager, 
 
     (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    image: x:1\n")
     container = BaseContainer(fresh_manager, tmp_path, name="999-local-repo")
-    container._repository_context = RepositoryConfigContext(
-        root_path=str(tmp_path), file_config=None, config=fresh_manager.env_config,
-        url=str(tmp_path), builtin=False,
+    container.repo_context = RepositoryConfigContext(
+        root_path=str(tmp_path), file_config=None,
+        url=str(tmp_path), builtin=False, repo_name="local-repo",
     )
 
     container.get_docker_compose_file()
 
     entry = fresh_manager.artifact_index.load()["compose/local-repo.yml"]
-    assert entry["repository_url"] == str(tmp_path)
+    assert entry["repo_name"] == "local-repo"
+    assert "repository_url" not in entry
     assert "repository_revision" not in entry
 
 

@@ -41,23 +41,24 @@ TimeoutType = _t.Union["Timeout", float, int, None]
 
 
 if _t.TYPE_CHECKING:
-    from .core._environ import ConfigDict  # noqa
-    from .core._config import ConfigField  # noqa
     from typing import Any, Dict, Union
     # A container helper (get_config/get_config_later/load_*_url) may be
     # given either a plain field name already defined elsewhere, or a
     # ConfigField to define (idempotently) and resolve in one step -- see
     # BaseContainer._resolve_config_key.
-    ConfigKeyType = Union[str, ConfigField]
-    ConfigType = Any
-    ConfigLiteralType = str
-    ConfigTypeMap = Dict[str, Any]
+    from .core._environ import ConfigDict  # noqa
+    from .core._config import Config, ConfigField  # noqa
     from .core._tools import Tools, Tool, ToolExecError  # noqa
     from .core._download import UrlFile, UrlFileValidatorType  # noqa
     from .core._environ import BaseEnviron as _BaseEnviron  # noqa
 
     P = _t.ParamSpec("P")
     EnvironType = _t.TypeVar("EnvironType", bound=_BaseEnviron)
+
+    ConfigKeyType = Union[str, ConfigField]
+    ConfigType = Any
+    ConfigLiteralType = str
+    ConfigTypeMap = Dict[str, Any]
 
 
 def get_origin(tp):

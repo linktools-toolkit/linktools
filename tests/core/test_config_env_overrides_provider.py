@@ -12,6 +12,8 @@ silent no-op after the field had been resolved/cached once). This contradicts
 the documented Environment > RuntimeOverride > Persistent > Default precedence
 (see Environ._create_config / wrap_config's source order).
 """
+import os
+
 from linktools.core import (
     AliasProvider, Config, ConfigField, ConfigSchema, ChainProvider,
     DefaultSource, EnvironmentSource, LazyProvider, PersistentSource,
@@ -23,9 +25,9 @@ from linktools.core._locks import LockManager
 
 def _make_config(tmp_path, env_prefix=""):
     store = ConfigStore(tmp_path / "settings.json", lock_manager=LockManager(tmp_path / "locks"))
-    schema = ConfigSchema(allow_unknown=True)
+    schema = ConfigSchema()
     return Config(None, schema, sources=[
-        EnvironmentSource(env_prefix),
+        EnvironmentSource((os.environ, env_prefix)),
         RuntimeOverrideSource(),
         PersistentSource(store, "test"),
         DefaultSource(schema),

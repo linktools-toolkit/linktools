@@ -23,7 +23,7 @@ def local_repo(tmp_path):
 
 
 def test_local_repo_update_does_not_call_git(fresh_manager, monkeypatch, local_repo):
-    fresh_manager.repos.add(local_repo, force=True)
+    fresh_manager.repos.add(local_repo, replace=True)
 
     def fail(*args, **kwargs):
         raise AssertionError("RepoGit.update must not be called for local repos")
@@ -41,7 +41,7 @@ def test_local_repo_update_does_not_call_git(fresh_manager, monkeypatch, local_r
 
 
 def test_local_repo_describe_does_not_inspect_git(fresh_manager, monkeypatch, local_repo):
-    fresh_manager.repos.add(local_repo, force=True)
+    fresh_manager.repos.add(local_repo, replace=True)
     url, meta = next(iter(fresh_manager.repos.get_all().items()))
 
     def fail(*args, **kwargs):
@@ -56,7 +56,7 @@ def test_local_repo_describe_does_not_inspect_git(fresh_manager, monkeypatch, lo
 
 
 def test_local_repo_status_produces_no_git_warning(fresh_manager, local_repo):
-    fresh_manager.repos.add(local_repo, force=True)
+    fresh_manager.repos.add(local_repo, replace=True)
     warnings = []
     fresh_manager.repos.git.logger.warning = lambda msg: warnings.append(msg)
 

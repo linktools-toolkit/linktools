@@ -79,6 +79,51 @@ def test_write_is_atomic_replaces_existing(store, tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_set_rolls_back_in_memory_state_when_flush_fails(store, monkeypatch):
+    """A failed disk write must never leave the in-memory store reflecting
+    a value that was never actually persisted -- a caller reading it back
+    (without an intervening reload()) would otherwise see a phantom write
+    that a crash right afterward would lose entirely."""
+    store.set("k", "before")
+
+    def broken_flush():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_flush", broken_flush)
+    with pytest.raises(OSError):
+        store.set("k", "after")
+
+    assert store.get("k") == "before"
+
+
+def test_save_rolls_back_in_memory_state_when_flush_fails(store, monkeypatch):
+    store.save(a=1, b=2)
+
+    def broken_flush():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_flush", broken_flush)
+    with pytest.raises(OSError):
+        store.save(a=99, c=3)
+
+    assert store.get("a") == 1
+    assert store.get("b") == 2
+    assert "c" not in store
+
+
+def test_remove_rolls_back_in_memory_state_when_flush_fails(store, monkeypatch):
+    store.set("k", "v")
+
+    def broken_flush():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_flush", broken_flush)
+    with pytest.raises(OSError):
+        store.remove("k")
+
+    assert store.get("k") == "v"
+
+
 def test_corrupt_json_raises(store, tmp_path):
     path = tmp_path / "settings.json"
     path.write_text("{not valid json")

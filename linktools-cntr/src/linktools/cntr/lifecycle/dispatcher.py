@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lifecycle event dispatch.
-
-``notify_remove`` only reconciles the running-container set on a *full*
-container run; a partial removal leaves it untouched. This is a known
-limitation, not fixed here to keep this module a pure behavior-preserving
-move.
-"""
+"""Lifecycle event dispatch."""
 import contextlib
 import inspect
 from typing import TYPE_CHECKING
@@ -84,22 +78,26 @@ class LifecycleDispatcher:
     def notify_remove(self, context: "EventContext"):
         yield
 
-        if context.is_full_containers:
-            running_names = self.manager.running_state.get_persisted()
-            running_containers = [
-                self.manager.containers[name] for name in running_names if name in self.manager.containers
-            ]
-            removed = [container for container in running_containers if container not in context.containers]
-            for container in removed:
-                # A removed container is no longer in the installed list, so its
-                # `configs` defaults were never registered. Register them on its
-                # OWN env_config (the manager's shared Config for a builtin
-                # container, or its repository's own Config for a third-party
-                # one) so on_removed can read its own configs without failing --
-                # registering them on the manager's Config here would silently
-                # miss a third-party-repo container's fields entirely.
-                container.env_config.update_defaults(**container.configs)
-                self._invoke_callback(container.on_removed, context)
-                container.hooks.call(HookPhase.AFTER_REMOVE, context)
-            self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)
-            self.manager.running_state.remove([container.name for container in removed])
+        # context.containers is always the FULL installed project (see
+        # ComposeOperations._make_context: it's built from
+        # selection.project_containers, never narrowed to the partial
+        # target set) -- so comparing it against the persisted running set
+        # is safe after every lifecycle operation, not just a full one. A
+        # partial up/down/restart must also reconcile a container that was
+        # removed from the installed set since it was last marked running.
+        running_names = self.manager.running_state.get_persisted()
+        running_containers = [
+            self.manager.containers[name] for name in running_names if name in self.manager.containers
+        ]
+        removed = [container for container in running_containers if container not in context.containers]
+        if not removed:
+            return
+        for container in removed:
+            # A removed container is no longer in the installed list, so its
+            # `configs` defaults were never registered -- register them now
+            # so on_removed can read its own configs without failing.
+            container.register_configs()
+            self._invoke_callback(container.on_removed, context)
+            container.hooks.call(HookPhase.AFTER_REMOVE, context)
+        self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)
+        self.manager.running_state.remove([container.name for container in removed])

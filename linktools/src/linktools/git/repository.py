@@ -21,7 +21,7 @@ from dulwich.repo import Repo as DulwichRepo
 
 from linktools import utils
 from linktools.core import environ
-from linktools.errors import GitError, GitDivergedError
+from linktools.errors import GitError, GitDivergedError, GitStashRestoreError
 from linktools.rich import create_progress
 
 from .progress import GitProgressStream
@@ -48,13 +48,16 @@ def _wrap_protocol_errors():
 class GitHead(object):
     """A local git branch that can be checked out."""
 
-    def __init__(self, path: str, name: str) -> None:
-        self._path = path
+    def __init__(self, repository: "GitRepository", name: str) -> None:
+        self._repository = repository
         self.name = name
 
     def checkout(self):
-        """Check out this branch in the working tree."""
-        porcelain.switch(self._path, self.name)
+        """Check out this branch in the working tree, serialized through
+        the owning repository's write lock -- same as every other write
+        operation on this repository."""
+        with self._repository._write_lock():
+            self._repository._checkout(self.name)
 
 
 class GitRepository(object):
@@ -68,12 +71,17 @@ class GitRepository(object):
     @classmethod
     def open_if_valid(cls, environ: "Any", path: "PathType") -> "GitRepository | None":
         """Like the constructor, but returns ``None`` instead of raising when
-        ``path`` isn't a git repository -- keeps dulwich's ``NotGitRepository``
-        entirely inside this module so callers never need to import it."""
-        from dulwich.errors import NotGitRepository
+        ``path`` isn't usable as a git repository -- not a repository at all
+        (dulwich's ``NotGitRepository``), or one whose on-disk state dulwich
+        can't even open (a corrupted object store/index, a permission
+        error, ...). dulwich's exception types have no single common base
+        class to catch narrowly, so this catches broadly by design: the
+        whole point of this method is turning "can't open this as a repo,
+        for any reason" into ``None`` rather than requiring every caller to
+        import dulwich just to catch its exception types itself."""
         try:
             return cls(environ, path)
-        except NotGitRepository:
+        except Exception:
             return None
 
     def close(self):
@@ -108,7 +116,7 @@ class GitRepository(object):
 
     def is_dirty(self):
         status = self.status()
-        return bool(any(status.staged.values()) or status.unstaged)
+        return bool(any(status.staged.values()) or status.unstaged or status.untracked)
 
     def head_sha(self) -> str:
         """Current HEAD commit SHA (full hex string)."""
@@ -125,7 +133,8 @@ class GitRepository(object):
     # -- writes (all serialised) ------------------------------------------
 
     def add(self, *paths):
-        porcelain.add(self._path, list(paths) or None)
+        with self._write_lock():
+            porcelain.add(self._path, list(paths) or None)
 
     def commit(self, message: str, author: str = None, committer: str = None,
                all: bool = False) -> str:
@@ -146,23 +155,34 @@ class GitRepository(object):
 
     def create_head(self, branch: str) -> "GitHead":
         with self._write_lock():
-            branch_ref = self._branch_ref(branch)
-            target = self._remote_branch_target(branch)
-            if target is None:
-                with _wrap_protocol_errors():
-                    result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
-                target = result.refs.get(branch_ref)
-            if target is None:
-                raise GitError("Remote branch `%s` not found." % branch)
-            porcelain.branch_create(self._path, branch, target)
-            return GitHead(self._path, branch)
+            return self._create_head_unlocked(branch)
+
+    def _create_head_unlocked(self, branch: str) -> "GitHead":
+        # Caller must already hold self._write_lock() -- a process_lock()
+        # is a fresh OS-level file lock every call, not a reentrant one, so
+        # acquiring it again here (from checkout_or_create(), which also
+        # needs this) would deadlock rather than no-op.
+        branch_ref = self._branch_ref(branch)
+        target = self._remote_branch_target(branch)
+        if target is None:
+            with _wrap_protocol_errors():
+                result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
+            target = result.refs.get(branch_ref)
+        if target is None:
+            raise GitError("Remote branch `%s` not found." % branch)
+        porcelain.branch_create(self._path, branch, target)
+        return GitHead(self, branch)
 
     def checkout_or_create(self, branch: str) -> None:
-        """Check out ``branch``, creating it from the remote if it doesn't exist locally."""
-        if branch in self.heads:
-            self._checkout(branch)
-        else:
-            self.create_head(branch).checkout()
+        """Check out ``branch``, creating it from the remote if it doesn't
+        exist locally -- both branches (existing or newly created) run
+        under a single write-lock acquisition, not two nested ones."""
+        with self._write_lock():
+            if branch in self.heads:
+                self._checkout(branch)
+            else:
+                self._create_head_unlocked(branch)
+                self._checkout(branch)
 
     # -- sync ( ------------------------------------------------------
 
@@ -175,14 +195,39 @@ class GitRepository(object):
             if policy == GitSyncPolicy.STASH_AND_RESTORE and self.is_dirty():
                 self._stash_push()
                 stashed = True
+
+            sync_exc = None
             try:
                 if policy == GitSyncPolicy.RESET_TO_REMOTE:
                     self._force_update()
                 else:
                     self._fast_forward()  # FAST_FORWARD_ONLY / default
-            finally:
-                if stashed:
+            except BaseException as exc:
+                sync_exc = exc
+
+            if stashed:
+                try:
                     self._stash_pop()
+                except Exception as restore_exc:
+                    # A restore failure must never silently replace the
+                    # original sync failure (a plain try/finally would do
+                    # exactly that) -- combine both into one message,
+                    # chained from whichever is the more relevant cause.
+                    if sync_exc is not None:
+                        raise GitStashRestoreError(
+                            "sync failed (%s: %s) and restoring the stashed "
+                            "changes afterward also failed (%s: %s)"
+                            % (type(sync_exc).__name__, sync_exc,
+                               type(restore_exc).__name__, restore_exc)
+                        ) from sync_exc
+                    raise GitStashRestoreError(
+                        "sync succeeded but restoring the stashed changes "
+                        "afterward failed: %s: %s"
+                        % (type(restore_exc).__name__, restore_exc)
+                    ) from restore_exc
+
+            if sync_exc is not None:
+                raise sync_exc
 
     # -- low-level porcelain wrappers ---------------------------------------
 
@@ -250,13 +295,18 @@ class GitRepository(object):
     @classmethod
     def clone(cls, environ: "Any", url: str, repo_path: str = None,
               branch: str = None) -> "GitRepository":
-        """Shallow-clone, atomically: clone to staging -> rename (spec §12.2).
+        """Shallow-clone, atomically: clone to staging -> rename.
 
         An interrupted clone leaves only the staging dir behind, never a
         half-valid repository at ``repo_path``.
         """
         target = str(repo_path)
-        if os.path.exists(target):
+        # lexists, not exists -- a dangling symlink already at the target
+        # path must also be rejected: os.path.exists() follows it and
+        # (since the target is missing) reports False, which would let
+        # porcelain.clone() try to write through/replace it instead of
+        # this classmethod ever seeing it as an occupied path.
+        if os.path.lexists(target):
             raise GitError("Clone target already exists: %s" % target)
         staging = "%s.staging-%s" % (target, uuid.uuid4().hex[:8])
         kwargs = {}
