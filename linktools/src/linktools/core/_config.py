@@ -6,7 +6,6 @@
 
 import json
 import os
-from collections import ChainMap
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -354,25 +353,21 @@ class EnvironmentSource(ConfigSource):
         reads ``mapping``'s keys as-is; a non-empty one strips it (e.g. the
         real ``os.environ`` with this source's env prefix).
         """
-        layers = []
+        self._layers = []
         for entry in environment:
             if not entry:
                 continue
             mapping, prefix = entry
-            layers.append(_UnprefixedMapping(mapping, prefix) if prefix else mapping)
-
-        if len(layers) > 1:
-            self._values = ChainMap(*layers)
-        elif len(layers) == 1:
-            self._values = layers[0]
-        else:
-            self._values = dict()
+            self._layers.append(_UnprefixedMapping(mapping, prefix) if prefix else mapping)
 
     def get(self, key: str) -> "tuple[Any, bool]":
-        value = self._values.get(key, MISSING)
-        if value is MISSING:
-            return (MISSING, False)
-        return (value, True)
+        # Each layer (e.g. the real os.environ) is read live, not snapshotted
+        # at construction time -- a test (or a caller) that mutates it after
+        # building this source must still see the new value.
+        for layer in self._layers:
+            if key in layer:
+                return (layer[key], True)
+        return (MISSING, False)
 
 
 class RuntimeOverrideSource(ConfigSource):
