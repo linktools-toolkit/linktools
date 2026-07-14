@@ -3,19 +3,25 @@
 
 """Git repository wrapper backed by dulwich.
 
-Pure-Python -- never shells out to system ``git``. Clone is atomic (clone to a
-staging dir, then rename) so an interrupted clone never leaves a half-valid
-repository. Write operations are serialised per repository via the
-environment's LockManager.
+Pure-Python for every operation except checkout: ``porcelain.switch()`` was
+only added in dulwich 0.25.0, so on an older dulwich (installable on
+Python < 3.10, where requirements.yml leaves the version unconstrained)
+``_checkout`` falls back to shelling out to the system ``git`` binary.
+Clone is atomic (clone to a staging dir, then rename) so an interrupted
+clone never leaves a half-valid repository. Write operations are
+serialised per repository via the environment's LockManager.
 """
 
 import contextlib
+import inspect
 import os
+import re
 import shutil
+import subprocess
 import uuid
 from typing import TYPE_CHECKING
 
-from dulwich import porcelain
+from dulwich import __version__ as _dulwich_version_tuple, porcelain
 from dulwich.errors import GitProtocolError
 from dulwich.repo import Repo as DulwichRepo
 
@@ -23,6 +29,7 @@ from linktools import utils
 from linktools.core import environ
 from linktools.errors import GitError, GitDivergedError, GitStashRestoreError
 from linktools.rich import create_progress
+from linktools.runtime import popen
 
 from .progress import GitProgressStream
 from .sync import GitSyncPolicy
@@ -32,6 +39,27 @@ if TYPE_CHECKING:
     from linktools.types import PathType
 
 _logger = environ.get_logger("git")
+
+dulwich_version = ".".join(str(part) for part in _dulwich_version_tuple)
+
+# dulwich installable on Python < 3.10 (requirements.yml pins no minimum
+# version there) predates several porcelain additions used below -- detect
+# them once at import time instead of re-inspecting on every call.
+_COMMIT_SUPPORTS_ALL = "all" in inspect.signature(porcelain.commit).parameters
+_FETCH_SUPPORTS_QUIET = "quiet" in inspect.signature(porcelain.fetch).parameters
+_STASH_POP_REQUIRES_INDEX = "index" in inspect.signature(porcelain.stash_pop).parameters
+
+
+_IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<email>.+?)>\s*$")
+
+
+def _split_identity(identity: str) -> "tuple[str, str]":
+    """Split a dulwich-style ``"Name <email>"`` identity into its parts, for
+    passing to the system git CLI via GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL."""
+    match = _IDENTITY_RE.match(identity)
+    if not match:
+        raise GitError("Invalid author/committer identity: %r" % identity)
+    return match.group("name"), match.group("email")
 
 
 @contextlib.contextmanager
@@ -139,13 +167,28 @@ class GitRepository(object):
     def commit(self, message: str, author: str = None, committer: str = None,
                all: bool = False) -> str:
         with self._write_lock():
-            sha = porcelain.commit(
-                self._path,
-                message=message,
-                author=author.encode() if author else None,
-                committer=committer.encode() if committer else None,
-                all=all,
-            )
+            encoded_author = author.encode() if author else None
+            encoded_committer = committer.encode() if committer else None
+            if _COMMIT_SUPPORTS_ALL:
+                sha = porcelain.commit(
+                    self._path,
+                    message=message,
+                    author=encoded_author,
+                    committer=encoded_committer,
+                    all=all,
+                )
+            elif all:
+                # dulwich < 0.24 has no commit(all=...) -- fall back to the
+                # system git CLI to get the same "commit -a" effect.
+                self._commit_via_git_cli(message, author, committer)
+                return self._repo.head().decode()
+            else:
+                sha = porcelain.commit(
+                    self._path,
+                    message=message,
+                    author=encoded_author,
+                    committer=encoded_committer,
+                )
             return sha.decode()
 
     def push(self, remote_location=None, branch=None, force=False):
@@ -166,7 +209,10 @@ class GitRepository(object):
         target = self._remote_branch_target(branch)
         if target is None:
             with _wrap_protocol_errors():
-                result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
+                if _FETCH_SUPPORTS_QUIET:
+                    result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
+                else:
+                    result = porcelain.fetch(self._path, depth=1, force=True)
             target = result.refs.get(branch_ref)
         if target is None:
             raise GitError("Remote branch `%s` not found." % branch)
@@ -235,13 +281,55 @@ class GitRepository(object):
         porcelain.stash_push(self._path)
 
     def _stash_pop(self):
-        porcelain.stash_pop(self._path)
+        if _STASH_POP_REQUIRES_INDEX:
+            # dulwich < 0.24 requires an explicit stash index; 0 is the
+            # top of the stack, matching newer dulwich's own default.
+            # getattr() dodges the installed dulwich's own type stub,
+            # which (being the newer signature) only declares 1 argument.
+            getattr(porcelain, "stash_pop")(self._path, 0)
+        else:
+            porcelain.stash_pop(self._path)
 
     def _reset_hard(self):
         porcelain.reset(self._path, mode="hard")
 
     def _checkout(self, branch):
-        porcelain.switch(self._path, branch)
+        if hasattr(porcelain, "switch"):
+            porcelain.switch(self._path, branch)
+        else:
+            # dulwich < 0.25.0 (possible on Python < 3.10, where the
+            # `git` extra pins no minimum version) has no porcelain.switch().
+            self._checkout_via_git_cli(branch)
+
+    def _checkout_via_git_cli(self, branch):
+        self._run_git_cli(
+            "checkout", branch,
+            reason="This dulwich version (%s) has no porcelain.switch()" % dulwich_version,
+        )
+
+    def _commit_via_git_cli(self, message, author, committer):
+        args = ["commit", "-a", "-m", message]
+        env = {}
+        if author:
+            args += ["--author", author]
+        if committer:
+            name, email = _split_identity(committer)
+            env["GIT_COMMITTER_NAME"] = name
+            env["GIT_COMMITTER_EMAIL"] = email
+        self._run_git_cli(
+            *args, env=env or None,
+            reason="This dulwich version (%s) has no commit(all=True) support" % dulwich_version,
+        )
+
+    def _run_git_cli(self, *args, reason: str, env: "dict[str, str]" = None):
+        try:
+            popen("git", *args, cwd=self._path, append_env=env).check_call()
+        except FileNotFoundError:
+            raise GitError(
+                "%s, and no system `git` binary was found to fall back to." % reason
+            )
+        except subprocess.CalledProcessError as exc:
+            raise GitError("git %s failed: %s" % (args[0], exc))
 
     def _fast_forward(self):
         branch_ref = self._current_branch_ref()

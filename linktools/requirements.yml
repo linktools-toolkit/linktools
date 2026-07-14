@@ -33,9 +33,9 @@ optional-dependencies:
     - scp
 
   git:
-    # 用于git仓库的克隆、拉取等操作，仅 Python 3.10+ 安装
-    # Used for git repository clone/pull operations; only installed on Python 3.10+
+    # Used for git repository clone/pull operations
     # >=0.25.1: porcelain.switch() 在 0.25.0 引入，但 porcelain.status() 的
     # untracked 字段类型不一致，0.25.1 才修复
     # <0.26: 不自动升级到未来可能破坏 API 的版本
-    - "dulwich>=0.25.1,<0.26; python_version >= '3.10'"
+    - "dulwich>=0.25.1; python_version >= '3.10'"
+    - "dulwich; python_version < '3.10'"
