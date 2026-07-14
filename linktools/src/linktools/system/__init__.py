@@ -17,6 +17,8 @@ from .network import get_lan_ip, get_wan_ip
 from .ports import bind, is_port_free, get_free_port, reserve_tcp_port
 from .wait import wait_event, wait_thread, wait_process
 from .interpreter import get_interpreter, get_interpreter_ident
+from .shell import SUPPORTED_SHELLS, ShellScript, get_default_shell, get_shell
+from .stub import CommandStub
 
 __all__ = [
     # platform
@@ -32,4 +34,8 @@ __all__ = [
     "wait_event", "wait_thread", "wait_process",
     # interpreter
     "get_interpreter", "get_interpreter_ident",
+    # shell-script generation (source/eval snippets)
+    "SUPPORTED_SHELLS", "ShellScript", "get_default_shell", "get_shell",
+    # executable wrapper scripts (.bat / POSIX sh)
+    "CommandStub",
 ]

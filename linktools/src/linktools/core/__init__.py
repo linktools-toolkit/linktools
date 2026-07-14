@@ -25,7 +25,7 @@ from ._config import (
     ResolvedConfig,
     redact_config_value,
 )
-from ._tools import Tools, Tool, ToolStub
+from ._tools import Tools, Tool
 from ._tools_installer import ToolInstaller
 from ._tools_registry import ToolRegistry, ToolDefinition
 from ._tools_runner import ToolRunner
@@ -65,7 +65,7 @@ __all__ = [
     "SizeValidator", "HashValidator", "CompositeValidator", "FileTransport",
     "HttpTransport", "UrlFile",
     # tools
-    "Tools", "Tool", "ToolStub", "ToolInstaller", "ToolRegistry",
+    "Tools", "Tool", "ToolInstaller", "ToolRegistry",
     "ToolDefinition", "ToolRunner",
     # capability
     "BaseCapability", "Capability", "Updater", "DevelopUpdater", "GitUpdater",

@@ -54,7 +54,11 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     from .. import utils, metadata
     from ..core import environ as _environ
-    from ..system import get_interpreter, get_interpreter_ident
+    from ..system import (
+        get_interpreter, get_interpreter_ident,
+        SUPPORTED_SHELLS, ShellScript, get_default_shell as _detect_default_shell,
+        CommandStub,
+    )
     from ..runtime import popen
     from .command import SubCommand, CommandError, iter_entry_points_capabilities
 
@@ -93,17 +97,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             utils.remove_file(alias_path)
 
     def get_default_shell(environ: "BaseEnviron") -> str:
-        import shutil
-        if environ.system == "windows":
-            if shutil.which("powershell"):
-                return "powershell"
-            raise CommandError(f"No supported shell found, supported shells: {', '.join(SUPPORTED_SHELLS)}")
-        shell_env = os.environ.get("SHELL", "")
-        if shell_env:
-            name = os.path.basename(shell_env)
-            if name in ("bash", "zsh", "fish", "tcsh"):
-                return name
-        raise CommandError(f"Unsupported shell: {shell_env!r}, supported shells: {', '.join(SUPPORTED_SHELLS)}")
+        return _detect_default_shell(system=environ.system)
 
     @register_command(name="shell", description="run shell command")
     class ShellCommand(SubCommand):
@@ -138,7 +132,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-s", "--shell", help="output code for the specified shell",
-                                choices=["bash", "zsh", "tcsh", "fish", "powershell"], default=None)
+                                choices=list(SUPPORTED_SHELLS), default=None)
             parser.add_argument("--reload", action="store_true", help="reload alias script", default=False)
             return parser
 
@@ -153,7 +147,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             from ..cli.argparse import ArgParseComplete
             from ..cli.command import iter_entry_point_commands
-            from ..core import ToolStub
 
             stub_path = get_stub_path()
             stub_path.mkdir(parents=True, exist_ok=True)
@@ -172,29 +165,21 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                         temp = command_infos[temp.parent_id]
                         names.append(temp.command_name)
                     executable = "-".join(reversed(names))
-                    stub = ToolStub(stub_path, executable, environ=environ)
-                    stub.create(utils.list2cmdline([get_interpreter(), "-m", command_info.module]))
+                    CommandStub(stub_path, executable, system=environ.system).write(
+                        [get_interpreter(), "-m", command_info.module]
+                    )
                     environ.logger.info(f"Found alias: {executable} -> {command_info.module}")
                     executables.append(executable)
 
-            lines = []
-
-            tools_path = environ.tools.stub_path
-            if shell in ("bash", "zsh"):
-                lines.append(f"export PATH=\"$PATH:{stub_path}:{tools_path}\"")
-            elif shell in ("fish",):
-                lines.append(f"set -x PATH \"$PATH\" \"{stub_path}\" \"{tools_path}\"")
-            elif shell in ("tcsh",):
-                lines.append(f"setenv PATH \"$PATH:{stub_path}:{tools_path}\"")
-            elif shell in ("powershell",):
-                lines.append(f"$env:PATH=\"$env:PATH;{stub_path}:{tools_path}\"")
+            script = ShellScript(shell)
+            script.append_path([str(stub_path), str(environ.tools.stub_path)])
 
             completion = ArgParseComplete.shellcode(executables, shell=shell)
             if completion:
                 environ.logger.info("Generate completion script ...")
-                lines.append(completion)
+                script.add_raw(completion)
 
-            result = os.linesep.join(lines)
+            result = script.render()
             utils.write_file(alias_path, result)
             print(result, flush=True)
 
@@ -204,7 +189,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
             parser = super().create_parser(type)
             parser.add_argument("-s", "--shell", help="output code for the specified shell",
-                                choices=["bash", "zsh", "tcsh", "fish", "powershell"])
+                                choices=list(SUPPORTED_SHELLS))
             parser.add_argument("version", metavar="VERSION", nargs="?",
                                 help="java version, such as 11.0.23 / 17.0.11 / 22.0.1")
             return parser
@@ -214,33 +199,19 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             if args.version:
                 java = java.copy(version=args.version)
 
-            cmdline = java.make_cmdline()
             shell = args.shell or get_default_shell(environ)
+            home_path = java.get("home_path")
 
-            lines = []
-            if shell in ("bash", "zsh"):
-                lines.append(f"alias java='{cmdline}'")
-                lines.append(f"export JAVA_VERSION='{java.get('version')}'")
-                lines.append(f"export JAVA_HOME='{java.get('home_path')}'")
-                lines.append(f"export PATH=\"$JAVA_HOME/bin:$PATH\"")
-            elif shell in ("fish",):
-                lines.append(f"alias java '{cmdline}'")
-                lines.append(f"set -x JAVA_VERSION '{java.get('version')}'")
-                lines.append(f"set -x JAVA_HOME '{java.get('home_path')}'")
-                lines.append(f"set -x PATH \"$JAVA_HOME/bin\" \"$PATH\"")
-            elif shell in ("tcsh",):
-                lines.append(f"alias java '{cmdline}'")
-                lines.append(f"setenv JAVA_VERSION '{java.get('version')}'")
-                lines.append(f"setenv JAVA_HOME '{java.get('home_path')}'")
-                lines.append(f"setenv PATH \"$JAVA_HOME/bin:$PATH\"")
-            elif shell in ("powershell",):
-                lines.append(f"function __tool_java__ {{ {cmdline} $args }}")
-                lines.append(f"Set-Alias -Name java -Value __tool_java__")
-                lines.append(f"$env:JAVA_VERSION='{java.get('version')}'")
-                lines.append(f"$env:JAVA_HOME='{java.get('home_path')}'")
-                lines.append(f"$env:PATH=\"$env:JAVA_HOME\\bin;$env:PATH\"")
+            # Structured intent only -- ShellScript owns quoting/$PATH syntax.
+            # PATH gets the real bin path, never a "$JAVA_HOME/bin" expression.
+            script = ShellScript(shell)
+            script.define_command("java", java.make_cmdargs())
+            script.set_env("JAVA_VERSION", java.get("version"))
+            if home_path:
+                script.set_env("JAVA_HOME", home_path)
+                script.prepend_path([os.path.join(str(home_path), "bin")])
 
-            result = os.linesep.join(lines)
+            result = script.render()
             print(result, flush=True)
 
     if environ is _environ:

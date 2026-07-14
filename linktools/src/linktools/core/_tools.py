@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.errors import ToolDefinitionError
 from linktools.errors import ToolExecError, ToolNotFound, ToolNotSupport
-from linktools.system import get_interpreter, get_interpreter_ident, get_shell_path, get_system
+from linktools.system import get_interpreter, get_interpreter_ident, get_shell_path, CommandStub
 from linktools.runtime import popen
 from linktools.decorator import cached_property, timeoutable
 from linktools.types import MISSING
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from typing import Any
     from ._environ import BaseEnviron
     from ._tools_installer import ToolInstaller
-    from linktools.types import PathType, TimeoutType
+    from linktools.types import TimeoutType
     from linktools.runtime import Process
 
 SUPPRESS = object()
@@ -127,54 +127,6 @@ def _parse_value(config: "ChainMap[str, Any]", key: str, default=None):
 
     # use default value
     return default  # ==> not found "else"
-
-
-class ToolStub(object):
-
-    """Lightweight descriptor for a tool definition."""
-    def __init__(self, path: "PathType", name: str, environ: "BaseEnviron" = None):
-        self.system = environ.system if environ else get_system()
-        self.name = f"{name}.bat" if self.system == "windows" else name
-        self.path = pathlib.Path(path, self.name)
-
-    @property
-    def exists(self) -> bool:
-        """Return whether the tool executable exists.
-
-        Returns:
-            bool: The property value.
-        """
-        return self.path and os.path.exists(self.path)
-
-    def create(self, cmdline: str) -> "PathType":
-        """Create an executable stub for a command line.
-
-        Args:
-            cmdline (str): Command line string to write or execute.
-
-        Returns:
-            PathType: The operation result.
-        """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "wt") as fd:
-            if self.system == "windows":
-                fd.write("@echo off\n")
-                fd.write(f"{cmdline} %*\n")
-            else:
-                fd.write(f"#!{shutil.which('sh')}\n")
-                fd.write(f"{cmdline} \"$@\"\n")
-                # fd.write(f"trap 'kill 0' INT TERM\n")
-                # fd.write(f"{cmdline} \"$@\" &\n")
-                # fd.write(f"wait\n")
-        os.chmod(self.path, 0o755)
-        return self.path
-
-    def remove(self):
-        """Remove the executable stub if it exists."""
-        utils.ignore_errors(os.remove, args=(self.path,))
-
-    def __repr__(self):
-        return f"ToolStub<{self.name}>"
 
 
 class ToolProperty(object):
@@ -407,11 +359,11 @@ class Tool(metaclass=ToolMeta):
         return False
 
     @property
-    def _stub(self) -> "ToolStub":
-        return ToolStub(
+    def _stub(self) -> "CommandStub":
+        return CommandStub(
             self._tools.stub_path,
             self.name,
-            environ=self._tools.environ
+            system=self._tools.environ.system,
         )
 
     def get(self, key: str, default: "Any" = None) -> "Any":
@@ -464,7 +416,7 @@ class Tool(metaclass=ToolMeta):
 
         if not os.access(self._stub.path, os.X_OK):
             self._tools.logger.debug(f"Create {self._stub}")
-            self._stub.create(self.make_cmdline())
+            self._stub.write(self.make_cmdargs())
 
         # change tool file permission
         cmdline = self.executable_cmdline
@@ -555,14 +507,23 @@ class Tool(metaclass=ToolMeta):
     def __repr__(self):
         return f"Tool<{self.name}>"
 
+    def make_cmdargs(self) -> "list[str]":
+        """Return the argv list used to invoke this tool through linktools.
+
+        The structured form consumed by :meth:`CommandStub.write` -- argv is
+        only turned into a command-line string at the one platform boundary
+        (the wrapper file), never pre-joined in core.
+        """
+        from ..cli import env
+        return [get_interpreter(), "-m", env.__name__, "tool", self.name]
+
     def make_cmdline(self) -> str:
         """Return the command line used to invoke this tool through linktools.
 
         Returns:
             str: The operation result.
         """
-        from ..cli import env
-        return utils.list2cmdline([get_interpreter(), "-m", env.__name__, "tool", self.name])
+        return utils.list2cmdline(self.make_cmdargs())
 
     def _make_corrupt_path(self, root_path):
         """Return a unique path under the tools tree to quarantine a bad install.
