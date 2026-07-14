@@ -104,7 +104,7 @@ MANAGER_API = (
     "container_type", "container_host",
     "docker_container_name", "docker_compose_names",
     "root_path", "app_path", "app_data_path",
-    "data_path", "temp_path", "setting_path",
+    "data_path", "temp_path", "settings",
     "env_config", "compose_runner", "compose_operations",
     "resolver", "loader", "runtime",
     "lifecycle", "running_state", "installed_state", "repos",
@@ -148,7 +148,7 @@ _DESCRIPTOR_TYPES = {
     "app_data_path": property,
     "data_path": _CachedProperty,
     "temp_path": _CachedProperty,
-    "setting_path": _CachedProperty,
+    "settings": _CachedProperty,
     "containers": _CachedProperty,
     "hooks": _CachedProperty,
     "start_hooks": _CachedProperty,
@@ -237,7 +237,7 @@ def test_manager_configs_override_is_dispatched_through_property(tmp_path, monke
 def test_installed_containers_route_through_persistent_store(fresh_manager, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        fresh_manager._persistent_store, "set",
+        fresh_manager.settings, "set",
         lambda key, value: (calls.append(key), None)[1],
     )
     fresh_manager.installed_state.add(*list(fresh_manager.containers.keys())[:1])
@@ -247,7 +247,7 @@ def test_installed_containers_route_through_persistent_store(fresh_manager, monk
 def test_installed_repos_route_through_persistent_store(fresh_manager, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        fresh_manager._persistent_store, "get",
+        fresh_manager.settings, "get",
         lambda key, default=None: (calls.append(key), default)[1],
     )
     fresh_manager.repos.get_all()
@@ -257,7 +257,7 @@ def test_installed_repos_route_through_persistent_store(fresh_manager, monkeypat
 def test_running_containers_route_through_transient_namespace(fresh_manager, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        fresh_manager._transient_ns, "get",
+        fresh_manager.cache, "get",
         lambda key, default=None: (calls.append(key), default)[1],
     )
     fresh_manager.running_state.get_persisted()

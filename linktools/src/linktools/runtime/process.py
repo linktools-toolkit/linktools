@@ -47,6 +47,31 @@ def _get_logger():
     return _logger
 
 
+def _subprocess_env() -> "dict[str, str]":
+    """Build the base environment every subprocess spawned via ``popen``
+    starts from: ``os.environ``, overlaid with the current project's
+    profile-declared ``"environment"`` section (``.linktools.json`` /
+    ``linktools.json``), then with the managed-tools stub dir prepended
+    to PATH so tools resolve without a global PATH mutation.
+
+    Returns a fresh mapping; never mutates the process ``os.environ``.
+    """
+    environ = _get_environ()
+    env = dict(os.environ)
+    profile_environment = environ.profile.get("environment", {})
+    if profile_environment:
+        env.update({str(key): str(value) for key, value in profile_environment.items()})
+    try:
+        stub = str(environ.tools.stub_path)
+        if stub:
+            rest = [p for p in env.get("PATH", "").split(os.pathsep)
+                    if p and p != stub]
+            env["PATH"] = os.pathsep.join([stub] + rest)
+    except Exception:
+        pass
+    return env
+
+
 if is_unix_like():
 
     class Output:
@@ -437,14 +462,22 @@ def popen(
             cwd = _get_environ().temp_path
             cwd.mkdir(parents=True, exist_ok=True)
 
+    # Every subprocess spawned here gets the same base environment (not
+    # just ones a tool-execution call site remembers to build itself):
+    # os.environ, this project's own profile-declared "environment"
+    # overlay, and the managed-tools stub prepended to PATH. An explicit
+    # ``env=`` fully replaces this base, same as before.
+    base_env = env if env is not None else _subprocess_env()
     if append_env or default_env:
         maps = []
         if append_env is not None:
             maps.append(append_env)
-        maps.append(env if env is not None else os.environ)
+        maps.append(base_env)
         if default_env is not None:
             maps.append(default_env)
         env = ChainMap(*maps)
+    else:
+        env = base_env
 
     _get_logger().debug(f"Exec cmdline: {list2cmdline(args)}")
 

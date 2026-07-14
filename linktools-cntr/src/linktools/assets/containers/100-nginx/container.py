@@ -13,7 +13,7 @@ from linktools.core import (
 )
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
-from linktools.rich import prompt
+from linktools.rich import choose
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
@@ -81,7 +81,7 @@ class Container(BaseContainer):
         # enabled later.
         if not r.get("NGINX_HTTPS_ENABLE"):
             raise ConfigNotFoundError("NGINX_HTTPS_ENABLE is disabled")
-        return prompt("ACME_DNS_API", choices=list(self.dnsapi.keys()))
+        return choose("ACME_DNS_API", list(self.dnsapi.keys()))
 
     @cached_property
     def extend_configs(self):

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
+from ._cache import CacheStore, CacheNamespace, CacheCodec, JsonCodec, BytesCodec
 from ._config_store import ConfigStore
 from ._config import (
     Config,
@@ -51,6 +52,8 @@ __all__ = [
     "BaseEnviron", "Environ", "environ",
     # project profile
     "ProjectProfile",
+    # cache
+    "CacheStore", "CacheNamespace", "CacheCodec", "JsonCodec", "BytesCodec",
     # config
     "Config", "ConfigField", "ConfigSchema", "ConfigResolver", "ConfigSource",
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource", "DictSource",

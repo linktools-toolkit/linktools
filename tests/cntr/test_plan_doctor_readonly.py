@@ -23,9 +23,9 @@ def _install_write_guards(manager, monkeypatch):
             raise _WriteAttempted(f"{name} must not be called by a read-only Plan/Doctor pass")
         return fail
 
-    monkeypatch.setattr(manager._persistent_store, "set", guard("ConfigStore.set"))
-    monkeypatch.setattr(manager._persistent_store, "save", guard("ConfigStore.save"))
-    monkeypatch.setattr(manager._persistent_store, "remove", guard("ConfigStore.remove"))
+    monkeypatch.setattr(manager.settings, "set", guard("ConfigStore.set"))
+    monkeypatch.setattr(manager.settings, "save", guard("ConfigStore.save"))
+    monkeypatch.setattr(manager.settings, "remove", guard("ConfigStore.remove"))
     monkeypatch.setattr(ArtifactIndex, "record", guard("ArtifactIndex.record"))
 
     from linktools.cntr import artifacts as artifacts_module

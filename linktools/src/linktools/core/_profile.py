@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from linktools.types import PathType
 from ..errors import ConfigError
 
 __all__ = [
@@ -25,19 +26,31 @@ class ProjectProfile(object):
 
     max_bytes = _MAX_FILE_BYTES
 
-    GLOBAL_FILE_NAME = "linktools.json"
-    LOCAL_FILE_NAME = ".linktools.json"
+    _GLOBAL_FILE_NAME = "linktools.json"
+    _LOCAL_FILE_NAME = ".linktools.json"
 
     @classmethod
     def global_path(cls) -> str:
         """The user-level profile path: ``~/.linktools/linktools.json``."""
-        return str(Path.home() / ".linktools" / cls.GLOBAL_FILE_NAME)
+        return str(Path.home() / ".linktools" / cls._GLOBAL_FILE_NAME)
 
     @classmethod
-    def local_path(cls, root=None) -> str:
+    def local_path(cls, root: "PathType | None" = None) -> str:
         """The local-level profile path under ``root`` (the process CWD
         when ``root`` is ``None``): ``<root>/.linktools.json``."""
-        return str(Path(str(root) if root is not None else os.getcwd()) / cls.LOCAL_FILE_NAME)
+        return str(Path(str(root) if root is not None else os.getcwd()) / cls._LOCAL_FILE_NAME)
+
+    @classmethod
+    def for_root(cls, root: "PathType | None" = None, global_: bool = False) -> "ProjectProfile":
+        """Build the profile for a project rooted at ``root`` (the process
+        CWD when ``root`` is ``None``): the local per-project file, merged
+        with the user-level global file when ``global_`` is True -- the
+        local file takes precedence on a conflicting key.
+        """
+        paths = [cls.local_path(root)]
+        if global_:
+            paths.append(cls.global_path())
+        return cls(*paths)
 
     def __init__(self, *paths):
         if not paths or paths[0] is None or isinstance(paths[0], dict):
@@ -53,13 +66,13 @@ class ProjectProfile(object):
             merged_data = self._merge(profile._data, merged_data)
         self._data = merged_data
 
-    @staticmethod
-    def _merge(base, overlay):
+    @classmethod
+    def _merge(cls, base, overlay):
         """Merge two profile dictionaries, with ``overlay`` taking precedence."""
         if isinstance(base, dict) and isinstance(overlay, dict):
             result = copy.deepcopy(base)
             for key, value in overlay.items():
-                result[key] = ProjectProfile._merge(result[key], value) \
+                result[key] = cls._merge(result[key], value) \
                     if key in result else copy.deepcopy(value)
             return result
         return copy.deepcopy(overlay)

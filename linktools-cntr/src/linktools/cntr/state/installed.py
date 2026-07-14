@@ -37,7 +37,7 @@ class InstalledStateStore:
             # another process's write. Reload now, under the lock, so this
             # read-modify-write is based on the latest data instead of
             # clobbering a concurrent writer's change on flush.
-            self.manager._persistent_store.reload()
+            self.manager.settings.reload()
             result = set()
             for name in names:
                 container = self.manager.containers.get(name, None)
@@ -50,7 +50,7 @@ class InstalledStateStore:
 
     def remove(self, *names: str, force: bool = False) -> "list[BaseContainer]":
         with self.manager.environ.locks.process_lock("cntr:settings"):
-            self.manager._persistent_store.reload()
+            self.manager.settings.reload()
             containers = self._load()
 
             result = set()
@@ -88,10 +88,10 @@ class InstalledStateStore:
         container objects here (via manager.containers) would recurse back
         into the property this feeds.
         """
-        return list(self.manager._persistent_store.get(_INSTALLED_KEY, []) or [])
+        return list(self.manager.settings.get(_INSTALLED_KEY, []) or [])
 
     def _dump_names(self, names: "Iterable[str]") -> None:
-        self.manager._persistent_store.set(_INSTALLED_KEY, list(names))
+        self.manager.settings.set(_INSTALLED_KEY, list(names))
 
     def _load(self) -> "list[BaseContainer]":
         result = set()

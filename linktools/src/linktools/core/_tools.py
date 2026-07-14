@@ -503,13 +503,13 @@ class Tool(metaclass=ToolMeta):
         """
         self.prepare()
 
-        #  pass the tools-stub PATH via subprocess_env instead of
-        # relying on the global os.environ mutation.
-        env = self._tools.environ.subprocess_env()
+        # popen() builds the base environment itself (os.environ, the
+        # profile's own "environment" overlay, the managed-tools stub
+        # PATH) -- only this tool's own fixed environment values need to
+        # reach it, as the lowest-priority layer (any value already
+        # present elsewhere always wins).
         if self.environment:
-            for key, value in self.environment.items():
-                env.setdefault(key, value)
-        kwargs.setdefault("default_env", env)
+            kwargs.setdefault("default_env", dict(self.environment))
 
         # java or other
         executable_cmdline = self.executable_cmdline

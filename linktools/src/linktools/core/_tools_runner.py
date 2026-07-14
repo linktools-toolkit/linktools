@@ -29,14 +29,20 @@ class ToolRunner:
         self._environ = environ
 
     def popen(self, resolved: "ResolvedTool", args: "Sequence[str]" = (), *,
-              include_tools: bool = True, env_overrides: "dict[str, str] | None" = None,
+              env_overrides: "dict[str, str] | None" = None,
               **kwargs: "Any") -> "Any":
-        """Spawn the resolved tool; return the runtime Process (do not wait)."""
-        env = self._environ.subprocess_env(
-            include_tools=include_tools, overrides=env_overrides)
-        env.update(resolved.env)
+        """Spawn the resolved tool; return the runtime Process (do not wait).
+
+        The base environment (os.environ, this project's profile-declared
+        "environment" overlay, the managed-tools stub PATH) is built by
+        ``popen()`` itself -- only the tool's own env and any explicit
+        ``env_overrides`` are this call's concern.
+        """
+        append_env = dict(resolved.env)
+        if env_overrides:
+            append_env.update(env_overrides)
         command = [resolved.executable] + [str(a) for a in args]
-        return popen(*command, env=env, **kwargs)
+        return popen(*command, append_env=append_env or None, **kwargs)
 
     def run(self, resolved: "ResolvedTool", args: "Sequence[str]" = (), *,
             check: bool = True, timeout: "TimeoutType" = None, **kwargs: "Any") -> int:

@@ -4,7 +4,9 @@
 under ``PersistentSource`` / cntr's installed-container and repo state."""
 
 import contextlib
+import copy
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +17,7 @@ from ..utils import atomic_write
 if TYPE_CHECKING:
     from typing import Any, Iterator
 
-__all__ = ["ConfigStore"]
+__all__ = ["ConfigStore", "ConfigNamespace"]
 
 
 class ConfigStore(object):
@@ -26,6 +28,7 @@ class ConfigStore(object):
         self._lock_manager = lock_manager
         self._data: "dict[str, Any]" = {}
         self._revision = 0
+        self._tx_owner = threading.local()
         self.reload()
 
     @property
@@ -84,7 +87,19 @@ class ConfigStore(object):
 
     @contextlib.contextmanager
     def _locked(self) -> "Iterator[None]":
-        """Acquire the cross-process lock, reread, yield, then flush on exit."""
+        """Acquire the cross-process lock, reread, yield, then flush on exit.
+
+        Reentrant for the thread already holding it (e.g. an ordinary set()
+        called from within a namespace transaction on the same store): reused
+        directly rather than acquired again, since a fresh ``FileLock``/
+        ``process_lock`` object per call is not guaranteed OS-level reentrant
+        on the same path, and re-reading here would discard whatever the
+        outer call already has staged in memory. Safe to skip both: nobody
+        else can be writing this file while this thread holds the lock.
+        """
+        if getattr(self._tx_owner, "value", None) == threading.get_ident():
+            yield
+            return
         if self._lock_manager is not None:
             lock = self._lock_manager.process_lock("config:" + self._path.name)
         else:
@@ -94,7 +109,11 @@ class ConfigStore(object):
             lock = FileLock(str(self._path) + ".lock")
         with lock:
             self.reload()
-            yield
+            self._tx_owner.value = threading.get_ident()
+            try:
+                yield
+            finally:
+                self._tx_owner.value = None
 
     # -- read ---------------------------------------------------------------
 
@@ -162,5 +181,82 @@ class ConfigStore(object):
             self._data = previous
             raise
 
+    def namespace(self, name: str) -> "ConfigNamespace":
+        """A namespaced view over this store -- see :class:`ConfigNamespace`."""
+        return ConfigNamespace(self, name)
+
     def __repr__(self) -> str:
         return "ConfigStore(path=%r, keys=%d)" % (str(self._path), len(self._data))
+
+
+class ConfigNamespace(object):
+    """A namespaced key/value view over one :class:`ConfigStore`.
+
+    Mirrors ``CacheNamespace``'s ``get``/``set``/``pop``/``transaction``
+    shape, for persistent (not swept, not TTL-expired) per-owner state --
+    e.g. a container's own operational settings. Every namespace of one
+    store shares its single JSON file; a namespace's data lives nested
+    under one top-level key (its name) holding a dict.
+    """
+
+    def __init__(self, store: "ConfigStore", name: str) -> None:
+        self._store = store
+        self._name = name
+        self._tx_data: "dict[str, Any] | None" = None  # set only inside transaction()
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _snapshot(self) -> "dict[str, Any]":
+        if self._tx_data is not None:
+            return self._tx_data
+        # Deep copy: ConfigStore.get() returns a live reference into its own
+        # _data, not a fresh decode like CacheNamespace's SQLite-blob reads --
+        # a caller mutating a nested value in the returned dict must never
+        # silently corrupt this store's in-memory state without going
+        # through set()/a transaction.
+        return copy.deepcopy(self._store.get(self._name, {}) or {})
+
+    def get(self, key: str, default: "Any" = None) -> "Any":
+        return self._snapshot().get(key, default)
+
+    def keys(self) -> "list[str]":
+        return list(self._snapshot().keys())
+
+    def set(self, key: str, value: "Any") -> None:
+        if self._tx_data is not None:
+            self._tx_data[key] = value
+            return
+        with self.transaction():
+            self.set(key, value)
+
+    def pop(self, key: str, default: "Any" = None) -> "Any":
+        if self._tx_data is not None:
+            return self._tx_data.pop(key, default)
+        with self.transaction():
+            return self.pop(key, default)
+
+    @contextlib.contextmanager
+    def transaction(self) -> "Iterator[ConfigNamespace]":
+        """Run a batch of get/set/pop against a consistent snapshot,
+        flushing once on exit. Refuses to nest -- see ``ConfigStore._locked``."""
+        with self._store._locked():
+            self._tx_data = copy.deepcopy(self._store._data.get(self._name, {}) or {})
+            previous = copy.deepcopy(self._tx_data)
+            try:
+                yield self
+            except Exception:
+                self._tx_data = None
+                raise
+            if self._tx_data != previous:
+                previous_all = self._store._data
+                new_all = dict(self._store._data)
+                new_all[self._name] = self._tx_data
+                self._store._data = new_all
+                self._store._flush_or_rollback(previous_all)
+                self._store._touch()
+            self._tx_data = None
+
+    def __repr__(self) -> str:
+        return "ConfigNamespace(store=%r, name=%r)" % (self._store, self._name)

@@ -77,12 +77,12 @@ def test_storage_path_from_global_file(monkeypatch, tmp_path):
     assert str(env.paths.storage) == str(tmp_path / "global-storage")
 
 
-def test_storage_path_global_file_overrides_local_file(monkeypatch, tmp_path):
+def test_storage_path_local_file_overrides_global_file(monkeypatch, tmp_path):
     home, cwd = tmp_path / "home", tmp_path / "cwd"
     _write(home / ".linktools" / "linktools.json", {"environment": {"STORAGE_PATH": str(tmp_path / "global-storage")}})
     _write(cwd / ".linktools.json", {"environment": {"STORAGE_PATH": str(tmp_path / "local-storage")}})
     env = _make_environ(monkeypatch, storage=None)
-    assert str(env.paths.storage) == str(tmp_path / "global-storage")
+    assert str(env.paths.storage) == str(tmp_path / "local-storage")
 
 
 def test_profile_outranks_os_env(monkeypatch, tmp_path):
@@ -90,7 +90,7 @@ def test_profile_outranks_os_env(monkeypatch, tmp_path):
     _write(home / ".linktools" / "linktools.json", {"environment": {"STORAGE_PATH": str(tmp_path / "global-storage")}})
     _write(cwd / ".linktools.json", {"environment": {"STORAGE_PATH": str(tmp_path / "local-storage")}})
     env = _make_environ(monkeypatch, storage=str(tmp_path / "env-storage"))
-    assert str(env.paths.storage) == str(tmp_path / "global-storage")
+    assert str(env.paths.storage) == str(tmp_path / "local-storage")
 
 
 def test_corrupt_local_file_raises_not_silently_ignored(monkeypatch, tmp_path):
@@ -140,4 +140,4 @@ def test_relative_storage_path_does_not_crash_config_store(monkeypatch, tmp_path
     cwd = tmp_path / "cwd"
     _write(cwd / ".linktools.json", {"environment": {"STORAGE_PATH": "./storage"}})
     env = _make_environ(monkeypatch, storage=None)
-    env.config_store  # must not raise "Unsafe path" from mixing relative/absolute paths
+    env._config_store  # must not raise "Unsafe path" from mixing relative/absolute paths

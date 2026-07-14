@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ._paths import EnvironmentPaths
     from ._logging import LoggingManager
     from ._locks import LockManager
-    from ..cache import CacheStore
+    from ._cache import CacheStore
     from ._config_store import ConfigStore
     from ._download import DownloadManager
     from ._profile import ProjectProfile
@@ -188,7 +188,7 @@ class BaseEnviron(abc.ABC):
         """
         from ._paths import EnvironmentPaths
 
-        profile = self._profile
+        profile = self.profile
         prefix = metadata.__name__.upper()
         environment = profile.get("environment", {})
 
@@ -239,13 +239,27 @@ class BaseEnviron(abc.ABC):
         ``environ.cache.namespace(name)`` for isolated key spaces. Per-thread
         connections are managed inside the store.
         """
-        from ..cache import CacheStore
+        from ._cache import CacheStore
 
         self.paths.ensure_cache()
         return CacheStore(self.paths.cache / "cache.db")
 
+    def build_config_store(self, name: str) -> "ConfigStore":
+        """A ``ConfigStore`` for ``<config>/name``, process-locked via ``self.locks``.
+
+        Shared constructor behind ``config_store`` and any other
+        persistent, user-editable JSON store kept under ``paths.config``
+        (e.g. cntr's per-container settings) -- callers should still cache
+        the result themselves (as a ``cached_property``) rather than call
+        this more than once for the same ``name``.
+        """
+        from ._config_store import ConfigStore
+
+        self.paths.ensure_config()
+        return ConfigStore(self.paths.config / name, lock_manager=self.locks)
+
     @cached_property(lock=True)
-    def config_store(self) -> "ConfigStore":
+    def _config_store(self) -> "ConfigStore":
         """Persistent, user-editable JSON store.
 
         Returns:
@@ -255,46 +269,12 @@ class BaseEnviron(abc.ABC):
         INSTALLED_CONTAINERS) that must NOT live in the cache. Distinct file and
         lifecycle from ``cache``; written atomically under a process lock.
         """
-        from ._config_store import ConfigStore
+        store = self.build_config_store("settings.json")
 
-        self.paths.ensure_config()
-        return ConfigStore(self.paths.config / "settings.json", lock_manager=self.locks)
+        from ._migrate import migrate_legacy_config_cfg
+        migrate_legacy_config_cfg(self, store)
 
-    @cached_property(lock=True)
-    def downloads(self) -> "DownloadManager":
-        """Unified download manager.
-
-        Returns:
-            DownloadManager: The operation result.
-
-        Locks via ``self.locks``, stores resume metadata in ``self.cache``;
-        consumers migrate from the legacy UrlFile (core/_url.py) to this.
-        """
-        from ._download import DownloadManager
-
-        return DownloadManager(self)
-
-    def subprocess_env(self, include_tools=True, overrides=None):
-        """Build a subprocess environment dict.
-
-        Returns a fresh mapping (never mutates the process ``os.environ``): the
-        managed-tools stub dir is prepended to PATH so tools resolve without the
-        global PATH mutation the legacy ``_create_tools`` did, then ``overrides``
-        are applied.
-        """
-        env = dict(os.environ)
-        if include_tools:
-            try:
-                stub = str(self.tools.stub_path)
-                if stub:
-                    rest = [p for p in env.get("PATH", "").split(os.pathsep)
-                            if p and p != stub]
-                    env["PATH"] = os.pathsep.join([stub] + rest)
-            except Exception:
-                pass
-        if overrides:
-            env.update(overrides)
-        return env
+        return store
 
     def get_path(self, *paths: str) -> "Path":
         """Return the path.
@@ -343,29 +323,43 @@ class BaseEnviron(abc.ABC):
         return path
 
     def clean_temp_files(self, *paths: str, expire_days: int = 7) -> None:
-        """Remove expired temporary files.
+        """Remove expired temporary/cache/download files.
 
         Args:
-            paths (str): The paths value.
+            paths (str): Subpath under the temp directory to scope the
+                temp-directory sweep to.
             expire_days (int): The expire_days value.
+
+        Sweeps ``temp`` (optionally scoped to ``paths``), plus the whole
+        ``cache`` (including stale lock files under ``cache/locks``) and
+        ``downloads`` (orphaned partial-download staging) directories --
+        everything ``EnvironmentPaths`` documents as regenerable/ephemeral.
+        ``data`` and ``config`` are never swept: they hold persistent user
+        state.
         """
         current_time = time.time()
         target_time = current_time - expire_days * 24 * 60 * 60
 
-        temp_path = self.get_temp_path(*paths)
-        for root, dirs, files in os.walk(temp_path, topdown=False):
+        self._remove_expired(self.get_temp_path(*paths), target_time)
+        self._remove_expired(self.paths.cache, target_time)
+        self._remove_expired(self.paths.downloads, target_time)
+
+    def _remove_expired(self, root: "PathType", target_time: float) -> None:
+        """Remove files/empty directories under ``root`` last touched before
+        ``target_time`` (a POSIX timestamp)."""
+        for parent, dirs, files in os.walk(root, topdown=False):
             for name in files:
-                path = os.path.join(root, name)
+                path = os.path.join(parent, name)
                 last_time = max(
                     os.path.getatime(path),
                     os.path.getctime(path),
                     os.path.getmtime(path),
                 )
                 if last_time < target_time:
-                    self.logger.info(f"Remove expired temp file: {path}")
+                    self.logger.info(f"Remove expired file: {path}")
                     os.remove(path)
             for name in dirs:
-                path = os.path.join(root, name)
+                path = os.path.join(parent, name)
                 if os.path.exists(path) and not os.listdir(path):
                     last_time = max(
                         os.path.getatime(path),
@@ -373,7 +367,7 @@ class BaseEnviron(abc.ABC):
                         os.path.getmtime(path),
                     )
                     if last_time < target_time:
-                        self.logger.info(f"Remove empty temp directory: {path}")
+                        self.logger.info(f"Remove empty directory: {path}")
                         shutil.rmtree(path, ignore_errors=True)
 
     @cached_property
@@ -423,14 +417,14 @@ class BaseEnviron(abc.ABC):
         return ConfigDict(DEBUG=False)
 
     @cached_property(lock=True)
-    def _profile(self) -> "ProjectProfile":
+    def profile(self) -> "ProjectProfile":
         """Merged global and local profile for this process's own root.
 
         This profile is shared by bootstrap path resolution and global config.
         """
         from ._profile import ProjectProfile
 
-        return ProjectProfile(ProjectProfile.global_path(), ProjectProfile.local_path())
+        return ProjectProfile.for_root(global_=True)
 
     def _create_config(self) -> "Config":
         """Build the process-wide, ConfigSchema-backed main Config.
@@ -457,7 +451,7 @@ class BaseEnviron(abc.ABC):
         )
 
         schema = ConfigSchema()
-        profile = self._profile
+        profile = self.profile
         return NewConfig(
             self,
             schema,
@@ -468,7 +462,7 @@ class BaseEnviron(abc.ABC):
                     (os.environ, env_prefix),
                 ),
                 RuntimeOverrideSource(),
-                PersistentSource(self.config_store, namespace),
+                PersistentSource(self._config_store, namespace),
                 DictSource(self.global_config, name="global-config"),
                 DefaultSource(schema),
             ],
@@ -500,33 +494,9 @@ class BaseEnviron(abc.ABC):
         """
         self.config.set(key, value)
 
-    def close(self):
-        """Close all owned resources.
-
-        Idempotent. Closes cache connections, logging handlers, and download
-        tasks owned by this Environment. Does NOT close other Environment's
-        resources or the root logger.
-        """
-        # Cache (SQLite connections are per-thread; close this thread's).
-        cache = getattr(self, "_cache", None)
-        if cache is not None:
-            cache.close()
-        # Config store (no persistent connection to close, but flush is atomic).
-        # Logging (unregister redactor from global factory).
-        logging_mgr = getattr(self, "_logging", None)
-        if logging_mgr is not None:
-            logging_mgr.close()
-        self._closed = True
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
 
     def _create_tools(self) -> "Tools":
         from ._tools import Tools
-        # ConfigDict is defined above (inlined)
 
         config = ConfigDict()
 
@@ -542,10 +512,7 @@ class BaseEnviron(abc.ABC):
             import yaml
             config.update_from_file(develop_path, yaml.safe_load)
 
-        tools = Tools(self, config)
-        # do NOT mutate os.environ["PATH"]. Subprocesses that need the
-        # tools stub resolve it via env.subprocess_env() (Tool.popen, ToolRunner).
-        return tools
+        return Tools(self, config)
 
     @cached_property(lock=True)
     def tools(self) -> "Tools":
@@ -580,17 +547,22 @@ class BaseEnviron(abc.ABC):
         Returns:
             UrlFile: The operation result.
         """
+        from urllib.parse import urlsplit
         from ._download import HttpFile, LocalFile
+        from ..errors import DownloadError
 
         if not isinstance(url, str):
             url = str(url)
 
-        if url.startswith("http://") or url.startswith("https://"):  # noqa
+        result = urlsplit(url)
+        scheme = result.scheme.lower()
+        if scheme in ("http", "https"):
             return HttpFile(self, url)
-        elif url.startswith("file://"):
-            return LocalFile(self, url[len("file://"):])
-
-        return LocalFile(self, url)
+        elif scheme == "file":
+            return LocalFile(self, result.path)
+        elif scheme == "" or os.path.isabs(url):
+            return LocalFile(self, url)
+        raise DownloadError(f"unsupported url scheme: {result.scheme!r}")
 
 
 class Environ(BaseEnviron):

@@ -30,12 +30,12 @@ if TYPE_CHECKING:
 
 _REPO_KEY = "INSTALLED_REPOS"
 
-# Recognized protocol prefixes for a remote Git URL. SCP-like addresses
+# Recognized schemes for a remote Git URL. SCP-like addresses
 # (`git@host:repo.git`, `user@host:path`) are deliberately not recognized --
-# they are indistinguishable from a bare local path without also parsing
-# Windows drive letters/UNC prefixes, so they are left as local paths rather
-# than risk misrouting one into Git cloning.
-_GIT_PREFIXES = ("http://", "https://", "ssh://", "git://", "file://")
+# urlsplit has no scheme for them (the `@` isn't a valid scheme character),
+# so they are left as local paths rather than risk misrouting one into Git
+# cloning.
+_GIT_SCHEMES = frozenset(("http", "https", "ssh", "git", "file"))
 
 _REPO_TYPE_GIT = "git"
 _REPO_TYPE_LOCAL = "local"
@@ -46,12 +46,13 @@ def _is_remote_git_url(value: "Any") -> bool:
     """Whether ``value`` is a Git URL this module clones/updates via
     RepoGit, as opposed to a local filesystem path it symlinks in as-is.
 
-    Only explicit protocol prefixes count -- a Windows drive path
-    (``C:\\repo``, ``C:/repo``), a UNC path (``\\\\server\\share``), or a
-    relative/absolute local path never matches one, so they always fall
-    through to the local-repository branch below.
+    Only an explicit recognized scheme counts -- a Windows drive path
+    (``C:\\repo``, ``C:/repo``, parsed by ``urlsplit`` as scheme ``"c"``), a
+    UNC path (``\\\\server\\share``), or a relative/absolute local path never
+    matches one, so they always fall through to the local-repository branch
+    below.
     """
-    return isinstance(value, str) and value.startswith(_GIT_PREFIXES)
+    return isinstance(value, str) and urlsplit(value).scheme.lower() in _GIT_SCHEMES
 
 
 def _reject_credential_url(url: str) -> None:
@@ -136,10 +137,10 @@ class RepoService(object):
         return path
 
     def _load(self) -> "dict[str, dict[str, str]]":
-        return self.manager._persistent_store.get(_REPO_KEY, {})
+        return self.manager.settings.get(_REPO_KEY, {})
 
     def _dump(self, repos: "dict[str, dict[str, str]]") -> None:
-        self.manager._persistent_store.set(_REPO_KEY, repos)
+        self.manager.settings.set(_REPO_KEY, repos)
 
     def get_all(self) -> "dict[str, dict[str, str]]":
         """Every configured repository, as an independent copy -- `_load()`
@@ -169,7 +170,7 @@ class RepoService(object):
             # See InstalledStateStore.add for why this reload is necessary:
             # the lock alone doesn't stop this read-modify-write from
             # clobbering a concurrent writer's change with stale data.
-            self.manager._persistent_store.reload()
+            self.manager.settings.reload()
             repos = self._load()
 
             if _is_remote_git_url(url):
@@ -363,7 +364,7 @@ class RepoService(object):
     def _revalidate_after_update(self, repo_path: "str | None") -> "tuple[bool, str | None]":
         try:
             repo_path = self._validate_repo_root(repo_path)
-            file_config = ProjectProfile(ProjectProfile.local_path(repo_path))
+            file_config = ProjectProfile.for_root(repo_path)
             ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
         except ConfigValidationError as exc:
             return False, f"incompatible with this host after update: {exc}"
@@ -375,7 +376,7 @@ class RepoService(object):
 
     def remove(self, url: str) -> None:
         with self.manager.environ.locks.process_lock("cntr:repo"):
-            self.manager._persistent_store.reload()
+            self.manager.settings.reload()
             repos = self._load()
             if url not in repos:
                 raise ContainerError(f"Repository `{url}` not found.")
@@ -467,11 +468,10 @@ class RepoService(object):
         # re-implemented here) is the only thing that decides load success,
         # so a present-but-broken file is reported as present + incompatible
         # rather than silently downgraded to absent.
-        local_path = ProjectProfile.local_path(repo_path)
-        info["local_config"] = "present" if os.path.lexists(local_path) else "absent"
+        info["local_config"] = "present" if os.path.lexists(ProjectProfile.local_path(repo_path)) else "absent"
 
         try:
-            file_config = ProjectProfile(local_path)
+            file_config = ProjectProfile.for_root(repo_path)
             info["requires"] = dict(file_config.get("requires", {}))
             info["ignored_environment_keys"] = self._find_reserved_environment_keys(file_config)
             ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
@@ -538,7 +538,7 @@ class RepoService(object):
         # itself, to avoid stale metadata drifting from the on-disk
         # .linktools.json.
         try:
-            file_config = ProjectProfile(ProjectProfile.local_path(repo_path))
+            file_config = ProjectProfile.for_root(repo_path)
             ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
         except Exception as exc:
             raise ContainerError(f"Repository `{repo_path}` is not usable: {exc}") from exc

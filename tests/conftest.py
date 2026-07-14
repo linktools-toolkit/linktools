@@ -32,7 +32,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _close_leaked_cache_stores_after_each_test():
     yield
-    from linktools.cache import CacheStore
+    from linktools.core import CacheStore
 
     for obj in gc.get_objects():
         if isinstance(obj, CacheStore):

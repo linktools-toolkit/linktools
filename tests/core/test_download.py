@@ -17,7 +17,7 @@ from linktools.core import (
     CompositeValidator,
 )
 from linktools.errors import DownloadError
-from linktools.cache import CacheStore
+from linktools.core import CacheStore
 from linktools.core._locks import LockManager
 from linktools.types import MISSING
 

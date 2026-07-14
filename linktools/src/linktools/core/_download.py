@@ -430,7 +430,8 @@ class UrlFile(metaclass=abc.ABCMeta):
                 )
                 # DownloadManager owns atomic landing/resume/gzip/retry; UrlFile
                 # validators are an additional layer applied to the landed file.
-                self._environ.downloads.download(request, on_progress=None)
+                manager = DownloadManager(self._environ)
+                manager.download(request, on_progress=None)
                 if validator is not None:
                     validator.validate(destination)
                 return destination

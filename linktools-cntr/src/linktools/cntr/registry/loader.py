@@ -102,7 +102,7 @@ class ContainerLoader:
             # warning required. A repository whose local requirement isn't
             # satisfied is skipped: warned, not imported.
             try:
-                file_config = ProjectProfile(ProjectProfile.local_path(repo_path))
+                file_config = ProjectProfile.for_root(repo_path)
                 ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
             except (ConfigError, ConfigValidationError) as exc:
                 manager.logger.warning(f"Repository `{display_url}` failed compatibility check, skip: {exc}")

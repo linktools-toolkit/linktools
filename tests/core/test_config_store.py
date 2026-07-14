@@ -202,3 +202,98 @@ def test_concurrent_writes_do_not_lose_keys(store, tmp_path):
     assert not errors
     assert a.reload() is None or True
     assert "a" in a.keys() and "b" in a.keys()
+
+
+# -- ConfigNamespace ------------------------------------------------------
+
+def test_namespace_get_set_roundtrip(store):
+    ns = store.namespace("app:one")
+    assert ns.get("k", "fallback") == "fallback"
+    ns.set("k", "v")
+    assert ns.get("k") == "v"
+
+
+def test_namespace_isolated_from_other_namespaces(store):
+    a = store.namespace("app:a")
+    b = store.namespace("app:b")
+    a.set("k", "a-value")
+    assert b.get("k") is None
+    assert a.get("k") == "a-value"
+
+
+def test_namespace_does_not_leak_into_store_top_level_keys(store):
+    ns = store.namespace("app:one")
+    ns.set("k", "v")
+    # The namespace's data lives nested under its own name, not as a
+    # top-level store key -- "k" itself must never collide with an
+    # unrelated top-level config key of the same name.
+    assert "k" not in store.keys()
+    assert store.get("app:one") == {"k": "v"}
+
+
+def test_namespace_pop(store):
+    ns = store.namespace("app:one")
+    ns.set("k", "v")
+    assert ns.pop("k") == "v"
+    assert ns.get("k") is None
+    assert ns.pop("missing", "fallback") == "fallback"
+
+
+def test_namespace_keys(store):
+    ns = store.namespace("app:one")
+    ns.set("a", 1)
+    ns.set("b", 2)
+    assert set(ns.keys()) == {"a", "b"}
+
+
+def test_namespace_transaction_persists_once(store):
+    ns = store.namespace("app:one")
+    with ns.transaction() as tx:
+        tx.set("a", 1)
+        tx.set("b", 2)
+    assert ns.get("a") == 1
+    assert ns.get("b") == 2
+
+
+def test_namespace_transaction_rolls_back_in_memory_on_error(store):
+    ns = store.namespace("app:one")
+    ns.set("a", 1)
+    with pytest.raises(RuntimeError):
+        with ns.transaction() as tx:
+            tx.set("a", 2)
+            raise RuntimeError("boom")
+    assert ns.get("a") == 1
+
+
+def test_namespace_transaction_survives_a_fresh_snapshot(store):
+    # get()/set() outside a transaction read/write a fresh snapshot each
+    # time -- not a live reference the caller could accidentally mutate.
+    ns = store.namespace("app:one")
+    ns.set("nested", {"x": 1})
+    snapshot = ns.get("nested")
+    snapshot["x"] = 999
+    assert ns.get("nested") == {"x": 1}
+
+
+def test_namespace_transaction_reenters_a_plain_store_operation(store):
+    # A plain store.set() from within a namespace transaction on the same
+    # store (e.g. ordinary config resolution persisting a value while a
+    # container's settings.transaction() is open) must reuse the held lock
+    # rather than deadlock or raise -- and both writes must survive.
+    ns = store.namespace("app:one")
+    with ns.transaction() as tx:
+        tx.set("a", 1)
+        store.set("unrelated", "value")
+    assert ns.get("a") == 1
+    assert store.get("unrelated") == "value"
+
+
+def test_two_namespaces_of_the_same_store_can_nest_transactions(store):
+    a = store.namespace("app:a")
+    b = store.namespace("app:b")
+    with a.transaction() as tx_a:
+        tx_a.set("k", "a-value")
+        with b.transaction() as tx_b:
+            tx_b.set("k", "b-value")
+    assert a.get("k") == "a-value"
+    assert b.get("k") == "b-value"

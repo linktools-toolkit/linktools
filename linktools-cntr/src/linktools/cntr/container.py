@@ -112,10 +112,33 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def exposes(self) -> "Iterable[ExposeLink]":
         return []
 
-    @property
+    @cached_property
     def settings(self):
-        """Return this container's operational cache namespace."""
-        return self.manager.environ.cache.namespace("cntr:app:" + self.name)
+        """Return this container's persistent operational settings namespace.
+
+        Backed by ``manager.settings`` (``cntr.json``, not
+        ``environ.cache``): unlike cache, this is never age-swept by
+        ``clean_temp_files``, since real user configuration lives here (e.g.
+        ``ct-cntr mount``'s persisted paths) -- data an unused-for-N-days
+        sweep must never silently drop.
+        """
+        namespace_key = "cntr:app:" + self.name
+        new_ns = self.manager.settings.namespace(namespace_key)
+
+        # One-time migration: this namespace used to live in the cache store
+        # (regenerable/age-swept by design); anything a pre-existing
+        # installation already persisted there must move to the permanent
+        # store instead of silently disappearing under the next sweep.
+        old_ns = self.environ.cache.namespace(namespace_key)
+        old_keys = old_ns.keys()
+        if old_keys and not new_ns.keys():
+            with new_ns.transaction() as ns:
+                for key in old_keys:
+                    ns.set(key, old_ns.get(key))
+            for key in old_keys:
+                old_ns.delete(key)
+
+        return new_ns
 
     # -- Direct access to shared manager services -------------------------
     # Lightweight `@property`, not `@cached_property`: the instance itself is

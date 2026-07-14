@@ -69,7 +69,7 @@ def test_validate_raises_on_a_malformed_persisted_value(fresh_manager):
     # use permissive string/path casts that never fail on arbitrary text, so
     # this is the only reliable way to exercise a cast failure.
     fresh_manager.env_config.define(ConfigField(name="TEST_PORT", cast=int))
-    store = fresh_manager.environ.config_store
+    store = fresh_manager.environ._config_store
     store.set("container.TEST_PORT", "not-a-number")
     fresh_manager.env_config.reload()
 

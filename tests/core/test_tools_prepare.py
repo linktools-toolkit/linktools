@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.cache import CacheStore
+from linktools.core import CacheStore
 from linktools.core import DownloadManager
 from linktools.core._locks import LockManager
 from linktools.core._tools import Tools

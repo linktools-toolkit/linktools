@@ -6,23 +6,18 @@ import pytest
 
 from linktools.core import environ
 from linktools.core._tools_runner import ResolvedTool, ToolRunner
+from linktools.runtime.process import _subprocess_env
 
 
-def test_subprocess_env_returns_fresh_dict_with_overrides():
-    # subprocess_env returns its own mapping (not os.environ) and applies
-    # overrides without leaking them into os.environ.
+def test_subprocess_env_returns_fresh_dict():
+    # _subprocess_env returns its own mapping, not os.environ itself.
     import os
-    env = environ.subprocess_env(overrides={"LT_TEST": "1"})
+    env = _subprocess_env()
     assert env is not os.environ
-    assert env["LT_TEST"] == "1"
-    assert "LT_TEST" not in os.environ  # override did not leak to the process env
-    # (The legacy _create_tools still mutates os.environ["PATH"] so subprocesses
-    #  that invoke tools by name resolve the stub; removing that is a §10.11
-    #  follow-up. subprocess_env itself prepends the stub cleanly here.)
 
 
 def test_subprocess_env_prepends_tools_stub():
-    env = environ.subprocess_env()
+    env = _subprocess_env()
     stub = str(environ.tools.stub_path)
     # stub is first on PATH (managed tools win) without mutating global PATH.
     assert env["PATH"].startswith(stub)

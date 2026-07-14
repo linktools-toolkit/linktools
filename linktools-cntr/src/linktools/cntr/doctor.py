@@ -235,7 +235,7 @@ class Doctor:
             # just because it has nothing to check.
             file_config = None
             try:
-                file_config = ProjectProfile(ProjectProfile.local_path(repo_path))
+                file_config = ProjectProfile.for_root(repo_path)
             except ConfigError as exc:
                 findings.append(Finding(
                     WARN, f"repo `{url}` has an invalid .linktools.json: {exc}",

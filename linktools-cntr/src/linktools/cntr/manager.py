@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """``ContainerManager``: the facade owning config, container discovery,
 lifecycle, state, repos, and every other cntr subsystem."""
+import json
 import os
 import pathlib
 from typing import TYPE_CHECKING
@@ -15,7 +16,7 @@ from .container import BaseContainer, ContainerError, NoContainerInstalledError
 
 if TYPE_CHECKING:
     from typing import Any
-    from linktools.core import Environ
+    from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
     from .operations import ComposeOperations
@@ -180,18 +181,20 @@ class ContainerManager:
         return self.environ.get_temp_path("container")
 
     @cached_property
-    def setting_path(self):
-        path = utils.join_path(self.data_path, "setting")
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+    def settings(self) -> "ConfigStore":
+        """Persistent store for all of cntr's own state: INSTALLED_CONTAINERS/
+        INSTALLED_REPOS (top-level keys) plus each container's own operational
+        settings (namespaced ``cntr:app:<name>`` keys, see BaseContainer.settings).
+        """
+        from ._migrate import migrate_legacy_settings
+
+        return migrate_legacy_settings(
+            self, 
+            self.environ.build_config_store("container.json")
+        )
 
     @cached_property
-    def _persistent_store(self):
-        """Persistent user state: INSTALLED_CONTAINERS / INSTALLED_REPOS."""
-        return self.environ.config_store
-
-    @cached_property
-    def _transient_ns(self):
+    def cache(self) -> "CacheNamespace":
         """Transient settings (RUNNING_CONTAINERS, ...) in the cache store."""
         return self.environ.cache.namespace("cntr")
 

@@ -74,7 +74,7 @@ def test_doctor_runs_on_builtins(fresh_manager):
 
 
 def test_doctor_does_not_write_to_config_store(fresh_manager, monkeypatch):
-    store = fresh_manager.environ.config_store
+    store = fresh_manager.environ._config_store
     writes = []
     original_set = store.set
 

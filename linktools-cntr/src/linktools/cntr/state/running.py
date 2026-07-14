@@ -38,10 +38,10 @@ class RunningStateStore:
         self.manager = manager
 
     def _get(self) -> "list[str]":
-        return list(self.manager._transient_ns.get(_RUNNING_KEY, []) or [])
+        return list(self.manager.cache.get(_RUNNING_KEY, []) or [])
 
     def _set(self, names: "Iterable[str]") -> None:
-        self.manager._transient_ns.set(_RUNNING_KEY, sorted(set(names)))
+        self.manager.cache.set(_RUNNING_KEY, sorted(set(names)))
 
     def _mutate(self, func: "Callable[[set[str]], Iterable[str]]") -> None:
         """Read-modify-write the persisted running set under the same

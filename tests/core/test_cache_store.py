@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Tests for the SQLite CacheStore now used by Environment.cache.
-
-CacheStore (merged into linktools/cache.py alongside the legacy FileCache) backs
-``environ.cache``; FileCache remains as a legacy API in linktools.cache.
-"""
+"""Tests for the SQLite CacheStore now used by Environment.cache."""
 import threading
 
 import pytest
 
-from linktools.cache import CacheStore, JsonCodec, BytesCodec
+from linktools.core import CacheStore, JsonCodec, BytesCodec
 from linktools.errors import (
     CacheValueError, CacheCodecError, CacheBusyError,
 )
@@ -75,7 +71,7 @@ def test_ttl_negative_is_rejected(ns):
 
 def test_ttl_expires_after_time(ns, monkeypatch):
     # The store uses time.time() (UTC unix) for persistent TTL.
-    import linktools.cache as mod
+    import linktools.core._cache as mod
     clock = [1000.0]
     monkeypatch.setattr(mod.time, "time", lambda: clock[0])
     ns.set("k", "v", ttl=10)         # expires at 1010
