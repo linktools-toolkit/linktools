@@ -345,6 +345,8 @@ if __name__ == '__main__':
         @property
         def main(self) -> "CommandMain":
 
+            environ = self.environ
+
             class Main(CommandMain):
 
                 def init_logging(self):
