@@ -137,7 +137,7 @@ def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
         else eps.select(group=group)
     for ep in eps:
         try:
-            yield ep.load()
+            yield ep, ep.load()
         except Exception as e:
             if callable(onerror):
                 onerror(ep.name, e)
@@ -183,7 +183,7 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
                     parent = name[len(prefix):name.rfind(".")]
                 info.id = name[len(prefix):]
                 info.parent_id, info.declared_parent_group = _normalize_parent(parent)
-                info.module = command.module
+                info.module = name
                 info.command = command
                 info.command_name = command.name
                 info.command_description = command.description
@@ -222,7 +222,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
     Returns:
         Generator[_CommandInfo, Any, Any]: The operation result.
     """
-    for obj in _iter_entry_points(group, onerror=onerror):
+    for ep, obj in _iter_entry_points(group, onerror=onerror):
         if isinstance(obj, CommandMain):
             command = obj.command
             parent_id, declared_parent_group = _normalize_parent(command.parent)
@@ -230,7 +230,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
             info.id = _join_id(parent_id, command.name)
             info.parent_id = parent_id
             info.declared_parent_group = declared_parent_group
-            info.module = command.module  # ep.module
+            info.module = ep.module
             info.command = command
             info.command_name = command.name
             info.command_description = command.description
@@ -250,7 +250,7 @@ def iter_entry_points_capabilities(group: str, *, onerror: "ERROR_HANDLER" = "er
     Returns:
         Iterator[Any]: Generated values.
     """
-    for obj in _iter_entry_points(group, onerror=onerror):
+    for _, obj in _iter_entry_points(group, onerror=onerror):
         if isinstance(obj, BaseCapability):
             yield obj
         elif inspect.isclass(obj) and issubclass(obj, BaseCapability):
@@ -1226,33 +1226,25 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
     """Base class for executable command-line commands."""
 
     @property
-    def module(self) -> str:
-        """Module.
-
-        Returns:
-            str: The property value.
-        """
-        return self.__module__
-
-    @property
     def name(self) -> str:
         """Return the name.
 
         Returns:
             str: The property value.
         """
-        name = self.module
+        name = self.__module__
         index = name.rfind(".")
         if index >= 0:
             name = name[index + 1:]
         return name
 
     @property
-    def parent(self) -> "str | None":
-        """Return the parent command id.
+    def parent(self) -> "CommandGroupRef | str | None":
+        """Return the parent command id, or a :class:`CommandGroupRef` to
+        declare a fallback group to materialise if none is registered.
 
         Returns:
-            Optional[str]: The property value.
+            CommandGroupRef | str | None: The property value.
         """
         return None
 
