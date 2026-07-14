@@ -18,10 +18,14 @@ from linktools.ai.model.router import ModelRouter
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
+from linktools.ai.storage.file.approval import FileApprovalStore
 from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+from linktools.ai.storage.file.commit import FileRunCommitCoordinator
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 
 def _model_fn(text: str = '{"response": {"answer": 42}}'):
@@ -68,17 +72,34 @@ def _seed_session(store, session_id) -> None:
 
 
 def _make_runner(tmp_path, pipeline=None):
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 
 def test_run_succeeds_persists_session_run_events_and_checkpoint(tmp_path):
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_model_fn())),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -118,7 +139,10 @@ def test_run_transitions_to_failed_and_appends_run_failed_on_model_error(tmp_pat
     def _boom(messages, info: AgentInfo) -> ModelResponse:
         raise RuntimeError("model exploded")
 
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_boom)))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_boom)),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -181,6 +205,7 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
     log: "list[str]" = []
     pipeline = MiddlewarePipeline(middlewares=(_RecordingMiddleware(log),))
     compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_model_fn())),
         middleware_pipeline=pipeline,
     )
@@ -223,7 +248,10 @@ def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
     # carry no mutable per-Run field at all -- the per-Run ToolContext reaches
     # them via pydantic-ai DI (ctx.deps.tool_context). A run leaves the
     # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_model_fn())),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -316,20 +344,34 @@ def _seed_memory(
 
 
 def _make_runner_with_memory(tmp_path):
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
     from linktools.ai.storage.file.memory import FileMemoryStore
 
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         memory_store=FileMemoryStore(root=tmp_path / "memories"),
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 
 def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry(_echo_model_fn()))
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -366,7 +408,8 @@ def test_memory_store_none_default_leaves_prompt_unchanged(tmp_path):
     # Default runner (memory_store=None) must not inject anything: the echoed
     # prompt is exactly the user prompt (no history seeded -> no history text).
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry(_echo_model_fn()))
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -413,9 +456,17 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
         event_store=FileEventStore(root=tmp_path / "events"),
         checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
         retriever=_StubRetriever(),
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+            run_store=FileRunStore(root=tmp_path / "runs"),
+            session_store=FileSessionStore(root=tmp_path / "sessions"),
+            event_store=FileEventStore(root=tmp_path / "events"),
+        ),
     )
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry(_echo_model_fn()))
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -442,7 +493,8 @@ def test_empty_memory_store_injects_no_memory_section(tmp_path):
     # "" -> no `## Memory` section added -> output unchanged from the no-memory
     # baseline.
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry(_echo_model_fn()))
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -481,7 +533,10 @@ def test_run_model_timeout_transitions_run_to_failed(tmp_path):
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_slow_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -535,7 +590,10 @@ def test_run_max_tokens_exceeded_transitions_run_to_failed(tmp_path):
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_heavy_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -588,7 +646,10 @@ def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_light_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -631,7 +692,10 @@ def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
 def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
     """Defaults (timeout_seconds=None, max_tokens=None) must reproduce the
     baseline lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(_model_fn())))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(_model_fn())),
+    )
     compiled = asyncio.run(
         compiler.compile(
             AgentSpec(
@@ -666,3 +730,87 @@ def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
     assert "42" in str(result.output)
     rec = asyncio.run(runner._run_store.get("run-def"))
     assert rec.status == RunStatus.SUCCEEDED
+
+
+def test_cost_budget_exceeded_raises(tmp_path):
+    """WP-14 §18: ModelPolicy.budget is enforced via a ModelPricingProvider --
+    a response whose token cost exceeds the Decimal budget raises
+    ModelPolicyExceededError (the budget field is no longer inert)."""
+    from decimal import Decimal
+
+    from pydantic_ai.usage import RunUsage
+
+    from linktools.ai.errors import ModelPolicyExceededError
+    from linktools.ai.model.pricing import ModelPricing, StaticModelPricingProvider
+
+    def _usage_model(messages, info):
+        return ModelResponse(
+            parts=[TextPart(content='{"response": "x"}')],
+            usage=RunUsage(input_tokens=1000, output_tokens=1000),
+        )
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_usage_model))
+    runner = _make_runner(tmp_path)
+    runner._pricing_provider = StaticModelPricingProvider(
+        {
+            "test-model": ModelPricing(
+                model_id="test-model",
+                input_cost_per_token=Decimal("0.001"),
+                output_cost_per_token=Decimal("0.001"),
+            )
+        }
+    )
+    spec = AgentSpec(
+        id="b",
+        name="b",
+        model=ModelPolicy(
+            primary="test-model", budget=Decimal("0.5")
+        ),  # 2000 tokens * 0.001 = 2.0 > 0.5
+        instructions=PromptSpec(instructions="hi"),
+    )
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
+    compiled = asyncio.run(compiler.compile(spec))
+
+    async def _run():
+        await runner.run(
+            compiled, RunInput(prompt="hi"), _run_context("run-b", "session-1")
+        )
+
+    with pytest.raises(ModelPolicyExceededError):
+        asyncio.run(_run())
+
+
+def test_budget_without_pricing_fails_closed(tmp_path):
+    """WP-14 §18.6: a ModelPolicy.budget set with no pricing provider is a
+    configuration error -- the run refuses to start (fail-closed)."""
+    from decimal import Decimal
+
+    from linktools.ai.errors import ModelPolicyExceededError
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_model_fn()))
+    runner = _make_runner(tmp_path)
+    # No pricing_provider wired.
+    spec = AgentSpec(
+        id="c",
+        name="c",
+        model=ModelPolicy(primary="test-model", budget=Decimal("1")),
+        instructions=PromptSpec(instructions="hi"),
+    )
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
+    compiled = asyncio.run(compiler.compile(spec))
+
+    async def _run():
+        await runner.run(
+            compiled, RunInput(prompt="hi"), _run_context("run-c", "session-1")
+        )
+
+    with pytest.raises(ModelPolicyExceededError):
+        asyncio.run(_run())

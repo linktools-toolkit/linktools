@@ -3,9 +3,9 @@
 """EventEnvelope[TEvent]: the strongly-typed wrapper every event payload travels
 in. Generic (not PEP-695 `class Foo[T]`) for Python 3.10 support."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Generic, TypeVar
+from typing import Any, Generic, Mapping, TypeVar
 
 TEvent = TypeVar("TEvent")
 
@@ -26,3 +26,9 @@ class EventEnvelope(Generic[TEvent]):
     session_id: str
     runnable_id: str
     payload: TEvent
+    # Free-form per-event metadata. The FileRunCommitCoordinator tags the
+    # critical pause/complete events with ``commit_id`` so it can dedup by
+    # (run_id, commit_id, event_type) -- a run may legitimately pause more
+    # than once (one event per approval), so deduping by event type alone
+    # would either drop a legitimate second pause or duplicate on recovery.
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)

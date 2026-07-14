@@ -154,6 +154,17 @@ class SwarmCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class SwarmFailed:
+    swarm_run_id: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmCancelled:
+    swarm_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceChanged:
     path: str
     revision: int

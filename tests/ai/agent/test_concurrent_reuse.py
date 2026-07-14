@@ -125,7 +125,7 @@ async def _compiled(pipeline: MiddlewarePipeline):
     """Compile a CompiledAgent whose middleware pipeline captures the per-Run
     ToolContext. The compiled agent carries an extra ``ping`` tool so the model
     has something to call (driving the ``before_tool`` hook)."""
-    compiler = AgentCompiler(
+    compiler = AgentCompiler(tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), 
         model_router=ModelRouter(registry=_registry()),
         middleware_pipeline=pipeline,
     )
@@ -169,14 +169,28 @@ async def _seed_session(store, session_id) -> None:
 
 
 def _make_runner(tmp_path, pipeline) -> AgentRunner:
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         capability_assembler=CapabilityAssembler({"test": _PingProvider()}),
         managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 

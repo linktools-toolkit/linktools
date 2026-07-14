@@ -17,16 +17,16 @@ if TYPE_CHECKING:
 def build_default_command_policy(
     *,
     approval_store: "ApprovalStore | None" = None,
-    pause_on_approval: bool = True,
     denied_patterns: "tuple[str, ...]" = DEFAULT_DENIED_COMMAND_PATTERNS,
 ) -> ToolExecutor:
-    """A ToolExecutor with a command denylist (+ optional approval pause). This
-    is a convenience preset, not a Runtime default -- pass it explicitly via
+    """A ToolExecutor with a command denylist. A REQUIRE_APPROVAL decision
+    raises RunPaused (the single approval path); wire an ``approval_store`` so
+    the pause can be persisted. This is a convenience preset, not a Runtime
+    default -- pass it explicitly via
     ``Runtime.build(tool_executor=build_default_command_policy(...))``."""
     return ToolExecutor(
         policy=PolicyEngine(rules=(CommandRule(denied_patterns=denied_patterns),)),
         approval_store=approval_store,
-        pause_on_approval=pause_on_approval,
     )
 
 

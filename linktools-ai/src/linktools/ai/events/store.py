@@ -8,7 +8,7 @@ store constructs the EventEnvelope (assigning the next sequence atomically,
 minting event_id, and stamping occurred_at)."""
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .envelope import EventEnvelope
 from .payloads import EventPayload
@@ -32,6 +32,7 @@ class EventStore(Protocol):
         session_id: str,
         runnable_id: str,
         payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope: ...
 
     async def list(

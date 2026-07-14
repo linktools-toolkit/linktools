@@ -137,14 +137,28 @@ def _seed_session(store, session_id) -> None:
 
 
 def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentRunner:
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    if approval_store is None:
+        approval_store = FileApprovalStore(root=tmp_path / "approvals")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
-        approval_store=approval_store,
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
         managed_tool_executor=tool_executor,
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=approval_store,
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 
@@ -155,7 +169,6 @@ def _compile(
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=approval_store,
-        pause_on_approval=True,
     )
     compiler = AgentCompiler(
         model_router=ModelRouter(registry=_registry()),

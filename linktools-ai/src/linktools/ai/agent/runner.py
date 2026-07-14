@@ -52,7 +52,6 @@ import contextlib
 import dataclasses
 import logging
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -61,13 +60,11 @@ from ..errors import (
     ModelPolicyExceededError,
     ModelRoutingError,
     RunConflictError,
+    RunInvariantError,
     RunPaused,
 )
 from ..events.payloads import (
-    ApprovalRequested,
-    RunCompleted,
     RunFailed,
-    RunPaused as RunPausedEvent,
     RunStarted,
 )
 from ..events.context import EventContext, append_event
@@ -78,11 +75,11 @@ from ..policy.engine import ToolContext
 from ..security.redact import redact_exception
 from ..run.cancellation import CancellationToken
 from ..run.checkpoint import CheckpointStore
+from ..run.commit import CompleteRunCommand, PauseRunCommand
 from ..run.context import RunContext
 from ..run.controller import RunController
-from ..run.lifecycle import mark_cancelled, mark_completed, mark_failed
+from ..run.lifecycle import mark_cancelled, mark_failed
 from ..run.models import (
-    RunCheckpoint,
     RunErrorInfo,
     RunInput,
     RunRecord,
@@ -97,21 +94,19 @@ from .dependencies import AgentDependencies
 from .models import CompiledAgent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
-    from contextlib import AbstractAsyncContextManager
+    from collections.abc import AsyncIterator, Sequence
 
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.toolsets import AbstractToolset
 
-    from ..agent.approval import ApprovalStore
     from ..capability.assembler import CapabilityAssembler
     from ..capability.models import CapabilityRuntimeOptions
     from ..execution.protocols import ExecutionBackend
     from ..knowledge.retriever import Retriever
+    from ..session.models import SessionMessage
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
-    from ..storage.sqlalchemy.facade import _UnitOfWork
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,6 +118,21 @@ async def _noop_span():
     fallback for :meth:`AgentRunner._span` when observability is not wired,
     so the lifecycle body has a single ``async with`` shape regardless."""
     yield None
+
+
+def _format_session_history(messages: "Sequence[SessionMessage]") -> str:
+    """Render prior session messages into the MODEL prompt with role prefixes,
+    so an assistant turn is not disguised as user content. This is injected
+    into the model prompt only -- the persisted USER session message is always
+    the caller's original prompt, never this rendering."""
+    lines: "list[str]" = []
+    for message in messages:
+        role = message.role.value.upper()
+        content = message.content
+        if not isinstance(content, str):
+            content = repr(content)
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
 
 
 class AgentRunner:
@@ -138,10 +148,8 @@ class AgentRunner:
         retriever: "Retriever | None" = None,
         observability: "ObservabilitySink | None" = None,
         metrics: "ObservabilityMetrics | None" = None,
-        uow_factory: "Callable[[], AbstractAsyncContextManager[_UnitOfWork]] | None" = None,
         run_controller: "RunController | None" = None,
         execution: "ExecutionBackend | None" = None,
-        approval_store: "ApprovalStore | None" = None,
         capability_assembler: "CapabilityAssembler | None" = None,
         capability_options: "CapabilityRuntimeOptions | None" = None,
         security_pipeline: Any = None,
@@ -149,6 +157,8 @@ class AgentRunner:
         tool_policy_provider: Any = None,
         managed_tool_executor: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
+        commit_coordinator: Any,
+        pricing_provider: Any = None,
     ) -> None:
         self._run_store = run_store
         self._session_store = session_store
@@ -159,13 +169,6 @@ class AgentRunner:
         self._retriever = retriever
         self._observability = observability
         self._metrics = metrics
-        # Cross-store UnitOfWork factory (SqlAlchemy only). When wired, the
-        # pause path wraps checkpoint-save + Run-transition + event-append in
-        # one shared AsyncSession + one transaction, so they commit/rollback
-        # atomically. None for FileStorage -- File cannot
-        # promise cross-store transactions, so the pause path keeps its
-        # best-effort non-atomic shape.
-        self._uow_factory = uow_factory
         # Real cancellation. When wired, execute()
         # registers its driving asyncio.Task + a fresh CancellationToken with
         # the controller so Runtime.cancel(run_id) can actually stop the run
@@ -183,13 +186,6 @@ class AgentRunner:
         # conversational-only run. Holding the backend on the runner (not the
         # compiler) is what decouples AgentCompiler from the filesystem.
         self._execution = execution
-        # File-mode approval persistence for
-        # the pause path (SqlAlchemy mode reaches the approval store via
-        # ``tx.approvals`` inside the UoW instead). None (default) means a
-        # RunPaused with a tool_call_id simply cannot persist its approval in
-        # File mode without this wired -- Runtime.build() always wires it
-        # from storage.approvals.
-        self._approval_store = approval_store
         # Capability Runtime: when an AgentSpec declares non-
         # empty tools and an assembler is wired, execute() resolves those tools
         # into prompt sections + toolsets via the capability providers. Default
@@ -205,6 +201,16 @@ class AgentRunner:
         # wired at construction -- no post-build private-field mutation.
         self._tool_executor_for_managed = managed_tool_executor
         self._security_audit_failure_mode = security_audit_failure_mode
+        # RunCommitCoordinator (required). The runner NEVER writes cross-store
+        # pause/complete state directly: it builds a Pause/CompleteRunCommand
+        # and delegates to the coordinator, which owns the atomic commit (one
+        # transaction for SQL, a journaled sequence for File). Runtime.build
+        # always wires the storage-appropriate coordinator.
+        self._commit_coordinator = commit_coordinator
+        # Optional ModelPricingProvider: when ModelPolicy.budget is set, the
+        # runner computes the per-response cost and refuses to exceed it (and
+        # refuses to run at all if budget is set without pricing -- fail-closed).
+        self._pricing_provider = pricing_provider
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -243,6 +249,31 @@ class AgentRunner:
         from .context_policies import DefaultPromptContextFormatter
 
         return DefaultPromptContextFormatter()
+
+    def _record_success_metrics(
+        self,
+        *,
+        attributes: "dict[str, Any]",
+        started: float,
+        metrics: "ObservabilityMetrics | None",
+    ) -> None:
+        """Best-effort success metrics. The run is already committed (SUCCEEDED)
+        by the time this runs, so a metrics failure is logged and swallowed --
+        never allowed to flip a committed run to FAILED or replace the
+        caller's result."""
+        if metrics is None:
+            return
+        try:
+            metrics.counter("agent.run.completed", attributes=attributes)
+            metrics.histogram(
+                "agent.run.duration_ms",
+                value=round((time.monotonic() - started) * 1000, 3),
+                attributes=attributes,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "success metrics failed for run %s", attributes.get("run_id")
+            )
 
     async def execute(
         self,
@@ -394,13 +425,20 @@ class AgentRunner:
 
                 # -- Prompt build. Resume path skips this entirely -- the
                 # prompt is baked into the checkpointed message_history.
+                #
+                # Two distinct values: ``user_prompt`` is the caller's ORIGINAL
+                # input (what gets persisted as the USER session message); the
+                # concatenated ``prompt`` below is the MODEL prompt (history +
+                # memory + knowledge + user) -- never persisted verbatim, so
+                # internal runtime context cannot leak into session history.
+                user_prompt = request.prompt
                 prompt: "str | None" = None
                 if message_history is None:
-                    history_text = "\n".join(str(m.content) for m in prior_messages)
+                    history_text = _format_session_history(prior_messages)
                     prompt = (
-                        f"{history_text}\n{request.prompt}"
+                        f"{history_text}\n{user_prompt}"
                         if history_text
-                        else request.prompt
+                        else user_prompt
                     )
 
                     # Memory + Knowledge injection via substitutable policies.
@@ -413,14 +451,14 @@ class AgentRunner:
                     memory_policy = self._effective_memory_policy()
                     if memory_policy is not None:
                         memories = await memory_policy.select_memories(
-                            context, request.prompt
+                            context, user_prompt
                         )
                         section = self._prompt_formatter().format_memory(memories)
                         if section:
                             prompt = f"{section}\n{prompt}"
                     retrieval_policy = self._effective_retrieval_policy()
                     if retrieval_policy is not None:
-                        items = await retrieval_policy.retrieve(context, request.prompt)
+                        items = await retrieval_policy.retrieve(context, user_prompt)
                         section = self._prompt_formatter().format_knowledge(items)
                         if section:
                             prompt = f"{section}\n{prompt}"
@@ -444,7 +482,7 @@ class AgentRunner:
                 # (no execution backend) simply passes ``toolsets=[]`` so the
                 # model has no file/terminal tools available. ``deps.execution``
                 # is the same backend -- capabilities that need it read
-                # ``ctx.deps.execution`` (future work).
+                # ``ctx.deps.execution``.
                 deps = AgentDependencies(
                     tool_context=tool_context,
                     execution=self._execution,
@@ -634,16 +672,44 @@ class AgentRunner:
                 # is observationally invisible on the default path.
                 if token is not None:
                     await token.raise_if_cancelled()
-                effective_prompt = (
-                    capability_prompt + "\n\n" + prompt if capability_prompt else prompt
-                )
+                # On resume, prompt is None (the prompt is baked into the
+                # checkpointed message_history) and capability_prompt must NOT
+                # be re-concatenated (it already lives in the history). Building
+                # ``capability_prompt + "\n\n" + prompt`` here would be str+None.
+                if message_history is not None:
+                    effective_prompt = None
+                elif capability_prompt:
+                    effective_prompt = f"{capability_prompt}\n\n{prompt}"
+                else:
+                    effective_prompt = prompt
+                # WP-13: wrap the model so the security pipeline fires
+                # before_model/after_model around EVERY model request (a tool
+                # loop drives several), not just once around the whole run.
+                # Passed per-call via iter(model=...) so the shared compiled
+                # agent is never mutated.
+                iter_model = None
+                if self._security_pipeline is not None:
+                    from ..security.secured_model import SecuredModel
+
+                    iter_model = SecuredModel(
+                        agent.pydantic_agent.model,
+                        pipeline=self._security_pipeline,
+                        run_id=context.run_id,
+                        agent_id=agent.spec.id,
+                    )
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
-                        message_history=message_history, deps=deps, toolsets=toolsets
+                        message_history=message_history,
+                        deps=deps,
+                        toolsets=toolsets,
+                        model=iter_model,
                     )
                 else:
                     run_iter = agent.pydantic_agent.iter(
-                        effective_prompt, deps=deps, toolsets=toolsets
+                        effective_prompt,
+                        deps=deps,
+                        toolsets=toolsets,
+                        model=iter_model,
                     )
 
                 # ``timed_out`` is set whenever the wait_for budget is exhausted
@@ -739,12 +805,16 @@ class AgentRunner:
                                                             "type": "text",
                                                             "text": text,
                                                         }
-                                        except Exception:
-                                            # Model lacks stream_function or
-                                            # otherwise can't stream -- skip.
-                                            # Model call already happened via
-                                            # __anext__; final result.output
-                                            # carries the answer.
+                                        except AssertionError:
+                                            # pydantic-ai raises AssertionError
+                                            # ("FunctionModel must receive a
+                                            # stream_function ...") when the
+                                            # model cannot stream -- the model
+                                            # call already happened via
+                                            # __anext__, so skip per-delta
+                                            # events and use result.output. Any
+                                            # other exception is a genuine
+                                            # stream error and propagates.
                                             pass
                                     elif PydanticAgent.is_call_tools_node(node):
                                         try:
@@ -772,9 +842,10 @@ class AgentRunner:
                                                                 ev.part, ToolReturnPart
                                                             ),
                                                         }
-                                        except Exception:
-                                            # Same degradation as above -- the
-                                            # tools already ran via __anext__.
+                                        except AssertionError:
+                                            # Same non-streaming-model signal as
+                                            # above -- tools already ran via
+                                            # __anext__; genuine errors propagate.
                                             pass
                             except RunPaused as paused:
                                 # Pause path (canonical surface): persist the
@@ -783,7 +854,7 @@ class AgentRunner:
                                 # WAITING_APPROVAL, emit ApprovalRequested +
                                 # RunPaused events -- all INSIDE the iter()
                                 # context so ``run.all_messages()`` works. The
-                                # paused-event yield itself is deferred to
+                                # paused-event yield itself is postponed to
                                 # AFTER all context managers exit (see the
                                 # comment on ``paused_signal`` above) so a
                                 # non-streaming consumer can abandon the
@@ -826,141 +897,37 @@ class AgentRunner:
                                 # final ``paused`` yield (below, after every
                                 # context manager exits) automatically reports
                                 # the resolved id too.
-                                if self._uow_factory is not None:
-                                    # Atomic (SqlAlchemy): all writes bind to
-                                    # one AsyncSession + one transaction. Any
-                                    # failure rolls back everything AND
-                                    # propagates to the outer generic-except
-                                    # handler so the Run ends up FAILED rather
-                                    # than left in a half-paused state.
-                                    async with self._uow_factory() as tx:
-                                        if paused.tool_call_id is not None:
-                                            approval = await tx.approvals.create_or_get_pending(
-                                                run_id=paused.run_id,
-                                                tool_call_id=paused.tool_call_id,
-                                                tool_name=paused.tool_name or "",
-                                                reason=paused.reason,
-                                                arguments=paused.arguments,
-                                                approval_id=paused.approval_id,
-                                            )
-                                            paused.approval_id = approval.id
-                                        checkpoint = RunCheckpoint(
-                                            id=str(uuid.uuid4()),
-                                            run_id=context.run_id,
-                                            sequence=1,
-                                            format="pydantic-ai-v1",
-                                            schema_version=1,
-                                            payload=serialize_messages(
-                                                run.all_messages()
-                                            ),
-                                            created_at=datetime.now(timezone.utc),
-                                            metadata={
-                                                "approval_id": paused.approval_id
-                                            },
-                                        )
-                                        approval_requested_payload = ApprovalRequested(
-                                            approval_id=paused.approval_id,
-                                            tool_name=paused.tool_name or "",
-                                            reason=paused.reason or "",
-                                        )
-                                        paused_payload = RunPausedEvent(
-                                            run_id=context.run_id,
-                                            reason=f"approval required: {paused.approval_id}",
-                                        )
-                                        await tx.checkpoints.save(checkpoint)
-                                        # WAITING_APPROVAL
-                                        # transition MUST propagate. If it
-                                        # fails the run cannot be paused --
-                                        # rolling back + propagating avoids
-                                        # leaving the checkpoint saved but the
-                                        # run still RUNNING (the inconsistent
-                                        # state forbidden by atomicity).
-                                        await tx.runs.transition(
-                                            context.run_id,
-                                            RunStatus.WAITING_APPROVAL,
-                                            expected_version=running_version,
-                                        )
-                                        await append_event(
-                                            tx.events,
-                                            EventContext.from_run_context(context),
-                                            approval_requested_payload,
-                                        )
-                                        await append_event(
-                                            tx.events,
-                                            EventContext.from_run_context(context),
-                                            paused_payload,
-                                        )
-                                else:
-                                    # File mode: non-atomic best-effort.
-                                    # Cross-store transactions are unavailable,
-                                    # so checkpoint + transition propagate
-                                    # (masking them is forbidden) but the approval
-                                    # write and event appends stay best-effort
-                                    # -- the run is already WAITING_APPROVAL, so
-                                    # a missing approval/event is a recovery
-                                    # gap, not state corruption.
-                                    if (
-                                        self._approval_store is not None
-                                        and paused.tool_call_id is not None
-                                    ):
-                                        try:
-                                            approval = await self._approval_store.create_or_get_pending(
-                                                run_id=paused.run_id,
-                                                tool_call_id=paused.tool_call_id,
-                                                tool_name=paused.tool_name or "",
-                                                reason=paused.reason,
-                                                arguments=paused.arguments,
-                                                approval_id=paused.approval_id,
-                                            )
-                                            paused.approval_id = approval.id
-                                        except Exception as exc:  # noqa: BLE001
-                                            _LOGGER.warning(
-                                                "failed to persist ApprovalRequest for run %s: %s",
-                                                context.run_id,
-                                                exc,
-                                            )
-                                    checkpoint = RunCheckpoint(
-                                        id=str(uuid.uuid4()),
+                                # Pause commit is coordinator-owned: the runner
+                                # builds a PauseRunCommand and delegates. The
+                                # coordinator persists the approval (resolving
+                                # the id -- create_or_get_pending may dedup on
+                                # tool_call_id and return an existing id), the
+                                # checkpoint, the WAITING_APPROVAL transition,
+                                # and the ApprovalRequested + RunPaused events
+                                # as one atomic commit. The resolved approval id
+                                # is written back so the paused-event yield
+                                # below reports the persisted id.
+                                _commit = await self._commit_coordinator.pause(
+                                    PauseRunCommand(
                                         run_id=context.run_id,
-                                        sequence=1,
-                                        format="pydantic-ai-v1",
-                                        schema_version=1,
-                                        payload=serialize_messages(run.all_messages()),
-                                        created_at=datetime.now(timezone.utc),
-                                        metadata={"approval_id": paused.approval_id},
-                                    )
-                                    approval_requested_payload = ApprovalRequested(
-                                        approval_id=paused.approval_id,
-                                        tool_name=paused.tool_name or "",
-                                        reason=paused.reason or "",
-                                    )
-                                    paused_payload = RunPausedEvent(
-                                        run_id=context.run_id,
-                                        reason=f"approval required: {paused.approval_id}",
-                                    )
-                                    await self._checkpoint_store.save(checkpoint)
-                                    await self._run_store.transition(
-                                        context.run_id,
-                                        RunStatus.WAITING_APPROVAL,
                                         expected_version=running_version,
+                                        approval_request={
+                                            "approval_id": paused.approval_id,
+                                            "tool_call_id": paused.tool_call_id,
+                                            "tool_name": paused.tool_name or "",
+                                            "reason": paused.reason,
+                                            "arguments": paused.arguments,
+                                        },
+                                        checkpoint_payload=serialize_messages(
+                                            run.all_messages()
+                                        ),
+                                        event_context=EventContext.from_run_context(
+                                            context
+                                        ),
+                                        commit_id=f"pause:{context.run_id}:{paused.approval_id}",
                                     )
-                                    try:
-                                        await append_event(
-                                            self._event_store,
-                                            EventContext.from_run_context(context),
-                                            approval_requested_payload,
-                                        )
-                                        await append_event(
-                                            self._event_store,
-                                            EventContext.from_run_context(context),
-                                            paused_payload,
-                                        )
-                                    except Exception as exc:  # noqa: BLE001
-                                        _LOGGER.warning(
-                                            "failed to append RunPaused event for run %s: %s",
-                                            context.run_id,
-                                            exc,
-                                        )
+                                )
+                                paused.approval_id = _commit.approval_id
                                 paused_signal = paused
                             else:
                                 if not timed_out:
@@ -1032,11 +999,8 @@ class AgentRunner:
                     else:
                         output = accumulated_text
 
-                    # max_tokens enforcement. usage is read once so the
-                    # check and the RunResult.token_usage share the same
-                    # snapshot. budget (cost-per-token) is declared on
-                    # ModelPolicy but deferred -- only the token-count limit is
-                    # enforced here.
+                    # max_tokens + cost-budget enforcement. usage is read once so
+                    # the checks and RunResult.token_usage share one snapshot.
                     usage = result.usage if result is not None else None
                     max_tokens = agent.spec.model.max_tokens
                     if max_tokens is not None and usage is not None:
@@ -1046,38 +1010,62 @@ class AgentRunner:
                                 f"max_tokens exceeded: used {used} > max_tokens {max_tokens}",
                                 kind="max_tokens",
                             )
+                    # ModelPolicy.budget is a Decimal cost limit. A budget set
+                    # without a pricing provider is a configuration error
+                    # (fail-closed); with pricing, the cost of this response
+                    # must not exceed the budget.
+                    budget = agent.spec.model.budget
+                    if budget is not None and usage is not None:
+                        if self._pricing_provider is None:
+                            raise ModelPolicyExceededError(
+                                "ModelPolicy.budget is set but no ModelPricingProvider "
+                                "is wired; refusing to run without a cost limit",
+                                kind="budget",
+                            )
+                        pricing = await self._pricing_provider.get_pricing(
+                            agent.spec.model.primary
+                        )
+                        if pricing is None:
+                            raise ModelPolicyExceededError(
+                                f"ModelPolicy.budget set but model "
+                                f"{agent.spec.model.primary!r} has no pricing; "
+                                f"refusing to run without a cost limit",
+                                kind="budget",
+                            )
+                        cost = pricing.cost(
+                            input_tokens=usage.input_tokens,
+                            output_tokens=usage.output_tokens,
+                        )
+                        if cost > budget:
+                            raise ModelPolicyExceededError(
+                                f"cost budget exceeded: {cost} > budget {budget}",
+                                kind="budget",
+                            )
 
-                    # sequence is assigned by the SessionStore itself
-                    # (NewSessionMessage carries no id/sequence/created_at) --
-                    # the caller no longer computes `len(prior_messages) + 1`,
-                    # which could race with a concurrent Run appending to the
-                    # same session.
-                    await self._session_store.append_messages(
-                        context.session_id,
-                        (
+                    # Build the complete-turn payload shared by both commit
+                    # paths: USER prompt + ASSISTANT output, plus the checkpoint
+                    # of the full message history. ``run`` is still bound here
+                    # (Python preserves the ``with ... as run`` target after the
+                    # block); the iter() context has exited cleanly but the
+                    # AgentRun still serves message history.
+                    user_content = request.prompt
+                    messages_to_append = [
+                        NewSessionMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=str(output),
+                            run_id=context.run_id,
+                        ),
+                    ]
+                    if user_content:
+                        messages_to_append.insert(
+                            0,
                             NewSessionMessage(
-                                role=MessageRole.ASSISTANT,
-                                content=str(output),
+                                role=MessageRole.USER,
+                                content=user_content,
                                 run_id=context.run_id,
                             ),
-                        ),
-                    )
-
-                    # ``run`` is still bound here (Python preserves the
-                    # ``with ... as run`` target after the block). The iter()
-                    # context has exited cleanly, but the AgentRun still
-                    # serves message history.
-                    await self._checkpoint_store.save(
-                        RunCheckpoint(
-                            id=str(uuid.uuid4()),
-                            run_id=context.run_id,
-                            sequence=1,
-                            format="pydantic-ai-v1",
-                            schema_version=1,
-                            payload=serialize_messages(run.all_messages()),
-                            created_at=datetime.now(timezone.utc),
                         )
-                    )
+                    checkpoint_payload = serialize_messages(run.all_messages())
 
                     run_result = RunResult(
                         output=output,
@@ -1086,45 +1074,39 @@ class AgentRunner:
                             "output_tokens": usage.output_tokens if usage else 0,
                         },
                     )
-                    await mark_completed(
-                        self._run_store,
-                        context.run_id,
-                        expected_version=running_version,
-                        result=run_result,
-                    )
 
+                    # after_run is business lifecycle: run it BEFORE the commit
+                    # so an after_run failure takes the normal FAILED path
+                    # instead of corrupting an already-SUCCEEDED run.
                     if self._middleware_pipeline is not None:
                         await self._middleware_pipeline.run_after_run(
                             context, run_result
                         )
 
-                    # Best-effort RunCompleted: on the resume path, the event
-                    # stream may already hold a RunPaused event from the
-                    # initial pause -- the store-assigned sequence simply
-                    # appends after it (no caller sequence to collide with).
-                    # best-effort audit - non-critical path:
-                    # the run is already SUCCEEDED, so a missing event is an
-                    # observability gap, not state corruption.
-                    try:
-                        await append_event(
-                            self._event_store,
-                            EventContext.from_run_context(context),
-                            RunCompleted(run_id=context.run_id),
+                    # Cross-store commit is coordinator-owned: the runner builds
+                    # a CompleteRunCommand and delegates. The coordinator
+                    # persists the session turn (USER + ASSISTANT), the
+                    # checkpoint, the SUCCEEDED transition (with the result),
+                    # and the RunCompleted event as one atomic commit. The
+                    # runner never writes those stores directly.
+                    await self._commit_coordinator.complete(
+                        CompleteRunCommand(
+                            run_id=context.run_id,
+                            session_id=context.session_id,
+                            expected_version=running_version,
+                            messages=tuple(messages_to_append),
+                            checkpoint_payload=checkpoint_payload,
+                            result=run_result,
+                            event_context=EventContext.from_run_context(context),
+                            commit_id=f"complete:{context.run_id}:{running_version}",
                         )
-                    except Exception as exc:  # noqa: BLE001
-                        _LOGGER.warning(
-                            "failed to append RunCompleted event for run %s: %s",
-                            context.run_id,
-                            exc,
-                        )
+                    )
 
-                    if metrics is not None:
-                        metrics.counter("agent.run.completed", attributes=run_attrs)
-                        metrics.histogram(
-                            "agent.run.duration_ms",
-                            value=round((time.monotonic() - started) * 1000, 3),
-                            attributes=run_attrs,
-                        )
+                    # Success metrics are best-effort observation only -- a
+                    # metrics failure must never flip a committed run to FAILED.
+                    self._record_success_metrics(
+                        attributes=run_attrs, started=started, metrics=metrics
+                    )
         except asyncio.CancelledError:
             # in-flight cancel path. CancelledError
             # surfaces at the current await point (model call / node.stream() /
@@ -1183,6 +1165,17 @@ class AgentRunner:
         except Exception as exc:
             # Generic error path: transition FAILED, run on_error, append
             # RunFailed, record metrics. Re-raise so the caller sees the error.
+            #
+            # Terminal/commit-point guard: if the run already left RUNNING -- it
+            # reached a commit point (SUCCEEDED / WAITING_APPROVAL / PAUSED) or
+            # is already terminal (a post-commit error such as a metrics or
+            # critical-event failure) -- do NOT fabricate a contradictory FAILED
+            # transition or RunFailed event. Re-raise the original error; the
+            # committed state stays authoritative and recovery re-attempts any
+            # missed post-commit write.
+            current = await self._run_store.get(context.run_id)
+            if current is not None and current.status is not RunStatus.RUNNING:
+                raise
             safe_error = redact_exception(exc)
             error_info = RunErrorInfo(error_type=type(exc).__name__, message=safe_error)
             # Run status update. The FAILED transition is kept
@@ -1206,7 +1199,15 @@ class AgentRunner:
                     transition_exc,
                 )
             if self._middleware_pipeline is not None:
-                await self._middleware_pipeline.run_on_error(context, exc)
+                # on_error is best-effort observation: its failure must not
+                # replace the ORIGINAL exc the caller needs to see.
+                try:
+                    await self._middleware_pipeline.run_on_error(context, exc)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception(
+                        "on_error middleware failed for run %s",
+                        context.run_id,
+                    )
             # best-effort audit - non-critical path: the run is already failing
             # (FAILED transition attempted above), so a missing RunFailed event
             # is an observability gap, not state corruption.
@@ -1227,14 +1228,19 @@ class AgentRunner:
                     event_exc,
                 )
             if metrics is not None:
-                metrics.counter(
-                    "agent.run.failed",
-                    attributes={
-                        "run_id": context.run_id,
-                        "session_id": context.session_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
+                try:
+                    metrics.counter(
+                        "agent.run.failed",
+                        attributes={
+                            "run_id": context.run_id,
+                            "session_id": context.session_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception(
+                        "failure metrics failed for run %s", context.run_id
+                    )
             raise
         finally:
             # drop the in-flight registration so the controller does
@@ -1296,10 +1302,12 @@ class AgentRunner:
         record = await self._run_store.get(context.run_id)
         if record is not None and record.result is not None:
             return record.result
-        # Defensive: execute() should always leave a terminal record. If
-        # somehow it didn't, synthesize an empty result so run() honors its
-        # return-type contract.
-        return RunResult(output="")
+        # execute() must always leave a terminal record with a result. If it
+        # did not, that is a runtime invariant violation -- raise rather than
+        # fabricate an empty success that masks the bug.
+        raise RunInvariantError(
+            f"run {context.run_id} completed without a persisted result"
+        )
 
     async def run_stream(
         self,

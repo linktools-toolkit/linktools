@@ -7,7 +7,7 @@ runnable_id=...`` at each call site. ``append_event(store, context, payload)``
 is the single helper."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from ..run.context import RunContext
@@ -43,9 +43,17 @@ class EventContext:
 
 
 async def append_event(
-    store: "EventStore", context: EventContext, payload: Any
+    store: "EventStore",
+    context: EventContext,
+    payload: Any,
+    *,
+    metadata: "Mapping[str, Any] | None" = None,
 ) -> None:
-    """Append ``payload`` to ``store`` under the EventContext's lineage."""
+    """Append ``payload`` to ``store`` under the EventContext's lineage.
+
+    ``metadata`` is optional free-form per-event metadata (e.g. a ``commit_id``
+    used for commit-scoped dedup of critical events); backends persist it
+    alongside the payload."""
     await store.append(
         stream_id=context.stream_id,
         run_id=context.run_id,
@@ -54,4 +62,5 @@ async def append_event(
         session_id=context.session_id,
         runnable_id=context.runnable_id,
         payload=payload,
+        metadata=metadata,
     )

@@ -4,6 +4,7 @@
 YAML via SpecLoader, caches per-revision, and exposes get_metadata_map() (the
 bridge the policy rule modules -- PermissionRule/RiskRule/ApprovalRule -- consume)."""
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -16,6 +17,13 @@ from ..policy.rule import (
     ToolPolicyMetadata,
 )
 from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
+
+
+def _reject_null(payload, name):
+    """Return the value if present, None if missing, or raise on explicit null."""
+    if name in payload and payload[name] is None:
+        raise InvalidSpecError(f"tool policy: {name} must not be null")
+    return payload.get(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +147,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
         name=name,
         description=reader.optional_str("description") or "",
         enabled=enabled,
-        permissions=_parse_permissions(payload.get("permissions")),
+        permissions=_parse_permissions(_reject_null(payload, "permissions")),
         risk=_RISK_LOOKUP[risk_key],
         side_effect=_SIDE_EFFECT_LOOKUP[side_key],
         approval=_APPROVAL_LOOKUP[approval_key],
@@ -162,13 +170,15 @@ class ToolRegistry:
         self._cache: "dict[tuple[str, int], ToolSpec]" = {}
         self._cached_revision: "int | None" = None
         self._ids: "tuple[str, ...] | None" = None
+        self._refresh_lock = asyncio.Lock()
 
     async def _ensure_fresh(self) -> None:
-        revision = await self._loader.revision()
-        if revision != self._cached_revision:
-            self._cache.clear()
-            self._ids = None
-            self._cached_revision = revision
+        async with self._refresh_lock:
+            revision = await self._loader.revision()
+            if revision != self._cached_revision:
+                self._cache.clear()
+                self._ids = None
+                self._cached_revision = revision
 
     async def list_ids(self) -> "tuple[str, ...]":
         await self._ensure_fresh()

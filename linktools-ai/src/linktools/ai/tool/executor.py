@@ -3,41 +3,33 @@
 """ToolExecutor: consults PolicyEngine before a tool executes, translating
 its decision into the corresponding domain error.
 
-Canonical approval flow (``pause_on_approval=True``): the executor mints an
-``approval_id`` and raises ``RunPaused`` carrying every field needed to build
-the ApprovalRequest. AgentRunner's pause handler then persists the
-ApprovalRequest (deduping on ``(run_id, tool_call_id)``) alongside the
-checkpoint save + WAITING_APPROVAL transition + pause events -- on a
-cross-store-transactional Storage that happens in one UnitOfWork, so a crash
-between "approval persisted" and "run paused" is impossible. ``Runtime.resume``
-completes the flow.
-
-Fallback (``pause_on_approval=False``): for runtimes without the pause/resume
-path, the executor persists a PENDING ApprovalRequest (when an approval store
-is wired) and emits an ApprovalRequested event (when an event store is wired)
-before raising ``ToolApprovalRequiredError``. This is the simpler, non-pausing
-mode; the pause/resume flow above is the recommended canonical path."""
+Approval flow: the executor mints an ``approval_id`` and raises ``RunPaused``
+carrying every field needed to build the ApprovalRequest. AgentRunner's pause
+handler then persists the ApprovalRequest (deduping on
+``(run_id, tool_call_id)``) alongside the checkpoint save + WAITING_APPROVAL
+transition + pause events -- on a cross-store-transactional Storage that
+happens in one UnitOfWork, so a crash between "approval persisted" and "run
+paused" is impossible. ``Runtime.resume`` completes the flow. The executor only
+emits the domain signal (RunPaused); it never persists approval state itself,
+so there is a single approval path."""
 
 import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from ..agent.approval import ApprovalStatus, build_approval_request
+from ..agent.approval import ApprovalStatus
 from ..errors import (
+    IdempotencyConflictError,
     IdempotencyInProgressError,
     RunPaused,
-    ToolApprovalRequiredError,
     ToolDeniedError,
-    ToolSecurityAuditError,
 )
-from ..events.payloads import ApprovalRequested
 from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
-from .idempotency import IdempotencyStatus, IdempotencyStore, compute_request_hash
+from .idempotency import IdempotencyStore, compute_request_hash
 
 if TYPE_CHECKING:
-    from ..agent.approval import ApprovalRequest, ApprovalStore
-    from ..events.store import EventStore
+    from ..agent.approval import ApprovalStore
     from .models import ToolDescriptor
     from .policy import EffectiveToolPolicy
 
@@ -50,16 +42,12 @@ class ToolExecutor:
         *,
         policy: PolicyEngine,
         approval_store: "ApprovalStore | None" = None,
-        event_store: "EventStore | None" = None,
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
-        pause_on_approval: bool = False,
         idempotency_store: "IdempotencyStore | None" = None,
         retry_policy: Any = None,
-        security_audit_failure_mode: Any = "fail_closed",
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
-        self._event_store = event_store
         self._run_id_resolver = run_id_resolver
         self._idempotency_store = idempotency_store
         # Retry is policy-driven: only clearly-transient errors, and never a
@@ -67,17 +55,6 @@ class ToolExecutor:
         from .retry import DefaultRetryPolicy
 
         self._retry_policy = retry_policy or DefaultRetryPolicy()
-        # When True, the require-approval branch persists the request (via
-        # _record_approval) and then raises RunPaused(run_id, approval_id)
-        # INSTEAD of ToolApprovalRequiredError. RunPaused is a RunError (not a
-        # ToolError) so PolicyCapability's catch list does not translate it
-        # into SkipToolExecution -- it propagates out of pydantic-ai's
-        # tool-execution stack to AgentRunner (which catches it). Default
-        # False is the direct-raise mode (ToolApprovalRequiredError).
-        self._pause_on_approval = pause_on_approval
-        self._security_audit_failure_mode = getattr(
-            security_audit_failure_mode, "value", security_audit_failure_mode
-        )
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
@@ -90,7 +67,7 @@ class ToolExecutor:
             # request matching (run_id, tool_call_id), the call was approved
             # externally (e.g. via the pause UI) and is now being re-driven by
             # the model with the same tool_call_id -- let it through instead
-            # of re-persisting a PENDING duplicate and re-raising.
+            # of re-raising RunPaused.
             if await self._already_approved(request, context):
                 return
             run_id = (
@@ -98,24 +75,18 @@ class ToolExecutor:
                 if self._run_id_resolver is not None
                 else context.run_id
             )
-            if self._pause_on_approval:
-                # do NOT persist here. Mint the id and hand every
-                # field the suspension handler needs to AgentRunner via
-                # RunPaused -- the actual ApprovalStore write happens there,
-                # atomically with the checkpoint/transition/event writes.
-                tool_call_id = context.tool_call_id or str(uuid.uuid4())
-                raise RunPaused(
-                    run_id=run_id,
-                    approval_id=str(uuid.uuid4()),
-                    tool_call_id=tool_call_id,
-                    tool_name=request.tool_name,
-                    reason=decision.reason,
-                    arguments=dict(request.arguments),
-                )
-            # Direct-raise path: persist the approval request immediately.
-            await self._record_approval(request, context, decision.reason)
-            raise ToolApprovalRequiredError(
-                decision.reason or f"tool requires approval: {request.tool_name}"
+            # The executor only emits the domain signal (RunPaused); it does
+            # NOT persist approval state. AgentRunner's pause handler persists
+            # the ApprovalRequest atomically with the checkpoint/transition/
+            # event writes, so there is a single approval path.
+            tool_call_id = context.tool_call_id or str(uuid.uuid4())
+            raise RunPaused(
+                run_id=run_id,
+                approval_id=str(uuid.uuid4()),
+                tool_call_id=tool_call_id,
+                tool_name=request.tool_name,
+                reason=decision.reason,
+                arguments=dict(request.arguments),
             )
 
     async def _already_approved(
@@ -156,84 +127,6 @@ class ToolExecutor:
             r.tool_call_id == tool_call_id and r.status is ApprovalStatus.APPROVED
             for r in requests
         )
-
-    async def _record_approval(
-        self,
-        request: ToolRequest,
-        context: ToolContext,
-        reason: "str | None",
-    ) -> "ApprovalRequest | None":
-        """Persist a PENDING ApprovalRequest (and emit ApprovalRequested) when
-        an approval_store is wired, returning the persisted request. Returns
-        None when no store is wired. Best-effort audit: event-emission failures
-        are logged and swallowed (the approval record is the source of truth);
-        the caller (check) still raises afterward regardless of outcome here.
-        With approval_store=None this is a no-op.
-
-        Only used by the direct-raise mode (``pause_on_approval=False``) -- the
-        pause path does NOT call this; it defers persistence to AgentRunner's
-        suspension handler instead (see ``check``).
-
-        Event emission is best-effort: the EventStore assigns the sequence
-        itself, so a failure here is logged and swallowed --
-        the approval record remains the source of truth. The store's
-        per-stream sequence counter naturally interleaves this event with any
-        others emitted for the same run (e.g. AgentRunner's RunStarted)."""
-        if self._approval_store is None:
-            return None
-
-        run_id = (
-            self._run_id_resolver(context)
-            if self._run_id_resolver is not None
-            else context.run_id
-        )
-        # Prefer the pydantic-ai ToolCallPart id threaded through ToolContext
-        # by PolicyCapability (the linchpin of resume: a re-driven call after
-        # approve() must find the matching approval). Fall back to a fresh uuid
-        # when the context carries no tool_call_id (e.g. a directly-constructed
-        # ToolContext with no stable call id).
-        tool_call_id = context.tool_call_id or str(uuid.uuid4())
-        approval = build_approval_request(
-            run_id=run_id,
-            tool_call_id=tool_call_id,
-            tool_name=request.tool_name,
-            reason=reason,
-            arguments=request.arguments,
-        )
-        await self._approval_store.create(approval)
-
-        if self._event_store is not None:
-            from ..events.context import EventContext, append_event
-
-            try:
-                await append_event(
-                    self._event_store,
-                    EventContext(
-                        stream_id=approval.run_id,
-                        run_id=approval.run_id,
-                        root_run_id=approval.run_id,
-                        parent_run_id=None,
-                        session_id=context.session_id,
-                        runnable_id=request.tool_name,
-                    ),
-                    ApprovalRequested(
-                        approval_id=approval.id,
-                        tool_name=request.tool_name,
-                        reason=reason or "",
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001 - configurable audit posture
-                _LOGGER.warning(
-                    "failed to append ApprovalRequested event for approval %s: %s",
-                    approval.id,
-                    exc,
-                )
-                if self._security_audit_failure_mode != "best_effort":
-                    raise ToolSecurityAuditError(
-                        "failed to persist approval security audit event"
-                    ) from exc
-
-        return approval
 
     async def execute(
         self,
@@ -312,7 +205,12 @@ class ToolExecutor:
         use_idempotency = (
             self._idempotency_store is not None and idempotency_key is not None
         )
+        claim = None
         if use_idempotency:
+            import uuid as _uuid
+
+            from .idempotency import ClaimDisposition
+
             scope = idempotency_scope or context.run_id
             request_hash = compute_request_hash(
                 request.tool_name,
@@ -320,19 +218,26 @@ class ToolExecutor:
                 scope,
                 schema_version=schema_version,
             )
-            existing = await self._idempotency_store.reserve(
-                scope, idempotency_key, request_hash
+            owner_id = _uuid.uuid4().hex
+            claim_result = await self._idempotency_store.claim(
+                scope=scope,
+                key=idempotency_key,
+                request_hash=request_hash,
+                owner_id=owner_id,
             )
-            if existing is not None:
-                if existing.status is IdempotencyStatus.COMPLETED:
-                    return existing.result
-                if existing.status is IdempotencyStatus.RESERVED:
-                    raise IdempotencyInProgressError(
-                        f"idempotent request in progress: key={idempotency_key!r}"
-                    )
-                # FAILED: fall through to re-execute. The handler runs again
-                # and complete()/fail() overwrites the existing terminal record
-                # FAILED allows retry per policy.
+            disposition = claim_result.disposition
+            if disposition is ClaimDisposition.REPLAY:
+                return claim_result.record.result
+            if disposition is ClaimDisposition.IN_PROGRESS:
+                raise IdempotencyInProgressError(
+                    f"idempotent request in progress: key={idempotency_key!r}"
+                )
+            if disposition is ClaimDisposition.CONFLICT:
+                raise IdempotencyConflictError(
+                    f"idempotency key {idempotency_key!r} reused with a different request"
+                )
+            # ACQUIRED: run the handler, then complete/fail with the fenced claim.
+            claim = claim_result.claim
         arguments = dict(request.arguments)
         last_error: "Exception | None" = None
         from .retry import backoff_delay
@@ -347,9 +252,7 @@ class ToolExecutor:
                 else:
                     result = await handler(**arguments)
                 if use_idempotency:
-                    await self._idempotency_store.complete(
-                        scope, idempotency_key, result
-                    )
+                    await self._idempotency_store.complete(claim, result)
                 return result
             except Exception as exc:  # noqa: BLE001 - decide via retry policy
                 last_error = exc
@@ -373,5 +276,5 @@ class ToolExecutor:
                 if last_error is not None
                 else "unknown error"
             )
-            await self._idempotency_store.fail(scope, idempotency_key, safe_error)
+            await self._idempotency_store.fail(claim, safe_error)
         raise last_error  # type: ignore[misc]

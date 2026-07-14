@@ -19,13 +19,19 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import ToolIdempotencyRow
-from ...errors import IdempotencyConflictError
-from ...tool.idempotency import IdempotencyRecord, IdempotencyStatus
+from ...json import canonical_json
+from ...tool.idempotency import (
+    ClaimDisposition,
+    ClaimResult,
+    IdempotencyClaim,
+    IdempotencyRecord,
+    IdempotencyStatus,
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -48,6 +54,10 @@ def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
         error=row.error_text,
         created_at=_as_utc(row.created_at),
         completed_at=_as_utc(row.completed_at),
+        owner_id=row.owner_id,
+        generation=row.generation or 0,
+        claimed_at=_as_utc(row.claimed_at),
+        lease_expires_at=_as_utc(row.lease_expires_at),
     )
 
 
@@ -98,113 +108,236 @@ class SqlAlchemyIdempotencyStore:
 
         return await self._execute_in_session(_do)
 
-    # -- write ---------------------------------------------------------
+    # -- claim / complete / fail (fenced) ---------------------------------
 
-    async def reserve(
+    async def claim(
         self,
+        *,
         scope: str,
         key: str,
         request_hash: str,
-        *,
-        expires_at: "datetime | None" = None,
-    ) -> "IdempotencyRecord | None":
-        """INSERT a fresh RESERVED row; on the (scope, key) unique-constraint
-        collision, SELECT the existing row. Hash-mismatch on the existing row
-        raises IdempotencyConflictError; hash-match returns the existing row
-        so the caller can branch on status. Returns None only when the
-        INSERT succeeds (truly fresh reservation)."""
-        now = datetime.now(timezone.utc)
-        record_id = str(uuid.uuid4())
+        owner_id: str,
+        lease_seconds: float = 300.0,
+    ) -> ClaimResult:
+        """Fenced claim: read-decide-write in one transaction. Re-claims (lease
+        expired or FAILED) use a CAS UPDATE on the prior generation so a
+        concurrent claimant cannot clobber a winner."""
 
-        def _row():
-            return ToolIdempotencyRow(
-                id=record_id,
-                scope=scope,
-                key=key,
-                request_hash=request_hash,
-                status=IdempotencyStatus.RESERVED.value,
-                result_json=None,
-                error_text=None,
-                created_at=now,
-                completed_at=None,
-                expires_at=expires_at,
+        async def _do(session):
+            now = datetime.now(timezone.utc)
+            lease_at = datetime.fromtimestamp(
+                now.timestamp() + lease_seconds, tz=timezone.utc
+            )
+            q = await session.execute(
+                select(ToolIdempotencyRow).where(
+                    ToolIdempotencyRow.scope == scope,
+                    ToolIdempotencyRow.key == key,
+                )
+            )
+            row = q.scalar_one_or_none()
+            if row is None:
+                fresh = ToolIdempotencyRow(
+                    id=str(uuid.uuid4()),
+                    scope=scope,
+                    key=key,
+                    request_hash=request_hash,
+                    status=IdempotencyStatus.RESERVED.value,
+                    result_json=None,
+                    error_text=None,
+                    created_at=now,
+                    completed_at=None,
+                    expires_at=None,
+                    owner_id=owner_id,
+                    generation=1,
+                    claimed_at=now,
+                    lease_expires_at=lease_at,
+                )
+                session.add(fresh)
+                await session.flush()
+                return ClaimResult(
+                    disposition=ClaimDisposition.ACQUIRED,
+                    claim=_claim_from_record(_row_to_record(fresh)),
+                )
+            if row.request_hash != request_hash:
+                return ClaimResult(disposition=ClaimDisposition.CONFLICT)
+            if row.status == IdempotencyStatus.COMPLETED.value:
+                return ClaimResult(
+                    disposition=ClaimDisposition.REPLAY,
+                    record=_row_to_record(row),
+                )
+            if row.status == IdempotencyStatus.RESERVED.value:
+                lease_valid = (
+                    row.lease_expires_at is not None
+                    and _as_utc(row.lease_expires_at) > now
+                )
+                if lease_valid and row.owner_id == owner_id:
+                    return ClaimResult(
+                        disposition=ClaimDisposition.ACQUIRED,
+                        claim=_claim_from_record(_row_to_record(row)),
+                    )
+                if lease_valid:
+                    return ClaimResult(
+                        disposition=ClaimDisposition.IN_PROGRESS,
+                        record=_row_to_record(row),
+                    )
+            # RESERVED+lease-expired OR FAILED: re-claim with generation+1 via a
+            # CAS that pins the SOURCE state we read. The WHERE must include
+            # status + request_hash + generation (and, for the RESERVED path,
+            # that the lease is still expired) -- otherwise a record a concurrent
+            # worker moved to COMPLETED (same generation) could be flipped back
+            # to RESERVED and its side effect re-run.
+            new_gen = (row.generation or 0) + 1
+            where_clauses = [
+                ToolIdempotencyRow.scope == scope,
+                ToolIdempotencyRow.key == key,
+                ToolIdempotencyRow.request_hash == request_hash,
+                ToolIdempotencyRow.status == row.status,
+                ToolIdempotencyRow.generation == (row.generation or 0),
+            ]
+            if row.status == IdempotencyStatus.RESERVED.value:
+                # Only steal if the lease is still expired (a concurrent worker
+                # may have re-leased it between our read and the UPDATE). The
+                # column round-trips naive on sqlite, so compare against a naive
+                # now to avoid the in-memory evaluator's tz mismatch.
+                now_naive = now.replace(tzinfo=None)
+                where_clauses.append(ToolIdempotencyRow.lease_expires_at <= now_naive)
+            upd = (
+                update(ToolIdempotencyRow)
+                .where(*where_clauses)
+                .values(
+                    status=IdempotencyStatus.RESERVED.value,
+                    result_json=None,
+                    error_text=None,
+                    completed_at=None,
+                    owner_id=owner_id,
+                    generation=new_gen,
+                    claimed_at=now,
+                    lease_expires_at=lease_at,
+                )
+            )
+            proxy = await session.execute(upd)
+            refreshed = await session.execute(
+                select(ToolIdempotencyRow).where(
+                    ToolIdempotencyRow.scope == scope,
+                    ToolIdempotencyRow.key == key,
+                )
+            )
+            winner = refreshed.scalar_one()
+            if proxy.rowcount == 0:
+                # The source state moved under us: re-classify the fresh record
+                # so we never return ACQUIRED for a record we no longer own.
+                if winner.request_hash != request_hash:
+                    return ClaimResult(disposition=ClaimDisposition.CONFLICT)
+                if winner.status == IdempotencyStatus.COMPLETED.value:
+                    return ClaimResult(
+                        disposition=ClaimDisposition.REPLAY,
+                        record=_row_to_record(winner),
+                    )
+                return ClaimResult(
+                    disposition=ClaimDisposition.IN_PROGRESS,
+                    record=_row_to_record(winner),
+                )
+            return ClaimResult(
+                disposition=ClaimDisposition.ACQUIRED,
+                claim=_claim_from_record(_row_to_record(winner)),
             )
 
-        # NOTE on NOT using session.begin_nested() in UoW mode: a released
-        # SAVEPOINT (no conflict -- the common case) was measured to NOT
-        # reliably participate in a LATER, unrelated failure's rollback of
-        # the enclosing transaction under sqlite+aiosqlite (see
-        # storage/sqlalchemy/approval.py's create_or_get_pending for the
-        # full writeup and repro). That correctness risk -- a reservation
-        # surviving a rollback it should have been part of -- is worse than
-        # the narrow benefit begin_nested() bought here (gracefully
-        # continuing the SAME transaction after a genuine (scope, key)
-        # collision, which requires two concurrent callers racing the exact
-        # same idempotency key). A real collision now fails the whole
-        # enclosing transaction instead; the (scope, key) UNIQUE constraint
-        # remains the actual data-integrity backstop regardless.
         try:
+            return await self._execute_in_session(_do)
+        except IntegrityError:
+            # Concurrent fresh-INSERT collision: another worker inserted the
+            # (scope, key) row between our SELECT and our INSERT, so the
+            # unique constraint turned our INSERT into IntegrityError. The
+            # only INSERT in ``_do`` is the fresh-row path above (the re-claim
+            # branch uses a CAS UPDATE, which cannot raise a unique-constraint
+            # IntegrityError), so this exception unambiguously means "lost
+            # the insert race". The failed transaction (and its session) is
+            # poisoned and must not be reused.
             if self._session is not None:
-                self._session.add(_row())
-                await self._session.flush()
-            else:
-
-                async def _insert(session):
-                    session.add(_row())
-
-                await self._execute_in_session(_insert)
-            return None
-        except IntegrityError as exc:
-            # Concurrent insert won the race (or this is a true duplicate).
-            # The savepoint (UoW mode) or the failed transaction (normal mode)
-            # already rolled back just this insert -- the surrounding
-            # transaction (if any) is still usable. SELECT the existing row to
-            # surface the domain-correct answer (existing record or
-            # hash-conflict) so the caller sees the same outcome either
-            # backend would produce.
-            existing = await self.get(scope, key)
-            if existing is None:
-                # Should be impossible (the IntegrityError proves the row
-                # exists), but don't mask the original error if it happens.
+                # UoW mode: the shared transaction is poisoned too -- there is
+                # no fresh session to recover in, so propagate (mirrors
+                # ApprovalStore.create_or_get_pending).
                 raise
-            if existing.request_hash != request_hash:
-                raise IdempotencyConflictError(
-                    f"idempotency key {key!r} reused with a different request"
-                ) from exc
-            return existing
+            # Normal mode: re-run the fenced read-decide-write in a FRESH
+            # session. The row now exists, so this takes the existing-record
+            # branch (CONFLICT / REPLAY / IN_PROGRESS / CAS re-claim) instead
+            # of inserting again -- there is no second fresh INSERT, hence no
+            # second IntegrityError, and the loser gets a stable disposition.
+            return await self._execute_in_session(_do)
 
-    async def complete(self, scope: str, key: str, result: Any) -> None:
+    async def complete(self, claim: IdempotencyClaim, result: Any) -> None:
+        """CAS to COMPLETED only if owner_id + generation still match the claim.
+        rowcount != 1 raises LostIdempotencyClaimError (the claim was stolen) --
+        never silently succeed."""
+        now = datetime.now(timezone.utc)
+
         async def _do(session):
-            result_q = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == scope,
-                    ToolIdempotencyRow.key == key,
+            proxy = await session.execute(
+                update(ToolIdempotencyRow)
+                .where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                    ToolIdempotencyRow.request_hash == claim.request_hash,
+                    ToolIdempotencyRow.owner_id == claim.owner_id,
+                    ToolIdempotencyRow.generation == claim.generation,
+                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                )
+                .values(
+                    status=IdempotencyStatus.COMPLETED.value,
+                    result_json=canonical_json(result),
+                    error_text=None,
+                    completed_at=now,
                 )
             )
-            row = result_q.scalar_one_or_none()
-            if row is None:
-                return
-            row.status = IdempotencyStatus.COMPLETED.value
-            row.result_json = json.dumps(result, default=str)
-            row.error_text = None
-            row.completed_at = datetime.now(timezone.utc)
+            if proxy.rowcount != 1:
+                from ...errors import LostIdempotencyClaimError
+
+                raise LostIdempotencyClaimError(
+                    f"complete lost the claim for ({claim.scope}, {claim.key}): "
+                    f"owner/generation no longer match"
+                )
 
         await self._execute_in_session(_do)
 
-    async def fail(self, scope: str, key: str, error: str) -> None:
+    async def fail(self, claim: IdempotencyClaim, error: str) -> None:
+        now = datetime.now(timezone.utc)
+
         async def _do(session):
-            result_q = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == scope,
-                    ToolIdempotencyRow.key == key,
+            proxy = await session.execute(
+                update(ToolIdempotencyRow)
+                .where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                    ToolIdempotencyRow.request_hash == claim.request_hash,
+                    ToolIdempotencyRow.owner_id == claim.owner_id,
+                    ToolIdempotencyRow.generation == claim.generation,
+                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                )
+                .values(
+                    status=IdempotencyStatus.FAILED.value,
+                    result_json=None,
+                    error_text=error,
+                    completed_at=now,
                 )
             )
-            row = result_q.scalar_one_or_none()
-            if row is None:
-                return
-            row.status = IdempotencyStatus.FAILED.value
-            row.result_json = None
-            row.error_text = error
-            row.completed_at = datetime.now(timezone.utc)
+            if proxy.rowcount != 1:
+                from ...errors import LostIdempotencyClaimError
+
+                raise LostIdempotencyClaimError(
+                    f"fail lost the claim for ({claim.scope}, {claim.key}): "
+                    f"owner/generation no longer match"
+                )
 
         await self._execute_in_session(_do)
+
+
+def _claim_from_record(record: IdempotencyRecord) -> IdempotencyClaim:
+    return IdempotencyClaim(
+        scope=record.scope,
+        key=record.key,
+        request_hash=record.request_hash,
+        owner_id=record.owner_id or "",
+        generation=record.generation,
+        claimed_at=record.claimed_at or record.created_at,
+        lease_expires_at=record.lease_expires_at or record.created_at,
+    )

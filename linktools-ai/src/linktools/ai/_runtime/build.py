@@ -60,6 +60,7 @@ class RuntimeComponents:
     tool_executor: ToolExecutor
     execution: "ExecutionBackend | None"
     mcp_connection_manager: "MCPConnectionManager | None"
+    commit_coordinator: Any = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -76,9 +77,36 @@ class RuntimeBuildConfig:
     tool_executor: "ToolExecutor | None" = None
     security: Any = None
     capability_options: "CapabilityRuntimeOptions | None" = None
-    pause_on_approval: bool = False
     allow_mcp_wildcard: bool = False
     mcp_connection_manager: "MCPConnectionManager | None" = None
+
+
+def _build_file_commit_coordinator(storage):
+    """Build a FileRunCommitCoordinator from a File-backed Storage."""
+    from ..storage.file.commit import FileRunCommitCoordinator
+
+    return FileRunCommitCoordinator(
+        approval_store=storage.approvals,
+        checkpoint_store=storage.checkpoints,
+        run_store=storage.runs,
+        session_store=storage.sessions,
+        event_store=storage.events,
+        transactions_root=storage.root / "transactions",
+    )
+
+
+def _build_commit_coordinator(storage):
+    """Build the storage-appropriate RunCommitCoordinator.
+
+    SQL-backed storage (cross_store_transactions) gets the atomic
+    SqlAlchemyRunCommitCoordinator -- pause/complete share one transaction so
+    the cross-store commit is all-or-nothing. File-backed storage gets the
+    sequential FileRunCommitCoordinator (no cross-store txn available)."""
+    if storage.capabilities.cross_store_transactions:
+        from ..storage.sqlalchemy.commit import SqlAlchemyRunCommitCoordinator
+
+        return SqlAlchemyRunCommitCoordinator(storage)
+    return _build_file_commit_coordinator(storage)
 
 
 def _build_capability_providers(
@@ -147,6 +175,12 @@ def _make_runtime_subagent_executor(
     mutation."""
     from ..run.context import RunContext
     from ..run.models import RunInput
+    from ..run.preparation import RunPreparationCoordinator
+
+    # A child agent run (subagent / package entrypoint) gets the same
+    # resumable snapshot as a top-level run: if one of its tools pauses on
+    # approval, Runtime.resume(child_run_id) can restore its spec + identity.
+    preparation = RunPreparationCoordinator(storage.run_definitions)
 
     async def execute(*, agent_spec, task, context, parent, scope, timeout_seconds):
         parent_run_id = parent.run_id if parent is not None else None
@@ -157,6 +191,10 @@ def _make_runtime_subagent_executor(
             SessionRecord(
                 id=child_session,
                 parent_id=parent_session_id,
+                # A subagent child session inherits its parent's principal, so a
+                # worker pause/resume stays within the same ownership domain.
+                user_id=parent.user_id if parent is not None else None,
+                tenant_id=parent.tenant_id if parent is not None else None,
                 status=SessionStatus.ACTIVE,
                 version=1,
                 created_at=now,
@@ -188,6 +226,7 @@ def _make_runtime_subagent_executor(
             }
 
         async def _drive():
+            await preparation.prepare_agent_run(spec=agent_spec, context=run_ctx)
             compiled = await compiler.compile(agent_spec)
             return await runner_provider().run(compiled, RunInput(prompt=task), run_ctx)
 
@@ -279,6 +318,15 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     RuntimeBuildConfig. Internal splits: resolve security + exposure -> build
     executor -> build capability assembler -> build compiler -> build runner ->
     build swarm runner."""
+    if config.storage.run_definitions is None:
+        # Fail fast at build time, not when a subagent/worker tool first
+        # pauses on approval and Runtime.resume(child_run_id) cannot find a
+        # snapshot. Resumability is a required capability, not opt-in.
+        from ..errors import RuntimeInitializationError
+
+        raise RuntimeInitializationError(
+            "RunDefinitionStore is required for resumable runs"
+        )
     base_options = config.capability_options or CapabilityRuntimeOptions()
     from ..security.baseline import SecurityBaseline
 
@@ -319,22 +367,12 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         resolved_executor = ToolExecutor(
             policy=PolicyEngine(rules=tuple(rules)),
             approval_store=config.storage.approvals,
-            event_store=config.storage.events,
             idempotency_store=config.storage.idempotency,
-            pause_on_approval=config.pause_on_approval,
-            security_audit_failure_mode=getattr(
-                baseline, "audit_failure_mode", "fail_closed"
-            ),
         )
     compiler = AgentCompiler(
         model_router=router,
         middleware_pipeline=config.middleware_pipeline,
         tool_executor=resolved_executor,
-    )
-    uow_factory = (
-        config.storage.transaction
-        if config.storage.capabilities.cross_store_transactions
-        else None
     )
     run_controller = RunController()
     runner_pipeline = getattr(baseline, "pipeline", None)
@@ -379,10 +417,8 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         middleware_pipeline=config.middleware_pipeline,
         memory_store=config.storage.memories,
         retriever=config.retriever,
-        uow_factory=uow_factory,
         run_controller=run_controller,
         execution=config.execution,
-        approval_store=config.storage.approvals,
         capability_options=resolved_options,
         capability_assembler=assembler,
         security_pipeline=runner_pipeline,
@@ -392,6 +428,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         security_audit_failure_mode=getattr(
             baseline, "audit_failure_mode", "fail_closed"
         ),
+        commit_coordinator=_build_commit_coordinator(config.storage),
     )
     swarm_runner = SwarmRunner(
         swarm_store=config.storage.swarms,
@@ -401,6 +438,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         compiler=compiler,
         agent_runner=runner,
         run_controller=run_controller,
+        run_definitions=config.storage.run_definitions,
     )
 
     return RuntimeComponents(
@@ -416,4 +454,5 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         tool_executor=resolved_executor,
         execution=config.execution,
         mcp_connection_manager=mcp_manager,
+        commit_coordinator=runner._commit_coordinator,
     )

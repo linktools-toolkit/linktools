@@ -44,7 +44,10 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
+from linktools.ai.storage.file.approval import FileApprovalStore
 from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+from linktools.ai.storage.file.definition import FileRunDefinitionStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
@@ -65,6 +68,8 @@ from linktools.ai.swarm.spec import (
     SwarmSpec,
     SwarmStrategySpec,
 )
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 
 _NOW = datetime.now(timezone.utc)
@@ -103,7 +108,10 @@ def _build_compiler(*outputs: str) -> AgentCompiler:
     registry = ModelRegistry()
     for i, out in enumerate(outputs):
         registry.register(f"model-{i}", model=_make_model(out))
-    return AgentCompiler(model_router=ModelRouter(registry=registry))
+    return AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
 
 
 def _agent_spec(agent_id: str, model_type: str) -> AgentSpec:
@@ -163,6 +171,7 @@ class _Stores:
         self.event_store = FileEventStore(root=tmp_path / "events")
         self.checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
         self.swarm_store = FileSwarmStore(root=tmp_path / "swarm")
+        self.run_definitions = FileRunDefinitionStore(root=tmp_path / "definitions")
         self.run_controller = RunController()
         self.agent_runner = AgentRunner(
             run_store=self.run_store,
@@ -170,6 +179,13 @@ class _Stores:
             event_store=self.event_store,
             checkpoint_store=self.checkpoint_store,
             run_controller=self.run_controller,
+            commit_coordinator=FileRunCommitCoordinator(
+                approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+                checkpoint_store=self.checkpoint_store,
+                run_store=self.run_store,
+                session_store=self.session_store,
+                event_store=self.event_store,
+            ),
         )
 
     def seed_shared_session(self, session_id: str) -> None:
@@ -216,6 +232,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -275,6 +292,69 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
     payload_types = {type(e.payload).__name__ for e in events.items}
     assert "SwarmStarted" in payload_types
     assert "SwarmCompleted" in payload_types
+
+
+def test_swarm_run_persists_driving_and_worker_run_definition_snapshots(tmp_path):
+    """§5.11: a swarm run persists a RunDefinitionSnapshot for the driving run
+    AND for each worker child run, so Runtime.resume(child_run_id) can restore a
+    worker that paused on approval. Both prepare_swarm_run (driving) and the
+    worker's prepare_agent_run are unconditional -- this fails if either is
+    re-gated behind an Optional RunDefinitionStore."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("coord-out", "alpha-out", "beta-out")
+    stores = _Stores(tmp_path)
+    stores.seed_shared_session("shared-session")
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
+    )
+    spec = _spec(
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=4),
+        agents=(AgentRef("coord"), AgentRef("worker-a"), AgentRef("worker-b")),
+        coordinator=AgentRef("coord"),
+        config={"task_count": 2},
+    )
+    agents = {
+        "coord": _agent_spec("coord", "model-0"),
+        "worker-a": _agent_spec("worker-a", "model-1"),
+        "worker-b": _agent_spec("worker-b", "model-2"),
+    }
+    context = _driving_context("drive-run-snap", "shared-session")
+
+    async def _run():
+        return await runner.run(
+            spec, RunInput(prompt="do the work"), context, agents=agents
+        )
+
+    result = asyncio.run(_run())
+    assert "alpha-out" in str(result.output)
+
+    async def _verify():
+        children = await stores.run_store.list_children(context.run_id)
+        driving_snapshot = await stores.run_definitions.get(context.run_id)
+        worker_snapshots = {
+            child.id: await stores.run_definitions.get(child.id) for child in children
+        }
+        return children, driving_snapshot, worker_snapshots
+
+    children, driving_snapshot, worker_snapshots = asyncio.run(_verify())
+
+    # Driving swarm run has a snapshot.
+    assert driving_snapshot is not None, "driving swarm run has no snapshot"
+    assert driving_snapshot.runnable_type == str(RunnableType.SWARM.value)
+    # Each worker child run has a snapshot (the unconditional worker
+    # prepare_agent_run in the strategy).
+    assert len(children) == 2
+    for child_id, snap in worker_snapshots.items():
+        assert snap is not None, f"worker run {child_id} has no snapshot"
+        assert snap.runnable_type == str(RunnableType.AGENT.value)
 
 
 # --- 2. cancel(swarm_run_id) ------------------------------------------------
@@ -368,6 +448,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -496,6 +577,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -582,6 +664,7 @@ def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -612,6 +695,7 @@ def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -629,6 +713,7 @@ def test_cancel_unknown_swarm_run_raises(tmp_path):
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -655,6 +740,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -702,8 +788,9 @@ def test_resume_after_partial_failure_completes(tmp_path):
     stores = _Stores(tmp_path)
     now = _NOW
 
-    # seed an interrupted swarm: driving Run RUNNING, SwarmRun RUNNING, one
-    # already-FAILED task (a worker that crashed mid-flight). The default
+    # seed an explicitly recoverable swarm: the driving Run is RUNNING, the
+    # SwarmRun is RECOVERABLE, and one already-FAILED task (a worker that
+    # crashed mid-flight). The default
     # coordinator returns one task on its first call (when no tasks have yet
     # SUCCEEDED), so resume re-enters the round loop, runs one new worker task
     # to success, then aggregates and completes.
@@ -731,7 +818,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
                 id="swarm-1",
                 run_id="drive-run-1",
                 round=0,
-                status=SwarmStatus.RUNNING,
+                status=SwarmStatus.RECOVERABLE,
                 version=1,
                 token_usage=TokenUsage(),
                 cost=Decimal("0"),
@@ -765,6 +852,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -783,8 +871,41 @@ def test_resume_after_partial_failure_completes(tmp_path):
         "worker-a": _agent_spec("worker-a", "model-0"),
     }
 
+    # The test seeds state manually (no runner.run), so create the snapshot
+    # explicitly so resume can restore the spec + member agents.
+    import hashlib as _hashlib
+
+    from linktools.ai.json import canonical_json as _cj
+    from linktools.ai.run.definition import (
+        RunDefinitionSnapshot as _Snap,
+        serialize_agent_spec as _sa,
+        serialize_swarm_spec as _ss,
+    )
+
+    _serialized = {
+        "type": "swarm",
+        "spec": _ss(spec),
+        "members": {aid: _sa(a) for aid, a in agents.items()},
+    }
+    asyncio.run(
+        stores.run_definitions.create(
+            _Snap(
+                run_id="drive-run-1",
+                runnable_type="swarm",
+                runnable_id="swarm-spec-1",
+                serialized_spec=_serialized,
+                spec_fingerprint=_hashlib.sha256(_cj(_serialized).encode()).hexdigest(),
+                user_id=None,
+                tenant_id=None,
+                workspace=None,
+                provider_revision=None,
+                created_at=_NOW,
+            )
+        )
+    )
+
     async def _resume():
-        return await runner.resume("swarm-1", spec, agents=agents)
+        return await runner.resume("swarm-1")
 
     result = asyncio.run(_resume())
 
@@ -813,20 +934,16 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
     stores = _Stores(tmp_path)
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
         agent_runner=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
-    spec = _spec(
-        kind="parallel_fan_out",
-        agents=(AgentRef("coord"),),
-        coordinator=AgentRef("coord"),
-    )
 
     async def _resume():
-        await runner.resume("no-such-swarm", spec, agents={})
+        await runner.resume("no-such-swarm")
 
     with pytest.raises(SwarmRunNotFoundError):
         asyncio.run(_resume())
@@ -847,6 +964,7 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -907,6 +1025,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -986,13 +1105,17 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
         "model-1",
         model=_make_model_with_usage("worker-out", input_tokens=100, output_tokens=100),
     )
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
 
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -1039,13 +1162,17 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
         "model-1",
         model=_make_model_with_usage("worker-out", input_tokens=50, output_tokens=50),
     )
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
 
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -1096,6 +1223,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
 
     runner = SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -1248,6 +1376,7 @@ def _make_runner(stores: _Stores):
 
     return SwarmRunner(
         swarm_store=stores.swarm_store,
+        run_definitions=stores.run_definitions,
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
@@ -1450,6 +1579,7 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
                 event_store=stores.event_store,
                 agent_runner=stores.agent_runner,
                 compiler=_build_compiler("ok"),
+                run_definitions=stores.run_definitions,
             )
             await runner.recover("swarm-1")
             return await swarm_store.list_tasks("swarm-1")
@@ -1459,3 +1589,252 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
     assert tasks[0].status is SwarmTaskStatus.PENDING
     assert tasks[0].active_run_id is None
     assert tasks[0].assigned_agent_id is None
+
+
+def test_resume_refused_for_terminal_swarm(tmp_path):
+    """WP-09 §13.1: a terminal swarm (SUCCEEDED/FAILED/CANCELLED) must not resume
+    -- re-running its strategy could repeat side-effecting tasks."""
+    from linktools.ai.swarm.runner import SwarmRunner
+    from linktools.ai.errors import InvalidRunTransitionError
+
+    compiler = _build_compiler("term-out")
+    stores = _Stores(tmp_path)
+    now = _NOW
+
+    async def _seed(status):
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-term",
+                root_run_id="drive-term",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=RunStatus.SUCCEEDED,
+                input=RunInput(prompt="done"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-term",
+                run_id="drive-term",
+                round=0,
+                status=status,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    for terminal in (SwarmStatus.SUCCEEDED, SwarmStatus.FAILED, SwarmStatus.CANCELLED):
+        asyncio.run(_seed(terminal))
+        runner = SwarmRunner(
+            swarm_store=stores.swarm_store,
+            run_store=stores.run_store,
+            session_store=stores.session_store,
+            event_store=stores.event_store,
+            compiler=compiler,
+            agent_runner=stores.agent_runner,
+            run_controller=stores.run_controller,
+            run_definitions=stores.run_definitions,
+        )
+        with pytest.raises(InvalidRunTransitionError):
+            asyncio.run(runner.resume("swarm-term"))
+
+
+@pytest.mark.parametrize(
+    "driving_status",
+    [RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED],
+    ids=["succeeded", "failed", "cancelled"],
+)
+def test_resume_refused_for_terminal_driving_run(tmp_path, driving_status):
+    """v4 §7.8: a PAUSED (non-terminal) swarm whose DRIVING Run is already
+    terminal must not resume -- re-entering the strategy could re-drive worker
+    side effects. The driving Run is rejected before the snapshot is loaded or
+    the strategy resumed, so nothing executes.
+
+    RUNNING is intentionally NOT rejected: a RECOVERABLE swarm's driving Run is
+    legitimately RUNNING mid-flight, and crash-recovery resume must keep working
+    (see test_resume_after_partial_failure_completes). The guide's §7.3 table
+    lists RunStatus.RECOVERABLE, which does not exist in this codebase; RUNNING
+    is the actual non-terminal recoverable driving state, so only the terminal
+    states are rejected (per the guide's own note to map names to the project's
+    actual statuses)."""
+    from linktools.ai.errors import InvalidRunTransitionError
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("term-out")
+    stores = _Stores(tmp_path)
+    now = _NOW
+
+    async def _seed():
+        await stores.run_store.create(
+            RunRecord(
+                id="drive-term-d",
+                root_run_id="drive-term-d",
+                parent_run_id=None,
+                session_id="shared",
+                runnable_id="swarm-spec-1",
+                runnable_type=RunnableType.SWARM,
+                status=driving_status,
+                input=RunInput(prompt="done"),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        # Non-terminal swarm -> passes the swarm-status check, so the driving
+        # check is what rejects the resume.
+        await stores.swarm_store.create_run(
+            SwarmRun(
+                id="swarm-term-d",
+                run_id="drive-term-d",
+                round=0,
+                status=SwarmStatus.PAUSED,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    asyncio.run(_seed())
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        agent_runner=stores.agent_runner,
+        compiler=compiler,
+        run_controller=stores.run_controller,
+        run_definitions=stores.run_definitions,
+    )
+    with pytest.raises(InvalidRunTransitionError):
+        asyncio.run(runner.resume("swarm-term-d"))
+
+    async def _verify():
+        driving = await stores.run_store.get("drive-term-d")
+        swarm = await stores.swarm_store.get_run("swarm-term-d")
+        tasks = await stores.swarm_store.list_tasks("swarm-term-d")
+        return driving, swarm, tasks
+
+    driving, swarm, tasks = asyncio.run(_verify())
+    # strategy.resume never ran: the driving Run stays terminal, the swarm stays
+    # PAUSED, and no worker task was created.
+    assert driving.status is driving_status
+    assert swarm.status is SwarmStatus.PAUSED
+    assert tasks == ()
+
+
+def test_swarm_snapshot_failure_leaves_no_orphan_running(tmp_path):
+    """B-03: when the run-definition snapshot cannot be serialized, the swarm
+    run must fail BEFORE any Run/SwarmRun is created -- no orphan RUNNING. A set
+    in the strategy config is rejected by canonical_json."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("snap-out")
+    stores = _Stores(tmp_path)
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        compiler=compiler,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
+        run_definitions=stores.run_definitions,
+    )
+    spec = _spec(
+        kind="parallel_fan_out",
+        agents=(AgentRef("coord"),),
+        coordinator=AgentRef("coord"),
+    )
+    agents = {"coord": _agent_spec("coord", "model-0")}
+    context = _driving_context("drive-snap", "shared-session")
+
+    # Force the snapshot store write to fail (B-03 §8.7: Snapshot Store write
+    # failure). The swarm run must fail BEFORE any Run/SwarmRun is created.
+    async def _failing_create(_snapshot):
+        raise RuntimeError("injected snapshot store failure")
+
+    stores.run_definitions.create = _failing_create
+
+    async def _run():
+        await runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
+
+    with pytest.raises(RuntimeError, match="injected snapshot store failure"):
+        asyncio.run(_run())
+    # No Run record was created (snapshot is prepared before any state).
+    assert asyncio.run(stores.run_store.get("drive-snap")) is None
+    # No SwarmRun either (the swarm runs subdir has no entry for this run).
+    swarms_dir = (
+        stores.swarm_store._root if hasattr(stores.swarm_store, "_root") else None
+    )
+    if swarms_dir is not None and swarms_dir.exists():
+        assert not any("drive-snap" in f.name for f in swarms_dir.iterdir()), list(
+            swarms_dir.iterdir()
+        )
+
+
+def test_swarm_worker_runs_have_resumable_snapshots(tmp_path):
+    """A-01: a swarm worker Run (child of the driving swarm run) must persist a
+    RunDefinitionSnapshot so Runtime.resume(child_run_id) can restore its spec
+    if a worker tool pauses on approval."""
+    from linktools.ai.swarm.runner import SwarmRunner
+
+    compiler = _build_compiler("alpha-out", "beta-out")
+    stores = _Stores(tmp_path)
+    runner = SwarmRunner(
+        swarm_store=stores.swarm_store,
+        run_store=stores.run_store,
+        session_store=stores.session_store,
+        event_store=stores.event_store,
+        compiler=compiler,
+        agent_runner=stores.agent_runner,
+        run_controller=stores.run_controller,
+        run_definitions=stores.run_definitions,
+    )
+    spec = _spec(
+        kind="parallel_fan_out",
+        limits=_limits(max_concurrency=4),
+        agents=(AgentRef("worker-a"), AgentRef("worker-b")),
+        coordinator=AgentRef("worker-a"),
+        config={"task_count": 2},
+    )
+    agents = {
+        "worker-a": _agent_spec("worker-a", "model-0"),
+        "worker-b": _agent_spec("worker-b", "model-1"),
+    }
+    context = _driving_context("drive-snap2", "shared-session")
+
+    async def _run():
+        return await runner.run(
+            spec, RunInput(prompt="do the work"), context, agents=agents
+        )
+
+    asyncio.run(_run())
+
+    async def _verify():
+        children = await stores.run_store.list_children(context.run_id)
+        snapshots = []
+        for child in children:
+            snapshots.append(await stores.run_definitions.get(child.id))
+        return children, snapshots
+
+    children, snapshots = asyncio.run(_verify())
+    assert children, "expected at least one worker child run"
+    # Every worker child run has a resumable snapshot.
+    assert all(s is not None for s in snapshots), snapshots
+    assert all(s.runnable_type == "agent" for s in snapshots)

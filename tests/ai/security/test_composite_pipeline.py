@@ -7,6 +7,8 @@ import pytest
 
 from linktools.ai.security.pipeline import (
     CompositeSecurityPipeline,
+    ModelInvocationEvent,
+    ModelResultEvent,
     PipelineAction,
     PipelineDecision,
     ToolInvocationEvent,
@@ -195,3 +197,92 @@ async def test_per_step_schema_validation_denies_bad_intermediate_modify():
     decision = await composite.before_tool(event)
     assert decision.action == PipelineAction.DENY
     assert "schema validation" in (decision.reason or "")
+
+
+class _ModelPipeline:
+    """Sub-pipeline whose before_model/after_model return canned decisions
+    (tools stay ALLOW). For testing composite per-sub-pipeline stage validation."""
+
+    def __init__(self, before_model=None, after_model=None):
+        self._before_model = before_model or (
+            lambda e: PipelineDecision(action=PipelineAction.ALLOW)
+        )
+        self._after_model = after_model or (
+            lambda e: PipelineDecision(action=PipelineAction.ALLOW)
+        )
+
+    async def before_model(self, e):
+        return self._before_model(e)
+
+    async def after_model(self, e):
+        return self._after_model(e)
+
+    async def before_tool(self, e):  # noqa: ARG002
+        return PipelineDecision(action=PipelineAction.ALLOW)
+
+    async def after_tool(self, e):  # noqa: ARG002
+        return PipelineDecision(action=PipelineAction.ALLOW)
+
+    async def on_security_event(self, e):  # noqa: ARG002
+        return PipelineDecision(action=PipelineAction.AUDIT_ONLY)
+
+
+@pytest.mark.asyncio
+async def test_composite_before_model_rejects_wrong_stage_modify_result():
+    """A sub-pipeline returning an after-stage action (MODIFY_RESULT) at
+    before_model must fail closed -- the composite must not silently fold it into
+    an ALLOW+payload that SecuredModel could never detect."""
+    from linktools.ai.errors import PipelineExecutionError
+
+    bad = _ModelPipeline(
+        before_model=lambda e: PipelineDecision(
+            action=PipelineAction.MODIFY_RESULT, modified_payload="[REDACTED]"
+        )
+    )
+    composite = CompositeSecurityPipeline([bad])
+    with pytest.raises(PipelineExecutionError):
+        await composite.before_model(ModelInvocationEvent(prompt="hi"))
+
+
+@pytest.mark.asyncio
+async def test_composite_after_model_rejects_wrong_stage_modify():
+    """A sub-pipeline returning a before-stage action (MODIFY) at after_model
+    must fail closed."""
+    from linktools.ai.errors import PipelineExecutionError
+
+    bad = _ModelPipeline(
+        after_model=lambda e: PipelineDecision(
+            action=PipelineAction.MODIFY, modified_payload="[REDACTED]"
+        )
+    )
+    composite = CompositeSecurityPipeline([bad])
+    with pytest.raises(PipelineExecutionError):
+        await composite.after_model(ModelResultEvent(output="out"))
+
+
+@pytest.mark.asyncio
+async def test_composite_before_model_rejects_modify_without_payload():
+    """A sub-pipeline's MODIFY at before_model with no payload must fail closed
+    at the composite boundary -- it cannot be folded into a payload-less ALLOW."""
+    from linktools.ai.errors import PipelineExecutionError
+
+    bad = _ModelPipeline(
+        before_model=lambda e: PipelineDecision(action=PipelineAction.MODIFY)
+    )
+    composite = CompositeSecurityPipeline([bad])
+    with pytest.raises(PipelineExecutionError):
+        await composite.before_model(ModelInvocationEvent(prompt="hi"))
+
+
+@pytest.mark.asyncio
+async def test_composite_after_model_rejects_modify_result_without_payload():
+    """A sub-pipeline's MODIFY_RESULT at after_model with no payload must fail
+    closed at the composite boundary."""
+    from linktools.ai.errors import PipelineExecutionError
+
+    bad = _ModelPipeline(
+        after_model=lambda e: PipelineDecision(action=PipelineAction.MODIFY_RESULT)
+    )
+    composite = CompositeSecurityPipeline([bad])
+    with pytest.raises(PipelineExecutionError):
+        await composite.after_model(ModelResultEvent(output="out"))

@@ -41,7 +41,9 @@ async def prepare_run(
     from .._runtime.lifecycle import create_run_context, resolve_session
     from ..swarm.spec import SwarmSpec
 
-    resolved_session = await resolve_session(storage, session_id)
+    resolved_session = await resolve_session(
+        storage, session_id, user_id=user_id, tenant_id=tenant_id
+    )
     resolved_run = run_id or str(uuid.uuid4())
     run_context = create_run_context(
         run_id=resolved_run,

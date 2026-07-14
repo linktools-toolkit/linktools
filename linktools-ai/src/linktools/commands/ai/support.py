@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import CommandError
 from linktools.core import environ
+from linktools.ai.agent.approval import ApprovalStatus
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.execution.local import LocalExecutionBackend
 from linktools.ai.model.policy import ModelPolicy
@@ -18,6 +19,7 @@ from linktools.ai.model.router import ModelRouter
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.facade import FileStorage
+from linktools.system import get_user
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -135,9 +137,50 @@ async def ensure_session(storage: FileStorage, session_id: str) -> None:
             SessionRecord(
                 id=session_id,
                 parent_id=None,
+                # The local CLI is single-principal: sessions it creates are
+                # unowned (None/None) and only re-openable by an unowned caller.
+                user_id=None,
+                tenant_id=None,
                 status=SessionStatus.ACTIVE,
                 version=1,
                 created_at=now,
                 updated_at=now,
             )
         )
+
+
+async def resolve_approval(
+    storage: FileStorage,
+    approval_id: str,
+    *,
+    approved: bool,
+    reason: "str | None",
+) -> "int | None":
+    """Resolve a pending approval request (shared by `lt ai approve`/`reject`).
+
+    Raises `CommandError` if the request is missing or no longer pending. The
+    `expected_version` from the read request fences a concurrent resolve."""
+    request = await storage.approvals.get(approval_id)
+    if request is None:
+        raise CommandError(f'approval "{approval_id}" not found')
+    if request.status != ApprovalStatus.PENDING:
+        raise CommandError(
+            f'approval "{approval_id}" is already {request.status.value}'
+        )
+    resolved_by = get_user() or "cli"
+    if approved:
+        await storage.approvals.approve(
+            approval_id,
+            expected_version=request.version,
+            resolved_by=resolved_by,
+        )
+        environ.logger.info(f"approved {approval_id}")
+    else:
+        await storage.approvals.reject(
+            approval_id,
+            expected_version=request.version,
+            resolved_by=resolved_by,
+            reason=reason,
+        )
+        environ.logger.info(f"rejected {approval_id}")
+    return 0

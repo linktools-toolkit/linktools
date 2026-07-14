@@ -41,6 +41,7 @@ from ..facade import Storage
 from ..resource.store import ResourceStore
 from .approval import SqlAlchemyApprovalStore
 from .checkpoint import SqlAlchemyCheckpointStore
+from .definition import SqlAlchemyRunDefinitionStore
 from .event import SqlAlchemyEventStore
 from .idempotency import SqlAlchemyIdempotencyStore
 from .memory import SqlAlchemyMemoryStore
@@ -95,6 +96,9 @@ class SqlAlchemyStorage(Storage):
             memories=SqlAlchemyMemoryStore(session_factory=session_factory),
             approvals=SqlAlchemyApprovalStore(session_factory=session_factory),
             idempotency=SqlAlchemyIdempotencyStore(session_factory=session_factory),
+            run_definitions=SqlAlchemyRunDefinitionStore(
+                session_factory=session_factory
+            ),
             capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
         )
         # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().

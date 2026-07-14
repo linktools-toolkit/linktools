@@ -1,3 +1,4 @@
 tomlkit
 pkginfo
 build
+pip

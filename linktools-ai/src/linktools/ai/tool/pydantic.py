@@ -31,8 +31,10 @@ if TYPE_CHECKING:
 @dataclass
 class PolicyCapability(AbstractCapability[None]):
     """Adapts ToolExecutor into a pydantic-ai AbstractCapability, converting
-    ToolDeniedError/ToolApprovalRequiredError into SkipToolExecution so a
-    denied call surfaces as a tool result the model can see.
+    ToolDeniedError into SkipToolExecution so a denied call surfaces as a tool
+    result the model can see. RunPaused (the approval signal) is a RunError, so
+    it is re-raised (not converted) and propagates to AgentRunner's pause
+    handler.
 
     The per-Run ToolContext arrives via pydantic-ai dependency injection
     (``ctx.deps.tool_context``); no mutable per-Run field on the capability, so

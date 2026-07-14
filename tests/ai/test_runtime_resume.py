@@ -139,7 +139,6 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FileStorage]":
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=storage.approvals,
-        pause_on_approval=True,
     )
     runtime = Runtime.build(
         storage=storage,
@@ -207,7 +206,7 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
         )
 
         # resume re-enters run_stream with message_history.
-        resume_events = await _collect(runtime.resume("run-r1", spec))
+        resume_events = await _collect(runtime.resume("run-r1"))
 
         # Final record: SUCCEEDED.
         final = await storage.runs.get("run-r1")
@@ -240,11 +239,10 @@ def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
 def test_resume_run_not_found_raises(tmp_path):
     """Resume on a non-existent run raises RunNotFoundError."""
     runtime, _ = _build_runtime(tmp_path)
-    spec = _spec()
 
     async def _drive():
         try:
-            async for _ in runtime.resume("nonexistent", spec):
+            async for _ in runtime.resume("nonexistent"):
                 pass
             return None
         except RunNotFoundError:
@@ -257,7 +255,6 @@ def test_resume_not_waiting_approval_raises(tmp_path):
     """Resume on a run that is SUCCEEDED (not WAITING_APPROVAL) raises
     InvalidRunTransitionError."""
     runtime, storage = _build_runtime(tmp_path)
-    spec = _spec()
 
     async def _seed_and_resume():
         now = datetime.now(timezone.utc)
@@ -280,7 +277,7 @@ def test_resume_not_waiting_approval_raises(tmp_path):
             )
         )
         try:
-            async for _ in runtime.resume("run-done", spec):
+            async for _ in runtime.resume("run-done"):
                 pass
             return None
         except InvalidRunTransitionError:
@@ -293,7 +290,6 @@ def test_resume_no_checkpoint_raises(tmp_path):
     """Resume on a WAITING_APPROVAL run without a checkpoint raises
     RunNotFoundError."""
     runtime, storage = _build_runtime(tmp_path)
-    spec = _spec()
 
     async def _seed_and_resume():
         now = datetime.now(timezone.utc)
@@ -316,10 +312,197 @@ def test_resume_no_checkpoint_raises(tmp_path):
             )
         )
         try:
-            async for _ in runtime.resume("run-paused-nockpt", spec):
+            async for _ in runtime.resume("run-paused-nockpt"):
                 pass
             return None
         except RunNotFoundError:
             return True
 
     assert asyncio.run(_seed_and_resume()) is True
+
+
+def test_resume_refused_when_approval_still_pending(tmp_path):
+    """WP-08 §12.6: a run whose approval is still PENDING must not resume -- the
+    run stays WAITING_APPROVAL (resume is fail-closed until explicitly approved)."""
+
+    async def _drive():
+        runtime, storage = _build_runtime(tmp_path)
+        spec = _spec()
+        now = datetime.now(timezone.utc)
+        await storage.sessions.create(
+            SessionRecord(
+                id="session-pending",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        pause_events = await _collect(
+            runtime.run_stream(
+                spec,
+                "call risky",
+                session_id="session-pending",
+                run_id="run-pending",
+            )
+        )
+        assert any(e["type"] == "paused" for e in pause_events)
+        # Do NOT approve -- the request is still PENDING.
+        try:
+            async for _ in runtime.resume("run-pending"):
+                pass
+            return None
+        except InvalidRunTransitionError:
+            # Run must still be WAITING_APPROVAL (no CAS happened).
+            record = await storage.runs.get("run-pending")
+            return record.status is RunStatus.WAITING_APPROVAL
+
+    assert asyncio.run(_drive()) is True
+
+
+def test_resume_refused_when_approval_rejected(tmp_path):
+    """WP-08 §12.6: a REJECTED approval must not resume -- fail-closed, run stays
+    WAITING_APPROVAL."""
+
+    async def _drive():
+        runtime, storage = _build_runtime(tmp_path)
+        spec = _spec()
+        now = datetime.now(timezone.utc)
+        await storage.sessions.create(
+            SessionRecord(
+                id="session-rej",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        pause_events = await _collect(
+            runtime.run_stream(
+                spec,
+                "call risky",
+                session_id="session-rej",
+                run_id="run-rej",
+            )
+        )
+        paused = next(e for e in pause_events if e["type"] == "paused")
+        await storage.approvals.reject(
+            paused["approval_id"], expected_version=1, resolved_by="test"
+        )
+        try:
+            async for _ in runtime.resume("run-rej"):
+                pass
+            return None
+        except InvalidRunTransitionError:
+            record = await storage.runs.get("run-rej")
+            return record.status is RunStatus.WAITING_APPROVAL
+
+    assert asyncio.run(_drive()) is True
+
+
+def test_resume_persists_non_empty_user_message(tmp_path):
+    """WP-11 §15.2: a resumed run's complete commit must persist the ORIGINAL
+    user message (carried through record.input.prompt), not an empty string."""
+
+    async def _drive():
+        runtime, storage = _build_runtime(tmp_path)
+        spec = _spec()
+        now = datetime.now(timezone.utc)
+        await storage.sessions.create(
+            SessionRecord(
+                id="session-usr",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        pause_events = await _collect(
+            runtime.run_stream(
+                spec,
+                "call risky",
+                session_id="session-usr",
+                run_id="run-usr",
+            )
+        )
+        paused = next(e for e in pause_events if e["type"] == "paused")
+        await storage.approvals.approve(
+            paused["approval_id"], expected_version=1, resolved_by="test"
+        )
+        await _collect(runtime.resume("run-usr"))
+        messages = await storage.sessions.list_messages("session-usr")
+        return [m for m in messages if m.role.value == "user"]
+
+    user_msgs = asyncio.run(_drive())
+    assert len(user_msgs) == 1, f"expected 1 USER message, got {len(user_msgs)}"
+    assert user_msgs[0].content == "call risky", (
+        f"expected original prompt 'call risky', got {user_msgs[0].content!r}"
+    )
+
+
+class _PromptedRiskyProvider(_RiskyProvider):
+    """Same risky tool as _RiskyProvider, but ALSO injects a capability prompt
+    section -- reproduces B-02 (resume with capability_prompt non-empty used to
+    do ``str + None`` and crash)."""
+
+    async def resolve(self, ref, context):
+        bundle = await super().resolve(ref, context)
+        return bundle.__class__(
+            tool_contributions=bundle.tool_contributions,
+            prompt_sections={"catalog": "## Tool Catalog\n- risky: doubles a number"},
+        )
+
+
+def test_resume_with_capability_prompt_does_not_crash(tmp_path):
+    """B-02: a capability-enabled agent (with a prompt section) that pauses on
+    approval and then resumes must not TypeError on ``capability_prompt + None``."""
+
+    async def _drive():
+        storage = FileStorage(root=tmp_path)
+        executor = ToolExecutor(
+            policy=PolicyEngine(
+                rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
+            ),
+            approval_store=storage.approvals,
+        )
+        runtime = Runtime.build(
+            storage=storage,
+            model_router=ModelRouter(registry=_registry()),
+            tool_executor=executor,
+            providers=ProviderBundle(capabilities=(_PromptedRiskyProvider(),)),
+        )
+        spec = _spec()
+        now = datetime.now(timezone.utc)
+        await storage.sessions.create(
+            SessionRecord(
+                id="session-cp",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        pause_events = await _collect(
+            runtime.run_stream(
+                spec,
+                "call risky",
+                session_id="session-cp",
+                run_id="run-cp",
+            )
+        )
+        assert any(e["type"] == "paused" for e in pause_events), pause_events
+        paused = next(e for e in pause_events if e["type"] == "paused")
+        await storage.approvals.approve(
+            paused["approval_id"], expected_version=1, resolved_by="test"
+        )
+        resume_events = await _collect(runtime.resume("run-cp"))
+        final = await storage.runs.get("run-cp")
+        return resume_events, final
+
+    resume_events, final_record = asyncio.run(_drive())
+    assert resume_events[0]["type"] == "resumed"
+    assert final_record.status is RunStatus.SUCCEEDED

@@ -12,6 +12,7 @@ AgentSpec.tools are then resolved into prompt sections + toolsets via the
 registered capability providers. Runtime is an async context manager that
 releases MCP connections on close."""
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Mapping
 
 # AsyncIterator is a typing-only alias used to annotate the streaming
@@ -49,6 +50,32 @@ class Runtime:
         components: RuntimeComponents,
     ) -> None:
         self._components = components
+        from .run.preparation import RunPreparationCoordinator
+
+        # Single owner of RunDefinitionSnapshot creation across every entry point.
+        self._prepare = RunPreparationCoordinator(components.storage.run_definitions)
+        # One-time crash-recovery guard: the File coordinator's journal is
+        # replayed before the first run/resume so an interrupted pause/complete
+        # is made consistent. No-op for coordinators without recovery (SQL) and
+        # idempotent (recovery discards each journal it resolves). The lock +
+        # double-check serialize concurrent first-callers, and the flag is set
+        # only after recovery succeeds so a failed recovery can be retried.
+        self._recovery_done = False
+        self._recovery_lock = asyncio.Lock()
+
+    async def _ensure_recovered(self) -> None:
+        if self._recovery_done:
+            return
+        async with self._recovery_lock:
+            if self._recovery_done:
+                return
+            coordinator = self._components.commit_coordinator
+            recover = getattr(coordinator, "recover_incomplete_commits", None)
+            if recover is not None:
+                await recover()
+            # Only flag done after recovery succeeds; a raise leaves the flag
+            # False so the next entry point retries.
+            self._recovery_done = True
 
     @classmethod
     def build(
@@ -60,7 +87,6 @@ class Runtime:
         retriever: "Retriever | None" = None,
         execution: "ExecutionBackend | None" = None,
         tool_executor: "ToolExecutor | None" = None,
-        pause_on_approval: bool = False,
         mcp_connection_manager: "MCPConnectionManager | None" = None,
         providers: "ProviderBundle | None" = None,
         options: "CapabilityRuntimeOptions | None" = None,
@@ -82,7 +108,6 @@ class Runtime:
             tool_executor=tool_executor,
             security=security,
             capability_options=options,
-            pause_on_approval=pause_on_approval,
             allow_mcp_wildcard=allow_mcp_wildcard,
             mcp_connection_manager=mcp_connection_manager,
         )
@@ -127,6 +152,7 @@ class Runtime:
     ):
         from .run.lifecycle import prepare_run
 
+        await self._ensure_recovered()
         prepared = await prepare_run(
             storage=self._components.storage,
             spec=spec,
@@ -139,9 +165,17 @@ class Runtime:
         if isinstance(spec, SwarmSpec):
             if agents is None:
                 raise SwarmError("agents mapping is required to run a SwarmSpec")
+            # SwarmRunner owns the swarm snapshot creation (via the same
+            # RunPreparationCoordinator) so both Runtime- and test-driven swarm
+            # runs persist a snapshot. No double-create: Runtime does not
+            # pre-create for swarm.
             return await self._components.swarm_runner.run(
                 spec, RunInput(prompt=prompt), prepared.context, agents=agents
             )
+
+        # Persist the immutable run-definition snapshot (single owner) so resume
+        # restores the exact original spec + identity instead of a caller's.
+        await self._prepare.prepare_agent_run(spec=spec, context=prepared.context)
 
         compiled = await self._components.compiler.compile(spec)
         return await self._components.runner.run(
@@ -239,6 +273,7 @@ class Runtime:
         if isinstance(spec, SwarmSpec):
             raise SwarmError("run_stream does not support SwarmSpec")
 
+        await self._ensure_recovered()
         prepared = await prepare_run(
             storage=self._components.storage,
             spec=spec,
@@ -247,6 +282,10 @@ class Runtime:
             user_id=user_id,
             tenant_id=tenant_id,
         )
+
+        # Persist the immutable run-definition snapshot (single owner).
+        await self._prepare.prepare_agent_run(spec=spec, context=prepared.context)
+
         compiled = await self._components.compiler.compile(spec)
         async for event in self._components.runner.run_stream(
             compiled, RunInput(prompt=prompt), prepared.context
@@ -256,24 +295,27 @@ class Runtime:
     async def resume(
         self,
         run_id: str,
-        spec: "AgentSpec",
-        *,
-        user_id: "str | None" = None,
-        tenant_id: "str | None" = None,
     ) -> "AsyncIterator[dict]":
-        """Resume a paused Run. Loads the paused RunRecord,
-        deserializes its checkpoint's message history, transitions
-        WAITING_APPROVAL -> RUNNING, and re-enters :meth:`AgentRunner.run_stream`.
+        """Resume a paused Run from its immutable persisted definition. Loads
+        the RunDefinitionSnapshot, restores the ORIGINAL spec + identity (not a
+        caller-supplied one), verifies the spec fingerprint, deserializes the
+        checkpoint, transitions WAITING_APPROVAL -> RUNNING, and re-enters
+        :meth:`AgentRunner.run_stream`.
 
         Yields ``{"type": "resumed", "run_id": run_id}`` first, then the same
         dict-event shape ``run_stream`` yields. Raises :class:`RunNotFoundError`
-        when the run/checkpoint does not exist; :class:`InvalidRunTransitionError`
-        when the run is not WAITING_APPROVAL."""
+        when the run/checkpoint/snapshot does not exist;
+        :class:`InvalidRunTransitionError` when the run is not WAITING_APPROVAL
+        or the spec fingerprint does not match."""
+        from .agent.approval import ApprovalStatus
         from .agent.checkpoint import deserialize_messages
         from .errors import InvalidRunTransitionError, RunNotFoundError
+        from .run.definition import deserialize_agent_spec, spec_fingerprint
         from .run.models import RunStatus
 
+        await self._ensure_recovered()
         storage = self._components.storage
+        # 1. Read RunRecord. 2. Require WAITING_APPROVAL.
         record = await storage.runs.get(run_id)
         if record is None:
             raise RunNotFoundError(f"run not found: {run_id}")
@@ -281,16 +323,49 @@ class Runtime:
             raise InvalidRunTransitionError(
                 f"cannot resume run in status {record.status}"
             )
+
+        # 3. Read snapshot. 4. Recompute + verify fingerprint.
+        snapshot = await storage.run_definitions.get(run_id)
+        if snapshot is None:
+            raise RunNotFoundError(f"no run-definition snapshot for run: {run_id}")
+        spec = deserialize_agent_spec(snapshot.serialized_spec)
+        if spec_fingerprint(spec) != snapshot.spec_fingerprint:
+            raise InvalidRunTransitionError(
+                f"run {run_id}: spec fingerprint mismatch -- the persisted "
+                f"definition was tampered with or serialized incorrectly"
+            )
+
+        # 5. Latest checkpoint. 6. approval_id from checkpoint metadata.
         checkpoint = await storage.checkpoints.latest(run_id)
         if checkpoint is None:
             raise RunNotFoundError(f"no checkpoint for run: {run_id}")
+        approval_id = (checkpoint.metadata or {}).get("approval_id")
+        # 7-8. Query ApprovalRequest; require APPROVED (fail-closed). A run may
+        # only resume after explicit approval -- PENDING/REJECTED/missing all
+        # refuse, leaving the run WAITING_APPROVAL (no state change yet).
+        if not approval_id:
+            raise InvalidRunTransitionError(
+                f"run {run_id}: checkpoint has no approval_id; cannot resume"
+            )
+        approval = await storage.approvals.get(approval_id)
+        if approval is None:
+            raise InvalidRunTransitionError(
+                f"run {run_id}: approval {approval_id} not found; cannot resume"
+            )
+        if approval.status is not ApprovalStatus.APPROVED:
+            raise InvalidRunTransitionError(
+                f"run {run_id}: approval {approval_id} is {approval.status.value}, "
+                f"not APPROVED; cannot resume"
+            )
+
+        # 9. Deserialize checkpoint. 10. Spec restored above. 11. Compile.
+        # ALL of 1-11 must succeed BEFORE the CAS transition (step 13): a
+        # compile failure or a tampered checkpoint must leave the run
+        # WAITING_APPROVAL, not RUNNING.
         messages = deserialize_messages(checkpoint.payload)
-        await storage.runs.transition(
-            run_id,
-            RunStatus.RUNNING,
-            expected_version=record.version,
-        )
         compiled = await self._components.compiler.compile(spec)
+        # 12. Construct the full context, restoring the ORIGINAL identity from
+        # the snapshot (user/tenant/workspace) + lineage from the record.
         from ._runtime.lifecycle import create_run_context
 
         context = create_run_context(
@@ -298,15 +373,24 @@ class Runtime:
             session_id=record.session_id,
             runnable_id=record.runnable_id,
             runnable_type=record.runnable_type,
-            user_id=user_id,
-            tenant_id=tenant_id,
+            user_id=snapshot.user_id,
+            tenant_id=snapshot.tenant_id,
+            workspace=snapshot.workspace,
             root_run_id=record.root_run_id,
             parent_run_id=record.parent_run_id,
         )
+        # 13. CAS WAITING_APPROVAL -> RUNNING (only after every check + compile).
+        await storage.runs.transition(
+            run_id,
+            RunStatus.RUNNING,
+            expected_version=record.version,
+        )
+        # 14. Resume execution. The ORIGINAL user prompt is carried through so
+        # the complete commit persists a real USER message (not an empty one).
         yield {"type": "resumed", "run_id": run_id}
         async for event in self._components.runner.run_stream(
             compiled,
-            RunInput(prompt=""),
+            RunInput(prompt=record.input.prompt or ""),
             context,
             message_history=messages,
         ):

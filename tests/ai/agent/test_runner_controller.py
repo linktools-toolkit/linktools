@@ -33,6 +33,8 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -79,15 +81,28 @@ class _RecordingRunStore:
 def _make_runner(
     tmp_path, controller, pipeline=None
 ) -> "tuple[AgentRunner, _RecordingRunStore]":
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
     inner_store = FileRunStore(root=tmp_path / "runs")
     recording = _RecordingRunStore(inner_store)
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     runner = AgentRunner(
         run_store=recording,
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         run_controller=controller,
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=recording,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
     return runner, recording
 
@@ -136,7 +151,10 @@ async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
     runner, recording = _make_runner(tmp_path, controller, pipeline=pipeline)
     await _seed_session(runner._session_store, "session-ctrl-1")
 
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry()))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry()),
+    )
     compiled = await compiler.compile(
         AgentSpec(
             id="agent-1",
@@ -278,18 +296,34 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
 
     pipeline = MiddlewarePipeline(middlewares=(_BlockingMiddleware(),))
     # Default runner: no run_controller argument.
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
     inner_store = FileRunStore(root=tmp_path / "runs")
     recording = _RecordingRunStore(inner_store)
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     runner = AgentRunner(
         run_store=recording,
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=recording,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
     await _seed_session(runner._session_store, "session-noctrl")
 
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry()))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry()),
+    )
     compiled = await compiler.compile(
         AgentSpec(
             id="agent-2",

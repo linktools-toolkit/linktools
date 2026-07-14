@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-from .chat import Command
-
-command = Command()
-
-__all__ = [
-    "Command",
-    "command",
-]
+__command__ = "ai"
+__description__ = "AI scripts"
+__order__ = "\x1f150-ai"

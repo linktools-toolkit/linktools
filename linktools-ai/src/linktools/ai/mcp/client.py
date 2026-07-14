@@ -5,6 +5,7 @@ MCPConnectionManager to cache/share live toolsets and close them on shutdown.
 Construction is synchronous and side-effect-free; connections are
 opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..errors import MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError
+from ..json import canonical_json
 from ..registry.mcp import MCPServerSpec
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,21 +51,27 @@ def _config_fingerprint(spec: MCPServerSpec) -> str:
     tool filters, prefix config, discovery mode, and a DIGEST of env/headers.
     The digest covers both keys AND values, so a changed secret value (e.g. a
     rotated Authorization token) invalidates the cache -- without the secret
-    plaintext ever entering the key, logs, or exceptions."""
-    parts = [
-        spec.transport,
-        " ".join(spec.command) if spec.command else (spec.url or ""),
-        str(spec.cwd),
-        "" if spec.timeout_seconds is None else f"{spec.timeout_seconds:.6f}",
-        str(spec.tool_prefix),
-        ",".join(spec.enabled_tools) if spec.enabled_tools else "",
-        ",".join(spec.disabled_tools),
-        getattr(spec, "discovery_mode", "strict"),
-        _digest_mapping(spec.env),
-        _digest_mapping(spec.headers),
-    ]
-    payload = "|".join(parts).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
+    plaintext ever entering the key, logs, or exceptions.
+
+    The payload is canonical JSON (sorted keys, compact) so there is no
+    ambiguous delimiter-based join: ``("a b","c")`` and ``("a","b c")`` hash
+    differently, and a None allowlist hashes differently from an empty one."""
+    payload = {
+        "transport": spec.transport,
+        "command": list(spec.command) if spec.command is not None else None,
+        "url": spec.url,
+        "cwd": spec.cwd,
+        "timeout_seconds": spec.timeout_seconds,
+        "tool_prefix": spec.tool_prefix,
+        "enabled_tools": (
+            list(spec.enabled_tools) if spec.enabled_tools is not None else None
+        ),
+        "disabled_tools": list(spec.disabled_tools),
+        "discovery_mode": getattr(spec, "discovery_mode", "strict"),
+        "env_digest": _digest_mapping(spec.env),
+        "headers_digest": _digest_mapping(spec.headers),
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()[:16]
 
 
 def _resolved_tool_prefix(spec: MCPServerSpec) -> "str | None":
@@ -131,18 +139,26 @@ class MCPConnectionManager:
         # command, env, timeout, tool filters, prefix ...) with a reused id
         # does NOT return a stale cached toolset.
         self._toolsets: "dict[tuple[str, str], Any]" = {}
+        # Per-key lock so two concurrent get_toolset() calls for the same
+        # server build only ONE toolset (double-checked locking).
+        self._lock = asyncio.Lock()
 
     async def get_toolset(self, server: MCPServerSpec) -> MCPToolsetHandle:
         key = (server.id, _config_fingerprint(server))
         cached = self._toolsets.get(key)
         if cached is not None:
             return MCPToolsetHandle(MCPConnectionRef(*key), cached)
-        from pydantic_ai.mcp import MCPToolset
+        async with self._lock:
+            # Double-check inside the lock.
+            cached = self._toolsets.get(key)
+            if cached is not None:
+                return MCPToolsetHandle(MCPConnectionRef(*key), cached)
+            from pydantic_ai.mcp import MCPToolset
 
-        mcp_server = build_mcp_server(server)
-        toolset = MCPToolset(mcp_server)
-        self._toolsets[key] = toolset
-        return MCPToolsetHandle(MCPConnectionRef(*key), toolset)
+            mcp_server = build_mcp_server(server)
+            toolset = MCPToolset(mcp_server)
+            self._toolsets[key] = toolset
+            return MCPToolsetHandle(MCPConnectionRef(*key), toolset)
 
     async def list_tools(self, server: MCPServerSpec) -> "tuple[str, ...]":
         """Enumerate a server's live tool names for governance (enabled/disabled

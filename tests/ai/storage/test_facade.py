@@ -313,22 +313,25 @@ def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_pa
 
     async def _run():
         async with storage.transaction() as tx:
-            first = await tx.idempotency.reserve("scope-1", "key-1", "hash-a")
-            assert first is None  # fresh reservation
-            # Same (scope, key), DIFFERENT hash -> a genuine collision.
-            with pytest.raises(Exception):
-                await tx.idempotency.reserve("scope-1", "key-1", "hash-b")
-            # The session is now in a failed state (SQLAlchemy's
-            # PendingRollbackError) -- any further use of tx.* in this same
-            # transaction is expected to fail too.
-            with pytest.raises(Exception):
-                await tx.runs.create(run)
+            first = await tx.idempotency.claim(
+                scope="scope-1", key="key-1", request_hash="hash-a", owner_id="own-1"
+            )
+            assert first.disposition.value == "acquired"  # fresh claim
+            # Same (scope, key), DIFFERENT hash -> CONFLICT disposition (the
+            # new claim model resolves conflicts gracefully -- no IntegrityError,
+            # so the enclosing UoW is NOT aborted).
+            second = await tx.idempotency.claim(
+                scope="scope-1", key="key-1", request_hash="hash-b", owner_id="own-2"
+            )
+            assert second.disposition.value == "conflict"
+            # The UoW is still usable: a subsequent tx.runs.create commits.
+            await tx.runs.create(run)
         return await storage.runs.get(run.id)
 
     fetched_run = asyncio.run(_run())
-    assert fetched_run is None, (
-        "tx.runs.create() must not have committed -- the collision aborted "
-        "the whole enclosing transaction"
+    assert fetched_run is not None, (
+        "tx.runs.create() must commit -- the CONFLICT disposition did not abort "
+        "the enclosing transaction"
     )
 
 

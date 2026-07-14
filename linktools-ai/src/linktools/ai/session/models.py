@@ -34,6 +34,14 @@ class SessionRecord:
     version: int
     created_at: datetime
     updated_at: datetime
+    # Principal the session belongs to. resolve_session enforces strict
+    # (user_id, tenant_id) equality on re-open: a session created by (u, t) is
+    # only re-openable by the same principal, and (None, None) only opens an
+    # unowned session -- ownership is never auto-claimed. Defaults to None
+    # (unowned) so the CLI and existing call sites stay single-principal; the
+    # runtime path always sets these explicitly via resolve_session.
+    user_id: "str | None" = None
+    tenant_id: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 

@@ -67,6 +67,8 @@ def _row_to_record(row: SessionRow) -> SessionRecord:
     return SessionRecord(
         id=row.id,
         parent_id=row.parent_id,
+        user_id=row.user_id,
+        tenant_id=row.tenant_id,
         status=SessionStatus(row.status),
         version=row.version,
         created_at=_as_utc(row.created_at),
@@ -118,6 +120,8 @@ class SqlAlchemySessionStore:
                 SessionRow(
                     id=session.id,
                     parent_id=session.parent_id,
+                    user_id=session.user_id,
+                    tenant_id=session.tenant_id,
                     status=session.status.value,
                     version=session.version,
                     created_at=session.created_at,

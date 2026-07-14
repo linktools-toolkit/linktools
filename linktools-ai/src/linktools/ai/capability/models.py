@@ -35,6 +35,13 @@ class CapabilityRef:
     name: str
     config: "Mapping[str, Any]" = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind.strip():
+            raise ValueError("CapabilityRef.kind must be a non-empty string")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("CapabilityRef.name must be a non-empty string")
+        object.__setattr__(self, "config", freeze_value(dict(self.config)))
+
     def __str__(self) -> str:
         return f"{self.kind}:{self.name}"
 
@@ -67,6 +74,11 @@ class CapabilityBundle:
 
     prompt_sections: "Mapping[str, str]" = field(default_factory=dict)
     tool_contributions: "tuple[Any, ...]" = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool_contributions, tuple):
+            raise TypeError("CapabilityBundle.tool_contributions must be a tuple")
+        self.prompt_sections = dict(self.prompt_sections)
 
     @classmethod
     def empty(cls) -> "CapabilityBundle":

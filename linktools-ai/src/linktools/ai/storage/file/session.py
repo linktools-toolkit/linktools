@@ -33,6 +33,8 @@ def _record_to_json(record: SessionRecord) -> dict:
     return {
         "id": record.id,
         "parent_id": record.parent_id,
+        "user_id": record.user_id,
+        "tenant_id": record.tenant_id,
         "status": record.status.value,
         "version": record.version,
         "created_at": record.created_at.isoformat(),
@@ -45,6 +47,9 @@ def _record_from_json(raw: dict) -> SessionRecord:
     return SessionRecord(
         id=raw["id"],
         parent_id=raw["parent_id"],
+        # Older on-disk records predate ownership columns -> unowned (None).
+        user_id=raw.get("user_id"),
+        tenant_id=raw.get("tenant_id"),
         status=SessionStatus(raw["status"]),
         version=raw["version"],
         created_at=datetime.fromisoformat(raw["created_at"]),
@@ -212,6 +217,8 @@ class FileSessionStore:
         updated = SessionRecord(
             id=current.id,
             parent_id=current.parent_id,
+            user_id=current.user_id,
+            tenant_id=current.tenant_id,
             status=status if status is not None else current.status,
             version=current.version + 1,
             created_at=current.created_at,

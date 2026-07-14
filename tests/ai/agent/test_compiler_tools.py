@@ -39,6 +39,8 @@ from linktools.ai.storage.file.checkpoint import FileCheckpointStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 from datetime import datetime, timezone
 
@@ -71,16 +73,29 @@ def _make_runner(tmp_path, *, execution=None) -> AgentRunner:
     from linktools.ai.capability.assembler import CapabilityAssembler
     from linktools.ai.capability.builtin import BuiltinProvider
     from linktools.ai.policy.engine import PolicyEngine
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
     from linktools.ai.tool.executor import ToolExecutor
 
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         execution=execution,
         capability_assembler=CapabilityAssembler({"builtin": BuiltinProvider()}),
         managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 
@@ -118,6 +133,7 @@ def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
     # contract: the compiler produces an Agent with NO builtin file/terminal tools.
     # Those tools are constructed at execution time, not compile time.
     compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(
             registry=_registry(
                 lambda m, i: ModelResponse(parts=[TextPart(content="ok")])
@@ -151,7 +167,10 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
             )
         return ModelResponse(parts=[TextPart(content='{"response": {"done": true}}')])
 
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(model_fn)))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(model_fn)),
+    )
     compiled = asyncio.run(compiler.compile(_spec()))
     runner = _make_runner(tmp_path)  # execution=None -> no builtin tools
     _seed_session(runner._session_store, "session-1")
@@ -210,7 +229,10 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
             parts=[TextPart(content='{"response": {"status": "done"}}')]
         )
 
-    compiler = AgentCompiler(model_router=ModelRouter(registry=_registry(model_fn)))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(model_fn)),
+    )
     compiled = asyncio.run(compiler.compile(_spec()))
     backend = LocalExecutionBackend(runtime_dir=tmp_path)
     runner = _make_runner(tmp_path, execution=backend)

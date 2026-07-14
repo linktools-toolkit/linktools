@@ -20,6 +20,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 
 from ...events import payloads as _payloads_module
 from ...events.envelope import EventEnvelope
@@ -65,6 +66,7 @@ class FileEventStore:
         session_id: str,
         runnable_id: str,
         payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope:
         stream_dir = self._stream_dir(stream_id)
         existing = list(stream_dir.glob("*.json"))
@@ -72,6 +74,7 @@ class FileEventStore:
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc)
         payload_type = type(payload).__name__
+        meta = dict(metadata) if metadata else {}
         raw = {
             "event_id": event_id,
             "stream_id": stream_id,
@@ -84,6 +87,7 @@ class FileEventStore:
             "runnable_id": runnable_id,
             "payload_type": payload_type,
             "payload": asdict(payload),
+            "metadata": meta,
         }
         path = stream_dir / f"{next_seq:010d}.json"
         path.write_text(json.dumps(raw))
@@ -98,6 +102,7 @@ class FileEventStore:
             session_id=session_id,
             runnable_id=runnable_id,
             payload=payload,
+            metadata=meta,
         )
 
     async def append(
@@ -110,6 +115,7 @@ class FileEventStore:
         session_id: str,
         runnable_id: str,
         payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope:
         # Atomic per-stream sequence assignment: hold the lock across the
         # read-max + write so a concurrent append to the same stream cannot
@@ -128,6 +134,7 @@ class FileEventStore:
                 session_id=session_id,
                 runnable_id=runnable_id,
                 payload=payload,
+                metadata=metadata,
             )
 
     def _load(self, path: Path) -> EventEnvelope:
@@ -148,6 +155,7 @@ class FileEventStore:
             session_id=raw["session_id"],
             runnable_id=raw["runnable_id"],
             payload=payload,
+            metadata=raw.get("metadata") or {},
         )
 
     def _list_sync(

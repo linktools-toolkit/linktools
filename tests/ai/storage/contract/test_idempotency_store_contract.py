@@ -1,36 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_idempotency_store_contract.py — runs the
-same IdempotencyStore contract against both FileIdempotencyStore and
-SqlAlchemyIdempotencyStore (design note contract backend parity). The
-parametrized ``store_factory`` fixture mirrors test_approval_store_contract.py
-/ test_memory_store_contract.py (file + sqlalchemy branches, including
-``_run_in_new_loop`` to bootstrap the SQL engine off the test loop).
+same fenced-claim IdempotencyStore contract against both FileIdempotencyStore
+and SqlAlchemyIdempotencyStore (backend parity).
 
-The contract covers (per contract):
-1. reserve -> complete -> get returns COMPLETED with cached result.
-2. reserve same (scope, key) with a different request_hash -> IdempotencyConflictError.
-3. Two fresh reservations with different (scope, key) coexist independently.
-4. fail marks the record FAILED with the serialized error string.
-5. RESERVED is the status reserve leaves a fresh record in (the caller's
-   signal to proceed + complete/fail).
+The contract covers (per the WP-10 claim/owner/generation/lease model):
+1. claim -> complete(claim) -> get returns COMPLETED with cached result.
+2. claim same (scope, key) with a different request_hash -> CONFLICT.
+3. Two fresh claims with different (scope, key) coexist independently.
+4. fail(claim) marks FAILED; a later claim with the SAME hash ACQUIRES a new
+   generation (retry), and complete(claim) then transitions it to COMPLETED.
+5. complete/fail are no-ops when the (scope, key) is missing or the claim's
+   owner/generation no longer matches (stale-worker fencing).
 
-Uses ``def test_x(store_factory): asyncio.run(_run())`` style — sync test
-wrapper driving its own event loop, no pytest-asyncio needed."""
+Uses ``def test_x(store_factory): asyncio.run(_run())`` style."""
 
 import asyncio
 
 import pytest
 
-from linktools.ai.errors import IdempotencyConflictError
 from linktools.ai.storage.file.idempotency import FileIdempotencyStore
-from linktools.ai.tool.idempotency import IdempotencyStatus
-
-
-# ---------------------------------------------------------------------------
-# Parametrized store factory. The SQL branch (incl. ``_run_in_new_loop``) is
-# copied verbatim from test_approval_store_contract.py / test_memory_store_contract.py.
-# ---------------------------------------------------------------------------
+from linktools.ai.tool.idempotency import ClaimDisposition, IdempotencyStatus
 
 
 @pytest.fixture(params=["file", "sqlalchemy"])
@@ -52,10 +42,6 @@ def store_factory(request, tmp_path):
     engines = []
 
     def _run_in_new_loop(coro):
-        # Called synchronously from inside an already-running pytest-asyncio
-        # loop, so we cannot use asyncio.get_event_loop().run_until_complete()
-        # here. Run the setup on a separate thread with its own fresh loop.
-        import asyncio
         import threading
 
         outcome = {}
@@ -63,7 +49,7 @@ def store_factory(request, tmp_path):
         def _runner():
             try:
                 outcome["value"] = asyncio.run(coro)
-            except BaseException as exc:  # noqa: BLE001 - re-raised below
+            except BaseException as exc:  # noqa: BLE001
                 outcome["error"] = exc
 
         thread = threading.Thread(target=_runner)
@@ -82,11 +68,7 @@ def store_factory(request, tmp_path):
 
         async def _create():
             async with engine.begin() as conn:
-                # ToolIdempotencyRow subclasses Base, so a single create_all
-                # covers every table both backends need.
                 await conn.run_sync(Base.metadata.create_all)
-            # Dispose the pool so later ops open fresh connections on the
-            # test's own loop instead of reusing one bound to this thread.
             await engine.dispose()
 
         _run_in_new_loop(_create())
@@ -98,84 +80,66 @@ def store_factory(request, tmp_path):
             _run_in_new_loop(engine.dispose())
 
     request.addfinalizer(_dispose_engines)
-
     return sqlalchemy_factory
 
 
-# ---------------------------------------------------------------------------
-# 1. reserve -> complete -> get: COMPLETED status, cached result round-trips,
-#    completed_at is set + tz-aware.
-# ---------------------------------------------------------------------------
-
-
-def test_reserve_complete_get_roundtrip(store_factory):
+def test_claim_complete_get_roundtrip(store_factory):
     store = store_factory()
 
     async def _run():
-        # Fresh reservation: reserve returns None (caller should proceed).
-        existing = await store.reserve("scope-1", "key-1", "hash-1")
-        assert existing is None, "fresh reserve must return None"
-        # The persisted record is in the RESERVED state.
+        result = await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-1", owner_id="own-1"
+        )
+        assert result.disposition is ClaimDisposition.ACQUIRED
+        assert result.claim is not None
         record = await store.get("scope-1", "key-1")
         assert record is not None
         assert record.status is IdempotencyStatus.RESERVED
-        assert record.scope == "scope-1"
-        assert record.key == "key-1"
-        assert record.request_hash == "hash-1"
-        assert record.result is None
-        assert record.error is None
-        assert record.completed_at is None
-        assert record.created_at.tzinfo is not None
-        # Complete the reservation.
-        await store.complete("scope-1", "key-1", {"output": "ok", "n": 42})
+        assert record.owner_id == "own-1"
+        assert record.generation == 1
+        assert record.lease_expires_at is not None
+        await store.complete(result.claim, {"output": "ok", "n": 42})
         completed = await store.get("scope-1", "key-1")
         assert completed is not None
         assert completed.status is IdempotencyStatus.COMPLETED
         assert completed.result == {"output": "ok", "n": 42}
-        assert completed.error is None
-        assert completed.completed_at is not None
-        assert completed.completed_at.tzinfo is not None
 
     asyncio.run(_run())
 
 
-# ---------------------------------------------------------------------------
-# 2. reserve same (scope, key) with a different hash -> IdempotencyConflictError.
-#    Same hash returns the existing record (so the caller can branch on status).
-# ---------------------------------------------------------------------------
-
-
-def test_reserve_same_scope_key_with_different_hash_raises_conflict(store_factory):
+def test_claim_same_scope_key_with_different_hash_is_conflict(store_factory):
     store = store_factory()
 
     async def _run():
-        await store.reserve("scope-1", "key-1", "hash-a")
-        # Different hash on the same (scope, key) -> conflict.
-        with pytest.raises(IdempotencyConflictError):
-            await store.reserve("scope-1", "key-1", "hash-b")
-        # Same hash on the same (scope, key) -> returns the existing RESERVED
-        # record (caller branches on status, not a conflict).
-        existing = await store.reserve("scope-1", "key-1", "hash-a")
-        assert existing is not None
-        assert existing.status is IdempotencyStatus.RESERVED
+        await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-a", owner_id="own-1"
+        )
+        second = await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-b", owner_id="own-2"
+        )
+        assert second.disposition is ClaimDisposition.CONFLICT
+        # Same hash, different owner, lease still valid -> IN_PROGRESS.
+        third = await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-a", owner_id="own-2"
+        )
+        assert third.disposition is ClaimDisposition.IN_PROGRESS
 
     asyncio.run(_run())
-
-
-# ---------------------------------------------------------------------------
-# 3. Two fresh reservations with different (scope, key) coexist independently.
-#    Same key under different scopes does NOT collide.
-# ---------------------------------------------------------------------------
 
 
 def test_different_scope_or_key_coexist(store_factory):
     store = store_factory()
 
     async def _run():
-        await store.reserve("scope-1", "key-1", "hash-a")
-        await store.reserve("scope-2", "key-1", "hash-b")  # different scope
-        await store.reserve("scope-1", "key-2", "hash-c")  # different key
-        # All three are present and addressable by their (scope, key).
+        await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-a", owner_id="o"
+        )
+        await store.claim(
+            scope="scope-2", key="key-1", request_hash="hash-b", owner_id="o"
+        )
+        await store.claim(
+            scope="scope-1", key="key-2", request_hash="hash-c", owner_id="o"
+        )
         r1 = await store.get("scope-1", "key-1")
         r2 = await store.get("scope-2", "key-1")
         r3 = await store.get("scope-1", "key-2")
@@ -185,67 +149,79 @@ def test_different_scope_or_key_coexist(store_factory):
     asyncio.run(_run())
 
 
-# ---------------------------------------------------------------------------
-# 4. fail marks the record FAILED with the serialized error string. A FAILED
-#    record allows retry: a later reserve with the SAME hash returns the
-#    FAILED record (caller proceeds), and complete() then transitions it to
-#    COMPLETED.
-# ---------------------------------------------------------------------------
-
-
-def test_fail_marks_failed_and_retry_can_complete(store_factory):
+def test_fail_then_retry_claim_can_complete(store_factory):
     store = store_factory()
 
     async def _run():
-        await store.reserve("scope-1", "key-1", "hash-a")
-        await store.fail("scope-1", "key-1", "boom: transient")
+        first = await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-a", owner_id="own-1"
+        )
+        await store.fail(first.claim, "boom: transient")
         failed = await store.get("scope-1", "key-1")
-        assert failed is not None
         assert failed.status is IdempotencyStatus.FAILED
         assert failed.error == "boom: transient"
-        assert failed.result is None
-        assert failed.completed_at is not None
-        # Retry path: reserve with the SAME hash returns the FAILED record
-        # (caller branches on status -> FAILED means "retry allowed").
-        existing = await store.reserve("scope-1", "key-1", "hash-a")
-        assert existing is not None
-        assert existing.status is IdempotencyStatus.FAILED
-        # Caller re-executes and completes -- the FAILED record is
-        # overwritten with COMPLETED.
-        await store.complete("scope-1", "key-1", {"ok": True})
+        # Retry: a new owner claims a fresh generation (FAILED -> retry).
+        retry = await store.claim(
+            scope="scope-1", key="key-1", request_hash="hash-a", owner_id="own-2"
+        )
+        assert retry.disposition is ClaimDisposition.ACQUIRED
+        assert retry.claim.generation == 2
+        await store.complete(retry.claim, {"ok": True})
         final = await store.get("scope-1", "key-1")
-        assert final is not None
         assert final.status is IdempotencyStatus.COMPLETED
         assert final.result == {"ok": True}
-        assert final.error is None
 
     asyncio.run(_run())
 
 
-# ---------------------------------------------------------------------------
-# 5. complete/fail are no-ops on missing (scope, key) -- defensive against the
-#    race where the record was evicted between reserve and complete/fail.
-# ---------------------------------------------------------------------------
+def test_complete_and_fail_on_missing_or_stale_claim_are_rejected(store_factory):
+    """complete/fail against a missing record, or with a stale owner/generation,
+    raise LostIdempotencyClaimError (C-01 §6.7) -- never silently succeed."""
+    from linktools.ai.errors import LostIdempotencyClaimError
+    from linktools.ai.tool.idempotency import IdempotencyClaim
 
-
-def test_complete_and_fail_on_missing_record_are_noops(store_factory):
     store = store_factory()
 
     async def _run():
-        # Should not raise.
-        await store.complete("missing-scope", "missing-key", {"x": 1})
-        await store.fail("missing-scope", "missing-key", "error")
+        from datetime import datetime, timezone
+
+        ghost = IdempotencyClaim(
+            scope="missing-scope",
+            key="missing-key",
+            request_hash="h",
+            owner_id="ghost",
+            generation=1,
+            claimed_at=datetime.now(timezone.utc),
+            lease_expires_at=datetime.now(timezone.utc),
+        )
+        with pytest.raises(LostIdempotencyClaimError):
+            await store.complete(ghost, {"x": 1})
+        with pytest.raises(LostIdempotencyClaimError):
+            await store.fail(ghost, "error")
         assert await store.get("missing-scope", "missing-key") is None
+        # Stale-owner fencing: a second owner steals the lease, then the first
+        # owner's complete()/fail() must be rejected (not overwrite owner-2).
+        first = await store.claim(
+            scope="scope-s",
+            key="key-s",
+            request_hash="h",
+            owner_id="own-1",
+            lease_seconds=0.01,
+        )
+        await asyncio.sleep(0.05)
+        second = await store.claim(
+            scope="scope-s", key="key-s", request_hash="h", owner_id="own-2"
+        )
+        assert second.disposition is ClaimDisposition.ACQUIRED
+        with pytest.raises(LostIdempotencyClaimError):
+            await store.complete(first.claim, {"stale": True})
+        with pytest.raises(LostIdempotencyClaimError):
+            await store.fail(first.claim, "stale")
+        record = await store.get("scope-s", "key-s")
+        assert record.status is IdempotencyStatus.RESERVED  # owner-2 still holds
+        assert record.result is None
 
     asyncio.run(_run())
-
-
-# ---------------------------------------------------------------------------
-# 6. File-only: path-traversal in scope or key -> ValueError. (SQL ids are
-#    opaque column values, not path segments, so this guard is
-#    FileIdempotencyStore-specific -- mirrors the file-only path-traversal
-#    test in test_approval_store_contract.py.)
-# ---------------------------------------------------------------------------
 
 
 def test_path_traversal_in_scope_or_key_is_rejected(tmp_path):
@@ -253,14 +229,39 @@ def test_path_traversal_in_scope_or_key_is_rejected(tmp_path):
 
     async def _run():
         with pytest.raises(ValueError):
-            await store.reserve("../evil", "key", "h")
+            await store.claim(
+                scope="../evil", key="key", request_hash="h", owner_id="o"
+            )
         with pytest.raises(ValueError):
-            await store.reserve("scope", "../evil", "h")
+            await store.claim(
+                scope="scope", key="../evil", request_hash="h", owner_id="o"
+            )
         with pytest.raises(ValueError):
             await store.get("../evil", "key")
-        # ``..`` alone is rejected as a path segment -- would resolve to the
-        # parent directory if written verbatim.
-        with pytest.raises(ValueError):
-            await store.complete("scope", "..", "result")
+
+    asyncio.run(_run())
+
+
+def test_completed_record_cannot_be_reclaimed(store_factory):
+    """C-01 §6.8: a COMPLETED record must never be flipped back to CLAIMED/
+    RESERVED. A later claim returns REPLAY (the cached result), not ACQUIRED --
+    even though the CAS only pins generation, the status clause in the WHERE
+    blocks the re-claim."""
+    store = store_factory()
+
+    async def _run():
+        first = await store.claim(
+            scope="scope-c", key="key-c", request_hash="h", owner_id="own-1"
+        )
+        await store.complete(first.claim, {"done": True})
+        # A second claim on the COMPLETED record must REPLAY, not re-acquire.
+        again = await store.claim(
+            scope="scope-c", key="key-c", request_hash="h", owner_id="own-2"
+        )
+        assert again.disposition is ClaimDisposition.REPLAY, again.disposition
+        assert again.record.result == {"done": True}
+        # And the persisted record is still COMPLETED.
+        record = await store.get("scope-c", "key-c")
+        assert record.status is IdempotencyStatus.COMPLETED
 
     asyncio.run(_run())

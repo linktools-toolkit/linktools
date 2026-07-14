@@ -6,12 +6,10 @@ from .window import (
     NoopWindowPolicy,
     RecentWindowPolicy,
     SessionWindowPolicy,
-    TokenBudgetWindowPolicy,
 )
 
 __all__ = [
     "SessionWindowPolicy",
     "NoopWindowPolicy",
     "RecentWindowPolicy",
-    "TokenBudgetWindowPolicy",
 ]

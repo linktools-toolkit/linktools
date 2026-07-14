@@ -29,6 +29,7 @@ from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunStatus, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+from linktools.ai.storage.file.definition import FileRunDefinitionStore
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
@@ -50,6 +51,8 @@ from linktools.ai.swarm.spec import (
 )
 from linktools.ai.swarm.store import SwarmStore
 from linktools.ai.swarm.strategy import SwarmExecutionContext
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 
 # --- in-memory SwarmStore (single-process, FIFO claim) ----------------------
@@ -277,7 +280,10 @@ def _compile_worker(agent_id: str, output_text: str) -> CompiledAgent:
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     spec = AgentSpec(
         id=agent_id,
         name=agent_id,
@@ -342,11 +348,21 @@ def _build_ctx(
     session_store = FileSessionStore(root=tmp_path / "sessions")
     event_store = FileEventStore(root=tmp_path / "events")
     checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
     runner = AgentRunner(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
     # pre-seed the shared session so the driving RunContext is consistent.
     asyncio.run(
@@ -361,7 +377,10 @@ def _build_ctx(
             )
         )
     )
-    compiler = AgentCompiler(model_router=ModelRouter(registry=ModelRegistry()))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=ModelRegistry()),
+    )
     return SwarmExecutionContext(
         spec=spec,
         swarm_run=_swarm_run(),
@@ -374,6 +393,7 @@ def _build_ctx(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
+        run_definitions=FileRunDefinitionStore(root=tmp_path / "definitions"),
     )
 
 
@@ -1212,7 +1232,10 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
 
     registry = ModelRegistry()
     registry.register("flaky-model", model=FunctionModel(_flaky_model))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     flaky_spec = AgentSpec(
         id="worker-flaky",
         name="worker-flaky",
@@ -1326,11 +1349,21 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
         session_store = FileSessionStore(root=tmp_path / "sessions")
         event_store = FileEventStore(root=tmp_path / "events")
         checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+        from linktools.ai.storage.file.approval import FileApprovalStore
+        from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
         runner = AgentRunner(
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
             checkpoint_store=checkpoint_store,
+            commit_coordinator=FileRunCommitCoordinator(
+                approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+                checkpoint_store=checkpoint_store,
+                run_store=run_store,
+                session_store=session_store,
+                event_store=event_store,
+            ),
         )
         await session_store.create(
             SessionRecord(
@@ -1345,7 +1378,10 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
 
         registry = ModelRegistry()
         registry.register("flaky-model", model=FunctionModel(_flaky_model))
-        compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+        compiler = AgentCompiler(
+            tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+            model_router=ModelRouter(registry=registry),
+        )
         flaky_spec = AgentSpec(
             id="worker-flaky",
             name="worker-flaky",
@@ -1387,6 +1423,7 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
+            run_definitions=FileRunDefinitionStore(root=tmp_path / "definitions"),
         )
         await swarm_store.create_task(
             SwarmTask(
@@ -1457,7 +1494,10 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
 
     registry = ModelRegistry()
     registry.register("worker-model", model=FunctionModel(_model_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     worker_spec = AgentSpec(
         id="worker-a",
         name="worker-a",
@@ -1568,7 +1608,10 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
 
     registry = ModelRegistry()
     registry.register("worker-model", model=FunctionModel(_model_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     worker_spec = AgentSpec(
         id="worker-a",
         name="worker-a",
@@ -1655,7 +1698,10 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
 
     registry = ModelRegistry()
     registry.register("worker-model", model=FunctionModel(_model_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     worker_spec = AgentSpec(
         id="worker-a",
         name="worker-a",
@@ -1751,7 +1797,10 @@ def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
     swarm_store = swarm_store if swarm_store is not None else _MemorySwarmStore()
     registry = ModelRegistry()
     registry.register("worker-model", model=FunctionModel(model_fn))
-    compiler = AgentCompiler(model_router=ModelRouter(registry=registry))
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry),
+    )
     worker_spec = AgentSpec(
         id="worker-a",
         name="worker-a",
@@ -2038,7 +2087,10 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
 
     registry2 = ModelRegistry()
     registry2.register("worker-model-2", model=FunctionModel(_clean_model_fn))
-    compiler2 = AgentCompiler(model_router=ModelRouter(registry=registry2))
+    compiler2 = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=registry2),
+    )
     worker_spec_2 = AgentSpec(
         id="worker-a",
         name="worker-a",

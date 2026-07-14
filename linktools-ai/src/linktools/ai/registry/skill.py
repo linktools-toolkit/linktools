@@ -6,10 +6,11 @@ frontmatter holds name/description/metadata; the markdown body becomes the
 SkillSpec.instructions (mirrors the AgentRegistry markdown pattern)."""
 
 from dataclasses import dataclass, field
+import asyncio
 from typing import Any, Mapping
 
 from ..errors import RegistryNotFoundError
-from .parser import SpecLoader, StrictConfigReader, parse_markdown_text
+from .parser import SpecLoader, StrictConfigReader, parse_markdown_text, resolved_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ def parse_skill_spec(skill_id: str, payload: "dict[str, Any]", body: str) -> Ski
     """
     allowed = {"name", "description", "metadata"}
     reader = StrictConfigReader(payload, allowed=allowed, context=f"skill {skill_id}")
-    name = reader.optional_str("name") or skill_id
+    name = resolved_name(reader, skill_id)
     description = reader.optional_str("description") or ""
     instructions = body.strip()
     metadata = reader.mapping("metadata") or {}
@@ -58,13 +59,15 @@ class SkillRegistry:
         self._cache: "dict[tuple[str, int], SkillSpec]" = {}
         self._cached_revision: "int | None" = None
         self._ids: "tuple[str, ...] | None" = None
+        self._refresh_lock = asyncio.Lock()
 
     async def _ensure_fresh(self) -> None:
-        revision = await self._loader.revision()
-        if revision != self._cached_revision:
-            self._cache.clear()
-            self._ids = None
-            self._cached_revision = revision
+        async with self._refresh_lock:
+            revision = await self._loader.revision()
+            if revision != self._cached_revision:
+                self._cache.clear()
+                self._ids = None
+                self._cached_revision = revision
 
     async def list_ids(self) -> "tuple[str, ...]":
         await self._ensure_fresh()

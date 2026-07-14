@@ -50,6 +50,16 @@ class ToolDescriptor:
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("ToolDescriptor.name must be a non-empty string")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("ToolDescriptor.source must be a non-empty string")
+        if not isinstance(self.category, str) or not self.category.strip():
+            raise ValueError("ToolDescriptor.category must be a non-empty string")
+        if not isinstance(self.risk, str) or not self.risk.strip():
+            raise ValueError("ToolDescriptor.risk must be a non-empty string")
+        if not isinstance(self.mutating, bool):
+            raise TypeError("ToolDescriptor.mutating must be a boolean")
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 

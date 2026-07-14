@@ -11,7 +11,6 @@ from linktools.ai.prompt import (
     NoopWindowPolicy,
     RecentWindowPolicy,
     SessionWindowPolicy,
-    TokenBudgetWindowPolicy,
 )
 
 
@@ -54,10 +53,6 @@ def test_recent_rejects_non_positive():
     with pytest.raises(ValueError):
         RecentWindowPolicy(max_messages=0)
 
-
-def test_token_budget_reserved():
-    with pytest.raises(NotImplementedError):
-        TokenBudgetWindowPolicy()
 
 
 def test_policies_satisfy_protocol():

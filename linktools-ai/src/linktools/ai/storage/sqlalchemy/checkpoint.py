@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemyCheckpointStore: DB-backed CheckpointStore, keyed by (run_id, sequence)."""
+"""SqlAlchemyCheckpointStore: DB-backed CheckpointStore, keyed by (run_id, sequence).
 
+The Store owns sequence assignment: append() takes a NewRunCheckpoint and
+returns the persisted RunCheckpoint. Sequence comes from a per-run counter row
+incremented inside the append transaction (the unique constraint on
+(run_id, sequence) is the backstop), so concurrent appends for the same run
+never collide."""
+
+import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import RunCheckpointRow
-from ...run.models import RunCheckpoint
+from .models import RunCheckpointCounterRow, RunCheckpointRow
+from ...run.models import NewRunCheckpoint, RunCheckpoint
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -47,6 +55,17 @@ class SqlAlchemyCheckpointStore:
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+        # Serializes same-process append-for-same-run so the read-increment of
+        # the counter row is atomic across coroutines; the DB unique constraint
+        # on (run_id, sequence) is the cross-process backstop.
+        self._append_locks: "dict[str, asyncio.Lock]" = {}
+
+    def _append_lock_for(self, run_id: str) -> asyncio.Lock:
+        lock = self._append_locks.get(run_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._append_locks[run_id] = lock
+        return lock
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the
@@ -59,22 +78,44 @@ class SqlAlchemyCheckpointStore:
             async with session.begin():
                 return await fn(session)
 
-    async def save(self, checkpoint: RunCheckpoint) -> None:
+    async def append(self, new: NewRunCheckpoint) -> RunCheckpoint:
         async def _do(session):
+            counter = await session.get(RunCheckpointCounterRow, new.run_id)
+            if counter is None:
+                counter = RunCheckpointCounterRow(run_id=new.run_id, last_sequence=1)
+                session.add(counter)
+                sequence = 1
+            else:
+                counter.last_sequence += 1
+                sequence = counter.last_sequence
+            checkpoint_id = str(uuid.uuid4())
+            created_at = datetime.now(timezone.utc)
             session.add(
                 RunCheckpointRow(
-                    id=checkpoint.id,
-                    run_id=checkpoint.run_id,
-                    sequence=checkpoint.sequence,
-                    format=checkpoint.format,
-                    schema_version=checkpoint.schema_version,
-                    payload=checkpoint.payload,
-                    created_at=checkpoint.created_at,
-                    metadata_json=json.dumps(dict(checkpoint.metadata)),
+                    id=checkpoint_id,
+                    run_id=new.run_id,
+                    sequence=sequence,
+                    format=new.format,
+                    schema_version=new.schema_version,
+                    payload=new.payload,
+                    created_at=created_at,
+                    metadata_json=json.dumps(dict(new.metadata)),
                 )
             )
+            await session.flush()
+            return RunCheckpoint(
+                id=checkpoint_id,
+                run_id=new.run_id,
+                sequence=sequence,
+                format=new.format,
+                schema_version=new.schema_version,
+                payload=new.payload,
+                created_at=created_at,
+                metadata=dict(new.metadata),
+            )
 
-        await self._execute_in_session(_do)
+        async with self._append_lock_for(new.run_id):
+            return await self._execute_in_session(_do)
 
     async def latest(self, run_id: str) -> "RunCheckpoint | None":
         async def _do(session):

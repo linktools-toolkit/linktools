@@ -325,14 +325,18 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
 
     async def _run():
         # Seed a RESERVED record with the EXACT request hash the executor will
-        # compute (same tool_name, same arguments, same scope) so reserve()
-        # returns the existing record instead of raising conflict.
+        # compute (same tool_name, same arguments, same scope) under a DIFFERENT
+        # owner so the executor's claim() sees a live IN_PROGRESS reservation.
         from linktools.ai.tool.idempotency import compute_request_hash
 
         expected_hash = compute_request_hash("tool-x", {"a": 1}, "r1")
-        seeded = await store.reserve("r1", "key-r", expected_hash)
-        assert seeded is None, "fixture seed: first reserve is fresh"
-        # Now the executor hits the RESERVED record and raises.
+        seeded = await store.claim(
+            scope="r1", key="key-r", request_hash=expected_hash, owner_id="other-owner"
+        )
+        assert seeded.disposition.value == "acquired", (
+            "fixture seed: first claim acquires"
+        )
+        # Now the executor hits the RESERVED record and raises IN_PROGRESS.
         with pytest.raises(IdempotencyInProgressError):
             await executor.execute(
                 ToolRequest(tool_name="tool-x", arguments={"a": 1}),

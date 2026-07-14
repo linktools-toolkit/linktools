@@ -648,6 +648,31 @@ def _resolve_runtime_path(rel_path: str, runtime_dir: Path) -> Path:
     return target
 
 
+def _is_within_root(target: Path, root: Path) -> bool:
+    target = target.resolve()
+    root = root.resolve()
+    return target == root or root in target.parents
+
+
+def _resolve_existing_confined_path(
+    candidate: Path,
+    *,
+    allowed_roots: "tuple[Path, ...]",
+    raw_path: str,
+) -> Path:
+    """Resolve ``candidate`` following symlinks, then require the real target to
+    lie within one of ``allowed_roots``. A symlink whose target escapes every
+    allowed root is denied here -- the lexical position of the link itself is
+    irrelevant. ``allowed_roots`` members must already be resolved."""
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"path not found: {raw_path}") from exc
+    if not any(_is_within_root(resolved, root) for root in allowed_roots):
+        raise ValueError(f"path escape denied: {raw_path}")
+    return resolved
+
+
 def _resolve_read_path(
     raw_path: str,
     runtime_dir: Path,
@@ -658,6 +683,7 @@ def _resolve_read_path(
         roots.append(
             ("agent_dir" if i == 0 else f"agent_dir{i + 1}", base_dir.resolve())
         )
+    allowed_roots = tuple(root for _, root in roots)
 
     path_text = raw_path.strip()
     prefixed_root = ""
@@ -679,33 +705,38 @@ def _resolve_read_path(
     raw_candidate = Path(path_text).expanduser()
 
     def _logical_target(base: Path) -> Path:
-        # Normalize "."/".." lexically without resolving the final component, so
-        # files inside `base` that are themselves symlinks elsewhere (e.g. an L2
-        # capability cache) stay addressable while ".."-escapes from `base` are
-        # still rejected.
+        # Normalize "."/".." lexically without resolving the final component; the
+        # strict resolve + confinement below follows symlinks and rejects any
+        # whose real target leaves the allowed roots.
         joined = raw_candidate if raw_candidate.is_absolute() else base / raw_candidate
         return Path(os.path.normpath(joined))
 
+    last_error: "ValueError | None" = None
     for name, base in candidates:
-        target = _logical_target(base)
-        if target == base or base in target.parents:
-            if prefixed_root or target.exists():
-                return (
-                    target,
-                    name,
-                    str(target.relative_to(base)) if target != base else ".",
-                )
-
-    if not prefixed_root and candidates:
-        name, base = candidates[0]
-        target = _logical_target(base)
-        if target == base or base in target.parents:
-            return (
-                target,
-                name,
-                str(target.relative_to(base)) if target != base else ".",
+        logical = _logical_target(base)
+        # Cheap lexical guard before touching disk: a ".."-escape from `base`
+        # cannot be confined even before resolving symlinks.
+        if logical != base and base not in logical.parents:
+            continue
+        try:
+            resolved = _resolve_existing_confined_path(
+                logical, allowed_roots=allowed_roots, raw_path=raw_path
             )
-    raise ValueError(f"Path escape denied: {raw_path}")
+        except ValueError as exc:
+            # A symlink whose real target escapes is a hard deny; a not-found
+            # here just means the path is absent in this root, so try the next.
+            if "path escape denied" in str(exc):
+                raise
+            last_error = exc
+            continue
+        display = str(logical.relative_to(base)) if logical != base else "."
+        return resolved, name, display
+
+    raise (
+        last_error
+        if last_error is not None
+        else ValueError(f"Path escape denied: {raw_path}")
+    )
 
 
 def _positive_int(value: object, default: int) -> int:

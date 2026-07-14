@@ -4,6 +4,7 @@
 via SpecLoader, revision-cached. The frontmatter holds name/model/tools/middleware;
 the markdown body becomes the PromptSpec.instructions."""
 
+import asyncio
 from typing import Any
 
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from .parser import (
     SpecLoader,
     parse_markdown_text,
     parse_model_policy,
+    resolved_name,
     parse_tool_refs,
 )
 
@@ -55,7 +57,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
     """Build an AgentSpec from a parsed frontmatter dict + markdown body."""
     allowed = {"name", "model", "tools", "sections", "middleware", "metadata"}
     reader = StrictConfigReader(payload, allowed=allowed, context=f"agent {agent_id}")
-    name = reader.optional_str("name") or agent_id
+    name = resolved_name(reader, agent_id)
     model_payload = payload.get("model")
     if not isinstance(model_payload, dict):
         raise InvalidSpecError(f"agent {agent_id}: 'model' must be a mapping")
@@ -65,6 +67,13 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
         instructions=body.strip(),
         sections=sections,
     )
+    # tools/middleware are parsed by value (parse_tool_refs /
+    # _parse_middleware_refs take the value directly), so distinguish a missing
+    # key (unset / empty-list) from an explicit null here -- null is rejected.
+    if "tools" in payload and payload["tools"] is None:
+        raise InvalidSpecError(f"agent {agent_id}: 'tools' must not be null")
+    if "middleware" in payload and payload["middleware"] is None:
+        raise InvalidSpecError(f"agent {agent_id}: 'middleware' must not be null")
     return AgentSpec(
         id=agent_id,
         name=name,
@@ -91,13 +100,15 @@ class AgentRegistry:
         self._cache: "dict[tuple[str, int], AgentSpec]" = {}
         self._cached_revision: "int | None" = None
         self._ids: "tuple[str, ...] | None" = None
+        self._refresh_lock = asyncio.Lock()
 
     async def _ensure_fresh(self) -> None:
-        revision = await self._loader.revision()
-        if revision != self._cached_revision:
-            self._cache.clear()
-            self._ids = None
-            self._cached_revision = revision
+        async with self._refresh_lock:
+            revision = await self._loader.revision()
+            if revision != self._cached_revision:
+                self._cache.clear()
+                self._ids = None
+                self._cached_revision = revision
 
     async def list_ids(self) -> "tuple[str, ...]":
         await self._ensure_fresh()

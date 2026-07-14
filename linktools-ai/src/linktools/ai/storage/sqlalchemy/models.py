@@ -72,6 +72,11 @@ class ToolIdempotencyRow(Base):
     created_at: Mapped[datetime]
     completed_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     expires_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    # Fencing fields for the claim/owner/generation/lease model.
+    owner_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    generation: Mapped[int] = mapped_column(default=0)
+    claimed_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    lease_expires_at: Mapped["datetime | None"] = mapped_column(nullable=True)
 
 
 class RevisionRow(Base):
@@ -119,11 +124,45 @@ class RunCheckpointRow(Base):
     metadata_json: Mapped[str] = mapped_column(Text)
 
 
+class RunCheckpointCounterRow(Base):
+    """Per-run monotonic counter the Store increments inside the append
+    transaction so concurrent appends for the same run never collide on
+    sequence (the unique constraint on (run_id, sequence) is the backstop)."""
+
+    __tablename__ = "ai_run_checkpoint_counters"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    last_sequence: Mapped[int]
+
+
+class RunDefinitionRow(Base):
+    """The immutable RunDefinitionSnapshot persisted at run creation so resume
+    can restore the exact original spec + identity (R-03)."""
+
+    __tablename__ = "ai_run_definitions"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    runnable_type: Mapped[str] = mapped_column(String(32))
+    runnable_id: Mapped[str] = mapped_column(String(255))
+    serialized_spec_json: Mapped[str] = mapped_column(Text)
+    spec_fingerprint: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    tenant_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    workspace: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime]
+    manifest_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+
+
 class SessionRow(Base):
     __tablename__ = "ai_sessions"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     parent_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    # Principal the session belongs to (SEC-03). Nullable: legacy rows and
+    # unowned (single-user CLI) sessions stay NULL. create_all adds the columns
+    # for fresh databases; existing databases need an ALTER TABLE.
+    user_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    tenant_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32))
     version: Mapped[int]
     created_at: Mapped[datetime]
@@ -172,6 +211,10 @@ class EventRow(Base):
     runnable_id: Mapped[str] = mapped_column(String(255))
     payload_type: Mapped[str] = mapped_column(String(64))
     payload_json: Mapped[str] = mapped_column(Text)
+    # Free-form per-event metadata (e.g. commit_id for commit-scoped dedup of
+    # critical events). Nullable: rows written before this column existed (and
+    # events with no metadata) store NULL -> read back as an empty mapping.
+    metadata_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
 
 
 class SwarmRunRow(Base):

@@ -24,9 +24,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ...errors import IdempotencyConflictError
-from ...tool.idempotency import IdempotencyRecord, IdempotencyStatus
+from ...tool.idempotency import (
+    ClaimDisposition,
+    ClaimResult,
+    IdempotencyClaim,
+    IdempotencyRecord,
+    IdempotencyStatus,
+)
 from .run import _atomic_write, _validate_id_segment
+
+
+def _dt_iso(dt: "datetime | None") -> "str | None":
+    return None if dt is None else dt.isoformat()
 
 
 def _record_to_json(record: IdempotencyRecord) -> dict:
@@ -39,9 +48,11 @@ def _record_to_json(record: IdempotencyRecord) -> dict:
         "result": record.result,
         "error": record.error,
         "created_at": record.created_at.isoformat(),
-        "completed_at": None
-        if record.completed_at is None
-        else record.completed_at.isoformat(),
+        "completed_at": _dt_iso(record.completed_at),
+        "owner_id": record.owner_id,
+        "generation": record.generation,
+        "claimed_at": _dt_iso(record.claimed_at),
+        "lease_expires_at": _dt_iso(record.lease_expires_at),
     }
 
 
@@ -58,6 +69,14 @@ def _record_from_json(raw: dict) -> IdempotencyRecord:
         completed_at=None
         if raw.get("completed_at") is None
         else datetime.fromisoformat(raw["completed_at"]),
+        owner_id=raw.get("owner_id"),
+        generation=raw.get("generation") or 0,
+        claimed_at=None
+        if raw.get("claimed_at") is None
+        else datetime.fromisoformat(raw["claimed_at"]),
+        lease_expires_at=None
+        if raw.get("lease_expires_at") is None
+        else datetime.fromisoformat(raw["lease_expires_at"]),
     )
 
 
@@ -89,26 +108,91 @@ class FileIdempotencyStore:
             return None
         return _record_from_json(json.loads(path.read_text()))
 
-    # -- write ---------------------------------------------------------
+    # -- claim / complete / fail (fenced) ---------------------------------
 
-    def _reserve_sync(
+    def _claim_sync(
         self,
+        *,
         scope: str,
         key: str,
         request_hash: str,
-        *,
-        expires_at: "datetime | None",
-    ) -> "IdempotencyRecord | None":
+        owner_id: str,
+        lease_seconds: float,
+    ) -> ClaimResult:
         existing = self._read(scope, key)
-        if existing is not None:
-            if existing.request_hash != request_hash:
-                raise IdempotencyConflictError(
-                    f"idempotency key {key!r} reused with a different request"
-                )
-            return existing
         now = datetime.now(timezone.utc)
+        lease_at = datetime.fromtimestamp(
+            now.timestamp() + lease_seconds, tz=timezone.utc
+        )
+        if existing is None:
+            return self._persist_fresh_claim(
+                scope=scope,
+                key=key,
+                request_hash=request_hash,
+                owner_id=owner_id,
+                now=now,
+                lease_at=lease_at,
+                generation=1,
+                existing_id=None,
+            )
+        # Same-key different request -> conflict (no record returned).
+        if existing.request_hash != request_hash:
+            return ClaimResult(disposition=ClaimDisposition.CONFLICT)
+        if existing.status is IdempotencyStatus.COMPLETED:
+            return ClaimResult(disposition=ClaimDisposition.REPLAY, record=existing)
+        if existing.status is IdempotencyStatus.RESERVED:
+            lease_valid = (
+                existing.lease_expires_at is not None
+                and existing.lease_expires_at > now
+            )
+            if lease_valid and existing.owner_id == owner_id:
+                # Same owner re-driving (e.g. retry) -- keep its generation.
+                return ClaimResult(
+                    disposition=ClaimDisposition.ACQUIRED,
+                    claim=_claim_from_record(existing),
+                )
+            if lease_valid:
+                # Another live worker owns it.
+                return ClaimResult(
+                    disposition=ClaimDisposition.IN_PROGRESS, record=existing
+                )
+            # Lease expired -- steal: new generation, new owner.
+            return self._persist_fresh_claim(
+                scope=scope,
+                key=key,
+                request_hash=request_hash,
+                owner_id=owner_id,
+                now=now,
+                lease_at=lease_at,
+                generation=existing.generation + 1,
+                existing_id=existing.id,
+            )
+        # FAILED -> retry: new generation, new owner.
+        return self._persist_fresh_claim(
+            scope=scope,
+            key=key,
+            request_hash=request_hash,
+            owner_id=owner_id,
+            now=now,
+            lease_at=lease_at,
+            generation=existing.generation + 1,
+            existing_id=existing.id,
+        )
+
+    def _persist_fresh_claim(
+        self,
+        *,
+        scope: str,
+        key: str,
+        request_hash: str,
+        owner_id: str,
+        now: datetime,
+        lease_at: datetime,
+        generation: int,
+        existing_id: "str | None",
+    ) -> ClaimResult:
         record = IdempotencyRecord(
-            id=str(uuid.uuid4()),
+            id=existing_id or str(uuid.uuid4()),
             scope=scope,
             key=key,
             request_hash=request_hash,
@@ -117,36 +201,49 @@ class FileIdempotencyStore:
             error=None,
             created_at=now,
             completed_at=None,
+            owner_id=owner_id,
+            generation=generation,
+            claimed_at=now,
+            lease_expires_at=lease_at,
         )
-        # mkdir for the scope subdir is done here (not in __init__) so
-        # FileIdempotencyStore(root=...) never creates empty scope dirs
-        # for scopes that never reserve. Idempotent.
         path = self._path(scope, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, json.dumps(_record_to_json(record)).encode("utf-8"))
-        return None
+        return ClaimResult(
+            disposition=ClaimDisposition.ACQUIRED,
+            claim=_claim_from_record(record),
+        )
 
-    async def reserve(
+    async def claim(
         self,
+        *,
         scope: str,
         key: str,
         request_hash: str,
-        *,
-        expires_at: "datetime | None" = None,
-    ) -> "IdempotencyRecord | None":
+        owner_id: str,
+        lease_seconds: float = 300.0,
+    ) -> ClaimResult:
         async with self._lock:
             return await asyncio.to_thread(
-                self._reserve_sync,
-                scope,
-                key,
-                request_hash,
-                expires_at=expires_at,
+                self._claim_sync,
+                scope=scope,
+                key=key,
+                request_hash=request_hash,
+                owner_id=owner_id,
+                lease_seconds=lease_seconds,
             )
 
-    def _complete_sync(self, scope: str, key: str, result: Any) -> None:
-        current = self._read(scope, key)
-        if current is None:
-            return
+    def _complete_sync(self, claim: IdempotencyClaim, result: Any) -> None:
+        current = self._read(claim.scope, claim.key)
+        if current is None or not _fence_matches(current, claim):
+            # Stale owner/generation or missing record: reject (parity with the
+            # SQL backend's rowcount check) -- never silently succeed.
+            from ...errors import LostIdempotencyClaimError
+
+            raise LostIdempotencyClaimError(
+                f"complete lost the claim for ({claim.scope}, {claim.key}): "
+                f"owner/generation no longer match"
+            )
         now = datetime.now(timezone.utc)
         updated = IdempotencyRecord(
             id=current.id,
@@ -158,19 +255,29 @@ class FileIdempotencyStore:
             error=None,
             created_at=current.created_at,
             completed_at=now,
+            owner_id=current.owner_id,
+            generation=current.generation,
+            claimed_at=current.claimed_at,
+            lease_expires_at=current.lease_expires_at,
         )
         _atomic_write(
-            self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8")
+            self._path(claim.scope, claim.key),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
         )
 
-    async def complete(self, scope: str, key: str, result: Any) -> None:
+    async def complete(self, claim: IdempotencyClaim, result: Any) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._complete_sync, scope, key, result)
+            await asyncio.to_thread(self._complete_sync, claim, result)
 
-    def _fail_sync(self, scope: str, key: str, error: str) -> None:
-        current = self._read(scope, key)
-        if current is None:
-            return
+    def _fail_sync(self, claim: IdempotencyClaim, error: str) -> None:
+        current = self._read(claim.scope, claim.key)
+        if current is None or not _fence_matches(current, claim):
+            from ...errors import LostIdempotencyClaimError
+
+            raise LostIdempotencyClaimError(
+                f"fail lost the claim for ({claim.scope}, {claim.key}): "
+                f"owner/generation no longer match"
+            )
         now = datetime.now(timezone.utc)
         updated = IdempotencyRecord(
             id=current.id,
@@ -182,16 +289,43 @@ class FileIdempotencyStore:
             error=error,
             created_at=current.created_at,
             completed_at=now,
+            owner_id=current.owner_id,
+            generation=current.generation,
+            claimed_at=current.claimed_at,
+            lease_expires_at=current.lease_expires_at,
         )
         _atomic_write(
-            self._path(scope, key), json.dumps(_record_to_json(updated)).encode("utf-8")
+            self._path(claim.scope, claim.key),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
         )
 
-    async def fail(self, scope: str, key: str, error: str) -> None:
+    async def fail(self, claim: IdempotencyClaim, error: str) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._fail_sync, scope, key, error)
+            await asyncio.to_thread(self._fail_sync, claim, error)
 
     async def get(self, scope: str, key: str) -> "IdempotencyRecord | None":
-        # Read-only: no lock needed. _path validates the segments, so a
-        # traversal attempt raises ValueError rather than escaping root.
-        return await asyncio.to_thread(self._read, scope, key)
+        async with self._lock:
+            return await asyncio.to_thread(self._read, scope, key)
+
+
+def _claim_from_record(record: IdempotencyRecord) -> IdempotencyClaim:
+    return IdempotencyClaim(
+        scope=record.scope,
+        key=record.key,
+        request_hash=record.request_hash,
+        owner_id=record.owner_id or "",
+        generation=record.generation,
+        claimed_at=record.claimed_at or record.created_at,
+        lease_expires_at=record.lease_expires_at or record.created_at,
+    )
+
+
+def _fence_matches(record: IdempotencyRecord, claim: IdempotencyClaim) -> bool:
+    """A complete/fail is valid only if the record is still RESERVED and the
+    owner_id + generation match -- a stale worker (older generation, or a
+    lease that was stolen) cannot overwrite a newer owner's record."""
+    return (
+        record.status is IdempotencyStatus.RESERVED
+        and record.owner_id == claim.owner_id
+        and record.generation == claim.generation
+    )

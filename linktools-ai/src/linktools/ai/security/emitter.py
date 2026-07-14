@@ -2,7 +2,6 @@
 
 import logging
 import dataclasses
-import json
 import re
 from collections.abc import Mapping
 from datetime import date, datetime
@@ -14,6 +13,23 @@ from ..errors import ToolSecurityAuditError
 from .redact import redact_exception
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Flatten dataclass wrappers / Mappings / sequences into a plain JSON
+    structure for size measurement. ``_value`` already redacted and normalized
+    the event but keeps payload dataclasses as instances; canonical_json needs a
+    plain structure. Not a hash path -- only used to measure bytes."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            f.name: _to_jsonable(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 @runtime_checkable
@@ -45,7 +61,9 @@ class DefaultSecurityEventSanitizer:
     def sanitize(self, event: Any) -> Any:
         result = self._value(event)
         try:
-            serialized = json.dumps(result, default=str, ensure_ascii=False)
+            from ..json import canonical_json
+
+            serialized = canonical_json(_to_jsonable(result))
             size = len(serialized.encode("utf-8"))
         except Exception:
             # If the sanitized value cannot be sized it cannot overflow either;
@@ -101,8 +119,8 @@ class DefaultSecurityEventSanitizer:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         # Unknown object: coerce to a truncated safe string so the sanitized
-        # event is always JSON-serializable without relying on the store's
-        # default=str fallback.
+        # event is always JSON-serializable without a non-deterministic
+        # string fallback.
         text = str(value)
         if len(text) > self._MAX_TEXT:
             return text[: self._MAX_TEXT] + "<truncated>"

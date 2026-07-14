@@ -45,7 +45,16 @@ import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Tuple, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Mapping,
+    Protocol,
+    Tuple,
+    runtime_checkable,
+)
 
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
@@ -63,10 +72,14 @@ from .models import (
     SwarmTask,
     SwarmTaskAttempt,
     SwarmTaskStatus,
+    SwarmCheckpoint,
     TaskInput,
 )
 from .spec import SwarmSpec, SwarmStrategySpec
 from .store import SwarmStore
+
+if TYPE_CHECKING:
+    from ..run.definition import RunDefinitionStore
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,7 +104,14 @@ class SwarmExecutionContext:
     """The bundle a strategy consumes: the spec, the driving swarm run, the
     request that initiated it, the parent RunContext (shared session lives
     here), the runner/compiler, the pre-compiled worker agents keyed by
-    AgentRef.agent_id, and the four stores."""
+    AgentRef.agent_id, and the four stores.
+
+    ContextPolicy: ``spec.context_policy`` is accessible to strategies. The
+    current ``coordinator_delegation`` strategy reads the parent session for
+    the coordinator (equivalent to ``coordinator_reads_session=True``) and
+    isolates workers (``worker_reads_session=False``). A strategy that wants
+    different behavior reads ``ctx.spec.context_policy`` and gates its
+    session/summary injection accordingly."""
 
     spec: SwarmSpec
     swarm_run: SwarmRun
@@ -104,6 +124,7 @@ class SwarmExecutionContext:
     run_store: Any  # RunStore Protocol (typed loosely to avoid a cycle with run.store)
     session_store: Any  # SessionStore Protocol
     event_store: Any  # EventStore Protocol
+    run_definitions: "RunDefinitionStore"
 
 
 # --- SwarmStrategy Protocol + registry --------------------------------------
@@ -112,6 +133,13 @@ class SwarmExecutionContext:
 @runtime_checkable
 class SwarmStrategy(Protocol):
     async def run(self, ctx: SwarmExecutionContext) -> RunResult: ...
+
+
+@runtime_checkable
+class ResumableSwarmStrategy(Protocol):
+    async def resume(
+        self, ctx: SwarmExecutionContext, checkpoint: SwarmCheckpoint
+    ) -> RunResult: ...
 
 
 _STRATEGY_REGISTRY: "dict[str, type]" = {}
@@ -361,6 +389,9 @@ async def _run_task(
             SessionRecord(
                 id=scratch_session_id,
                 parent_id=None,
+                # A worker scratch session inherits the driving run's principal.
+                user_id=ctx.parent_context.user_id,
+                tenant_id=ctx.parent_context.tenant_id,
                 status=SessionStatus.ACTIVE,
                 version=1,
                 created_at=now,
@@ -405,6 +436,14 @@ async def _run_task(
         # caught here and mistaken for a worker failure that warrants a
         # retry or an eventual fail_task() call.
         try:
+            # A worker Run gets the same resumable snapshot as a top-level run:
+            # if a worker tool pauses on approval, Runtime.resume(child_run_id)
+            # can restore its spec + identity.
+            from ..run.preparation import RunPreparationCoordinator as _Prep
+
+            await _Prep(ctx.run_definitions).prepare_agent_run(
+                spec=compiled.spec, context=child_context
+            )
             result = await ctx.agent_runner.run(
                 compiled,
                 RunInput(prompt=claimed.input.prompt),
@@ -648,6 +687,47 @@ class CoordinatorDelegationStrategy:
         all_tasks = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
         return aggregate(ctx.spec.aggregation, all_tasks)
 
+    async def resume(
+        self, ctx: SwarmExecutionContext, checkpoint: SwarmCheckpoint
+    ) -> RunResult:
+        workers = _worker_pool(ctx)
+        coordinator_fn = self._resolve_coordinator(ctx)
+        created_count = 0
+        for task_id in checkpoint.pending_task_ids:
+            task = next(
+                (
+                    t
+                    for t in await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
+                    if t.id == task_id
+                ),
+                None,
+            )
+            if task is not None:
+                await _run_task(ctx, task, max_task_retries=self._max_task_retries)
+        while True:
+            tasks = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
+            new_inputs = await coordinator_fn(
+                ctx.swarm_run,
+                tuple(t for t in tasks if t.status is SwarmTaskStatus.SUCCEEDED),
+                ctx.spec.limits,
+            )
+            if not new_inputs:
+                break
+            if created_count + len(new_inputs) > ctx.spec.limits.max_tasks:
+                raise SwarmLimitExceededError(
+                    f"coordinator exceeded max_tasks={ctx.spec.limits.max_tasks}",
+                    kind="max_tasks",
+                )
+            for ti in new_inputs:
+                task = _make_task(ctx, ti, workers[created_count % len(workers)])
+                await ctx.swarm_store.create_task(task)
+                await _run_task(ctx, task, max_task_retries=self._max_task_retries)
+                created_count += 1
+        return aggregate(
+            ctx.spec.aggregation,
+            await ctx.swarm_store.list_tasks(ctx.swarm_run.id),
+        )
+
 
 # --- ParallelFanOutStrategy -------------------------------------------------
 
@@ -706,3 +786,22 @@ class ParallelFanOutStrategy:
 
         all_tasks = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
         return aggregate(ctx.spec.aggregation, all_tasks)
+
+    async def resume(
+        self, ctx: SwarmExecutionContext, checkpoint: SwarmCheckpoint
+    ) -> RunResult:
+        for task_id in checkpoint.pending_task_ids:
+            task = next(
+                (
+                    t
+                    for t in await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
+                    if t.id == task_id
+                ),
+                None,
+            )
+            if task is not None:
+                await _run_task(ctx, task, max_task_retries=self._max_task_retries)
+        return aggregate(
+            ctx.spec.aggregation,
+            await ctx.swarm_store.list_tasks(ctx.swarm_run.id),
+        )

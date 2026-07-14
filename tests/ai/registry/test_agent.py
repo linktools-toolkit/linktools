@@ -206,3 +206,45 @@ def test_parse_agent_spec_supports_dict_middleware():
     assert len(spec.middleware) == 1
     assert spec.middleware[0].name == "budget"
     assert dict(spec.middleware[0].config) == {"limit": 5}
+
+
+# -- WP-10: explicit null vs missing for tools/middleware -------------------
+
+
+def test_parse_agent_spec_tools_null_rejected_missing_ok():
+    """tools:null is an explicit null (reject); tools absent is unset (None);
+    tools:[] is an explicit empty list (())."""
+    from linktools.ai.registry.agent import parse_agent_spec
+
+    model = {"primary": "gpt"}
+    # missing -> None
+    assert parse_agent_spec("a", {"model": model}, "body").tools is None
+    # [] -> ()
+    assert parse_agent_spec("a", {"model": model, "tools": []}, "body").tools == ()
+    # null -> reject
+    with pytest.raises(InvalidSpecError, match="tools"):
+        parse_agent_spec("a", {"model": model, "tools": None}, "body")
+
+
+def test_parse_agent_spec_middleware_null_rejected():
+    from linktools.ai.registry.agent import parse_agent_spec
+
+    with pytest.raises(InvalidSpecError, match="middleware"):
+        parse_agent_spec("a", {"model": {"primary": "gpt"}, "middleware": None}, "body")
+
+
+def test_parse_agent_spec_rejects_empty_name(tmp_path):
+    """WP-16 §20.1: an explicit empty/whitespace 'name' is a config error, not a
+    silent fall-back to the agent id. Missing 'name' still falls back."""
+    from linktools.ai.errors import InvalidSpecError
+
+    body = "instructions body"
+    # Missing name -> falls back to the agent id (no error).
+    spec = parse_agent_spec("fallback", {"model": {"primary": "m"}}, body)
+    assert spec.name == "fallback"
+    # Explicit empty name -> InvalidSpecError.
+    with pytest.raises(InvalidSpecError):
+        parse_agent_spec("blank", {"name": "", "model": {"primary": "m"}}, body)
+    # Whitespace-only name -> InvalidSpecError.
+    with pytest.raises(InvalidSpecError):
+        parse_agent_spec("space", {"name": "   ", "model": {"primary": "m"}}, body)

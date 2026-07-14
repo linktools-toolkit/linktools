@@ -68,6 +68,12 @@ class IdempotencyConflictError(LinktoolsAIError):
     """Same idempotency key reused with a different request hash."""
 
 
+class LostIdempotencyClaimError(LinktoolsAIError):
+    """complete/fail did not match the persisted record (owner+generation no
+    longer hold -- a newer worker stole the lease). The terminal write is
+    rejected rather than silently succeeding."""
+
+
 class IdempotencyConfigurationError(LinktoolsAIError):
     """An idempotent call lacks the context or trusted key needed for safety."""
 
@@ -92,12 +98,19 @@ class InvalidRunTransitionError(RunError):
     pass
 
 
+class RunInvariantError(RunError):
+    """A run completed without the authoritative state the runtime contract
+    requires (e.g. no terminal RunResult after a non-pausing execute). Raised
+    instead of fabricating an empty success result that would mask the bug."""
+
+
 class RunPaused(RunError):
-    """Raised by ToolExecutor (under ``pause_on_approval=True``) and propagated
+    """Raised by ToolExecutor when a tool requires approval, and propagated
     through pydantic-ai's tool-execution stack out to AgentRunner, which
     persists the ApprovalRequest, checkpoints state, transitions the Run to
     WAITING_APPROVAL, and appends the pause events -- all atomically in one
-    UnitOfWork on SqlAlchemy storage.
+    UnitOfWork on SqlAlchemy storage. This is the single approval path: the
+    executor only emits the signal; it never persists approval state itself.
 
     This is a control-flow signal, NOT an error condition -- it's a RunError
     (not a ToolError) precisely so PolicyCapability.before_tool_execute (which
@@ -138,6 +151,13 @@ class RunPaused(RunError):
 
 class SessionError(LinktoolsAIError):
     """Base class for Session-related errors."""
+
+
+class SessionAccessDeniedError(SessionError):
+    """A session exists but does not belong to the current principal/tenant.
+    Raised by resolve_session when (user_id, tenant_id) do not match the
+    session's owner -- the message never reveals whether the session belongs to
+    someone else."""
 
 
 class SessionSequenceConflictError(SessionError):
@@ -187,7 +207,7 @@ class ToolSchemaError(ToolError):
 
 class ToolSchemaDefinitionError(ToolSchemaError):
     """A tool's parameters_json_schema is itself malformed. Detected at assembly
-    time (never deferred to first call). Never retried."""
+    time (never postponed to first call). Never retried."""
 
 
 class ToolSchemaValidationError(ToolSchemaError):
@@ -228,10 +248,20 @@ class ModelRoutingError(LinktoolsAIError):
     pass
 
 
+class ModelInvocationDeniedError(LinktoolsAIError):
+    """The model call was denied by before_model policy (DENY or an unsupported
+    action). Raised before the delegate model is invoked, so no prompt leaves."""
+
+
+class ModelResultDeniedError(LinktoolsAIError):
+    """The model's result was denied or replaced by after_model policy. Raised
+    before the un-audited result reaches the caller."""
+
+
 class ModelPolicyExceededError(LinktoolsAIError):
     """Raised when a ModelPolicy limit (max_tokens, ...) is violated by a model
     call's actual usage. Carries ``kind`` so callers can distinguish which limit
-    fired (currently only ``"max_tokens"``; ``"budget"`` is deferred until
+    fired (currently only ``"max_tokens"``; ``"budget"`` requires a pricing
     cost-per-token rates exist)."""
 
     def __init__(self, message: str, *, kind: str) -> None:
@@ -244,6 +274,12 @@ class SwarmError(LinktoolsAIError):
 
 
 class SwarmRunNotFoundError(SwarmError):
+    pass
+
+
+class SwarmResumeUnsupportedError(SwarmError):
+    """The selected strategy has no explicit checkpoint-resume protocol."""
+
     pass
 
 

@@ -5,6 +5,7 @@ revision-cached. Mirrors AgentRegistry — the loader exposes a revision() monot
 clock; whenever it changes the per-(id, revision) cache and the id listing are
 dropped so the next get() re-reads and re-parses the YAML."""
 
+import asyncio
 from typing import Any
 
 from collections.abc import Mapping
@@ -20,7 +21,7 @@ from ..swarm.spec import (
     SwarmStrategySpec,
 )
 from .agent import _parse_middleware_refs
-from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
+from .parser import SpecLoader, StrictConfigReader, resolved_name, parse_yaml_text
 
 
 def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
@@ -65,7 +66,21 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
         "metadata",
     }
     reader = StrictConfigReader(payload, allowed=allowed, context=f"swarm {swarm_id}")
-    name = reader.optional_str("name") or swarm_id
+    name = resolved_name(reader, swarm_id)
+
+    # Fields parsed by value (payload.get) bypass the StrictConfigReader, so
+    # distinguish a missing key from an explicit null here -- null is rejected.
+    for _field in (
+        "agents",
+        "coordinator",
+        "strategy",
+        "limits",
+        "aggregation",
+        "middleware",
+        "context_policy",
+    ):
+        if _field in payload and payload[_field] is None:
+            raise InvalidSpecError(f"swarm {swarm_id}: '{_field}' must not be null")
 
     # agents — required, non-empty.
     agents_raw = payload.get("agents")
@@ -236,13 +251,15 @@ class SwarmRegistry:
         self._cache: "dict[tuple[str, int], SwarmSpec]" = {}
         self._cached_revision: "int | None" = None
         self._ids: "tuple[str, ...] | None" = None
+        self._refresh_lock = asyncio.Lock()
 
     async def _ensure_fresh(self) -> None:
-        revision = await self._loader.revision()
-        if revision != self._cached_revision:
-            self._cache.clear()
-            self._ids = None
-            self._cached_revision = revision
+        async with self._refresh_lock:
+            revision = await self._loader.revision()
+            if revision != self._cached_revision:
+                self._cache.clear()
+                self._ids = None
+                self._cached_revision = revision
 
     async def list_ids(self) -> "tuple[str, ...]":
         await self._ensure_fresh()

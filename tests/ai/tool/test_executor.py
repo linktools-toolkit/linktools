@@ -4,7 +4,7 @@
 
 import pytest
 
-from linktools.ai.errors import ToolApprovalRequiredError, ToolDeniedError
+from linktools.ai.errors import RunPaused, ToolDeniedError
 from linktools.ai.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
@@ -49,7 +49,7 @@ async def test_check_raises_tool_denied_on_deny():
 @pytest.mark.asyncio
 async def test_check_raises_approval_required_on_require_approval():
     executor = ToolExecutor(policy=PolicyEngine(rules=(_AlwaysApprovalRule(),)))
-    with pytest.raises(ToolApprovalRequiredError):
+    with pytest.raises(RunPaused):
         await executor.check(
             ToolRequest(tool_name="terminal", arguments={}),
             ToolContext(run_id="r1", session_id="s1"),

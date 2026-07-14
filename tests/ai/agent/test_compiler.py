@@ -12,6 +12,8 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
+from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import ToolExecutor
 
 
 def _config(model_type: str) -> RuntimeModelConfig:
@@ -32,7 +34,9 @@ async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
     router = ModelRouter(registry=registry)
-    compiler = AgentCompiler(model_router=router)
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+    )
 
     spec = AgentSpec(
         id="agent-1",
@@ -60,7 +64,9 @@ async def test_compile_reuses_model_router_fallback():
     registry = ModelRegistry()
     registry.register("fallback-model", config=_config("fallback-model"))
     router = ModelRouter(registry=registry)
-    compiler = AgentCompiler(model_router=router)
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+    )
 
     spec = AgentSpec(
         id="agent-2",
@@ -81,7 +87,11 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
     registry.register("test-model", config=_config("test-model"))
     router = ModelRouter(registry=registry)
     pipeline = MiddlewarePipeline(middlewares=())
-    compiler = AgentCompiler(model_router=router, middleware_pipeline=pipeline)
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=router,
+        middleware_pipeline=pipeline,
+    )
     spec = AgentSpec(
         id="agent-mw",
         name="mw-agent",
@@ -105,7 +115,9 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
     router = ModelRouter(registry=registry)
-    compiler = AgentCompiler(model_router=router)
+    compiler = AgentCompiler(
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+    )
     spec = AgentSpec(
         id="agent-nomw",
         name="nomw-agent",
@@ -114,3 +126,14 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     )
     compiled = await compiler.compile(spec)
     assert compiled.middleware_capability is None
+
+
+def test_compiler_requires_tool_executor():
+    """WP-03 §8.4: AgentCompiler without an explicit ToolExecutor fails loudly
+    (no silent ALLOW-all fallback)."""
+    from linktools.ai.errors import RuntimeInitializationError
+
+    with pytest.raises(RuntimeInitializationError):
+        AgentCompiler(
+            model_router=ModelRouter(registry=ModelRegistry()), tool_executor=None
+        )

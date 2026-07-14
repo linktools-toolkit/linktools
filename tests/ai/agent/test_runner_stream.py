@@ -166,13 +166,27 @@ def _seed_session(store, session_id) -> None:
 
 
 def _make_runner(tmp_path):
+    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     return AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         capability_assembler=CapabilityAssembler({"test": _EchoProvider()}),
         managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
 
 
@@ -187,7 +201,8 @@ def _compile(
     tmp_path, fn, stream_fn, *, agent_id="agent-1", output_schema=str
 ) -> "tuple[AgentRunner, CompiledAgent]":
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry(fn, stream_fn))
+        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        model_router=ModelRouter(registry=_registry(fn, stream_fn)),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -244,6 +259,104 @@ def test_run_stream_yields_text_events_and_succeeds(tmp_path):
     payload_types = {type(e.payload).__name__ for e in events_list.items}
     assert "RunStarted" in payload_types
     assert "RunCompleted" in payload_types
+
+
+def test_run_stream_non_streaming_model_completes_via_result(tmp_path):
+    """A model without a stream_function (pydantic-ai raises AssertionError)
+    still completes via the final result -- the narrowed catch swallows only
+    that signal, not real errors."""
+    fn, _stream_fn = _text_pair(text="final-answer")
+    # stream_fn=None -> FunctionModel raises AssertionError on node.stream().
+    runner, compiled = _compile(tmp_path, fn, None)
+    _seed_session(runner._session_store, "session-s1")
+
+    events = asyncio.run(
+        _collect(
+            runner.run_stream(
+                compiled,
+                RunInput(prompt="what is the answer?"),
+                _run_context(run_id="run-ns", session_id="session-s1"),
+            )
+        )
+    )
+
+    # No text deltas streamed (the model can't stream), but the run still
+    # completes SUCCEEDED and the final result carries the answer.
+    assert not any(e["type"] == "text" for e in events)
+
+    async def _verify():
+        return await runner._run_store.get("run-ns")
+
+    run_record = asyncio.run(_verify())
+    assert run_record.status is RunStatus.SUCCEEDED
+    assert "final-answer" in str(run_record.result.output)
+
+
+def test_run_stream_real_stream_error_fails_the_run(tmp_path):
+    """A genuine stream error (NOT the non-streaming AssertionError signal) must
+    propagate and FAIL the run -- this is the whole point of narrowing the catch
+    away from ``except Exception``. ``_fn`` succeeds (the model call works) but
+    the ``_stream_fn`` raises a real error mid-stream, which the narrowed
+    ``except AssertionError`` deliberately does not swallow."""
+
+    def _fn(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(content="final-answer")])
+
+    async def _stream_fn(messages, info: AgentInfo):
+        raise ValueError("stream broke")
+        yield  # pragma: no cover  -- makes this an async generator
+
+    runner, compiled = _compile(tmp_path, _fn, _stream_fn)
+    _seed_session(runner._session_store, "session-s1")
+
+    # The stream error propagates and ends the run FAILED.
+    with pytest.raises(ValueError, match="stream broke"):
+        asyncio.run(
+            _collect(
+                runner.run_stream(
+                    compiled,
+                    RunInput(prompt="what is the answer?"),
+                    _run_context(run_id="run-err", session_id="session-s1"),
+                )
+            )
+        )
+
+    async def _verify():
+        return await runner._run_store.get("run-err")
+
+    run_record = asyncio.run(_verify())
+    assert run_record.status is RunStatus.FAILED
+
+
+def test_run_raises_run_invariant_error_when_no_result_persisted(tmp_path):
+    """When execute() completes without a persisted result (an invariant
+    violation), run() raises RunInvariantError instead of fabricating an empty
+    success. The execute() happy path does not read the record back, so
+    stripping ``result`` from the authoritative read isolates the tail check."""
+    import dataclasses
+
+    from linktools.ai.errors import RunInvariantError
+
+    fn, stream_fn = _text_pair(text="answer")
+    runner, compiled = _compile(tmp_path, fn, stream_fn)
+    _seed_session(runner._session_store, "session-s1")
+
+    real_get = runner._run_store.get
+
+    async def _stripped_get(run_id):
+        record = await real_get(run_id)
+        return None if record is None else dataclasses.replace(record, result=None)
+
+    runner._run_store.get = _stripped_get  # type: ignore[assignment]
+
+    with pytest.raises(RunInvariantError):
+        asyncio.run(
+            runner.run(
+                compiled,
+                RunInput(prompt="what is the answer?"),
+                _run_context(run_id="run-inv", session_id="session-s1"),
+            )
+        )
 
 
 def test_run_stream_yields_tool_and_text_events(tmp_path):

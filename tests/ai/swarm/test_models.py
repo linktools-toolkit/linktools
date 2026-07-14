@@ -173,8 +173,9 @@ def test_token_usage_from_mapping_missing_keys():
 
 
 def test_token_usage_from_mapping_none_values():
-    tu = TokenUsage.from_mapping({"input_tokens": None, "output_tokens": None})
-    assert tu == TokenUsage()
+    """None values are rejected (strict parsing, no implicit int() coercion)."""
+    with pytest.raises(ValueError, match="input_tokens"):
+        TokenUsage.from_mapping({"input_tokens": None, "output_tokens": None})
 
 
 # --- SwarmRun ---------------------------------------------------------------

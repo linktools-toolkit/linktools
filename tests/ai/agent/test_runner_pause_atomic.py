@@ -46,6 +46,7 @@ from linktools.ai.storage.sqlalchemy.event import SqlAlchemyEventStore
 from linktools.ai.storage.sqlalchemy.models import Base
 from linktools.ai.storage.file.approval import FileApprovalStore
 from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+from linktools.ai.storage.file.commit import FileRunCommitCoordinator
 from linktools.ai.storage.file.event import FileEventStore
 from linktools.ai.storage.file.run import FileRunStore
 from linktools.ai.storage.file.session import FileSessionStore
@@ -158,7 +159,6 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=storage.approvals,
-        pause_on_approval=True,
     )
     compiler = AgentCompiler(
         model_router=ModelRouter(registry=_registry()),
@@ -181,21 +181,24 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
 
 
 def _sqla_runner(storage) -> AgentRunner:
-    """AgentRunner wired with SqlAlchemy stores + the UoW factory -- the
-    atomic configuration."""
+    """AgentRunner wired with SqlAlchemy stores + the atomic
+    SqlAlchemyRunCommitCoordinator -- pause/complete share one transaction."""
+    from linktools.ai.storage.sqlalchemy.commit import (
+        SqlAlchemyRunCommitCoordinator,
+    )
+
     return AgentRunner(
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
         checkpoint_store=storage.checkpoints,
-        uow_factory=storage.transaction,
+        commit_coordinator=SqlAlchemyRunCommitCoordinator(storage),
         capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
         managed_tool_executor=ToolExecutor(
             policy=PolicyEngine(
                 rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
             ),
             approval_store=storage.approvals,
-            pause_on_approval=True,
         ),
     )
 
@@ -461,10 +464,12 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
 
 def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     """File mode (``uow_factory=None``): cross-store transactions are
-    unavailable, so a failure in the best-effort RunPaused event append does
-    NOT undo the checkpoint or the WAITING_APPROVAL transition. This is the
-    non-atomic shape contract documents -- the inverse of the SqlAlchemy test
-    above, and the reason the File path keeps its best-effort try/except."""
+    unavailable. A failure in the RunPaused event append now PROPAGATES (v5
+    BUG-03) so the journal is retained for recovery -- but the pause commit
+    point (checkpoint + WAITING_APPROVAL transition + approval) is NOT rolled
+    back, and no contradictory RunFailed event is written. This is the
+    non-atomic shape the contract documents -- the inverse of the SqlAlchemy
+    rollback test above."""
     approval_store = FileApprovalStore(root=tmp_path / "approvals")
 
     class _FailingOnRunPausedEvents:
@@ -486,7 +491,6 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=approval_store,
-        pause_on_approval=True,
     )
     compiler = AgentCompiler(
         model_router=ModelRouter(registry=_registry()),
@@ -505,14 +509,26 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         )
     )
 
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = _FailingOnRunPausedEvents(FileEventStore(root=tmp_path / "events"))
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
     runner = AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=_FailingOnRunPausedEvents(FileEventStore(root=tmp_path / "events")),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
         capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
         managed_tool_executor=executor,
-        # uow_factory deliberately omitted -> File mode non-atomic path.
+        # File coordinator: event appends are best-effort, so a RunPaused event
+        # failure does NOT roll back the checkpoint or the transition.
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=approval_store,
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
     )
     now = datetime.now(timezone.utc)
     asyncio.run(
@@ -528,29 +544,133 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         )
     )
 
-    events = asyncio.run(
-        _collect(
-            runner.run_stream(
-                compiled,
-                RunInput(prompt="call the risky tool"),
-                _run_context("run-f1", "session-f1"),
+    # v5 BUG-03: a critical-event append failure is no longer swallowed -- it
+    # propagates so the journal is retained and recovery re-attempts it. The
+    # pause commit point (WAITING_APPROVAL + checkpoint + approval) is NOT
+    # rolled back; only the audit event is missing until recovery.
+    with pytest.raises(RuntimeError, match="simulated event append failure"):
+        asyncio.run(
+            _collect(
+                runner.run_stream(
+                    compiled,
+                    RunInput(prompt="call the risky tool"),
+                    _run_context("run-f1", "session-f1"),
+                )
+            )
+        )
+
+    # Commit point persisted -- no rollback.
+    run_record = asyncio.run(runner._run_store.get("run-f1"))
+    assert run_record.status is RunStatus.WAITING_APPROVAL, (
+        "pause commit point (WAITING_APPROVAL) must persist, not roll back"
+    )
+    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-f1"))
+    assert checkpoint is not None, "pause checkpoint must persist"
+
+    # The RunPaused event is missing now (recovery will re-attempt it), and the
+    # propagated error did NOT fabricate a contradictory RunFailed event.
+    event_page = asyncio.run(runner._event_store.list("run-f1"))
+    payload_types = {type(e.payload).__name__ for e in event_page.items}
+    assert "RunPaused" not in payload_types
+    assert "RunFailed" not in payload_types
+
+
+def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
+    """R-02 (WP-02 §7.4): in File mode, a failed ApprovalRequest write must
+    PROPAGATE -- the run must never enter WAITING_APPROVAL without its approval
+    persisted (it could not then be approved or resumed). The failure ends the
+    run FAILED; no checkpoint is orphaned (the approval write precedes the
+    checkpoint append)."""
+    from linktools.ai.run.models import RunStatus
+
+    class _FailingApprovalStore:
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def create_or_get_pending(self, **kwargs):
+            raise RuntimeError("simulated approval write failure")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    executor = ToolExecutor(
+        policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
+        approval_store=_FailingApprovalStore(
+            FileApprovalStore(root=tmp_path / "approvals")
+        ),
+    )
+    compiler = AgentCompiler(
+        model_router=ModelRouter(registry=_registry()),
+        tool_executor=executor,
+    )
+    compiled = asyncio.run(
+        compiler.compile(
+            AgentSpec(
+                id="agent-1",
+                name="a",
+                model=ModelPolicy(primary="test-model"),
+                instructions=PromptSpec(instructions="hi"),
+                output_schema=str,
+                tools=(ToolRef(kind="test", name=TOOL_NAME),),
             )
         )
     )
-    assert any(e["type"] == "paused" for e in events), (
-        "File pause should still yield paused despite best-effort event failure"
+    run_store = FileRunStore(root=tmp_path / "runs")
+    session_store = FileSessionStore(root=tmp_path / "sessions")
+    event_store = FileEventStore(root=tmp_path / "events")
+    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    runner = AgentRunner(
+        run_store=run_store,
+        session_store=session_store,
+        event_store=event_store,
+        checkpoint_store=checkpoint_store,
+        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        managed_tool_executor=executor,
+        # The coordinator owns the approval write; a failure propagates so the
+        # run ends FAILED (not WAITING_APPROVAL) with no orphan checkpoint.
+        commit_coordinator=FileRunCommitCoordinator(
+            approval_store=_FailingApprovalStore(
+                FileApprovalStore(root=tmp_path / "approvals")
+            ),
+            checkpoint_store=checkpoint_store,
+            run_store=run_store,
+            session_store=session_store,
+            event_store=event_store,
+        ),
+    )
+    now = datetime.now(timezone.utc)
+    asyncio.run(
+        runner._session_store.create(
+            SessionRecord(
+                id="session-r02",
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
     )
 
-    # Non-atomic: checkpoint + transition persisted; only the event is missing.
-    run_record = asyncio.run(runner._run_store.get("run-f1"))
-    assert run_record.status is RunStatus.WAITING_APPROVAL, (
-        "File mode transition should persist (non-atomic)"
-    )
-    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-f1"))
-    assert checkpoint is not None, "File mode checkpoint should persist (non-atomic)"
+    # The failed approval write propagates (the runner's generic-error handler
+    # transitions the run FAILED, then re-raises so the caller sees the cause).
+    with pytest.raises(RuntimeError, match="simulated approval write failure"):
+        asyncio.run(
+            _collect(
+                runner.run_stream(
+                    compiled,
+                    RunInput(prompt="call the risky tool"),
+                    _run_context("run-r02", "session-r02"),
+                )
+            )
+        )
 
-    event_page = asyncio.run(runner._event_store.list("run-f1"))
-    payload_types = {type(e.payload).__name__ for e in event_page.items}
-    assert "RunPaused" not in payload_types, (
-        "best-effort RunPaused append should have failed silently"
+    run_record = asyncio.run(runner._run_store.get("run-r02"))
+    assert run_record.status is not RunStatus.WAITING_APPROVAL, (
+        "a failed approval write must not leave the run WAITING_APPROVAL"
+    )
+    # The approval write precedes the checkpoint append, so no orphan checkpoint.
+    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-r02"))
+    assert checkpoint is None, (
+        "no checkpoint should persist when the approval write fails"
     )

@@ -33,7 +33,6 @@ against it. ``compute_request_hash`` centralizes the hash formula so
 both backends and the executor agree byte-for-byte."""
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -57,12 +56,24 @@ class IdempotencyStatus(str, Enum):
     FAILED = "failed"
 
 
+class ClaimDisposition(str, Enum):
+    """The outcome of a fenced ``claim()``. The caller branches on this:
+    ACQUIRED -> run the handler then complete/fail with the claim token;
+    REPLAY -> return the cached result; IN_PROGRESS -> raise; CONFLICT -> raise."""
+
+    ACQUIRED = "acquired"
+    REPLAY = "replay"
+    IN_PROGRESS = "in_progress"
+    CONFLICT = "conflict"
+
+
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
-    """One persisted idempotency reservation. ``result`` is the cached tool
-    result when COMPLETED (None otherwise); ``error`` is the serialized error
-    message when FAILED (None otherwise). ``completed_at`` is set on either
-    terminal transition (COMPLETED or FAILED) and stays None while RESERVED."""
+    """One persisted idempotency record. Fencing fields: ``owner_id`` is the
+    worker that currently owns a RESERVED record; ``generation`` increments on
+    every (re)claim so a stale worker's complete/fail is rejected;
+    ``lease_expires_at`` is when a RESERVED claim may be stolen (worker died).
+    ``completed_at`` is set on either terminal transition."""
 
     id: str
     scope: str
@@ -73,41 +84,57 @@ class IdempotencyRecord:
     error: "str | None"
     created_at: datetime
     completed_at: "datetime | None"
+    owner_id: "str | None" = None
+    generation: int = 0
+    claimed_at: "datetime | None" = None
+    lease_expires_at: "datetime | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimResult:
+    """The fenced result of ``claim()``: a disposition + either the claim
+    token (ACQUIRED) or the existing record (REPLAY/IN_PROGRESS). CONFLICT
+    carries no record."""
+
+    disposition: ClaimDisposition
+    claim: "IdempotencyClaim | None" = None
+    record: "IdempotencyRecord | None" = None
 
 
 @runtime_checkable
 class IdempotencyStore(Protocol):
     """Persistent idempotency storage. Two backends: FileIdempotencyStore
     (one JSON per (scope, key)) and SqlAlchemyIdempotencyStore (table
-    ``ai_idempotency``). Both implement the same contract."""
+    ``ai_idempotency``). Both implement the same fenced-claim contract."""
 
-    async def reserve(
+    async def claim(
         self,
+        *,
         scope: str,
         key: str,
         request_hash: str,
-        *,
-        expires_at: "datetime | None" = None,
-    ) -> "IdempotencyRecord | None":
-        """Try to reserve ``(scope, key)``. Returns ``None`` if this is a
-        fresh reservation (caller proceeds + ``complete``/``fail``), or the
-        existing record if one already exists (caller branches on
-        ``status``). Raises ``IdempotencyConflictError`` if the existing
-        record carries a different ``request_hash``.
-
-        ``expires_at`` is recorded for future TTL support; backends do not
-        yet expire records automatically in this phase."""
+        owner_id: str,
+        lease_seconds: float = 300.0,
+    ) -> ClaimResult:
+        """Fenced claim on ``(scope, key)``. The state machine:
+        - no record -> CLAIMED generation=1, owner=owner_id -> ACQUIRED
+        - COMPLETED + same hash -> REPLAY (return cached result)
+        - RESERVED + same hash + lease not expired + same owner -> ACQUIRED (re-drive)
+        - RESERVED + same hash + lease not expired + other owner -> IN_PROGRESS
+        - RESERVED + lease expired OR FAILED -> re-claim generation+1, new owner -> ACQUIRED
+        - different request_hash -> CONFLICT
+        """
         ...
 
-    async def complete(self, scope: str, key: str, result: Any) -> None:
-        """Mark the record at ``(scope, key)`` as COMPLETED with ``result``.
-        No-op if no such record exists (defensive against races where the
-        record was evicted between ``reserve`` and ``complete``)."""
+    async def complete(self, claim: "IdempotencyClaim", result: Any) -> None:
+        """Mark the record COMPLETED with ``result``. The claim's owner_id +
+        generation must match the persisted record or the call is rejected (a
+        stale worker cannot overwrite a newer owner's record)."""
         ...
 
-    async def fail(self, scope: str, key: str, error: str) -> None:
-        """Mark the record at ``(scope, key)`` as FAILED with ``error``.
-        Same no-op-on-missing semantics as ``complete``."""
+    async def fail(self, claim: "IdempotencyClaim", error: str) -> None:
+        """Mark the record FAILED with ``error``. Same owner/generation
+        fencing as ``complete``."""
         ...
 
     async def get(self, scope: str, key: str) -> "IdempotencyRecord | None":
@@ -122,11 +149,11 @@ def compute_request_hash(
     *,
     schema_version: str = "1",
 ) -> str:
-    """SHA-256 of ``tool_name | schema_version | normalized_args | scope``.
-    ``arguments`` are json-serialized with ``sort_keys=True`` so
-    two dicts that compare equal hash identically regardless of insertion
-    order; ``default=str`` keeps non-JSON-native values (Path, datetime, ...)
-    stable instead of raising.
+    """SHA-256 of ``tool_name | schema_version | canonical_args | scope``.
+    ``arguments`` are encoded with :func:`canonical_json` so two dicts that
+    compare equal hash identically regardless of insertion order, and a
+    non-JSON-native value (Path, datetime, bytes, ...) raises instead of being
+    silently stringified into an unstable/colliding hash.
 
     ``schema_version`` defaults to ``"1"`` so existing callers that don't pass
     it (or a ToolSpec whose ``schema_version`` was never bumped) hash
@@ -134,15 +161,16 @@ def compute_request_hash(
     contract changes, bumping ``ToolSpec.schema_version`` changes the hash for
     every subsequent call, so a stale idempotency record from before the
     schema change is never mistaken for a match against the new shape."""
-    payload = (
-        f"{tool_name}|{schema_version}|"
-        f"{json.dumps(arguments, sort_keys=True, default=str)}|{scope}"
-    )
+    from ..json import canonical_json
+
+    payload = f"{tool_name}|{schema_version}|{canonical_json(arguments)}|{scope}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    from ..json import canonical_json
+
+    return canonical_json(value)
 
 
 def encode_business_key(value: Any) -> str:
@@ -216,3 +244,17 @@ class DefaultIdempotencyKeyBuilder:
             ]
         payload = "|".join(identity).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyClaim:
+    """A fenced claim on an idempotency record. The owner_id + generation pair
+    is the fencing token: complete/fail must match or be rejected."""
+
+    scope: str
+    key: str
+    request_hash: str
+    owner_id: str
+    generation: int
+    claimed_at: datetime
+    lease_expires_at: datetime

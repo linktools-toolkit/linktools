@@ -28,6 +28,7 @@ class _RecordingStore:
         session_id,
         runnable_id,
         payload,
+        metadata=None,
     ):
         self.events.append(type(payload).__name__)
         return payload

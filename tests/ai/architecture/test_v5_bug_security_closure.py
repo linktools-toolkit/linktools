@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Architecture locks for the v5 bug/security closure (guide §13).
+
+One representative check per fixed item (2 security + 1 isolation + 5
+correctness), so a future change -- or a deleted per-area test file -- cannot
+silently re-introduce the gap each fix closed. Mixes behavioral locks with
+source/structure inspection (the same style test_final_closure_invariants uses).
+"""
+
+import dataclasses
+import inspect
+
+import pytest
+
+from linktools.ai._runtime.lifecycle import resolve_session
+from linktools.ai.errors import SessionAccessDeniedError
+from linktools.ai.execution.local import _run_file_tool_sync
+from linktools.ai.runtime import Runtime
+from linktools.ai.security.pipeline import validate_model_decision
+from linktools.ai.security.secured_model import SecuredModel
+from linktools.ai.session.models import SessionRecord
+from linktools.ai.storage.facade import FileStorage
+
+
+# --- SEC-01: symlink reads confined to resolved roots -----------------------
+
+
+def test_v5_read_path_resolves_and_rejects_symlink_escape(tmp_path):
+    runtime = tmp_path / "runtime"
+    outside = tmp_path / "outside"
+    runtime.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP-SECRET")
+    (runtime / "link.txt").symlink_to(outside / "secret.txt")
+
+    result = _run_file_tool_sync("read_file", {"path": "runtime/link.txt"}, runtime, [])
+
+    assert "error" in result
+    assert "TOP-SECRET" not in str(result)
+
+
+# --- SEC-02: every model pipeline decision enforced -------------------------
+
+
+def test_v5_secured_model_honors_modify_and_validates():
+    src = inspect.getsource(SecuredModel)
+    # MODIFY payload applied whenever non-None (composite pipelines return
+    # ALLOW with a payload), and a model decision validator exists.
+    assert "validate_model_decision" in src
+    assert "_replace_last_user_text" in src
+    assert "_replace_model_response_output" in src
+    # validate_model_decision rejects REQUIRE_APPROVAL at before_model.
+    from linktools.ai.security.pipeline import PipelineAction, PipelineDecision
+    from linktools.ai.errors import PipelineExecutionError
+
+    with pytest.raises(PipelineExecutionError):
+        validate_model_decision(
+            PipelineDecision(action=PipelineAction.REQUIRE_APPROVAL), stage="before"
+        )
+
+
+# --- SEC-03: sessions bound to principal/tenant -----------------------------
+
+
+def test_v5_session_record_carries_owner_and_resolve_enforces(tmp_path):
+    fields = {f.name for f in dataclasses.fields(SessionRecord)}
+    assert {"user_id", "tenant_id"} <= fields
+
+    import asyncio
+
+    storage = FileStorage(root=tmp_path)
+    sid = asyncio.run(resolve_session(storage, None, user_id="u-a", tenant_id="t-a"))
+    with pytest.raises(SessionAccessDeniedError):
+        asyncio.run(resolve_session(storage, sid, user_id="u-a", tenant_id="t-b"))
+
+
+# --- BUG-01: recovery serialized + retryable --------------------------------
+
+
+def test_v5_runtime_recovery_is_serialized():
+    assert hasattr(Runtime, "_ensure_recovered")
+    # The lock is created per-instance; the attribute must exist after build.
+    import tempfile
+
+    rt = Runtime.build(storage=FileStorage(root=tempfile.mkdtemp()))
+    assert hasattr(rt, "_recovery_lock")
+    assert hasattr(rt, "_recovery_done")
+
+
+# --- BUG-02: file session messages published only after commit -------------
+
+
+def test_v5_file_complete_publishes_messages_after_run_transition():
+    from linktools.ai.storage.file import commit as commit_mod
+
+    src = inspect.getsource(commit_mod.FileRunCommitCoordinator.complete)
+    # Session messages are appended AFTER the run transition (commit point).
+    pos_transition = src.index("RUN_TRANSITIONED")
+    pos_messages = src.index("_append_messages_once")
+    assert pos_transition < pos_messages, (
+        "session messages must be published after the SUCCEEDED commit point"
+    )
+
+
+# --- BUG-03: critical-event failures are not swallowed ----------------------
+
+
+def test_v5_file_critical_event_helper_does_not_swallow():
+    from linktools.ai.storage.file import commit as commit_mod
+
+    src = inspect.getsource(
+        commit_mod.FileRunCommitCoordinator._append_critical_event_once
+    )
+    # The append must NOT be wrapped in a broad except (it must propagate so the
+    # journal is retained).
+    assert "except Exception" not in src, (
+        "_append_critical_event_once must not swallow the append failure"
+    )
+    assert "metadata={" in src and "commit_id" in src
+
+
+# --- BUG-04: post-commit hooks isolated from terminal state -----------------
+
+
+def test_v5_runner_runs_after_run_before_complete():
+    from linktools.ai.agent.runner import AgentRunner
+
+    src = inspect.getsource(AgentRunner.execute)
+    pos_after_run = src.index("run_after_run")
+    pos_complete = src.index("_commit_coordinator.complete")
+    assert pos_after_run < pos_complete, (
+        "after_run must run before the commit so its failure does not corrupt a "
+        "committed run"
+    )
+
+
+# --- BUG-05: only the original user prompt is persisted ---------------------
+
+
+def test_v5_runner_persists_original_prompt_not_model_prompt():
+    from linktools.ai.agent import runner as runner_mod
+
+    src = inspect.getsource(runner_mod.AgentRunner.execute)
+    assert "user_content = prompt" not in src, (
+        "the USER session message must be request.prompt, never the concatenated "
+        "model prompt"
+    )
+    assert "_format_session_history" in inspect.getsource(runner_mod)

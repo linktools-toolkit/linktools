@@ -17,6 +17,7 @@ class SwarmStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     PAUSED = "paused"
+    RECOVERABLE = "recoverable"
     # CANCELLING distinguishes "cancel requested" from "actually cancelled"
     # (mirrors RunStatus.CANCELLING):
     # SwarmRunner.cancel() flips to CANCELLING while an in-flight swarm
@@ -68,6 +69,7 @@ ALLOWED_SWARM_TRANSITIONS: "Mapping[SwarmStatus, frozenset[SwarmStatus]]" = {
             SwarmStatus.CANCELLED,
         }
     ),
+    SwarmStatus.RECOVERABLE: frozenset({SwarmStatus.RUNNING}),
     SwarmStatus.CANCELLING: frozenset({SwarmStatus.CANCELLED, SwarmStatus.FAILED}),
     SwarmStatus.SUCCEEDED: frozenset(),
     SwarmStatus.FAILED: frozenset(),
@@ -102,10 +104,27 @@ class TokenUsage:
 
     @classmethod
     def from_mapping(cls, m: "Mapping[str, Any]") -> "TokenUsage":
-        return cls(
-            input_tokens=int(m.get("input_tokens", 0) or 0),
-            output_tokens=int(m.get("output_tokens", 0) or 0),
-        )
+        """Strictly parse token usage from a mapping. Non-int / negative values
+        are rejected rather than silently coerced via int()."""
+        raw_input = m.get("input_tokens", 0)
+        raw_output = m.get("output_tokens", 0)
+        if (
+            not isinstance(raw_input, int)
+            or isinstance(raw_input, bool)
+            or raw_input < 0
+        ):
+            raise ValueError(
+                f"input_tokens must be a non-negative int, got {raw_input!r}"
+            )
+        if (
+            not isinstance(raw_output, int)
+            or isinstance(raw_output, bool)
+            or raw_output < 0
+        ):
+            raise ValueError(
+                f"output_tokens must be a non-negative int, got {raw_output!r}"
+            )
+        return cls(input_tokens=raw_input, output_tokens=raw_output)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +139,19 @@ class SwarmRun:
     created_at: datetime
     updated_at: datetime
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmCheckpoint:
+    """Durable strategy input for resume; it never replays completed tasks."""
+
+    completed_task_ids: "tuple[str, ...]"
+    failed_task_ids: "tuple[str, ...]"
+    pending_task_ids: "tuple[str, ...]"
+    active_task_ids: "tuple[str, ...]"
+    task_outputs: "Mapping[str, RunResult]" = field(default_factory=dict)
+    strategy_state: "Mapping[str, Any]" = field(default_factory=dict)
+    aggregate_state: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

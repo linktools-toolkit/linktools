@@ -6,11 +6,12 @@ ToolRegistry's YAML pattern (the loader exposes a revision() monotonic clock;
 whenever it changes the per-(id, revision) cache and id listing are dropped)."""
 
 from dataclasses import dataclass, field
+import asyncio
 from typing import Any, Mapping
 import math
 
 from ..errors import InvalidSpecError, RegistryNotFoundError
-from .parser import SpecLoader, StrictConfigReader, parse_yaml_text
+from .parser import SpecLoader, StrictConfigReader, parse_yaml_text, resolved_name
 
 
 _VALID_TRANSPORTS = ("stdio", "sse", "http")
@@ -148,7 +149,7 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
     }
     reader = StrictConfigReader(payload, allowed=allowed, context=f"mcp {mcp_id}")
 
-    name = reader.optional_str("name") or mcp_id
+    name = resolved_name(reader, mcp_id)
     transport = reader.optional_str("transport") or "stdio"
     if transport not in _VALID_TRANSPORTS:
         raise InvalidSpecError(
@@ -213,13 +214,15 @@ class MCPRegistry:
         self._cache: "dict[tuple[str, int], MCPServerSpec]" = {}
         self._cached_revision: "int | None" = None
         self._ids: "tuple[str, ...] | None" = None
+        self._refresh_lock = asyncio.Lock()
 
     async def _ensure_fresh(self) -> None:
-        revision = await self._loader.revision()
-        if revision != self._cached_revision:
-            self._cache.clear()
-            self._ids = None
-            self._cached_revision = revision
+        async with self._refresh_lock:
+            revision = await self._loader.revision()
+            if revision != self._cached_revision:
+                self._cache.clear()
+                self._ids = None
+                self._cached_revision = revision
 
     async def list_ids(self) -> "tuple[str, ...]":
         await self._ensure_fresh()

@@ -25,3 +25,14 @@ class RunContext:
     tenant_id: "str | None"
     workspace: "WorkspaceRef | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id:
+            raise ValueError("RunContext.run_id must be a non-empty string")
+        if not isinstance(self.session_id, str) or not self.session_id:
+            raise ValueError("RunContext.session_id must be a non-empty string")
+        if not isinstance(self.runnable_id, str) or not self.runnable_id:
+            raise ValueError("RunContext.runnable_id must be a non-empty string")
+        from ..utils.freeze import freeze_value
+
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))

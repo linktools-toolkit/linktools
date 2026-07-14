@@ -135,7 +135,7 @@ class CapabilityAssembler:
 
             # Assembly-time schema validation: every ManagedToolDefinition that
             # declares a parameters_json_schema must have a well-formed schema.
-            # A malformed schema is rejected HERE, not deferred to first call.
+            # A malformed schema is rejected HERE, not postponed to first call.
             from ..tool.schema import validate_schema
 
             for c in contributions:

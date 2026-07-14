@@ -146,6 +146,50 @@ def validate_tool_decision(decision: PipelineDecision, *, stage: str) -> None:
         )
 
 
+def validate_model_decision(decision: PipelineDecision, *, stage: str) -> None:
+    """Validate a before_model/after_model decision.
+
+    There is no model-approval recovery semantics today, so before_model
+    REQUIRE_APPROVAL fails closed (it is not in the allowed set) rather than
+    being silently treated as ALLOW. A MODIFY/MODIFY_RESULT MUST carry a
+    modified_payload -- an empty one fails closed (the original, possibly
+    sensitive, prompt/result would otherwise pass through unchanged) rather
+    than being treated as a no-op ALLOW."""
+    before_allowed = {
+        PipelineAction.ALLOW,
+        PipelineAction.DENY,
+        PipelineAction.MODIFY,
+        PipelineAction.AUDIT_ONLY,
+    }
+    after_allowed = {
+        PipelineAction.ALLOW,
+        PipelineAction.DENY_RESULT,
+        PipelineAction.MODIFY_RESULT,
+        PipelineAction.AUDIT_ONLY,
+    }
+    if stage == "before":
+        allowed = before_allowed
+    elif stage == "after":
+        allowed = after_allowed
+    else:
+        raise PipelineExecutionError(f"invalid model pipeline stage: {stage!r}")
+    if decision.action not in allowed:
+        raise PipelineExecutionError(
+            f"pipeline action {decision.action.value!r} is invalid at {stage}_model"
+        )
+    if (
+        decision.action
+        in {
+            PipelineAction.MODIFY,
+            PipelineAction.MODIFY_RESULT,
+        }
+        and decision.modified_payload is None
+    ):
+        raise PipelineExecutionError(
+            f"pipeline action {decision.action.value!r} requires modified_payload"
+        )
+
+
 class CompositeSecurityPipeline:
     """Composes multiple SecurityPipelines. Decision precedence:
     DENY > REQUIRE_APPROVAL > MODIFY (in order) > ALLOW. AUDIT_ONLY never
@@ -169,7 +213,15 @@ class CompositeSecurityPipeline:
         require_approval: "PipelineDecision | None" = None
         for p in self._pipelines:
             decision = await getattr(p, hook_name)(current_event)
-            if hook_name == "before_tool":
+            # Validate EVERY sub-pipeline's decision against its stage BEFORE any
+            # DENY/REQUIRE_APPROVAL/MODIFY handling -- a wrong-stage action (e.g.
+            # MODIFY_RESULT at before_model) would otherwise be silently folded
+            # into an ALLOW+payload and SecuredModel could never detect it.
+            if hook_name == "before_model":
+                validate_model_decision(decision, stage="before")
+            elif hook_name == "after_model":
+                validate_model_decision(decision, stage="after")
+            elif hook_name == "before_tool":
                 validate_tool_decision(decision, stage="before")
             elif hook_name == "after_tool":
                 validate_tool_decision(decision, stage="after")

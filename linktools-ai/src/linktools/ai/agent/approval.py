@@ -5,7 +5,7 @@ ALLOWED_APPROVAL_TRANSITIONS map, the ApprovalStore Protocol, and the
 build_approval_request factory.
 
 This phase ships persistence + audit + events + external resolve; full run
-pause/resume is deferred. Mirrors the frozen-dataclass + str-Enum +
+pause/resume is not yet available. Mirrors the frozen-dataclass + str-Enum +
 transition-map + @runtime_checkable Protocol conventions used by
 swarm.models / swarm.store."""
 

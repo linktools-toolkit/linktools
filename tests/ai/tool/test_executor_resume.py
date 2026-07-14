@@ -11,7 +11,7 @@ the executor's ``_already_approved`` guard recognizes it and short-circuits.
 Covers three branches:
 1. APPROVED matching (run_id, tool_call_id) -> ``check()`` returns, no raise.
 2. No matching approval at all -> ``check()`` still raises
-   ``ToolApprovalRequiredError``.
+   ``RunPaused``.
 3. Matching tool_call_id but status PENDING (not yet approved) -> ``check()``
    still raises (resume must wait for an actual approve())."""
 
@@ -25,7 +25,7 @@ from linktools.ai.agent.approval import (
     ApprovalStatus,
     build_approval_request,
 )
-from linktools.ai.errors import ToolApprovalRequiredError
+from linktools.ai.errors import RunPaused
 from linktools.ai.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
@@ -156,9 +156,8 @@ def test_check_allows_through_when_already_approved():
 
 
 def test_check_raises_when_no_matching_approval():
-    """Branch 2: no matching approval at all -> ``check()`` still raises
-     ``ToolApprovalRequiredError`` and persists a PENDING request (the normal
-    require-approval flow)."""
+    """Branch 2: no matching approval at all -> ``check()`` raises RunPaused.
+    The executor only emits the signal; it does not persist (the caller does)."""
     store = _Store()
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(_Require(),)),
@@ -168,25 +167,17 @@ def test_check_raises_when_no_matching_approval():
     async def _run():
         await executor.check(_request(), _context(tool_call_id="tcid-OTHER"))
 
-    with pytest.raises(ToolApprovalRequiredError):
+    with pytest.raises(RunPaused):
         asyncio.run(_run())
 
-    # No prior approval seeded; executor persisted a fresh PENDING request.
-    assert store.created_count == 1
-    only = next(iter(store._by_id.values()))
-    assert only.status is ApprovalStatus.PENDING
-    assert only.tool_call_id == "tcid-OTHER"
+    # No prior approval seeded; the executor persists nothing.
+    assert store.created_count == 0
 
 
 def test_check_raises_when_matching_request_is_pending():
     """Branch 3: matching tool_call_id exists but status is PENDING (not yet
-    approved) -> ``check()`` still raises ``ToolApprovalRequiredError`` (resume
-    must wait for an actual approve()).
-
-    Note: the persisted existing PENDING request has a different ``id`` than
-    the fresh one ``_record_approval`` mints, so the store ends up with two
-    PENDING entries for the same tool_call_id -- that's fine; the resume gate
-    keys on (run_id, tool_call_id, status=APPROVED), not on id."""
+    approved) -> the resume gate does not fire, so ``check()`` raises
+    ``RunPaused`` (resume must wait for an actual approve())."""
     store = _Store()
     pending = build_approval_request(
         run_id="run-123",
@@ -203,20 +194,18 @@ def test_check_raises_when_matching_request_is_pending():
     async def _run():
         await executor.check(_request(), _context(tool_call_id="tcid-PENDING"))
 
-    with pytest.raises(ToolApprovalRequiredError):
+    with pytest.raises(RunPaused):
         asyncio.run(_run())
 
-    # PENDING does not satisfy the resume gate -> a new PENDING was persisted.
-    assert store.created_count == 1
+    # PENDING does not satisfy the resume gate; the executor persists nothing.
+    assert store.created_count == 0
 
 
 def test_check_raises_when_no_tool_call_id_in_context():
     """Branch 4: ``context.tool_call_id is None`` -> ``_already_approved``
-    returns False early (no key to match on), so ``check()`` raises normally.
-
-    This preserves the behavior exercised by test_executor_approval.py, where
-    ToolContext is constructed without a tool_call_id and the uuid fallback
-    fires -- resume cannot apply because there's no stable id to match."""
+    returns False early (no key to match on), so ``check()`` raises RunPaused.
+    The uuid fallback mints a tool_call_id on the RunPaused signal; resume
+    cannot apply because there was no stable id to match."""
     store = _Store()
     executor = ToolExecutor(
         policy=PolicyEngine(rules=(_Require(),)),
@@ -226,16 +215,16 @@ def test_check_raises_when_no_tool_call_id_in_context():
     async def _run():
         await executor.check(_request(), _context(tool_call_id=None))
 
-    with pytest.raises(ToolApprovalRequiredError):
+    with pytest.raises(RunPaused):
         asyncio.run(_run())
 
-    # No tool_call_id -> no resume -> fresh PENDING was persisted.
-    assert store.created_count == 1
+    # No tool_call_id -> no resume -> the executor persists nothing.
+    assert store.created_count == 0
 
 
 def test_check_without_approval_store_raises_normally():
     """Branch 5: ``approval_store is None`` -> ``_already_approved`` returns
-    False early; ``check()`` raises ``ToolApprovalRequiredError`` exactly like
+    False early; ``check()`` raises ``RunPaused`` exactly like
     the default-None path always has (no possible resume gate without a
     store)."""
     executor = ToolExecutor(
@@ -245,5 +234,5 @@ def test_check_without_approval_store_raises_normally():
     async def _run():
         await executor.check(_request(), _context(tool_call_id="tcid-XYZ"))
 
-    with pytest.raises(ToolApprovalRequiredError):
+    with pytest.raises(RunPaused):
         asyncio.run(_run())

@@ -81,12 +81,25 @@ class RunInput:
     prompt: str
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.prompt, str):
+            raise TypeError("RunInput.prompt must be a string")
+        from ..utils.freeze import freeze_value
+
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
+
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
     output: Any
     token_usage: "Mapping[str, Any]" = field(default_factory=dict)
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        from ..utils.freeze import freeze_value
+
+        object.__setattr__(self, "token_usage", freeze_value(dict(self.token_usage)))
+        object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,4 +137,18 @@ class RunCheckpoint:
     schema_version: int
     payload: bytes
     created_at: datetime
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class NewRunCheckpoint:
+    """Caller input for a new checkpoint: everything the runtime has, minus the
+    fields only the Store may assign (id / sequence / created_at). The Store
+    returns the persisted RunCheckpoint with those fields filled in, so callers
+    can never collide or overwrite by hardcoding the sequence."""
+
+    run_id: str
+    format: str
+    schema_version: int
+    payload: bytes
     metadata: "Mapping[str, Any]" = field(default_factory=dict)

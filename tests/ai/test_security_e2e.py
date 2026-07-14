@@ -356,7 +356,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     # Resume: the re-driven call must NOT re-pause (already-approved gate) --
     # the run reaches a terminal state (SUCCEEDED), not WAITING_APPROVAL again.
     resumed_run = False
-    async for _ev in rt.resume(run_id, spec):
+    async for _ev in rt.resume(run_id):
         resumed_run = True
     record = await storage.runs.get(run_id)
     from linktools.ai.run.models import RunStatus

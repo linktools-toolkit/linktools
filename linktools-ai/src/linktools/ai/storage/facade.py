@@ -34,6 +34,7 @@ from ..errors import StorageCapabilityError
 from ..events.store import EventStore
 from ..memory.store import MemoryStore
 from ..run.checkpoint import CheckpointStore
+from ..run.definition import RunDefinitionStore
 from ..run.store import RunStore
 from ..session.store import SessionStore
 from ..swarm.store import SwarmStore
@@ -41,6 +42,7 @@ from ..tool.idempotency import IdempotencyStore
 from .capabilities import FILE_STORAGE_CAPABILITIES, StorageCapabilities
 from .file.approval import FileApprovalStore
 from .file.checkpoint import FileCheckpointStore
+from .file.definition import FileRunDefinitionStore
 from .file.event import FileEventStore
 from .file.idempotency import FileIdempotencyStore
 from .file.memory import FileMemoryStore
@@ -68,6 +70,12 @@ class Storage:
     approvals: ApprovalStore
     idempotency: IdempotencyStore
     capabilities: StorageCapabilities
+    # Required, not optional: every run entry point (agent / subagent / swarm
+    # worker) persists a RunDefinitionSnapshot so Runtime.resume(child_run_id)
+    # can restore its spec + identity after an approval pause. A Storage built
+    # without one is rejected at Runtime build time -- resumability is not an
+    # opt-in capability.
+    run_definitions: RunDefinitionStore
 
     def transaction(self) -> "AsyncIterator[_UnitOfWork]":
         """Cross-store transactional scope. The base implementation always
@@ -106,5 +114,14 @@ class FileStorage(Storage):
             memories=FileMemoryStore(root=root_path / "memories"),
             approvals=FileApprovalStore(root=root_path / "approvals"),
             idempotency=FileIdempotencyStore(root=root_path / "idempotency"),
+            run_definitions=FileRunDefinitionStore(root=root_path / "definitions"),
             capabilities=FILE_STORAGE_CAPABILITIES,
         )
+        # Stash the root so the FileRunCommitCoordinator can place its crash-
+        # recovery journal under {root}/transactions (frozen dataclass -> bypass).
+        object.__setattr__(self, "_root", root_path)
+
+    @property
+    def root(self) -> Path:
+        """The storage root directory (where per-store subdirs live)."""
+        return self._root

@@ -13,7 +13,7 @@ import json
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -71,6 +71,7 @@ class SqlAlchemyEventStore:
         session_id: str,
         runnable_id: str,
         payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope:
         result = await session.execute(
             select(func.max(EventRow.sequence)).where(EventRow.stream_id == stream_id)
@@ -79,6 +80,7 @@ class SqlAlchemyEventStore:
         next_seq = (current or 0) + 1
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc)
+        meta = dict(metadata) if metadata else None
         row = EventRow(
             event_id=event_id,
             stream_id=stream_id,
@@ -91,6 +93,7 @@ class SqlAlchemyEventStore:
             runnable_id=runnable_id,
             payload_type=type(payload).__name__,
             payload_json=json.dumps(asdict(payload)),
+            metadata_json=json.dumps(meta) if meta else None,
         )
         session.add(row)
         await session.flush()
@@ -105,6 +108,7 @@ class SqlAlchemyEventStore:
             session_id=session_id,
             runnable_id=runnable_id,
             payload=payload,
+            metadata=meta or {},
         )
 
     async def append(
@@ -117,6 +121,7 @@ class SqlAlchemyEventStore:
         session_id: str,
         runnable_id: str,
         payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope:
         # Reserve the next sequence inside the inserting transaction: read
         # MAX(sequence) for the stream, add 1, insert. Retry the whole
@@ -137,6 +142,7 @@ class SqlAlchemyEventStore:
                 session_id=session_id,
                 runnable_id=runnable_id,
                 payload=payload,
+                metadata=metadata,
             )
             await self._session.flush()
             return envelope
@@ -154,6 +160,7 @@ class SqlAlchemyEventStore:
                             session_id=session_id,
                             runnable_id=runnable_id,
                             payload=payload,
+                            metadata=metadata,
                         )
             except IntegrityError as exc:
                 # Unique (stream_id, sequence) collision -- a concurrent append
@@ -189,6 +196,7 @@ class SqlAlchemyEventStore:
             session_id=row.session_id,
             runnable_id=row.runnable_id,
             payload=payload,
+            metadata=json.loads(row.metadata_json) if row.metadata_json else {},
         )
 
     async def list(

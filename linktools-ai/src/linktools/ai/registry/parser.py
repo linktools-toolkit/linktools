@@ -255,6 +255,20 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...]":
     return tuple(refs)
 
 
+def resolved_name(reader: "StrictConfigReader", entity_id: str) -> str:
+    """Resolve a spec's display name. A MISSING 'name' falls back to the entity
+    id; an explicit empty/whitespace 'name' is a config error (it is present but
+    blank, not a 'use the id' signal) and raises. The two must not be conflated
+    by ``or entity_id`` -- that would silently turn ``name: ""`` into the id."""
+    name = reader.optional_str("name")
+    if name is None:
+        return entity_id
+    name = name.strip()
+    if not name:
+        raise InvalidSpecError(f"{reader.context}: 'name' must not be empty")
+    return name
+
+
 class StrictConfigReader:
     """Strict, unknown-field-rejecting reader over a parsed config mapping.
 
@@ -300,6 +314,11 @@ class StrictConfigReader:
         if not isinstance(value, str):
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         return value
+
+    @property
+    def context(self) -> str:
+        """The validation context label (used by shared helpers for errors)."""
+        return self._context
 
     def bool(self, name, default=None):
         present, value = self._present(name)
