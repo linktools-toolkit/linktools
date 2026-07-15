@@ -10,7 +10,7 @@ declares a subagent ref. Package-scoped subagents resolve through the
 EntrypointResolver; global ones through the SubagentSpecProvider."""
 
 from dataclasses import dataclass, field
-from typing import Callable, ClassVar
+from typing import Any, Callable, ClassVar
 
 from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext
@@ -40,6 +40,13 @@ class SubagentProvider:
     # Reads the contextvar so multi-hop depth accounting works when the runtime
     # executor updates it per child run.
     depth_provider: "Callable[[], int]" = field(default=current_depth)
+    # Skill-private subagent support (call_subagent(instruction_path=...)).
+    # All optional: when None, the tool's instruction_path branch raises that
+    # skill-private subagents are not enabled (preserving the legacy behavior).
+    skill_resolver: Any = None
+    active_skill_provider: "Callable[[], Any] | None" = None
+    child_model_policy: Any = None
+    parent_delegated_tools: "set[str] | None" = None
     kind: str = "subagent"
     supported_kinds: "ClassVar[tuple[str, ...]]" = ("subagent",)
 
@@ -80,6 +87,27 @@ class SubagentProvider:
                 tenant_id=context.tenant_id,
                 workspace=context.workspace,
             )
+        # Derive the parent's delegatable tool set from the parent agent's own
+        # declared tools, so a skill-private child can never keep a tool the
+        # parent lacks (the permission intersection). Only when an explicit set
+        # was not configured and we can read the parent spec. On ANY failure to
+        # read the parent (unknown id, e.g. a skill-private multi-hop id not in
+        # the AgentRegistry, or a transient store error) FAIL CLOSED with an
+        # empty set -- the child keeps no tools -- never "no constraint".
+        parent_delegated = self.parent_delegated_tools
+        if (
+            parent_delegated is None
+            and self.subagent_provider is not None
+            and context.agent_id
+        ):
+            try:
+                parent_spec = await self.subagent_provider.get(context.agent_id)
+                parent_delegated = {
+                    t.name for t in (getattr(parent_spec, "tools", None) or ())
+                }
+            except Exception:
+                parent_delegated = set()
+
         toolset = build_subagent_toolset(
             allowed_names=allowed,
             subagent_provider=self.subagent_provider,
@@ -91,6 +119,10 @@ class SubagentProvider:
             max_concurrency=max_concurrency,
             allowed_packages=allowed_packages,
             parent=parent,
+            skill_resolver=self.skill_resolver,
+            active_skill_provider=self.active_skill_provider,
+            child_model_policy=self.child_model_policy,
+            parent_delegated_tools=parent_delegated,
         )
         from ..tool.models import ToolDescriptor
         from ..tool.models import ToolContribution, declared_tool_definitions

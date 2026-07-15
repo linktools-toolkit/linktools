@@ -47,6 +47,17 @@ class ProviderBundle:
     package_resources: "PackageResourceProvider | None" = None
     entrypoints: "EntrypointResolver | None" = None
     capabilities: "tuple[CapabilityProvider, ...]" = ()
+    # Skill-private subagent support (optional; None preserves legacy behavior).
+    # skill_resolver: a UnifiedSubagentResolver for call_subagent(instruction_path).
+    # active_skill_provider: returns the ActiveSkillContext for the current task.
+    # active_skill_lookup: async(skill_id)->ActiveSkillContext set by read_skill.
+    # child_model_policy / parent_delegated_tools: build the child AgentSpec with
+    # the permission intersection.
+    skill_resolver: Any = None
+    active_skill_provider: Any = None
+    active_skill_lookup: Any = None
+    child_model_policy: Any = None
+    parent_delegated_tools: "set[str] | None" = None
 
     def is_empty(self) -> bool:
         return (

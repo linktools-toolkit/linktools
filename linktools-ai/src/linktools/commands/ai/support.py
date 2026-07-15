@@ -4,9 +4,10 @@
 """Shared helpers for the `lt ai` command (model config, runtime, agent spec)."""
 
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 
 from linktools.cli import CommandError
 from linktools.core import environ
@@ -22,6 +23,7 @@ from linktools.ai.storage.facade import FileStorage
 from linktools.system import get_user
 
 if TYPE_CHECKING:
+    import logging
     from argparse import Namespace
 
 # Mirrors the legacy chat prompt. Kept here so every `lt ai` subcommand that
@@ -184,3 +186,48 @@ async def resolve_approval(
         )
         environ.logger.info(f"rejected {approval_id}")
     return 0
+
+
+def new_run_id() -> str:
+    """Mint a run id the CLI owns so it can cancel/resume a run by id.
+
+    The runtime accepts a caller-supplied ``run_id`` everywhere it accepts a
+    prompt; minting it here (instead of letting the runtime generate one
+    internally) is what lets ``lt ai run``/``chat`` cancel an in-flight run on
+    Ctrl+C and what ``lt ai resume`` later addresses."""
+    return str(uuid.uuid4())
+
+
+async def announce_paused(
+    storage: FileStorage,
+    event: "Mapping[str, Any]",
+    logger: "logging.Logger",
+) -> None:
+    """Render a ``paused`` stream event.
+
+    Prints the fields the spec requires -- ``tool``, ``arguments``, ``reason``,
+    ``run_id``, ``approval_id`` -- plus the cross-process commands that resume
+    the run. Only ``run_id``/``approval_id`` travel on the stream event; the
+    richer tool fields are read back from the persisted ApprovalRequest (the
+    runner persists it before yielding ``paused``). A missing request degrades
+    to the ids alone rather than crashing the run.
+    """
+    run_id = event.get("run_id")
+    approval_id = event.get("approval_id")
+    tool_name: "str | None" = None
+    reason: "str | None" = None
+    arguments: "dict[str, Any]" = {}
+    if approval_id is not None:
+        request = await storage.approvals.get(approval_id)
+        if request is not None:
+            tool_name = request.tool_name
+            reason = request.reason
+            arguments = dict(request.arguments)
+    logger.warning("run paused waiting for approval")
+    logger.info(f"tool: {tool_name or '?'}")
+    logger.info(f"arguments: {arguments}")
+    if reason:
+        logger.info(f"reason: {reason}")
+    logger.info(f"run_id: {run_id}")
+    logger.info(f"approval_id: {approval_id}")
+    logger.info(f"resume with: lt ai approve {approval_id} && lt ai resume {run_id}")

@@ -42,6 +42,20 @@ class InvalidResourcePathError(ResourceError):
     pass
 
 
+class SkillResourceAccessError(ResourceError):
+    """A skill-private resource path is forbidden: it is absolute, escapes the
+    skill's ``agents/`` directory (including via symlink), is not Markdown, or
+    is missing (spec §11). Path safety is enforced on the resolved path, so a
+    symlink that points outside ``agents/`` is rejected after resolve()."""
+
+
+class SubagentResolutionError(LinktoolsAIError):
+    """A ``call_subagent`` request could not be resolved: the named subagent is
+    unknown, an ``instruction_path`` was given without an active skill, the
+    active skill no longer exists / changed revision, or the request was
+    malformed (spec §9/§10/§14)."""
+
+
 class StorageError(LinktoolsAIError):
     """Base class for Storage-facade-related errors."""
 

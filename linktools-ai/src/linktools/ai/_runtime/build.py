@@ -124,7 +124,9 @@ def _build_capability_providers(
     if execution is not None:
         providers["builtin"] = BuiltinProvider()
     if bundle.skills is not None:
-        providers["skill"] = SkillProvider(bundle.skills)
+        providers["skill"] = SkillProvider(
+            bundle.skills, active_skill_lookup=bundle.active_skill_lookup
+        )
     if bundle.mcp_servers is not None:
         providers["mcp"] = MCPProvider(
             bundle.mcp_servers,
@@ -136,6 +138,10 @@ def _build_capability_providers(
             subagent_provider=bundle.subagents,
             entrypoint_resolver=bundle.entrypoints,
             executor=subagent_executor,
+            skill_resolver=bundle.skill_resolver,
+            active_skill_provider=bundle.active_skill_provider,
+            child_model_policy=bundle.child_model_policy,
+            parent_delegated_tools=bundle.parent_delegated_tools,
         )
     if bundle.package_resources is not None or bundle.entrypoints is not None:
         # PackageProvider declares every kind it handles via supported_kinds;
@@ -226,9 +232,21 @@ def _make_runtime_subagent_executor(
             }
 
         async def _drive():
-            await preparation.prepare_agent_run(spec=agent_spec, context=run_ctx)
-            compiled = await compiler.compile(agent_spec)
-            return await runner_provider().run(compiled, RunInput(prompt=task), run_ctx)
+            # A child run starts OUTSIDE any skill: clear the parent's active
+            # skill for the duration of the child so a subagent cannot address
+            # the parent's skill via call_subagent(instruction_path=...) (skill
+            # isolation). Imported lazily to avoid a build-time import cycle.
+            from ..skill.private import reset_active_skill, set_active_skill
+
+            skill_token = set_active_skill(None)
+            try:
+                await preparation.prepare_agent_run(spec=agent_spec, context=run_ctx)
+                compiled = await compiler.compile(agent_spec)
+                return await runner_provider().run(
+                    compiled, RunInput(prompt=task), run_ctx
+                )
+            finally:
+                reset_active_skill(skill_token)
 
         from ..events.payloads import (
             SubagentCompleted,

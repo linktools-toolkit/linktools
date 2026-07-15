@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 
-from .support import build_storage, resolve_approval
+from .assembly import project_storage
+from .support import resolve_approval
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -23,7 +24,7 @@ class Command(BaseCommand):
         parser.add_argument("approval_id", help="approval request id")
 
     def run(self, args: "Namespace") -> "int | None":
-        storage = build_storage()
+        storage = project_storage()
         return asyncio.run(
             resolve_approval(storage, args.approval_id, approved=True, reason=None)
         )

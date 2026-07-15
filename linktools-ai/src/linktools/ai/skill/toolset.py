@@ -4,7 +4,7 @@
 An agent may only read skills it declared; unauthorized
 reads raise SkillNotFoundError so existence is not leaked."""
 
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -12,6 +12,7 @@ from ..errors import SkillNotFoundError
 from ..events.payloads import SkillListed, SkillRead
 from ..providers.skill import SkillSpecProvider
 from .models import SkillContent, SkillSummary
+from .private import set_active_skill
 
 # Optional async emitter (event_store-backed) for skill operation events.
 SkillEmitter = "Callable[[Any], Awaitable[None]]"
@@ -34,8 +35,14 @@ def build_skill_toolset(
     *,
     authorized: "Iterable[str]",
     emit: "SkillEmitter | None" = None,
+    active_skill_lookup: "Callable[[str], Awaitable[Any]] | None" = None,
 ) -> FunctionToolset:
-    """Level-1 skill discovery tools scoped to ``authorized`` skill ids."""
+    """Level-1 skill discovery tools scoped to ``authorized`` skill ids.
+
+    When ``active_skill_lookup`` is provided, a successful ``read_skill`` also
+    activates that skill in the current task's context (so a later
+    ``call_subagent(instruction_path=...)`` resolves the path relative to it).
+    Activation is best-effort and never blocks a read."""
     toolset: FunctionToolset = FunctionToolset()
     allowed = set(authorized)
 
@@ -78,6 +85,16 @@ def build_skill_toolset(
             package_id=meta.get("package_id"),
             metadata=meta,
         )
+        if active_skill_lookup is not None:
+            # Activate the skill in this task so a subsequent
+            # call_subagent(instruction_path=...) resolves under it. Best-effort:
+            # a lookup failure must not break the read itself.
+            try:
+                ctx = await active_skill_lookup(skill_id)
+            except Exception:
+                ctx = None
+            if ctx is not None:
+                set_active_skill(ctx)
         return content.model_dump()
 
     toolset.add_function(list_skills)

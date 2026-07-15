@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai run`: run the PROJECT's agent against a single prompt and print the result.
+"""`lt ai resume`: resume a run paused waiting for approval.
 
-Loads the agent from the project (``.linktools/agents``), not a generic stub,
-streams the run so a pause-for-approval surfaces as exit code 4 (with the
-approval id printed) instead of a traceback, and cancels the run on Ctrl+C."""
+``Runtime.resume`` restores the ORIGINAL agent spec + identity from the
+persisted RunDefinitionSnapshot, so this command passes only the run id --
+never an AgentSpec. A second pause during resume again exits 4."""
 
 import asyncio
 from typing import TYPE_CHECKING
@@ -15,20 +15,10 @@ from linktools.ai.errors import (
     RunConflictError,
     RunNotFoundError,
 )
-from linktools.ai.model.registry import (
-    ModelClientUnavailable,
-    ModelOutputError,
-    ModelTurnLimitExceeded,
-)
 from linktools.cli import BaseCommand
 
-from .assembly import build_project_bundle, load_agent_spec
-from .support import (
-    announce_paused,
-    ensure_session,
-    new_run_id,
-    validate_session_id,
-)
+from .assembly import build_project_bundle
+from .support import announce_paused
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -37,26 +27,18 @@ if TYPE_CHECKING:
 
 
 class Command(BaseCommand):
-    """run the project agent with a single prompt"""
+    """resume a paused run"""
 
     @property
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [
-            ModelClientUnavailable,
-            ModelOutputError,
-            ModelTurnLimitExceeded,
             RunNotFoundError,
             InvalidRunTransitionError,
             RunConflictError,
         ]
 
     def init_arguments(self, parser: "CommandParser") -> None:
-        parser.add_argument("prompt", help="the prompt")
-        parser.add_argument(
-            "--agent",
-            default=None,
-            help="agent id (default: the project's default_agent)",
-        )
+        parser.add_argument("run_id", help="the run id to resume")
         parser.add_argument(
             "--model", default=None, help="model name (default: $OPENAI_MODEL)"
         )
@@ -69,24 +51,22 @@ class Command(BaseCommand):
             "--api-key", default=None, help="api key (default: $OPENAI_API_KEY)"
         )
         parser.add_argument(
-            "--session", default="main", help="session id (default main)"
+            "--workdir",
+            default=None,
+            help="agent working directory (default: current directory)",
         )
 
     def run(self, args: "Namespace") -> "int | None":
-        return asyncio.run(self._run_async(args, args.prompt))
-
-    async def _run_async(self, args: "Namespace", prompt: str) -> "int | None":
         bundle = build_project_bundle(args)
-        spec = await load_agent_spec(bundle, args.agent)
-        session_id = validate_session_id(args.session)
-        await ensure_session(bundle.storage, session_id)
-        run_id = new_run_id()
+        return asyncio.run(self._resume_async(bundle, args.run_id))
+
+    async def _resume_async(self, bundle, run_id: str) -> "int | None":
         try:
-            async for event in bundle.runtime.run_stream(
-                spec, prompt, session_id=session_id, run_id=run_id
-            ):
+            async for event in bundle.runtime.resume(run_id):
                 kind = event["type"]
-                if kind == "text":
+                if kind == "resumed":
+                    self.logger.info(f"resumed run: {event.get('run_id')}")
+                elif kind == "text":
                     print(event["text"], end="", flush=True)
                 elif kind == "tool":
                     self.logger.info(
@@ -94,13 +74,14 @@ class Command(BaseCommand):
                         f"{' ok' if event.get('ok') else ''}]"
                     )
                 elif kind == "paused":
+                    # Paused again after resume: surface and exit 4.
                     await announce_paused(bundle.storage, event, self.logger)
                     return 4
             print()
             return 0
         except asyncio.CancelledError:
             await bundle.runtime.cancel(run_id)
-            self.logger.warning("run cancelled")
+            self.logger.warning("resume cancelled")
             return 130
 
 

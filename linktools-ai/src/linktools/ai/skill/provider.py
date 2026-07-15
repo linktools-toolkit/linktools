@@ -11,7 +11,7 @@ Package skills surface their package_id in summaries; deeper package-resource
 access is a separate ``package-resource`` capability, not auto-enabled here."""
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
@@ -29,6 +29,9 @@ class SkillProvider:
     (default SkillRegistry or a business backend)."""
 
     skill_provider: SkillSpecProvider
+    # When set, read_skill activates the skill in the current task context so a
+    # later call_subagent(instruction_path=...) can resolve under it.
+    active_skill_lookup: Any = None
     kind: str = "skill"
     supported_kinds: "ClassVar[tuple[str, ...]]" = ("skill",)
 
@@ -67,7 +70,10 @@ class SkillProvider:
                 continue
             summaries.append(_summary_from_spec(sid, spec))
         toolset = build_skill_toolset(
-            self.skill_provider, authorized=set(ids), emit=emit
+            self.skill_provider,
+            authorized=set(ids),
+            emit=emit,
+            active_skill_lookup=self.active_skill_lookup,
         )
         sections = {}
         if context.exposure_policy.expose_prompt_catalog and summaries:
@@ -82,7 +88,10 @@ class SkillProvider:
         if not emit:
             pass  # emit check is handled by caller's exposure policy
         toolset = build_skill_toolset(
-            self.skill_provider, authorized={skill_id}, emit=emit
+            self.skill_provider,
+            authorized={skill_id},
+            emit=emit,
+            active_skill_lookup=self.active_skill_lookup,
         )
         contribution = _skill_contribution(toolset)
         return CapabilityBundle(tool_contributions=(contribution,))

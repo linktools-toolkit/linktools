@@ -171,7 +171,12 @@ def parse_mcp_spec(mcp_id: str, payload: "dict[str, Any]") -> MCPServerSpec:
                 f"mcp {mcp_id}: {transport} transport requires 'url'"
             )
 
-    env = reader.string_mapping("env") or {}
+    # Expand ${ENV_NAME} references (fail-on-missing) at parse time so a server
+    # never receives a literal placeholder and startup fails fast on an unset
+    # secret. Imported lazily to avoid a registry <-> mcp import cycle.
+    from ..mcp.env import expand_env_mapping
+
+    env = expand_env_mapping(reader.string_mapping("env") or {})
     headers = reader.string_mapping("headers") or {}
     metadata = reader.mapping("metadata") or {}
     cwd = reader.optional_str("cwd")

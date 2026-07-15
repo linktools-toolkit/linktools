@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING
 
 from linktools.ai.agent.approval import ApprovalStatus
 from linktools.cli import BaseCommand
-from linktools.core import environ
 
-from .support import build_storage
+from .assembly import project_storage
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -26,7 +25,7 @@ class Command(BaseCommand):
         pass
 
     def run(self, args: "Namespace") -> "int | None":
-        storage = build_storage()
+        storage = project_storage()
         return asyncio.run(self._list_async(storage))
 
     async def _list_async(self, storage) -> "int | None":
@@ -40,13 +39,13 @@ class Command(BaseCommand):
 
 
 async def _list_pending_approvals(storage) -> list:
-    """Enumerate pending approval requests across all runs.
+    """Enumerate pending approval requests under the project's storage.
 
     `ApprovalStore.list_pending(run_id)` is scoped to a single run; there is no
-    global listing API. We glob ``<root>/approvals/requests/*.json``, rehydrate
-    each request via the store's `get()`, and keep only pending ones.
+    whole-store listing API. We glob ``<root>/approvals/requests/*.json``,
+    rehydrate each request via the store's `get()`, and keep only pending ones.
     """
-    root = Path(environ.get_data_path("ai")) / "approvals" / "requests"
+    root = Path(storage.root) / "approvals" / "requests"
     requests = []
     for request_path in sorted(root.glob("*.json")):
         approval_id = request_path.stem

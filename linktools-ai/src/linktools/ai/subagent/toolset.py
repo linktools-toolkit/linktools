@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""call_subagent toolset. The tool delegates to a resolved
-child AgentSpec -- global (SubagentSpecProvider) or package-scoped
-(EntrypointResolver) -- subject to an allowlist and depth/timeout limits."""
+"""call_subagent toolset. The tool delegates to a resolved child spec:
+
+* ``name``/``agent_id`` -- a declared project agent (SubagentSpecProvider) or a
+  package-scoped agent (EntrypointResolver), subject to the allowlist and
+  depth/timeout limits;
+* ``instruction_path`` -- a skill-private agent resolved relative to the active
+  skill through a ``skill_resolver`` (UnifiedSubagentResolver), with the
+  permission intersection applied when the spec is built.
+
+All three share one tool + one execution path (the executor). The
+skill-private branch is only active when a ``skill_resolver`` is wired in
+(otherwise ``instruction_path`` raises that skill-private subagents are not
+enabled)."""
 
 from typing import Any, Callable, Mapping
 
@@ -60,48 +70,57 @@ def build_subagent_toolset(
     max_concurrency: int = 1,
     allowed_packages: "set[str] | None" = None,
     parent: "ParentRunIdentity | None" = None,
+    skill_resolver=None,
+    active_skill_provider: "Callable[[], Any] | None" = None,
+    child_model_policy=None,
+    parent_delegated_tools: "set[str] | None" = None,
 ) -> FunctionToolset:
-    """Level-2 execution tool: call_subagent. Only declared agent ids are
-    admitted; a package-scoped call must target a package in ``allowed_packages``
-    (declared-packages-only confinement); depth + authorization are enforced
-    before delegation; concurrency is bounded by ``max_concurrency`` (per-ref
-    semaphore, so two distinct subagent refs do not starve each other)."""
+    """Level-2 execution tool: call_subagent. Declared agent ids are admitted via
+    ``name``/``agent_id``; ``instruction_path`` resolves a skill-private agent
+    through ``skill_resolver``. Depth + authorization are enforced before
+    delegation; concurrency is bounded by ``max_concurrency`` (per-ref)."""
     import asyncio
 
     toolset: FunctionToolset = FunctionToolset()
     package_allowlist = allowed_packages or set()
-    # Per-ref concurrency cap; released even on failure/timeout via async-with.
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
     async def call_subagent(
-        agent_id: str,
-        task: str,
+        agent_id: "str | None" = None,
+        task: "str | None" = None,
+        name: "str | None" = None,
+        instruction_path: "str | None" = None,
         context: "dict[str, Any] | None" = None,
         scope: "dict[str, Any] | None" = None,
     ) -> "dict[str, Any]":
-        """Delegate a task to a declared subagent and return its result."""
-        if agent_id not in allowed_names:
-            raise SubagentNotFoundError(f"subagent not allowed: {agent_id}")
+        """Delegate a task to a declared subagent (name/agent_id) or a
+        skill-private agent (instruction_path) and return its result."""
+        if not task or not task.strip():
+            raise SubagentExecutionError("call_subagent requires a non-empty 'task'")
         enforce_depth(depth_provider(), max_depth)
         pkg_scope = _parse_scope(scope)
-        # A caller-supplied package scope may only target a package this agent
-        # declared; otherwise a parent could be coerced into running an
-        # undeclared package's agent.
         if pkg_scope is not None and pkg_scope.package_id not in package_allowlist:
             raise SubagentNotFoundError(
                 f"package scope not allowed: {pkg_scope.package_id!r}"
             )
-        spec = await _resolve_spec(
-            agent_id, pkg_scope, subagent_provider, entrypoint_resolver
-        )
+
+        if instruction_path is not None:
+            spec = await _resolve_skill_private(instruction_path, task, context)
+        else:
+            target = name or agent_id
+            if target is None:
+                raise SubagentNotFoundError(
+                    "call_subagent requires name or instruction_path"
+                )
+            if target not in allowed_names:
+                raise SubagentNotFoundError(f"subagent not allowed: {target}")
+            spec = await _resolve_spec(
+                target, pkg_scope, subagent_provider, entrypoint_resolver
+            )
+
         if executor is None:
             raise SubagentExecutionError("no subagent executor configured")
         if parent is None:
-            # A tool can only be invoked from inside a running model call, and
-            # Runtime.run always sets run_id+session_id on the context (which
-            # the provider built this identity from). parent=None means
-            # assembly happened outside any run -- fail loudly rather than
-            # minting an unparented child run with no lineage.
             raise SubagentExecutionError(
                 "call_subagent invoked without a parent run identity; subagent "
                 "tools cannot run outside a live Run"
@@ -116,6 +135,28 @@ def build_subagent_toolset(
                 timeout_seconds=timeout_seconds,
             )
         return result.model_dump()
+
+    async def _resolve_skill_private(instruction_path, task, context):
+        if skill_resolver is None:
+            raise SubagentExecutionError(
+                "skill-private subagents are not enabled in this runtime"
+            )
+        from ..skill.private import skill_subagent_to_agent_spec
+        from .skill_resolver import CallSubagentInput
+
+        active = active_skill_provider() if active_skill_provider is not None else None
+        request = CallSubagentInput(
+            task=task,
+            instruction_path=instruction_path,
+            context=context or {},
+        )
+        resolved = await skill_resolver.resolve(request=request, active_skill=active)
+        # Build the executable child spec with the permission intersection.
+        return skill_subagent_to_agent_spec(
+            resolved,
+            model_policy=child_model_policy,
+            parent_delegated=parent_delegated_tools,
+        )
 
     toolset.add_function(call_subagent)
     return toolset

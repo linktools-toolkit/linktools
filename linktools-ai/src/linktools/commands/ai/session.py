@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from .support import build_storage, validate_session_id
+from .assembly import project_storage
+from .support import validate_session_id
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -23,7 +24,7 @@ class Command(BaseCommand):
         parser.add_argument("session_id", help="session id")
 
     def run(self, args: "Namespace") -> "int | None":
-        storage = build_storage()
+        storage = project_storage()
         return asyncio.run(self._show_async(storage, args.session_id))
 
     async def _show_async(self, storage, session_id: str) -> "int | None":
