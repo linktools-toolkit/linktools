@@ -41,15 +41,9 @@ class Command(BaseCommand):
         action.add_argument(
             "--resume", action="store_true", help="resume an already-approved run"
         )
-        parser.add_argument(
-            "--base-url", action=ConfigAction, config=OPENAI_BASE_URL
-        )
-        parser.add_argument(
-            "--model", action=ConfigAction, config=OPENAI_MODEL
-        )
-        parser.add_argument(
-            "--api-key", action=ConfigAction, config=OPENAI_API_KEY
-        )
+        parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
+        parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
+        parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
 
     def run(self, args: "Namespace") -> "int | None":
         from linktools.ai_cli.console.continue_run import continue_run

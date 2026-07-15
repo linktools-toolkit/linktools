@@ -30,7 +30,7 @@ OPENAI_MODEL = ConfigField(
 )
 
 OPENAI_API_KEY = ConfigField.chain(
-    PromptProvider("OpenAI API Key", password=True, cached=True),
+    PromptProvider("OpenAI API Key", password=True, cached=False),
     ErrorProvider("no OpenAI API key: pass --api-key or set OPENAI_API_KEY"),
     name="OPENAI_API_KEY",
     aliases=("api_key",),

@@ -9,6 +9,7 @@ flat command surface with two lightweight interaction paths."""
 
 from typing import TYPE_CHECKING, Callable
 
+from rich.markup import escape
 from rich.text import Text
 from textual.command import Hit, Hits, Provider
 
@@ -59,14 +60,14 @@ def handle_slash_command(screen: "ChatScreen", line: str) -> bool:
         log.clear()
         return True
     if cmd == "/session":
-        log.write(f"[dim]session: {screen.session_id}[/dim]")
+        log.write(f"[dim]session: {escape(screen.session_id)}[/dim]")
         return True
     if cmd == "/new":
         if not arg:
             log.write("[dim]usage: /new <session-id>[/dim]")
             return True
         screen.session_id = validate_session_id(arg)
-        log.write(f"[dim]session: {screen.session_id}[/dim]")
+        log.write(f"[dim]session: {escape(screen.session_id)}[/dim]")
         return True
     if cmd == "/cancel":
         screen.action_cancel_run()

@@ -138,12 +138,8 @@ class ConfigLoader:
             # No CLI value — resolve via config (env → cache → prompt).
             key = field if field is not None else action.dest
             value = config.get(key, type=action.type, default=MISSING)
-        else:
-            # CLI value provided — persist it to cache so future runs without
-            # the flag reuse it (the "remember my choice" behavior of
-            # PromptProvider(cached=True)).
-            if field is not None and field.name:
-                config.persist(field.name, value)
+        # CLI values are one-shot (spec §10): they do NOT overwrite the cache.
+        # Secret values are never persisted regardless of source.
         setattr(namespace, action.dest, value)
 
 
