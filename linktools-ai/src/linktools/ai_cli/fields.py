@@ -1,51 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Stable configuration fields for ``lt ai`` (the model/endpoint config that is
-stable across runs and worth caching).
+"""Stable configuration fields for ``lt ai``.
 
-Each field is a real ``linktools.core.ConfigField``. Required fields chain a
-cached ``PromptProvider`` (ask once, remember) with an ``ErrorProvider`` so a
-non-interactive invocation fails fast instead of blocking on a prompt. The API
-key is ``secret=True`` and deliberately ``cached=False`` -- it is read from the
-environment or a one-off secure prompt, never written to the JSON cache."""
+Each field is a real ``linktools.core.ConfigField``. Commands declare argparse
+arguments via ``action=ConfigAction, config=FIELD`` — the framework resolves
+unset values from the config chain (env → cache → prompt). The API key is
+``secret=True``."""
 
 from linktools.core import ConfigField, ErrorProvider, PromptProvider
 
-# Field names mirror their environment variables so an empty-prefix
-# EnvironmentSource reads them directly; the JSON cache keys by the same names.
 OPENAI_BASE_URL = ConfigField.chain(
     PromptProvider("OpenAI Base URL", cached=True),
     ErrorProvider(
         "no OpenAI base URL: pass --base-url, set OPENAI_BASE_URL, "
-        "or add `openai.base_url` to .linktools/config.yaml"
+        "or run interactively to prompt"
     ),
     name="OPENAI_BASE_URL",
+    aliases=("base_url",),
     cast=str,
     required=True,
 )
 
 OPENAI_MODEL = ConfigField(
     name="OPENAI_MODEL",
+    aliases=("model",),
     cast=str,
-    provider=PromptProvider("Default model", default="", cached=True),
+    provider=PromptProvider("Default model", cached=True),
 )
 
 OPENAI_API_KEY = ConfigField.chain(
-    PromptProvider("OpenAI API Key", password=True, cached=False),
+    PromptProvider("OpenAI API Key", password=True, cached=True),
     ErrorProvider("no OpenAI API key: pass --api-key or set OPENAI_API_KEY"),
     name="OPENAI_API_KEY",
+    aliases=("api_key",),
     cast=str,
     required=True,
     secret=True,
 )
 
-# Optional for now (used once HttpRuntimeClient lands); resolved from env /
-# project config / cache when present, otherwise None -- never prompted.
 REMOTE_RUNTIME_URL = ConfigField(
     name="LINKTOOLS_AI_RUNTIME_URL",
+    aliases=("remote",),
     cast=str,
     default=None,
 )
-
-ALL_FIELDS = (OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_API_KEY, REMOTE_RUNTIME_URL)

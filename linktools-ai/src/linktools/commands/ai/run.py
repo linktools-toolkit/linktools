@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai run`: run one Agent task without the TUI.
-
-Thin shell -- declares the arguments and delegates to
-:func:`linktools.ai_cli.console.run_once.run_once`, which owns the streaming,
-exit-code (0/4/130) and Ctrl+C-cancel semantics."""
+"""`lt ai run`: run one Agent task without the TUI."""
 
 from typing import TYPE_CHECKING
 
@@ -17,7 +13,9 @@ from linktools.ai_cli.errors import (
     RunConflictError,
     RunNotFoundError,
 )
+from linktools.ai_cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from linktools.cli import BaseCommand
+from linktools.cli.argparse import ConfigAction
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -48,10 +46,14 @@ class Command(BaseCommand):
             "--session", default="main", help="session id (default main)"
         )
         parser.add_argument(
-            "--base-url", default=None, help="OpenAI-compatible base url"
+            "--base-url", action=ConfigAction, config=OPENAI_BASE_URL
         )
-        parser.add_argument("--model", default=None, help="model name")
-        parser.add_argument("--api-key", default=None, help="api key")
+        parser.add_argument(
+            "--model", action=ConfigAction, config=OPENAI_MODEL
+        )
+        parser.add_argument(
+            "--api-key", action=ConfigAction, config=OPENAI_API_KEY
+        )
         parser.add_argument(
             "--json", action="store_true", help="emit one JSON event per line"
         )

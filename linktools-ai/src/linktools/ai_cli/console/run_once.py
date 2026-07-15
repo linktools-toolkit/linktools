@@ -62,16 +62,11 @@ async def _run_once_async(
 
     own_client = client is None
     if own_client:
-        # --json is non-interactive; --yes (the framework's global no-input flag)
-        # is too — both must suppress prompts.
-        from linktools.rich import is_no_input
-
         client = build_runtime_client(
             model=model,
             base_url=base_url,
             api_key=api_key,
             with_model=True,
-            interactive=(not json_output) and not is_no_input(),
         )
 
     run_id = new_run_id()

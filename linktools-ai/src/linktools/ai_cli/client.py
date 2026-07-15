@@ -556,20 +556,17 @@ def build_runtime_client(
     api_key: "str | None" = None,
     with_model: bool = True,
     project: "str | Path | None" = None,
-    interactive: bool = True,
 ) -> "RuntimeClient":
     """Build the backend client for the current project.
 
     ``with_model=False`` builds the bundle without registering a model so
     ``doctor``/``inspect``/listings work in a freshly-initialized project with no
     API key. ``project`` overrides where project discovery starts (the
-    ``--project`` flag); the default walks up from cwd. ``interactive=False``
-    (e.g. ``--json`` / CI) makes a missing model config raise instead of
-    prompting. A non-None ``remote`` fails explicitly: the HTTP client is not
-    implemented in this build (HttpRuntimeClient is deferred and must not
-    pretend to work)."""
+    ``--project`` flag); the default is cwd. When ``with_model=True``, the
+    caller passes already-resolved base_url/model/api_key (typically from
+    ConfigAction at parse time). A non-None ``remote`` fails explicitly
+    (HttpRuntimeClient is deferred)."""
     if remote is not None:
-        # HttpRuntimeClient is deferred; fail explicitly rather than fake it.
         raise CommandError("remote Runtime client is not supported in this build")
     from linktools.core import environ
 
@@ -581,22 +578,12 @@ def build_runtime_client(
         from linktools.ai.model.registry import RuntimeModelConfig, model_registry
         from linktools.ai.model.router import ModelRouter
 
-        from .prompt_provider import resolve_ai_config
-
-        resolved = resolve_ai_config(
-            base_url=base_url,
-            model=model,
-            api_key=api_key,
-            config_yaml_path=cli_project.config_root / "config.yaml",
-            cache_store=environ.build_config_store("ai.json"),
-            interactive=interactive,
-        )
         config = RuntimeModelConfig(
             model_type="standard",
             protocol="openai",
-            model=resolved.model,
-            base_url=resolved.base_url,
-            api_key=resolved.api_key,
+            model=model or "",
+            base_url=base_url,
+            api_key=api_key,
             auth_token=None,
             timeout_seconds=300,
             raw={},

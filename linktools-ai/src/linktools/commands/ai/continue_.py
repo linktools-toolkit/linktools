@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai continue`: approve, reject, or resume an existing Run.
-
-Thin shell -- delegates to
-:func:`linktools.ai_cli.console.continue_run.continue_run`, which dispatches on
-the run's status. The command name is ``continue`` (a Python keyword, so the
-module is ``continue_`` and the name is set explicitly)."""
+"""`lt ai continue`: approve, reject, or resume an existing Run."""
 
 from typing import TYPE_CHECKING
 
@@ -15,7 +10,9 @@ from linktools.ai_cli.errors import (
     RunConflictError,
     RunNotFoundError,
 )
+from linktools.ai_cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from linktools.cli import BaseCommand
+from linktools.cli.argparse import ConfigAction
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -44,6 +41,15 @@ class Command(BaseCommand):
         action.add_argument(
             "--resume", action="store_true", help="resume an already-approved run"
         )
+        parser.add_argument(
+            "--base-url", action=ConfigAction, config=OPENAI_BASE_URL
+        )
+        parser.add_argument(
+            "--model", action=ConfigAction, config=OPENAI_MODEL
+        )
+        parser.add_argument(
+            "--api-key", action=ConfigAction, config=OPENAI_API_KEY
+        )
 
     def run(self, args: "Namespace") -> "int | None":
         from linktools.ai_cli.console.continue_run import continue_run
@@ -53,6 +59,9 @@ class Command(BaseCommand):
             approve=args.approve,
             reject=args.reject,
             resume=args.resume,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=args.api_key,
         )
 
 

@@ -44,12 +44,11 @@ def continue_run(
     approve: bool = False,
     reject: bool = False,
     resume: bool = False,
+    base_url: "str | None" = None,
+    model: "str | None" = None,
+    api_key: "str | None" = None,
     client: "RuntimeClient | None" = None,
 ) -> int:
-    # Reject only cancels -- it never drives the model. Every other path may
-    # resume (approve/resume/interactive), which needs the model registered, so
-    # only require a model there. This lets `lt ai continue <id> --reject` work
-    # without OPENAI_BASE_URL/OPENAI_API_KEY.
     with_model = not reject
     return asyncio.run(
         _continue_async(
@@ -57,6 +56,9 @@ def continue_run(
             approve=approve,
             reject=reject,
             resume=resume,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
             client=client,
             with_model=with_model,
         )
@@ -69,12 +71,20 @@ async def _continue_async(
     approve: bool,
     reject: bool,
     resume: bool,
-    client: "RuntimeClient | None",
+    base_url: "str | None" = None,
+    model: "str | None" = None,
+    api_key: "str | None" = None,
+    client: "RuntimeClient | None" = None,
     with_model: bool = True,
 ) -> int:
     logger = environ.logger
     if client is None:
-        client = build_runtime_client(with_model=with_model, interactive=True)
+        client = build_runtime_client(
+            with_model=with_model,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+        )
 
     record = await client.get_run(run_id)
     if record is None:

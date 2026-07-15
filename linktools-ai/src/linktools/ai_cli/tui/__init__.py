@@ -10,12 +10,12 @@ missing Textual install into an explicit, actionable error rather than a crash.
 """
 
 
-def run_tui(*, project, remote, client=None) -> int:
+def run_tui(
+    *, project, remote, base_url=None, model=None, api_key=None, client=None
+) -> int:
     try:
         from .app import run_tui as _run_tui
     except ImportError as exc:
-        # Only the missing-Textual case gets the friendly install hint; any
-        # other ImportError is a real bug and must surface honestly.
         if exc.name and (exc.name == "textual" or exc.name.startswith("textual.")):
             from linktools.cli import CommandError
 
@@ -24,4 +24,11 @@ def run_tui(*, project, remote, client=None) -> int:
                 "pip install linktools-ai[tui]"
             ) from exc
         raise
-    return _run_tui(project=project, remote=remote, client=client)
+    return _run_tui(
+        project=project,
+        remote=remote,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        client=client,
+    )

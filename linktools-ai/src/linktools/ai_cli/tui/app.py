@@ -64,15 +64,27 @@ class LinktoolsAIApp(App):
         self.push_screen(DoctorScreen(self.client))
 
 
-def run_tui(*, project, remote, client: "RuntimeClient | None" = None) -> int:
+def run_tui(
+    *,
+    project,
+    remote,
+    base_url: "str | None" = None,
+    model: "str | None" = None,
+    api_key: "str | None" = None,
+    client: "RuntimeClient | None" = None,
+) -> int:
     """Start the interactive Textual interface. ``client`` is injectable for
-    tests; when omitted a local client is built from the current project
-    (interactive, so model config may be prompted -- future work)."""
+    tests; when omitted a local client is built from the current project."""
     if client is None:
         from ..client import build_runtime_client
 
         client = build_runtime_client(
-            remote=remote, with_model=True, project=project, interactive=True
+            remote=remote,
+            with_model=True,
+            project=project,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
         )
     LinktoolsAIApp(client=client).run()
     return 0

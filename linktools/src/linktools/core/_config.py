@@ -827,7 +827,8 @@ class ConfigResolver:
                     return (source, raw, True)
         return (None, MISSING, False)
 
-    def resolve(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
+    def resolve(self, key: str, _stack: "list[str] | None" = None,
+                field: "ConfigField | None" = None) -> "ResolvedConfig":
         if _stack is None:
             cached = self._memo.get(key)
             if cached is not None:
@@ -840,7 +841,7 @@ class ConfigResolver:
                 # (not just `key`) is stale now.
                 self._memo.clear()
 
-        result = self._resolve_inner(key, _stack)
+        result = self._resolve_inner(key, _stack, field=field)
 
         if _stack is None:
             # Recompute the token AFTER resolving, not before: a cached=True
@@ -909,8 +910,10 @@ class ConfigResolver:
 
         raise ConfigNotFoundError("unknown provider type: %r" % type(provider).__name__)
 
-    def _resolve_inner(self, key: str, _stack: "list[str] | None" = None) -> "ResolvedConfig":
-        field = self._schema.get(key)
+    def _resolve_inner(self, key: str, _stack: "list[str] | None" = None,
+                       field: "ConfigField | None" = None) -> "ResolvedConfig":
+        if field is None:
+            field = self._schema.get(key)
         if field is None:
             source_name, raw, present = self._first_present_raw(key)
             if present:
@@ -1061,14 +1064,18 @@ class Config:
                 return s
         return None
 
-    def get(self, key: str, type: "type | None" = None, default: "Any" = MISSING) -> "Any":
+    def get(self, key: "str | ConfigField", type: "type | None" = None,
+            default: "Any" = MISSING) -> "Any":
+        if isinstance(key, ConfigField):
+            field: "ConfigField | None" = key
+            name: str = key.name or ""
+        else:
+            field = None
+            name = key
         try:
-            result = self._resolver.resolve(key)
+            result = self._resolver.resolve(name, field=field)
             value = result.value
         except ConfigNotFoundError:
-            # Missing with no default -> surface the error instead of silently
-            # propagating MISSING into business logic. Callers that accept
-            # absence must pass an explicit default.
             if default is MISSING:
                 raise
             return default
@@ -1078,14 +1085,14 @@ class Config:
             except (TypeError, ValueError) as exc:
                 if default is not MISSING:
                     return default
-                field = self._schema.get(key)
-                shown = redact_config_value(field, value)
+                redact_field = field or self._schema.get(name)
+                shown = redact_config_value(redact_field, value)
                 # The underlying cast exception's OWN message may also embed
                 # the raw value (e.g. Python's builtin `int("...")` ValueError
                 # repeats its argument verbatim) -- for a secret field, drop
                 # it entirely rather than risk leaking it back in via %s.
-                detail = exc.__class__.__name__ if (field is not None and field.secret) else str(exc)
-                raise ConfigCastError("cannot cast %r for %s: %s" % (shown, key, detail))
+                detail = exc.__class__.__name__ if (redact_field is not None and redact_field.secret) else str(exc)
+                raise ConfigCastError("cannot cast %r for %s: %s" % (shown, name, detail))
         return value
 
     def require(self, key: str, type: "type | None" = None) -> "Any":
