@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from textual.app import App
 from textual.binding import Binding
 
+from .commands import AiCommandProvider
 from .screens.chat import ChatScreen
 from .screens.doctor import DoctorScreen
 from .screens.resources import ResourcesScreen
@@ -33,6 +34,8 @@ class LinktoolsAIApp(App):
     #composer { dock: bottom; height: 3; }
     """
 
+    COMMANDS = {AiCommandProvider}
+
     # Priority bindings so navigation fires even while the composer Input is
     # focused (Textual's Input otherwise eats ctrl+d as delete-right, making
     # Ctrl+D→Doctor unreachable on the chat screen).
@@ -40,6 +43,7 @@ class LinktoolsAIApp(App):
         Binding("ctrl+r", "resources", "Resources", priority=True),
         Binding("ctrl+o", "runs", "Runs", priority=True),
         Binding("ctrl+d", "doctor", "Doctor", priority=True),
+        Binding("ctrl+p", "command_palette", "Commands", priority=True),
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
 

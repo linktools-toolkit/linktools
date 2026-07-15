@@ -39,6 +39,7 @@ class ChatScreen(Screen):
     def __init__(self, client: "RuntimeClient") -> None:
         super().__init__()
         self.client = client
+        self.session_id = "main"
         self._active_run_id: "str | None" = None
         self._active_worker = None
 
@@ -46,7 +47,7 @@ class ChatScreen(Screen):
         yield RichLog(id="conversation", wrap=True, markup=True)
         yield Input(
             id="composer",
-            placeholder="Send a message  (Esc cancel · Ctrl+Q quit)",
+            placeholder="Send a message  (/help · Esc cancel · Ctrl+Q quit)",
         )
 
     def on_mount(self) -> None:
@@ -56,13 +57,17 @@ class ChatScreen(Screen):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        if not text or self._active_worker is not None:
-            # One run at a time. This guard is what enforces it; ``exclusive=True``
-            # below is only a safety net and must NOT be relied on to cancel -- it
-            # would stop the Worker without calling RuntimeClient.cancel.
+        if not text:
             event.input.value = ""
             return
         event.input.value = ""
+        if text.startswith("/"):
+            from ..commands import handle_slash_command
+
+            handle_slash_command(self, text)
+            return
+        if self._active_worker is not None:
+            return
         self.query_one("#conversation", RichLog).write(f"[b]you[/b]: {escape(text)}")
         run_id = new_run_id()
         self._active_run_id = run_id
@@ -70,7 +75,7 @@ class ChatScreen(Screen):
 
     @work(exclusive=True, group="active-run")
     async def _start_run(self, prompt: str, run_id: str) -> None:
-        request = RunRequest(prompt=prompt, run_id=run_id)
+        request = RunRequest(prompt=prompt, session_id=self.session_id, run_id=run_id)
         try:
             async for event in self.client.run_stream(request):
                 self.post_message(RunEventMessage(event))
