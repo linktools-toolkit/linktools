@@ -153,10 +153,8 @@ class MCPConnectionManager:
             cached = self._toolsets.get(key)
             if cached is not None:
                 return MCPToolsetHandle(MCPConnectionRef(*key), cached)
-            from pydantic_ai.mcp import MCPToolset
 
-            mcp_server = build_mcp_server(server)
-            toolset = MCPToolset(mcp_server)
+            toolset = build_mcp_server(server)
             self._toolsets[key] = toolset
             return MCPToolsetHandle(MCPConnectionRef(*key), toolset)
 
