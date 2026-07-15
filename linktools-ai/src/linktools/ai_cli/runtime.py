@@ -19,6 +19,7 @@ available to the CLI."""
 from dataclasses import dataclass
 from pathlib import Path
 
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.models import CapabilityRuntimeOptions
 from linktools.ai.execution.local import LocalExecutionBackend
@@ -124,15 +125,34 @@ class CliRuntimeBundle:
     subagents: UnifiedSubagentResolver
 
 
+_BUILTIN_DEFAULT = AgentSpec(
+    id="default",
+    name="default",
+    model=ModelPolicy(primary="standard", max_retries=1, timeout_seconds=120),
+    instructions=PromptSpec(
+        instructions=(
+            "You are a general-purpose local assistant running in a terminal. "
+            "You can read/write files and run shell commands in the current "
+            "working directory via your file and terminal tools. Be direct and concise."
+        )
+    ),
+)
+
+
 async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None"):
-    """Resolve an AgentSpec by id (default: the project's default agent)."""
+    """Resolve an AgentSpec by id (default: the project's default agent).
+
+    Falls back to a built-in default agent when no agents are found on disk,
+    so ``lt ai run``/``lt ai tui`` work without ``lt ai init``."""
     from linktools.cli import CommandError
 
     target = agent_id or bundle.project.default_agent
     try:
         return await bundle.agents.get(target)
-    except Exception as exc:
-        raise CommandError(f"agent not found: {target}") from exc
+    except Exception:
+        if target == bundle.project.default_agent:
+            return _BUILTIN_DEFAULT
+        raise CommandError(f"agent not found: {target}")
 
 
 def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
