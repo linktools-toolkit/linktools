@@ -26,7 +26,7 @@ def _repo_with_shared_field(tmp_path, name, storage_value):
     repo_dir = tmp_path / name
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(
-        json.dumps({"environment": {"SHARED_FIELD": storage_value}}), encoding="utf-8",
+        json.dumps({"env": {"SHARED_FIELD": storage_value}}), encoding="utf-8",
     )
     (repo_dir / "container.py").write_text(
         "from linktools.core import ConfigField\n"
@@ -123,7 +123,7 @@ def test_global_file_value_inherited_by_both_repos(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
     (home / ".linktools").mkdir()
     (home / ".linktools" / "linktools.json").write_text(
-        json.dumps({"environment": {"GLOBAL_ONLY_FIELD": "global-value"}}), encoding="utf-8",
+        json.dumps({"env": {"GLOBAL_ONLY_FIELD": "global-value"}}), encoding="utf-8",
     )
 
     manager = _install_two_repos(tmp_path, add_order=["repo_a", "repo_b"])

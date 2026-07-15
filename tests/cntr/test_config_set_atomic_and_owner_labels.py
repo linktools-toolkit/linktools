@@ -98,7 +98,7 @@ def _two_repos_sharing_a_name(tmp_path, shared_basename):
             (repo_a, "a", "value-a"), (repo_b, "b", "value-b")):
         repo_dir.mkdir()
         (repo_dir / ".linktools.json").write_text(
-            json.dumps({"environment": {"SHARED_FIELD": value}}), encoding="utf-8")
+            json.dumps({"env": {"SHARED_FIELD": value}}), encoding="utf-8")
         c_dir = repo_dir / f"100-{container_name}"
         c_dir.mkdir()
         (c_dir / "container.py").write_text(

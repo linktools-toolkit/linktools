@@ -50,7 +50,7 @@ def _get_logger():
 def _subprocess_env() -> "dict[str, str]":
     """Build the base environment every subprocess spawned via ``popen``
     starts from: ``os.environ``, overlaid with the current project's
-    profile-declared ``"environment"`` section (``.linktools.json`` /
+    profile-declared ``"env"`` section (``.linktools.json`` /
     ``linktools.json``), then with the managed-tools stub dir prepended
     to PATH so tools resolve without a global PATH mutation.
 
@@ -58,9 +58,9 @@ def _subprocess_env() -> "dict[str, str]":
     """
     environ = _get_environ()
     env = dict(os.environ)
-    profile_environment = environ.profile.get("environment", {})
-    if profile_environment:
-        env.update({str(key): str(value) for key, value in profile_environment.items()})
+    profile_env = environ.profile.get("env", {})
+    if profile_env:
+        env.update({str(key): str(value) for key, value in profile_env.items()})
     try:
         stub = str(environ.tools.stub_path)
         if stub:
@@ -464,7 +464,7 @@ def popen(
 
     # Every subprocess spawned here gets the same base environment (not
     # just ones a tool-execution call site remembers to build itself):
-    # os.environ, this project's own profile-declared "environment"
+    # os.environ, this project's own profile-declared "env"
     # overlay, and the managed-tools stub prepended to PATH. An explicit
     # ``env=`` fully replaces this base, same as before.
     base_env = env if env is not None else _subprocess_env()

@@ -497,17 +497,17 @@ class RepoService(object):
 
     def _find_reserved_environment_keys(self, file_config: "Any") -> "list[str]":
         """Manager-owned keys (``_compute_manager_config_keys``) this
-        repository's own ``.linktools.json`` declares under ``environment``
+        repository's own ``.linktools.json`` declares under ``env``
         -- every container resolves fields through the manager's own shared
-        ``env_config``, so a repository's local ``environment`` section is
+        ``env_config``, so a repository's local ``env`` section is
         never actually consulted for these (or any other key);
         ``describe()``/``validate()`` surface them as a warning instead of
         leaving the mismatch invisible. Never rejects the repository over
         this -- an existing file with a reserved key must keep loading.
         """
-        local_environment = file_config.get("environment", {})
+        local_env = file_config.get("env", {})
         reserved = _compute_manager_config_keys(self.manager.env_config)
-        return sorted(key for key in local_environment if key in reserved)
+        return sorted(key for key in local_env if key in reserved)
 
     def validate(self, url: str = None) -> "tuple[dict[str, Any], list[str]]":
         """Describe one or all repositories; also report which are incompatible.

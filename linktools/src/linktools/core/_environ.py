@@ -190,7 +190,7 @@ class BaseEnviron(abc.ABC):
 
         profile = self.profile
         prefix = metadata.__name__.upper()
-        environment = profile.get("environment", {})
+        environment = profile.get("env", {})
 
         def resolve(key, default):
             names = (f"{prefix}_PATH", f"{prefix}_STORAGE_PATH") \
@@ -458,7 +458,7 @@ class BaseEnviron(abc.ABC):
             sources=[
                 EnvironmentSource(
                     (profile.get("config", {}), ""),
-                    (profile.get("environment", {}), env_prefix),
+                    (profile.get("env", {}), env_prefix),
                     (os.environ, env_prefix),
                 ),
                 RuntimeOverrideSource(),

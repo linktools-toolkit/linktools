@@ -41,7 +41,7 @@ def _repo_with_port(tmp_path, name, port):
     repo_dir = tmp_path / name
     repo_dir.mkdir()
     (repo_dir / ".linktools.json").write_text(
-        json.dumps({"environment": {"PORT": port}}), encoding="utf-8")
+        json.dumps({"env": {"PORT": port}}), encoding="utf-8")
     (repo_dir / "container.py").write_text(
         "from linktools.core import ConfigField\n"
         "from linktools.cntr.container import BaseContainer\n\n\n"

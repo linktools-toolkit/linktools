@@ -42,7 +42,7 @@ def _repo_with_container(tmp_path, name, environment=None, extra_config_field=No
     repo_dir.mkdir()
     if environment:
         (repo_dir / ".linktools.json").write_text(
-            json.dumps({"environment": environment}), encoding="utf-8")
+            json.dumps({"env": environment}), encoding="utf-8")
 
     configs_body = ""
     if extra_config_field:
