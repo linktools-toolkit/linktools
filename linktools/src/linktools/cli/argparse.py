@@ -126,10 +126,17 @@ class ConfigLoader:
             item = action.metavar
 
         config = parser.command.config
-        key = f"`{item}` for `{parser.prog}`"
+        field = getattr(action, "property", None)
         if value is MISSING or isinstance(value, ConfigLoader):
-            # New ConfigField: resolve through the Config's resolver.
-            value = config.get(action.dest, type=action.type, default=MISSING)
+            # No CLI value — resolve via config (env → cache → prompt).
+            key = field if field is not None else action.dest
+            value = config.get(key, type=action.type, default=MISSING)
+        else:
+            # CLI value provided — persist it to cache so future runs without
+            # the flag reuse it (the "remember my choice" behavior of
+            # PromptProvider(cached=True)).
+            if field is not None and field.name:
+                config.persist(field.name, value)
         setattr(namespace, action.dest, value)
 
 
@@ -145,11 +152,12 @@ class ConfigAction(argparse.Action):
                  required=False,
                  help=None,
                  metavar=None,
+                 nargs=None,
                  config=None):
         super().__init__(
             option_strings=option_strings,
             dest=dest,
-            nargs="?",
+            nargs=nargs,
             const=None,
             default=ConfigLoader(),
             type=type,

@@ -47,10 +47,10 @@ class TestFindProjectRoot(unittest.TestCase):
             deep.mkdir(parents=True)
             self.assertEqual(find_project_root(deep), root.resolve())
 
-    def test_missing_config_raises(self):
+    def test_missing_config_defaults_to_start(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(ProjectConfigError):
-                find_project_root(Path(tmp))
+            # No config.yaml — find_project_root returns the start path, not an error
+            self.assertEqual(find_project_root(Path(tmp)), Path(tmp).resolve())
 
 
 class TestProjectHash(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +84,19 @@ class TestLoadProject(unittest.TestCase):
             self.assertFalse(project.allow_mcp_wildcard)
             self.assertEqual(project.agents_root, project.config_root / "agents")
             self.assertEqual(project.skills_root, project.config_root / "skills")
+
+    def test_loads_without_config_uses_defaults(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as data,
+        ):
+            root = Path(tmp)
+            # No config.yaml — load_project uses defaults
+            project = self._load(root, Path(data))
+            self.assertEqual(project.default_agent, "default")
+            self.assertEqual(project.default_session, "main")
+            self.assertEqual(project.subagent_max_depth, 3)
+            self.assertEqual(project.root, root.resolve())
 
     def test_invalid_version_raises(self):
         with (

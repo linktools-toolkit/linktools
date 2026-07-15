@@ -18,10 +18,9 @@ from linktools.cli import CommandError
 
 
 class ProjectConfigError(CommandError):
-    """Raised when a project's ``.linktools/config.yaml`` is missing or invalid.
-
-    Subclasses CommandError so the CLI surfaces it as a user-input error
-    (exit code 2) with a message rather than a traceback."""
+    """Raised when a project's ``.linktools/config.yaml`` exists but is invalid
+    (wrong version, wrong type, blank agent). A missing config file is NOT an
+    error — the project root defaults to cwd and config values use defaults."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,12 +42,13 @@ class CliProject:
 
 def find_project_root(start: "Path | None" = None) -> Path:
     """Walk upward from ``start`` (default cwd) to the first directory holding a
-    ``.linktools/config.yaml``. Raises ProjectConfigError if none is found."""
+    ``.linktools/config.yaml``. If none is found, ``start`` (resolved) is the
+    project root — the config file is optional, not a prerequisite."""
     current = (start or Path.cwd()).resolve()
     for candidate in (current, *current.parents):
         if (candidate / ".linktools" / "config.yaml").is_file():
             return candidate
-    raise ProjectConfigError("no .linktools/config.yaml found")
+    return current
 
 
 def project_hash(root: Path) -> str:
@@ -58,20 +58,24 @@ def project_hash(root: Path) -> str:
 
 
 def load_project(*, data_root: Path, start: "Path | None" = None) -> CliProject:
-    """Discover the project root and parse ``.linktools/config.yaml``.
+    """Discover the project root and parse ``.linktools/config.yaml`` (optional).
 
     ``data_root`` is the ai data directory; the project's run state is placed
-    under ``<data_root>/projects/<project_hash>/``. Validates ``version: 1``,
-    non-blank ``default_agent`` / ``default_session``, and the ``mcp`` /
-    ``subagents`` sections."""
+    under ``<data_root>/projects/<project_hash>/``. If ``config.yaml`` exists it
+    is validated (``version: 1``, non-blank ``default_agent`` / ``default_session``,
+    ``mcp`` / ``subagents`` sections); if absent, all values use defaults."""
     root = find_project_root(start)
     config_root = root / ".linktools"
-    raw = yaml.safe_load((config_root / "config.yaml").read_text(encoding="utf-8"))
+    config_file = config_root / "config.yaml"
 
-    if not isinstance(raw, dict):
-        raise ProjectConfigError("config.yaml must be a mapping")
-    if raw.get("version") != 1:
-        raise ProjectConfigError("unsupported config version")
+    if config_file.is_file():
+        raw = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ProjectConfigError("config.yaml must be a mapping")
+        if raw.get("version") != 1:
+            raise ProjectConfigError("unsupported config version")
+    else:
+        raw = {}
 
     agent = raw.get("default_agent", "default")
     session = raw.get("default_session", "main")
