@@ -8,23 +8,38 @@ One active run at a time. Submitting starts a ``@work`` worker that streams
 cancel the run -- cancelling the Worker alone is not enough, so the run is also
 cancelled through ``RuntimeClient.cancel(run_id)``.
 
-Untrusted text (streamed model output, the prompt, tool/error fields) is
-Rich-markup-escaped before writing: the ``RichLog`` is ``markup=True``, and
-without escaping a model emitting ``[red]…[/red]`` would be silently restyled
-(or a stray ``[/b]`` would raise ``MarkupError``)."""
+Untrusted text is Rich-markup-escaped before writing."""
 
 from rich.markup import escape
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import Input, RichLog
+from textual.widgets import RichLog, TextArea
 
 from linktools.core import environ
 
 from ..messages import RunEventMessage, RunFailedMessage, RunFinishedMessage
 from ..modals.approval import ApprovalModal
 from ...client import RunRequest, RuntimeClient, new_run_id
+
+
+class Composer(TextArea):
+    """Multi-line text area that submits on Enter (Shift+Enter for newline)."""
+
+    BINDINGS = [
+        Binding("enter", "submit", "Send", show=False, priority=True),
+    ]
+
+    def action_submit(self) -> None:
+        self.post_message(Composer.Submitted(self))
+
+    class Submitted(Message):
+        def __init__(self, composer: "Composer") -> None:
+            super().__init__()
+            self.composer = composer
+            self.value = composer.text
 
 
 class ChatScreen(Screen):
@@ -45,22 +60,19 @@ class ChatScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="conversation", wrap=True, markup=True)
-        yield Input(
-            id="composer",
-            placeholder="Send a message  (/help · Esc cancel · Ctrl+Q quit)",
-        )
+        yield Composer(id="composer")
 
     def on_mount(self) -> None:
-        self.query_one("#composer", Input).focus()
+        self.query_one("#composer", Composer).focus()
 
     # -- submit ----------------------------------------------------------- #
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_composer_submitted(self, event: Composer.Submitted) -> None:
         text = event.value.strip()
         if not text:
-            event.input.value = ""
+            event.composer.text = ""
             return
-        event.input.value = ""
+        event.composer.text = ""
         if text.startswith("/"):
             from ..commands import handle_slash_command
 
@@ -80,8 +92,7 @@ class ChatScreen(Screen):
             async for event in self.client.run_stream(request):
                 self.post_message(RunEventMessage(event))
             self.post_message(RunFinishedMessage(run_id))
-        except Exception as exc:  # CancelledError is BaseException: not caught,
-            # so a cancel posts neither RunFailed nor RunFinished.
+        except Exception as exc:  # CancelledError is BaseException: not caught
             self.post_message(RunFailedMessage(exc))
         finally:
             self._active_run_id = None
@@ -92,8 +103,6 @@ class ChatScreen(Screen):
     def on_run_event_message(self, message: RunEventMessage) -> None:
         event = message.event
         if event.get("type") == "paused":
-            # The run stream ends at the pause; the approval modal decides
-            # approve (resume) / reject (cancel) / later (wait).
             self._open_approval(event)
             return
         log = self.query_one("#conversation", RichLog)
@@ -107,7 +116,6 @@ class ChatScreen(Screen):
             log.write(f"[dim]\\[tool: {name} {phase}{ok}][/dim]")
 
     def on_run_finished_message(self, message: RunFinishedMessage) -> None:
-        # Nothing to render for a clean finish beyond the streamed text.
         pass
 
     def on_run_failed_message(self, message: RunFailedMessage) -> None:
@@ -125,7 +133,6 @@ class ChatScreen(Screen):
         self._active_worker = None
         self._active_run_id = None
         worker.cancel()
-        # Also cancel through the runtime so the agent actually stops.
         self._cancel_via_runtime(run_id)
 
     @work(group="cancel-run")
@@ -133,8 +140,6 @@ class ChatScreen(Screen):
         try:
             await self.client.cancel(run_id)
         except Exception as exc:
-            # Best-effort: a failed cancel must not crash the UI, but the user
-            # should know the agent may still be running.
             environ.logger.warning("runtime cancel failed for %s: %s", run_id, exc)
 
     # -- approval -------------------------------------------------------- #
@@ -144,12 +149,10 @@ class ChatScreen(Screen):
             run_id = event.get("run_id")
             approval_id = event.get("approval_id")
             if decision == "approve":
-                # Track so Esc can still cancel the resumed run.
                 self._active_run_id = run_id
                 self._active_worker = self._start_approval(approval_id, run_id)
             elif decision == "reject":
                 self._start_reject(approval_id, run_id)
-            # "later" / None: leave the run WAITING_APPROVAL for later.
 
         self.app.push_screen(
             ApprovalModal(client=self.client, event=event), _on_decision
@@ -157,13 +160,11 @@ class ChatScreen(Screen):
 
     @work(exclusive=True, group="active-run")
     async def _start_approval(self, approval_id: "str | None", run_id: str) -> None:
-        # Approve, then re-drive the original run via resume_stream; a re-pause
-        # re-opens the modal through on_run_event_message.
         try:
             await self.client.approve(approval_id)
             async for event in self.client.resume_stream(run_id):
                 self.post_message(RunEventMessage(event))
-        except Exception as exc:  # CancelledError is BaseException: not caught
+        except Exception as exc:
             self.post_message(RunFailedMessage(exc))
         finally:
             self._active_run_id = None

@@ -31,7 +31,7 @@ class LinktoolsAIApp(App):
     CSS = """
     Screen { layout: vertical; }
     #conversation { border: round $primary; height: 1fr; }
-    #composer { dock: bottom; height: 3; }
+    #composer { dock: bottom; height: 5; }
     """
 
     COMMANDS = {AiCommandProvider}

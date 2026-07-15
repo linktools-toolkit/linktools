@@ -9,7 +9,7 @@ app with ``run_test()`` and a ``FakeRuntimeClient``."""
 import types
 import unittest
 
-from textual.widgets import Input
+from linktools.ai_cli.tui.screens.chat import Composer
 
 from linktools.ai_cli.client import FakeRuntimeClient
 from linktools.ai_cli.tui.app import LinktoolsAIApp
@@ -48,7 +48,7 @@ class TestTuiApproval(unittest.IsolatedAsyncioTestCase):
 
     async def _drive_to_modal(self, fake: FakeRuntimeClient, app, pilot) -> None:
         await pilot.pause()
-        pilot.app.screen.query_one(Input).value = "do something risky"
+        pilot.app.screen.query_one(Composer).text = "do something risky"
         await pilot.press("enter")
         await _wait_until(pilot, lambda: isinstance(app.screen, ApprovalModal))
 

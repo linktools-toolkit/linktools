@@ -14,7 +14,8 @@ import unittest
 from unittest import mock
 
 from rich.markup import escape
-from textual.widgets import Input, RichLog
+from linktools.ai_cli.tui.screens.chat import Composer
+from textual.widgets import RichLog
 
 from linktools.ai_cli.client import FakeRuntimeClient
 from linktools.ai_cli.tui.app import LinktoolsAIApp
@@ -55,7 +56,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
             await pilot.pause()  # ChatScreen pushed in on_mount
-            pilot.app.screen.query_one(Input).value = "hi"
+            pilot.app.screen.query_one(Composer).text = "hi"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
         self.assertEqual([r.prompt for r in fake.run_requests], ["hi"])
@@ -70,7 +71,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             recorded = _conversation_recorder(pilot)
-            pilot.app.screen.query_one(Input).value = "hi"
+            pilot.app.screen.query_one(Composer).text = "hi"
             await pilot.press("enter")
             await _wait_until(
                 pilot, lambda: any("hello world" in str(x) for x in recorded)
@@ -109,11 +110,11 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
             await pilot.pause()
-            inp = pilot.app.screen.query_one(Input)
-            inp.value = "first"
+            inp = pilot.app.screen.query_one(Composer)
+            inp.text = "first"
             await pilot.press("enter")
             await _wait_until(pilot, lambda: fake.last_run_id is not None)
-            inp.value = "second"
+            inp.text = "second"
             await pilot.press("enter")  # run still active -> ignored
             await pilot.pause()
         self.assertEqual([r.prompt for r in fake.run_requests], ["first"])
@@ -127,7 +128,7 @@ class TestTuiChatCancel(unittest.IsolatedAsyncioTestCase):
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
             await pilot.pause()
-            pilot.app.screen.query_one(Input).value = "hi"
+            pilot.app.screen.query_one(Composer).text = "hi"
             await pilot.press("enter")
             # Wait until the blocking run has actually started, so the cancel
             # targets a real in-flight run_id (no start/escape race).
@@ -144,7 +145,7 @@ class TestTuiChatCancel(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             recorded = _conversation_recorder(pilot)
-            pilot.app.screen.query_one(Input).value = "hi"
+            pilot.app.screen.query_one(Composer).text = "hi"
             await pilot.press("enter")
             await _wait_until(pilot, lambda: fake.last_run_id is not None)
             await pilot.press("escape")

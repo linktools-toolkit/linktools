@@ -8,7 +8,8 @@ registered on the App."""
 
 import unittest
 
-from textual.widgets import Input, RichLog
+from linktools.ai_cli.tui.screens.chat import Composer
+from textual.widgets import RichLog
 
 from linktools.ai_cli.client import FakeRuntimeClient
 from linktools.ai_cli.tui.app import LinktoolsAIApp
@@ -37,7 +38,7 @@ class TestSlashCommands(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             recorded = _conv_recorder(pilot)
-            pilot.app.screen.query_one(Input).value = "/help"
+            pilot.app.screen.query_one(Composer).text = "/help"
             await pilot.press("enter")
             await _wait_until(pilot, lambda: any("slash" in str(x) for x in recorded))
         self.assertTrue(any("slash" in str(x) for x in recorded))
@@ -48,7 +49,7 @@ class TestSlashCommands(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             recorded = _conv_recorder(pilot)
-            pilot.app.screen.query_one(Input).value = "/new test-session"
+            pilot.app.screen.query_one(Composer).text = "/new test-session"
             await pilot.press("enter")
             await _wait_until(
                 pilot, lambda: any("test-session" in str(x) for x in recorded)
@@ -60,7 +61,7 @@ class TestSlashCommands(unittest.IsolatedAsyncioTestCase):
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
             await pilot.pause()
-            pilot.app.screen.query_one(Input).value = "/bogus"
+            pilot.app.screen.query_one(Composer).text = "/bogus"
             await pilot.press("enter")
             await pilot.pause()
         self.assertEqual(fake.run_requests, [])

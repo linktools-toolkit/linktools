@@ -86,13 +86,13 @@ class TestTuiScreens(unittest.IsolatedAsyncioTestCase):
         # Regression: the composer Input is focused on the chat screen and
         # Textual's Input binds ctrl+d as delete-right; the App binding must be
         # high-priority so Ctrl+D still opens Doctor from chat.
-        from textual.widgets import Input
+        from linktools.ai_cli.tui.screens.chat import Composer
 
         fake = FakeRuntimeClient()
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
             await pilot.pause()
-            self.assertTrue(pilot.app.screen.query_one(Input).has_focus)
+            self.assertTrue(pilot.app.screen.query_one(Composer).has_focus)
             await pilot.press("ctrl+d")
             await _wait_until(pilot, lambda: isinstance(app.screen, DoctorScreen))
             self.assertIsInstance(app.screen, DoctorScreen)
