@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 from linktools.commands.ai import init as init_cmd
-from linktools.commands.ai.assembly import build_cli_runtime
-from linktools.commands.ai.project import load_project
+from linktools.ai_cli.runtime import build_cli_runtime
+from linktools.ai_cli.project import load_project
 from linktools.ai.runtime import Runtime
 
 
@@ -26,7 +26,7 @@ class TestAiInit(unittest.TestCase):
     def _run(self):
         from argparse import Namespace
 
-        return init_cmd.Command().run(Namespace(force=False))
+        return init_cmd.Command().run(Namespace(path=None))
 
     def test_ai_init_creates_scaffold(self):
         code = self._run()

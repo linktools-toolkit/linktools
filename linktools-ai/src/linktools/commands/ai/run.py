@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai run`: run the PROJECT's agent against a single prompt and print the result.
+"""`lt ai run`: run one Agent task without the TUI.
 
-Loads the agent from the project (``.linktools/agents``), not a generic stub,
-streams the run so a pause-for-approval surfaces as exit code 4 (with the
-approval id printed) instead of a traceback, and cancels the run on Ctrl+C."""
+Thin shell -- declares the arguments and delegates to
+:func:`linktools.ai_cli.console.run_once.run_once`, which owns the streaming,
+exit-code (0/4/130) and Ctrl+C-cancel semantics."""
 
-import asyncio
 from typing import TYPE_CHECKING
 
-from linktools.ai.errors import (
+from linktools.ai_cli.errors import (
     InvalidRunTransitionError,
-    RunConflictError,
-    RunNotFoundError,
-)
-from linktools.ai.model.registry import (
     ModelClientUnavailable,
     ModelOutputError,
     ModelTurnLimitExceeded,
+    RunConflictError,
+    RunNotFoundError,
 )
 from linktools.cli import BaseCommand
-
-from .assembly import build_project_bundle, load_agent_spec
-from .support import (
-    announce_paused,
-    ensure_session,
-    new_run_id,
-    validate_session_id,
-)
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -37,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class Command(BaseCommand):
-    """run the project agent with a single prompt"""
+    """run one Agent task without the TUI"""
 
     @property
     def known_errors(self) -> "list[type[BaseException]]":
@@ -51,57 +40,34 @@ class Command(BaseCommand):
         ]
 
     def init_arguments(self, parser: "CommandParser") -> None:
-        parser.add_argument("prompt", help="the prompt")
+        parser.add_argument("prompt", nargs="?", help="the prompt")
         parser.add_argument(
-            "--agent",
-            default=None,
-            help="agent id (default: the project's default_agent)",
-        )
-        parser.add_argument(
-            "--model", default=None, help="model name (default: $OPENAI_MODEL)"
-        )
-        parser.add_argument(
-            "--base-url",
-            default=None,
-            help="OpenAI-compatible base url (default: $OPENAI_BASE_URL)",
-        )
-        parser.add_argument(
-            "--api-key", default=None, help="api key (default: $OPENAI_API_KEY)"
+            "--agent", default=None, help="agent id (default: project default)"
         )
         parser.add_argument(
             "--session", default="main", help="session id (default main)"
         )
+        parser.add_argument(
+            "--base-url", default=None, help="OpenAI-compatible base url"
+        )
+        parser.add_argument("--model", default=None, help="model name")
+        parser.add_argument("--api-key", default=None, help="api key")
+        parser.add_argument(
+            "--json", action="store_true", help="emit one JSON event per line"
+        )
 
     def run(self, args: "Namespace") -> "int | None":
-        return asyncio.run(self._run_async(args, args.prompt))
+        from linktools.ai_cli.console.run_once import run_once
 
-    async def _run_async(self, args: "Namespace", prompt: str) -> "int | None":
-        bundle = build_project_bundle(args)
-        spec = await load_agent_spec(bundle, args.agent)
-        session_id = validate_session_id(args.session)
-        await ensure_session(bundle.storage, session_id)
-        run_id = new_run_id()
-        try:
-            async for event in bundle.runtime.run_stream(
-                spec, prompt, session_id=session_id, run_id=run_id
-            ):
-                kind = event["type"]
-                if kind == "text":
-                    print(event["text"], end="", flush=True)
-                elif kind == "tool":
-                    self.logger.info(
-                        f"[tool: {event['name']} {event['phase']}"
-                        f"{' ok' if event.get('ok') else ''}]"
-                    )
-                elif kind == "paused":
-                    await announce_paused(bundle.storage, event, self.logger)
-                    return 4
-            print()
-            return 0
-        except asyncio.CancelledError:
-            await bundle.runtime.cancel(run_id)
-            self.logger.warning("run cancelled")
-            return 130
+        return run_once(
+            prompt=args.prompt,
+            agent=args.agent,
+            session=args.session,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=args.api_key,
+            json_output=args.json,
+        )
 
 
 command = Command()

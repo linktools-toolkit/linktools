@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Project discovery and configuration for the `lt ai` CLI.
+"""Project discovery and configuration for the ``lt ai`` CLI/TUI.
 
 All project configuration lives under ``<root>/.linktools/``; run state lives
 under ``<data_root>/projects/<project_hash>/`` so two projects never share
 state. This module is pure path/config plumbing -- it loads nothing into the
-runtime (that is ``support.build_cli_runtime``'s job)."""
+runtime (that is :mod:`linktools.ai_cli.runtime`'s job)."""
 
 from dataclasses import dataclass
 from hashlib import sha256

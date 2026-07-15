@@ -150,15 +150,16 @@
 | 功能 | 正常测试 | 异常测试 |
 |---|---|---|
 | 轻量 CLI | tests/ai/commands/test_support.py::TestResolveModelConfig::test_flags_take_precedence_over_env | tests/ai/commands/test_support.py::TestValidateSessionId::test_normal_session_id_passes_through_unchanged |
-| 验证最小 Runtime 链路 | tests/ai/commands/test_support.py::TestBuildRuntimeLink::test_build_runtime_constructs_runtime | — |
+| 验证最小 Runtime 链路 | tests/ai/commands/test_init_and_assembly.py::TestBuildCliRuntime::test_build_cli_runtime_wires_registries | — |
 
 ---
 
 # 2. 已知覆盖缺口（精简前需补齐或确认）
 
 ```text
-1. CLI「验证最小 Runtime 链路」目前无 tests/ai 用例，仅有 commands/test_support.py 的纯函数测试。
-   阶段 13 验收前需补一个通过 CLI 验证 Runtime.build -> run 最小链路的用例。
+1. CLI「验证最小 Runtime 链路」的构建（build_cli_runtime 装配真实 Runtime）由
+   tests/ai/commands/test_init_and_assembly.py::TestBuildCliRuntime 覆盖；
+   端到端 Runtime.build -> run 的完整链路仍建议在后续补充。
 2. EXACT_CALL 幂等的具名 happy-path 用例缺失，当前由 test_executor_idempotency.py 的默认缓存行为间接覆盖。
 3. MCP env/header 单字段切换触发 fingerprint 变化的显式用例缺失（当前由 config-fingerprint 聚合用例覆盖）。
 ```

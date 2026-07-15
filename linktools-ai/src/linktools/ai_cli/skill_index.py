@@ -11,7 +11,8 @@ can be minted and later validated.
 
 The flat ``SkillRegistry`` reads ``{id}.md`` files and cannot represent a skill
 directory or its ``agents/`` tree; this index is the directory-aware complement
-used by ``build_cli_runtime`` to back the skill-private subagent provider."""
+used by :func:`linktools.ai_cli.runtime.build_cli_runtime` to back the
+skill-private subagent provider."""
 
 from dataclasses import dataclass
 from hashlib import sha256

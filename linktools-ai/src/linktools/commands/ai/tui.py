@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai doctor`: validate project + Runtime configuration.
+"""`lt ai tui`: start the interactive Textual interface.
 
-Thin shell -- delegates to
-:func:`linktools.ai_cli.console.doctor.run_doctor`, which renders the
-``DoctorReport`` produced by :meth:`LocalRuntimeClient.doctor`."""
+Thin shell -- delegates to :func:`linktools.ai_cli.tui.run_tui`, which builds a
+local RuntimeClient and runs the Textual chat app. Textual is an optional
+dependency (``linktools-ai[tui]``); if it is absent ``run_tui`` raises a clear
+``CommandError``."""
 
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,25 +20,18 @@ if TYPE_CHECKING:
 
 
 class Command(BaseCommand):
-    """validate project and Runtime configuration"""
+    """start the interactive Textual interface"""
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument(
             "--project", type=Path, default=None, help="project root (default: cwd)"
         )
         parser.add_argument("--remote", default=None, help="remote Runtime url")
-        parser.add_argument(
-            "--json", action="store_true", help="emit the report as JSON"
-        )
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.console.doctor import run_doctor
+        from linktools.ai_cli.tui import run_tui
 
-        return run_doctor(
-            project=args.project,
-            remote=args.remote,
-            json_output=args.json,
-        )
+        return run_tui(project=args.project, remote=args.remote)
 
 
 command = Command()

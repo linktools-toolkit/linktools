@@ -9,12 +9,12 @@ project directories), a project-scoped ``FileStorage`` (state isolation), an
 ``MCPConnectionManager`` (so ``aclose`` can release connections), and
 ``CapabilityRuntimeOptions``. Also builds the directory skill index +
 skill-private subagent resolver for the CLI's own use (inspect/list/doctor and
-the future live ``call_subagent(instruction_path=...)`` routing).
+the live ``call_subagent(instruction_path=...)`` routing).
 
 Project agents are exposed as subagents through the runtime's existing
 ``call_subagent`` (the ``name`` branch); the skill-private ``instruction_path``
 branch is resolved by :class:`UnifiedSubagentResolver`, composed here and
-available to the CLI, with live execution-path wiring tracked separately."""
+available to the CLI."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +37,7 @@ from linktools.ai.subagent.skill_resolver import (
     UnifiedSubagentResolver,
 )
 
-from .project import CliProject, load_project
+from .project import CliProject
 from .skill_index import DirectorySkillIndex
 
 
@@ -122,39 +122,6 @@ class CliRuntimeBundle:
     mcp: MCPRegistry
     skill_index: DirectorySkillIndex
     subagents: UnifiedSubagentResolver
-
-
-def build_project_bundle(args) -> CliRuntimeBundle:
-    """Discover the project, resolve+register the model, and build the runtime
-    bundle. This is what ``run``/``chat``/``resume`` use so they execute against
-    the PROJECT's agents/skills/mcp + isolated state -- not the generic stub.
-    Requires a ``.linktools/config.yaml`` (the CLI is project-scoped)."""
-    from linktools.ai.model.registry import model_registry
-    from linktools.ai.model.router import ModelRouter
-    from linktools.core import environ
-
-    from .support import resolve_model_config
-
-    project = load_project(data_root=environ.get_data_path("ai"))
-    config = resolve_model_config(args.model, args.base_url, args.api_key)
-    model_registry.register(config.model_type, config=config)
-    return build_cli_runtime(
-        project=project, model_router=ModelRouter(registry=model_registry)
-    )
-
-
-def project_storage() -> FileStorage:
-    """The current project's isolated storage (no model resolution needed).
-
-    ``run``/``chat``/``resume`` persist runs/sessions/approvals into this via
-    ``build_project_bundle``; cross-process ``approve``/``reject`` and the
-    ``sessions``/``approvals`` listings must read the SAME project-scoped store
-    (not the global ai data dir) or a paused run's approval would be invisible
-    to ``lt ai approve``."""
-    from linktools.core import environ
-
-    project = load_project(data_root=environ.get_data_path("ai"))
-    return FileStorage(root=project.state_root)
 
 
 async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None"):
