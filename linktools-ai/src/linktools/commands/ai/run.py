@@ -45,15 +45,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--session", default="main", help="session id (default main)"
         )
-        parser.add_argument(
-            "--base-url", action=ConfigAction, config=OPENAI_BASE_URL
-        )
-        parser.add_argument(
-            "--model", action=ConfigAction, config=OPENAI_MODEL
-        )
-        parser.add_argument(
-            "--api-key", action=ConfigAction, config=OPENAI_API_KEY
-        )
+        parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
+        parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
+        parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
         parser.add_argument(
             "--json", action="store_true", help="emit one JSON event per line"
         )

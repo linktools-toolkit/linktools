@@ -26,6 +26,7 @@
   / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
+
 import abc
 import argparse
 import os
@@ -40,16 +41,15 @@ if typing.TYPE_CHECKING:
     from .command import CommandParser
 
 if sys.version_info < (3, 10):
-
     _orig_get_action_name = getattr(argparse, "_get_action_name", None)
     if _orig_get_action_name is not None and callable(_orig_get_action_name):
+
         def _get_action_name(argument):
             result = _orig_get_action_name(argument)
             if result is None:
                 if argument.choices:
-                    return '{' + ','.join(argument.choices) + '}'
+                    return "{" + ",".join(argument.choices) + "}"
             return result
-
 
         setattr(argparse, "_get_action_name", _get_action_name)
 
@@ -57,6 +57,7 @@ if sys.version_info < (3, 10):
 ##############################
 # argparse types
 ##############################
+
 
 def range_type(min: int, max: int):
     """Create an argparse converter that accepts integers in a range.
@@ -71,6 +72,7 @@ def range_type(min: int, max: int):
     Raises:
         Exception: Propagates errors raised while completing the operation.
     """
+
     def wrapper(o):
         value = utils.int(o)
         if min <= value <= max:
@@ -81,9 +83,14 @@ def range_type(min: int, max: int):
 
 
 class LazyChoices(typing.Iterable):
-
     """Lazy iterable wrapper for argparse choices."""
-    def __init__(self, func: "_t.Callable[P, _t.Iterable[T]]", *args: "P.args", **kwargs: "P.kwargs"):
+
+    def __init__(
+        self,
+        func: "_t.Callable[P, _t.Iterable[T]]",
+        *args: "P.args",
+        **kwargs: "P.kwargs",
+    ):
         self._data = MISSING
         self._fn = func
         self._args = args
@@ -105,25 +112,25 @@ class LazyChoices(typing.Iterable):
             return True
         return self._load().__contains__(item)
 
+
 ##############################
 # argparse actions
 ##############################
 
-class ConfigLoader:
 
+class ConfigLoader:
     """Load configuration-backed argparse values after parsing."""
-    def __call__(self, parser: "CommandParser", action: "ConfigAction", namespace, value=MISSING):
+
+    def __call__(
+        self, parser: "CommandParser", action: "ConfigAction", namespace, value=MISSING
+    ):
 
         from .command import CommandParser
 
         if not isinstance(parser, CommandParser) or not parser.command:
-            raise argparse.ArgumentError(action, "ConfigAction only support CommandParser")
-
-        item = action.dest
-        if action.option_strings:
-            item = ", ".join(action.option_strings)
-        elif action.metavar:
-            item = action.metavar
+            raise argparse.ArgumentError(
+                action, "ConfigAction only support CommandParser"
+            )
 
         config = parser.command.config
         field = getattr(action, "property", None)
@@ -141,19 +148,21 @@ class ConfigLoader:
 
 
 class ConfigAction(argparse.Action):
-
     """Argparse action that binds an option to a configuration field."""
-    def __init__(self,
-                 option_strings,
-                 dest,
-                 default=MISSING,
-                 type=None,
-                 choices=None,
-                 required=False,
-                 help=None,
-                 metavar=None,
-                 nargs=None,
-                 config=None):
+
+    def __init__(
+        self,
+        option_strings,
+        dest,
+        default=MISSING,
+        type=None,
+        choices=None,
+        required=False,
+        help=None,
+        metavar=None,
+        nargs=None,
+        config=None,
+    ):
         super().__init__(
             option_strings=option_strings,
             dest=dest,
@@ -164,7 +173,8 @@ class ConfigAction(argparse.Action):
             choices=choices,
             required=required,
             help=help,
-            metavar=metavar)
+            metavar=metavar,
+        )
 
         from ..core import ConfigField
 
@@ -184,23 +194,26 @@ class ConfigAction(argparse.Action):
 
 
 if not hasattr(argparse, "BooleanOptionalAction"):
+
     class BooleanOptionalAction(argparse.Action):
-        def __init__(self,
-                     option_strings,
-                     dest,
-                     default=None,
-                     type=None,
-                     choices=None,
-                     required=False,
-                     help=None,
-                     metavar=None):
+        def __init__(
+            self,
+            option_strings,
+            dest,
+            default=None,
+            type=None,
+            choices=None,
+            required=False,
+            help=None,
+            metavar=None,
+        ):
 
             _option_strings = []
             for option_string in option_strings:
                 _option_strings.append(option_string)
 
-                if option_string.startswith('--'):
-                    option_string = '--no-' + option_string[2:]
+                if option_string.startswith("--"):
+                    option_string = "--no-" + option_string[2:]
                     _option_strings.append(option_string)
 
             super().__init__(
@@ -212,30 +225,33 @@ if not hasattr(argparse, "BooleanOptionalAction"):
                 choices=choices,
                 required=required,
                 help=help,
-                metavar=metavar)
+                metavar=metavar,
+            )
 
         def __call__(self, parser, namespace, values, option_string=None):
             if option_string in self.option_strings:
-                setattr(namespace, self.dest, not option_string.startswith('--no-'))
+                setattr(namespace, self.dest, not option_string.startswith("--no-"))
 
         def format_usage(self):
-            return ' | '.join(self.option_strings)
+            return " | ".join(self.option_strings)
 
 else:
     BooleanOptionalAction = argparse.BooleanOptionalAction
 
 
 class KeyValueAction(argparse.Action):
-
     """Argparse action that collects KEY=VALUE pairs into a dict."""
-    def __init__(self,
-                 option_strings,
-                 dest,
-                 nargs=None,
-                 default=None,
-                 required=False,
-                 help=None,
-                 metavar="KEY=VALUE"):
+
+    def __init__(
+        self,
+        option_strings,
+        dest,
+        nargs=None,
+        default=None,
+        required=False,
+        help=None,
+        metavar="KEY=VALUE",
+    ):
 
         super().__init__(
             option_strings=option_strings,
@@ -245,7 +261,8 @@ class KeyValueAction(argparse.Action):
             # type=dict,
             required=required,
             help=help,
-            metavar=metavar)
+            metavar=metavar,
+        )
 
     def __call__(self, parser, namespace, value, option_string=None):
         dest = getattr(namespace, self.dest) or {}
@@ -280,6 +297,7 @@ class ArgParseComplete:
     def _argcomplete(self):
         try:
             import argcomplete
+
             return argcomplete
         except ModuleNotFoundError:
             return None
@@ -291,10 +309,12 @@ class ArgParseComplete:
         Returns:
             Any: The operation result.
         """
-        return "_ARGCOMPLETE" in os.environ # and cls._argcomplete
+        return "_ARGCOMPLETE" in os.environ  # and cls._argcomplete
 
     @classmethod
-    def autocomplete(cls, argument_parser: "argparse.ArgumentParser", **kwargs) -> "argparse.ArgumentParser":
+    def autocomplete(
+        cls, argument_parser: "argparse.ArgumentParser", **kwargs
+    ) -> "argparse.ArgumentParser":
         """Enable argcomplete for an argument parser when available.
 
         Args:
@@ -310,7 +330,9 @@ class ArgParseComplete:
         return argument_parser
 
     @classmethod
-    def shellcode(cls, executables: "typing.Iterable[str]", shell: str, **kwargs) -> str:
+    def shellcode(
+        cls, executables: "typing.Iterable[str]", shell: str, **kwargs
+    ) -> str:
         """Return shell completion setup code when argcomplete is available.
 
         Args:
@@ -327,13 +349,14 @@ class ArgParseComplete:
         return ""
 
     class Completer(abc.ABC):
-
         @abc.abstractmethod
         def get_parser(self) -> "argparse.ArgumentParser":
             pass
 
         @abc.abstractmethod
-        def get_args(self, parsed_args: "argparse.Namespace", **kwargs) -> "typing.typing.list[str] | None":
+        def get_args(
+            self, parsed_args: "argparse.Namespace", **kwargs
+        ) -> "typing.typing.list[str] | None":
             pass
 
         def __call__(self, *, parsed_args, **kwargs):
@@ -355,7 +378,7 @@ class ArgParseComplete:
                 item = finder.rl_complete(cmdline, state)
                 if item is None:
                     break
-                key = item[len(cmdline):]
+                key = item[len(cmdline) :]
                 completions[key] = finder.get_display_completions().get(key, "")
                 state += 1
 
