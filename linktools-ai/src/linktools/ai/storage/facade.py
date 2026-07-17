@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
+    from ...evaluation.store import EvalStore
+    from ..task.store import TaskStore
     from .sqlalchemy.facade import _UnitOfWork
 
 from ..agent.approval import ApprovalStore
@@ -76,6 +78,14 @@ class Storage:
     # without one is rejected at Runtime build time -- resumability is not an
     # opt-in capability.
     run_definitions: RunDefinitionStore
+    # Reliable-task store. Optional + None for backward compatibility with
+    # existing Storage(...) constructions; TaskRuntime rejects a None tasks
+    # store at build time. Backends wire their own (FileStorage -> FileTaskStore).
+    tasks: "TaskStore | None" = None
+    # Evaluation store. Optional + None for backward compatibility; the eval
+    # runner persists lifecycle + results when a caller wires one (e.g. an
+    # InMemoryEvalStore or a backend-provided file/SQL store).
+    evaluations: "EvalStore | None" = None
 
     def transaction(self) -> "AsyncIterator[_UnitOfWork]":
         """Cross-store transactional scope. The base implementation always
@@ -101,6 +111,12 @@ class FileStorage(Storage):
     (False here) before calling it."""
 
     def __init__(self, *, root: "str | Path" = "./data") -> None:
+        # Lazy import keeps `import linktools.ai` / `import linktools.ai.storage`
+        # from pulling the task/evaluation domains; only constructing a
+        # FileStorage does.
+        from .file.evaluation import FileEvaluationStore
+        from .file.task import FileTaskStore
+
         root_path = Path(root)
         super().__init__(
             resources=ResourceStore(
@@ -116,6 +132,8 @@ class FileStorage(Storage):
             idempotency=FileIdempotencyStore(root=root_path / "idempotency"),
             run_definitions=FileRunDefinitionStore(root=root_path / "definitions"),
             capabilities=FILE_STORAGE_CAPABILITIES,
+            tasks=FileTaskStore(root_path / "tasks"),
+            evaluations=FileEvaluationStore(root_path / "evaluations"),
         )
         # Stash the root so the FileRunCommitCoordinator can place its crash-
         # recovery journal under {root}/transactions (frozen dataclass -> bypass).

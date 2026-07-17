@@ -7,7 +7,7 @@ lineage identically."""
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 
 from ..errors import SessionAccessDeniedError, SessionError
 from ..run.context import RunContext
@@ -71,11 +71,14 @@ def create_run_context(
     workspace: "str | None" = None,
     root_run_id: "str | None" = None,
     parent_run_id: "str | None" = None,
+    metadata: "Mapping[str, Any] | None" = None,
 ) -> RunContext:
     """Mint a RunContext for a top-level run. ``root_run_id`` defaults to the
     run itself; ``parent_run_id`` defaults to None (a resumed run passes the
     record's lineage through). ``workspace`` is restored from the snapshot on
-    resume (None for fresh runs)."""
+    resume (None for fresh runs). ``metadata`` is an optional caller-supplied
+    mapping merged onto the context (e.g. task correlation ids threaded from a
+    TaskHandler) so it reaches RunRecord/RunDefinitionSnapshot downstream."""
     return RunContext(
         run_id=run_id,
         root_run_id=root_run_id or run_id,
@@ -86,4 +89,5 @@ def create_run_context(
         user_id=user_id,
         tenant_id=tenant_id,
         workspace=workspace,
+        metadata=dict(metadata) if metadata else {},
     )

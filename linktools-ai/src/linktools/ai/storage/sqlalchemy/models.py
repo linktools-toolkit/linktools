@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLAlchemy table models for Resource storage. deleted_at/whiteout_version on
+"""SQLAlchemy table models for Resource and reliable-task storage. deleted_at/whiteout_version on
 ResourceRow encode the whiteout tombstone in the same row/table as live resources,
 rather than a separate whiteouts table, so the unique path constraint naturally
 covers both live and deleted state."""
@@ -10,6 +10,7 @@ from datetime import datetime
 from sqlalchemy import (
     DateTime,
     Float,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -317,3 +318,149 @@ class ApprovalRow(Base):
     resolved_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
     resolved_by: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text)
+
+
+# --- Reliable-task tables. Complex policy/context fields
+# are stored as JSON so the row holds the indexed query columns + an envelope. ---
+
+
+class TaskJobRow(Base):
+    __tablename__ = "ai_jobs"
+    __table_args__ = (
+        Index("ix_ai_jobs_status_created", "status", "created_at"),
+        Index("ix_ai_jobs_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32))
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    root_task_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    input_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    output_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    started_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    data_json: Mapped[str] = mapped_column(Text)
+
+
+class TaskRow(Base):
+    __tablename__ = "ai_tasks"
+    __table_args__ = (
+        Index("ix_ai_tasks_job_status", "job_id", "status"),
+        Index("ix_ai_tasks_status_available", "status", "available_at"),
+        Index(
+            "ix_ai_tasks_handler_status_available", "handler", "status", "available_at"
+        ),
+        Index("ix_ai_tasks_lease_expires", "lease_expires_at"),
+        UniqueConstraint("job_id", "key", name="uq_ai_tasks_job_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(128))
+    parent_task_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    key: Mapped[str] = mapped_column(String(255))
+    handler: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32))
+    input_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    output_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer)
+    available_at: Mapped[datetime] = mapped_column(DateTime)
+    lease_owner: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    fencing_token: Mapped[int] = mapped_column(Integer)
+    active_attempt_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    timeout_seconds: Mapped["float | None"] = mapped_column(Float, nullable=True)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+    data_json: Mapped[str] = mapped_column(Text)
+
+
+class TaskAttemptRow(Base):
+    __tablename__ = "ai_task_attempts"
+    __table_args__ = (
+        Index("ix_ai_attempts_task_attempt", "task_id", "attempt"),
+        Index("ix_ai_attempts_run", "run_id"),
+        UniqueConstraint("task_id", "attempt", name="uq_ai_attempts_task_attempt"),
+    )
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(128))
+    job_id: Mapped[str] = mapped_column(String(128))
+    attempt: Mapped[int] = mapped_column(Integer)
+    worker_id: Mapped[str] = mapped_column(String(128))
+    fencing_token: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    finished_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    failure_kind: Mapped["str | None"] = mapped_column(String(64), nullable=True)
+    error_type: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    error_message: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    data_json: Mapped[str] = mapped_column(Text)
+
+
+class TaskTransitionRow(Base):
+    __tablename__ = "ai_task_transitions"
+    __table_args__ = (Index("ix_ai_transitions_job", "job_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(128))
+    task_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    attempt_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    from_status: Mapped["str | None"] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TaskSignalRow(Base):
+    __tablename__ = "ai_task_signals"
+    __table_args__ = (Index("ix_ai_signals_job_name", "job_id", "name"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(128))
+    name: Mapped[str] = mapped_column(String(255))
+    correlation_key: Mapped[str] = mapped_column(String(255))
+    payload_artifact_id: Mapped["str | None"] = mapped_column(
+        String(128), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed_by_task_id: Mapped["str | None"] = mapped_column(
+        String(128), nullable=True
+    )
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EvalRunRow(Base):
+    __tablename__ = "ai_eval_runs"
+    __table_args__ = (Index("ix_ai_eval_runs_suite", "suite_id"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    suite_id: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    started_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
+    # target, baseline_target, metadata live in the envelope.
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EvalResultRow(Base):
+    __tablename__ = "ai_eval_results"
+    __table_args__ = (Index("ix_ai_eval_results_run", "eval_run_id"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    eval_run_id: Mapped[str] = mapped_column(String(128))
+    case_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    job_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    task_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    output_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    snapshot_artifact_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    error_type: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    error_message: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    # scores + metrics live in the envelope.
+    data_json: Mapped[str] = mapped_column(Text, default="{}")

@@ -8,8 +8,6 @@ Each public async method delegates to a ``_*_sync`` private method via
 
 import asyncio
 import json
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -25,24 +23,7 @@ from ...run.models import (
 )
 
 
-def _validate_id_segment(value: str, *, kind: str) -> str:
-    if not value or "/" in value or "\\" in value or value in (".", ".."):
-        raise ValueError(f"invalid {kind}: {value!r}")
-    return value
-
-
-def _atomic_write(path: Path, content: bytes) -> None:
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-        os.replace(tmp_name, path)
-    except BaseException:
-        if os.path.exists(tmp_name):
-            os.remove(tmp_name)
-        raise
+from ._util import _atomic_write, _validate_id_segment
 
 
 def _to_json(record: RunRecord) -> dict:

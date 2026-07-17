@@ -242,6 +242,8 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
                     swarms=tx.swarms,
                     memories=tx.memories,
                     idempotency=tx.idempotency,
+                    tasks=tx.tasks,
+                    evaluations=tx.evaluations,
                 )
 
         object.__setattr__(storage, "transaction", _patched_transaction)
@@ -317,6 +319,8 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                     swarms=tx.swarms,
                     memories=tx.memories,
                     idempotency=tx.idempotency,
+                    tasks=tx.tasks,
+                    evaluations=tx.evaluations,
                 )
 
         object.__setattr__(storage, "transaction", _patched_transaction)

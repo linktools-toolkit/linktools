@@ -8,7 +8,7 @@ points."""
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .context import RunContext
 from .models import RunStatus
@@ -36,8 +36,12 @@ async def prepare_run(
     run_id: "str | None",
     user_id: "str | None",
     tenant_id: "str | None",
+    context_metadata: "Mapping[str, Any] | None" = None,
 ) -> PreparedRun:
-    """Resolve a session and mint the context shared by run and streaming."""
+    """Resolve a session and mint the context shared by run and streaming.
+    ``context_metadata`` is an optional caller-supplied mapping (e.g. task
+    correlation ids) merged onto the RunContext so it flows to RunRecord /
+    RunDefinitionSnapshot."""
     from .._runtime.lifecycle import create_run_context, resolve_session
     from ..swarm.spec import SwarmSpec
 
@@ -54,6 +58,7 @@ async def prepare_run(
         else RunnableType.AGENT,
         user_id=user_id,
         tenant_id=tenant_id,
+        metadata=context_metadata,
     )
     return PreparedRun(
         run_id=resolved_run,

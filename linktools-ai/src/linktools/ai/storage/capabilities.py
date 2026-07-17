@@ -43,7 +43,7 @@ SQLALCHEMY_STORAGE_CAPABILITIES = StorageCapabilities(
     full_text_search=True,
     semantic_search=False,
     multi_process_swarm=True,
-    leasing=False,
+    leasing=True,
     advisory_locks=False,
     idempotency=True,
 )

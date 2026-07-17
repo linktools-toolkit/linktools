@@ -9,7 +9,7 @@ ModelPolicyExceededError once the cumulative cost crosses it. Decimal
 throughout (float would lose precision on small per-token costs).
 
 A budget set without a pricing provider is a configuration error: the run
-refuses to start rather than silently running without a cost limit (§18.6)."""
+refuses to start rather than silently running without a cost limit."""
 
 from dataclasses import dataclass
 from decimal import Decimal

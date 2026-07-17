@@ -18,6 +18,7 @@ def test_file_storage_capabilities_match_spec():
         full_text_search=False,
         semantic_search=False,
         multi_process_swarm=False,
+        leasing=False,
     )
 
 
@@ -30,6 +31,7 @@ def test_sqlalchemy_storage_capabilities_match_spec():
         full_text_search=True,
         semantic_search=False,
         multi_process_swarm=True,
+        leasing=True,
     )
 
 

@@ -6,13 +6,13 @@ cleanly without SQLAlchemy installed -- this module is only reached when a
 caller actually requests ``SqlAlchemyStorage``. SQLAlchemy and
 aiosqlite are optional dependencies; install via ``linktools-ai[sqlite]``.
 
-All seven stores share one ``session_factory``; ``transaction()`` yields a
+All stores share one ``session_factory``; ``transaction()`` yields a
 UnitOfWork whose stores bind to one AsyncSession + one transaction so a caller
 can coordinate writes across stores atomically."""
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, TYPE_CHECKING
 
 try:  # optional dependency -- give a clear install hint instead of a raw ImportError
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,10 @@ except (
             "  pip install 'linktools-ai[sqlalchemy]'"
         ) from exc
     raise
+
+if TYPE_CHECKING:
+    from ...evaluation.store import EvalStore
+    from ...task.store import TaskStore
 
 from ...agent.approval import ApprovalStore
 from ...events.store import EventStore
@@ -43,12 +47,14 @@ from .approval import SqlAlchemyApprovalStore
 from .checkpoint import SqlAlchemyCheckpointStore
 from .definition import SqlAlchemyRunDefinitionStore
 from .event import SqlAlchemyEventStore
+from .evaluation import SqlAlchemyEvalStore
 from .idempotency import SqlAlchemyIdempotencyStore
 from .memory import SqlAlchemyMemoryStore
 from .resource import SqlAlchemyResourceBackend
 from .run import SqlAlchemyRunStore
 from .session import SqlAlchemySessionStore
 from .swarm import SqlAlchemySwarmStore
+from .task import SqlAlchemyTaskStore
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,8 @@ class _UnitOfWork:
     swarms: SwarmStore
     memories: MemoryStore
     idempotency: IdempotencyStore
+    tasks: "TaskStore"
+    evaluations: "EvalStore"
 
 
 class SqlAlchemyStorage(Storage):
@@ -99,6 +107,8 @@ class SqlAlchemyStorage(Storage):
             run_definitions=SqlAlchemyRunDefinitionStore(
                 session_factory=session_factory
             ),
+            tasks=SqlAlchemyTaskStore(session_factory=session_factory),
+            evaluations=SqlAlchemyEvalStore(session_factory=session_factory),
             capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
         )
         # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().
@@ -136,6 +146,12 @@ class SqlAlchemyStorage(Storage):
                         session_factory=self._session_factory, session=session
                     ),
                     idempotency=SqlAlchemyIdempotencyStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    tasks=SqlAlchemyTaskStore(
+                        session_factory=self._session_factory, session=session
+                    ),
+                    evaluations=SqlAlchemyEvalStore(
                         session_factory=self._session_factory, session=session
                     ),
                 )

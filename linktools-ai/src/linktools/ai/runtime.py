@@ -149,6 +149,7 @@ class Runtime:
         user_id: "str | None" = None,
         tenant_id: "str | None" = None,
         agents: "Mapping[str, AgentSpec] | None" = None,
+        context_metadata: "Mapping[str, Any] | None" = None,
     ):
         from .run.lifecycle import prepare_run
 
@@ -160,6 +161,7 @@ class Runtime:
             run_id=run_id,
             user_id=user_id,
             tenant_id=tenant_id,
+            context_metadata=context_metadata,
         )
 
         if isinstance(spec, SwarmSpec):
@@ -264,6 +266,7 @@ class Runtime:
         run_id: "str | None" = None,
         user_id: "str | None" = None,
         tenant_id: "str | None" = None,
+        context_metadata: "Mapping[str, Any] | None" = None,
     ) -> "AsyncIterator[dict]":
         """Streaming variant of :meth:`run`. Only ``AgentSpec`` is supported --
         a ``SwarmSpec`` raises :class:`SwarmError` because swarm streaming is not
@@ -281,6 +284,7 @@ class Runtime:
             run_id=run_id,
             user_id=user_id,
             tenant_id=tenant_id,
+            context_metadata=context_metadata,
         )
 
         # Persist the immutable run-definition snapshot (single owner).

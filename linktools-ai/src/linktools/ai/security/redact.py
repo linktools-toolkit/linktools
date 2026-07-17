@@ -73,6 +73,19 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\bBasic\s+[^\s,;]+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]+"),
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    # Credentials embedded in a DB / connection string (user:pass@host).
+    re.compile(r"(?i)://[^\s:/@]+:[^\s/@]+@"),
+    # Inline credential assignments (password=..., api_key: ...).
+    re.compile(
+        r"(?i)\b(password|passwd|pwd|api[_-]?key|apikey|secret|"
+        r"access[_-]?token|refresh[_-]?token|session[_-]?id|cookie|"
+        r"set[_-]?cookie)\s*[:=]\s*[^\s,;>}]+"
+    ),
+    # PEM-encoded private key blocks (RSA / EC / OPENSSH / GENERIC).
+    re.compile(
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+        r"[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+    ),
 )
 
 
@@ -93,10 +106,19 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
-def redact_exception(error: BaseException, *, max_chars: int = _MAX_VALUE_CHARS) -> str:
-    text = str(error)
+def redact_text(text: str, *, max_chars: int = _MAX_VALUE_CHARS) -> str:
+    """Mask secret-looking substrings in an arbitrary string and cap its length:
+    Bearer/Basic/sk-/JWT, credentials inside a connection string
+    (user:pass@host), inline ``password=``/``api_key=`` assignments, cookie /
+    session ids, and PEM private-key blocks. Used for any text persisted to the
+    audit trail (failure messages, error summaries) so a credential embedded in
+    a message never reaches storage."""
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(_MASK, text)
     if len(text) > max_chars:
         text = text[:max_chars] + "...<truncated>"
     return text
+
+
+def redact_exception(error: BaseException, *, max_chars: int = _MAX_VALUE_CHARS) -> str:
+    return redact_text(str(error), max_chars=max_chars)
