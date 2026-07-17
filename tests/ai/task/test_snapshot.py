@@ -37,7 +37,10 @@ def test_snapshot_resource_pins_content_and_metadata() -> None:
         assert snap.version >= 1
         assert snap.etag
         assert snap.sha256 == hashlib.sha256(b"snapshot-me").hexdigest()
-        assert snap.artifact_id == snap.sha256
+        # The artifact id is a per-write record id (UUID), distinct from the
+        # content sha256 (the blob id).
+        assert snap.artifact_id != snap.sha256
+        assert snap.artifact_id.startswith("art-")
         # The pinned artifact is retrievable and integrity-verified.
         content = await artifacts.get(snap.artifact_id, tenant_id="t1")
         assert content == b"snapshot-me"

@@ -63,6 +63,7 @@ class TaskFailureKind(str, Enum):
     POLICY_DENIED = "policy_denied"
     HANDLER_NOT_FOUND = "handler_not_found"
     INVALID_INPUT = "invalid_input"
+    BUDGET_EXCEEDED = "budget_exceeded"
     SIDE_EFFECT_UNKNOWN = "side_effect_unknown"
     SUPERSEDED = "superseded"
     INTERNAL = "internal"
@@ -130,9 +131,53 @@ class ActorRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopeSet:
+    """A resolved set of delegated scopes -- always a concrete value, never
+    None. ``unrestricted=True`` means the job placed no scope limit; otherwise
+    ``values`` is the exact set held (possibly empty == no scopes / denied).
+
+    Replaces the old ``tuple[str, ...] | None`` whose None was ambiguous
+    (unresolved vs unrestricted vs inherit). Construction accepts a legacy
+    tuple/None via :meth:`from_any`, normalized to a ScopeSet at the dataclass
+    boundary so a persisted record is never None."""
+
+    unrestricted: bool = False
+    values: "tuple[str, ...]" = ()
+
+    @classmethod
+    def allow_all(cls) -> "ScopeSet":
+        return cls(unrestricted=True)
+
+    @classmethod
+    def of(cls, *scopes: str) -> "ScopeSet":
+        return cls(values=tuple(scopes))
+
+    @classmethod
+    def from_any(cls, value: "ScopeSet | tuple[str, ...] | list[str] | None") -> "ScopeSet":
+        if value is None:
+            return cls(unrestricted=True)
+        if isinstance(value, ScopeSet):
+            return value
+        return cls(values=tuple(value))
+
+    @property
+    def is_empty(self) -> bool:
+        """No scopes granted at all (not unrestricted AND no values) -- deny."""
+        return not self.unrestricted and not self.values
+
+
+@dataclass(frozen=True, slots=True)
 class ActorChain:
     actors: "tuple[ActorRef, ...]"
-    delegated_scopes: "tuple[str, ...] | None" = None
+    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.allow_all)
+
+    def __post_init__(self) -> None:
+        # Normalize legacy tuple/None input to a concrete ScopeSet at the
+        # boundary so a persisted ActorChain is never None-typed.
+        if not isinstance(self.delegated_scopes, ScopeSet):
+            object.__setattr__(
+                self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +217,16 @@ class JobRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskWaitCondition:
+    """A signal a WAITING task is blocked on (set by a WaitSignal command).
+    Lives on the TaskRecord -- not in metadata -- so it is a first-class part of
+    the state machine that serialization and reconciliation can trust."""
+
+    name: str
+    correlation_key: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskRecord:
     id: str
     job_id: str
@@ -196,8 +251,26 @@ class TaskRecord:
     created_at: datetime
     updated_at: datetime
     depth: int = 0
-    delegated_scopes: "tuple[str, ...] | None" = None
+    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.allow_all)
     actor_chain: "ActorChain | None" = None
+
+    def __post_init__(self) -> None:
+        # Normalize legacy tuple/None to a concrete ScopeSet at the boundary.
+        if not isinstance(self.delegated_scopes, ScopeSet):
+            object.__setattr__(
+                self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
+            )
+    # Signal-wait state (set when a handler returns WaitSignal). wait_deadline_at
+    # is None for an unbounded wait; reconcile_due moves a WAITING task past its
+    # deadline to a retry or a terminal cancel.
+    wait_conditions: "tuple[TaskWaitCondition, ...]" = ()
+    wait_deadline_at: "datetime | None" = None
+    # Pinned runnable resolution (set on the first attempt by bind_runnable).
+    # A retry re-resolves and bind_runnable rejects a drift -- so a mapping
+    # change between attempts can never silently re-run a different agent.
+    resolved_runnable_id: "str | None" = None
+    resolved_runnable_revision: "str | None" = None
+    resolved_runnable_fingerprint: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
@@ -244,35 +317,47 @@ class TaskSignalRecord:
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
+def resolve_effective_scopes(
+    requested: "tuple[str, ...] | list[str] | ScopeSet | None",
+    parent: "ScopeSet",
+) -> "ScopeSet":
+    """Resolve effective delegated scopes (never expand permission).
+
+    ``requested is None`` means "inherit the parent's effective scopes"
+    (unrestricted when the parent was unrestricted). An unrestricted requested
+    ScopeSet is equivalent to inherit: a child can never hold more than the
+    parent, so "everything requested" still collapses to the parent's set. A
+    concrete requested set (tuple/list/restricted ScopeSet) intersects with the
+    parent's scopes -- the child keeps only scopes the parent held, in the
+    parent's order. Always returns a concrete :class:`ScopeSet`."""
+    if requested is None:
+        return parent
+    if isinstance(requested, ScopeSet):
+        if requested.unrestricted:
+            return parent
+        requested_values = requested.values
+    else:
+        requested_values = tuple(requested)
+    if parent.unrestricted:
+        return ScopeSet.of(*requested_values)
+    requested_set = set(requested_values)
+    return ScopeSet.of(*(s for s in parent.values if s in requested_set))
+
+
 def narrow_child_principal(
     parent: "TaskRecord",
     cmd_delegated_scopes: "tuple[str, ...] | None",
     cmd_handler: str,
     job_actor_chain: ActorChain,
-) -> "tuple[tuple[str, ...] | None, ActorChain]":
+) -> "tuple[ScopeSet, ActorChain]":
     """Compute a child task's effective ``(delegated_scopes, actor_chain)``.
 
     Delegated scopes can only narrow: when a command requests scopes, the child
     receives their intersection with the parent's effective scopes -- never a
     union, never a scope the parent did not hold. The actor chain appends the
     current handler as a new Actor so each delegation step is attributable."""
-    parent_scopes = (
-        parent.delegated_scopes
-        if parent.delegated_scopes is not None
-        else job_actor_chain.delegated_scopes
-    )
-    if cmd_delegated_scopes is None:
-        # Inherit the parent's effective scopes unchanged.
-        child_scopes: "tuple[str, ...] | None" = parent_scopes
-    elif parent_scopes is None:
-        # Unrestricted parent delegating a subset: child receives the requested
-        # scopes (unrestricted ∩ requested == requested).
-        child_scopes = tuple(cmd_delegated_scopes)
-    else:
-        # Restricted parent: intersect -- the child keeps only scopes the parent
-        # actually held (never a union, never a new scope).
-        requested = set(cmd_delegated_scopes)
-        child_scopes = tuple(s for s in parent_scopes if s in requested)
+    parent_scopes = parent.delegated_scopes  # always a ScopeSet (normalized)
+    child_scopes = resolve_effective_scopes(cmd_delegated_scopes, parent_scopes)
     parent_chain = (
         parent.actor_chain if parent.actor_chain is not None else job_actor_chain
     )
@@ -373,6 +458,15 @@ def assert_attempt_transition(current: AttemptStatus, target: AttemptStatus) -> 
 
 
 JOB_TERMINAL = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED})
+
+# Claimable jobs -- a whitelist so a future JobStatus is never silently claimable
+# by default. A task in a terminal (SUCCEEDED/FAILED/CANCELLED) or CANCELLING job
+# must never be claimed: the claim path checks membership here rather than
+# enumerating excluded statuses.
+CLAIMABLE_JOB_STATUSES = frozenset(
+    {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.WAITING}
+)
+
 TASK_TERMINAL = frozenset(
     {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
 )
@@ -405,10 +499,12 @@ __all__: "list[str]" = [
     "TaskPrincipal",
     "ActorRef",
     "ActorChain",
+    "ScopeSet",
     "TaskBudget",
     "ResourceSnapshotRef",
     "JobRecord",
     "TaskRecord",
+    "TaskWaitCondition",
     "TaskAttemptRecord",
     "TaskTransitionRecord",
     "TaskSignalRecord",
@@ -419,9 +515,12 @@ __all__: "list[str]" = [
     "JOB_TERMINAL",
     "TASK_TERMINAL",
     "ATTEMPT_TERMINAL",
+    "CLAIMABLE_JOB_STATUSES",
     "assert_job_transition",
     "assert_task_transition",
     "assert_attempt_transition",
+    "resolve_effective_scopes",
+    "narrow_child_principal",
     "to_jsonable",
     "from_jsonable",
 ]

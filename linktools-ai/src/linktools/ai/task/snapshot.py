@@ -28,14 +28,17 @@ async def snapshot_resource(
 ) -> ResourceSnapshotRef:
     """Read the resource at ``path``, seal its bytes into an ArtifactStore, and
     return a :class:`ResourceSnapshotRef` pinning the path/version/etag plus the
-    content-addressed artifact id and sha256."""
+    content-addressed artifact id and sha256.
+
+    Uses a SINGLE ``resources.get`` so the version/etag and the sealed content
+    come from one read -- a separate ``stat`` then ``get`` would be a TOCTOU
+    window where the resource changes between the two calls and the snapshot
+    pins stale metadata against new bytes."""
     rpath = ResourcePath(path)
-    info = await resources.stat(rpath)
-    if info is None:
-        raise ResourceSnapshotError(f"resource not found: {path}")
     resource = await resources.get(rpath)
-    if resource is None:  # pragma: no cover - stat succeeded so get should too
-        raise ResourceSnapshotError(f"resource unreadable: {path}")
+    if resource is None:
+        raise ResourceSnapshotError(f"resource not found: {path}")
+    info = resource.info
     record = await artifact_store.put(
         resource.content,
         media_type=media_type or info.content_type or "application/octet-stream",

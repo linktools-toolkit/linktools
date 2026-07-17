@@ -14,6 +14,7 @@ context.
 deterministic under a fake clock in tests rather than sleeping for real.
 """
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -21,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 from .models import (
     RetryPolicy,
     SideEffectPolicy,
+    ScopeSet,
     ActorChain,
     ArtifactRef,
     ResourceSnapshotRef,
@@ -34,18 +36,25 @@ from ..clock import Clock, SystemClock  # noqa: E402,F401  (re-export)
 
 
 class CancellationToken:
-    """Cooperative cancellation flag the worker raises when a task is
-    cancelled or times out; the handler is expected to poll ``is_set``."""
+    """Cooperative cancellation flag the worker triggers when a task is
+    cancelled, times out, or loses its lease; a handler can poll ``is_set`` or
+    ``await wait()`` to race the cancellation against a long-running step.
+
+    Backed by ``asyncio.Event`` so ``wait()`` returns promptly when another
+    coroutine triggers the token, without polling."""
 
     def __init__(self) -> None:
-        self._set = False
+        self._event = asyncio.Event()
 
     def trigger(self) -> None:
-        self._set = True
+        self._event.set()
 
     @property
     def is_set(self) -> bool:
-        return self._set
+        return self._event.is_set()
+
+    async def wait(self) -> None:
+        await self._event.wait()
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +72,18 @@ class TaskContext:
     worker_id: str
     principal: TaskPrincipal
     actor_chain: ActorChain
-    delegated_scopes: "tuple[str, ...]"
+    delegated_scopes: "ScopeSet"
     budget: TaskBudget
     resource_snapshots: "tuple[ResourceSnapshotRef, ...]"
     cancellation: CancellationToken
+
+    def __post_init__(self) -> None:
+        # Normalize legacy tuple/None input to a concrete ScopeSet so a context
+        # handed to a handler is never None-typed.
+        if not isinstance(self.delegated_scopes, ScopeSet):
+            object.__setattr__(
+                self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
+            )
 
 
 # ---- orchestration commands ----
@@ -104,7 +121,11 @@ class CancelTask:
 
 @dataclass(frozen=True, slots=True)
 class CancelJob:
-    job_id: "str | None" = None  # None = current job
+    """Cancel the current job (the one whose task produced this command). A
+    handler command can never name another job -- cross-job cancellation is a
+    management action that goes through ``TaskRuntime.request_cancel``."""
+
+    reason: "str | None" = None
 
 
 TaskCommand = CreateTask | WaitSignal | CompleteJob | CancelTask | CancelJob

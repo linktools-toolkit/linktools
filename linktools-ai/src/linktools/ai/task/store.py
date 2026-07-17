@@ -46,6 +46,48 @@ class TaskClaimLostError(TaskStoreError):
     """The fencing check failed -- this worker no longer owns the task."""
 
 
+class TaskBudgetExceededError(TaskStoreError):
+    """A Job budget (max_tasks / max_depth / aggregate attempts / runtime) was
+    exceeded. Raised atomically when a task-creation command would push the job
+    past its cap, so the whole commit fails and no partial children land."""
+
+
+class InvalidTaskCommandError(TaskStoreError):
+    """A handler command is invalid in the current state -- e.g. CompleteJob
+    while sibling tasks are still live, or a task waiting on more than one
+    signal. Raised at commit so the task transitions to a terminal failure
+    rather than silently dropping the command."""
+
+
+class UnsupportedTaskSchemaError(TaskStoreError):
+    """A persisted task/job envelope used a schema version this code does not
+    know how to read. Raised on read so a future-version row is never silently
+    misinterpreted (e.g. security fields restored to broader permission)."""
+
+
+class RunnableBindingError(TaskStoreError):
+    """A task's pinned runnable resolution does not match the freshly resolved
+    one. Raised by ``bind_runnable`` so a retry can never silently re-run a
+    different agent after a mapping change; the handler maps it to a permanent
+    failure."""
+
+
+class TaskRunTimeoutError(TimeoutError):
+    """Raised by ``run_one_task`` when its wait budget elapses before the job
+    reaches a terminal state. The job is cancelled (so in-flight work stops)
+    rather than returning a still-running task the caller would mistake for
+    finished."""
+
+    def __init__(self, job_id: str, task_id: str, timeout_seconds: float) -> None:
+        super().__init__(
+            f"run_one_task for task {task_id} (job {job_id}) did not finish "
+            f"within {timeout_seconds}s"
+        )
+        self.job_id = job_id
+        self.task_id = task_id
+        self.timeout_seconds = timeout_seconds
+
+
 @dataclass(frozen=True, slots=True)
 class TaskClaim:
     task_id: str
@@ -60,6 +102,22 @@ class ClaimedTask:
     job: JobRecord
     task: TaskRecord
     attempt: TaskAttemptRecord
+
+
+def claim_matches_task(claim: TaskClaim, task: TaskRecord) -> bool:
+    """Pure ownership check: does ``task`` still belong to ``claim``? Every field
+    that fencing protects -- status (CLAIMED or CANCELLING), lease_owner (the
+    worker), active_attempt_id, and fencing_token -- must match. A worker whose
+    lease expired and was reclaimed fails on lease_owner / fencing_token and is
+    told it no longer owns the task. The worker's re-read check uses this; the
+    store guards inline the same predicate (with extra not-found handling) at
+    their fenced write sites."""
+    return (
+        task.status in {TaskStatus.CLAIMED, TaskStatus.CANCELLING}
+        and task.lease_owner == claim.worker_id
+        and task.active_attempt_id == claim.attempt_id
+        and task.fencing_token == claim.fencing_token
+    )
 
 
 @runtime_checkable
@@ -111,6 +169,18 @@ class TaskStore(Protocol):
         run_id: str,
     ) -> TaskAttemptRecord: ...
 
+    async def bind_runnable(
+        self,
+        *,
+        task_id: str,
+        attempt_id: str,
+        fencing_token: int,
+        worker_id: str,
+        runnable_id: str,
+        revision: "str | None",
+        fingerprint: str,
+    ) -> TaskRecord: ...
+
     async def commit_success(
         self,
         claim: TaskClaim,
@@ -142,6 +212,15 @@ class TaskStore(Protocol):
         limit: int = 100,
     ) -> "tuple[TaskRecord, ...]": ...
 
+    async def reconcile_due(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> "tuple[TaskRecord, ...]": ...
+
+    async def list_orphan_run_ids(self, *, limit: int = 500) -> "tuple[str, ...]": ...
+
     async def list_attempts(
         self,
         task_id: str,
@@ -161,4 +240,10 @@ __all__: "list[str]" = [
     "JobNotFoundError",
     "TaskNotFoundError",
     "TaskClaimLostError",
+    "TaskBudgetExceededError",
+    "InvalidTaskCommandError",
+    "UnsupportedTaskSchemaError",
+    "RunnableBindingError",
+    "TaskRunTimeoutError",
+    "claim_matches_task",
 ]

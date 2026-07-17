@@ -16,15 +16,17 @@ def _store() -> ArtifactStore:
     return ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
 
 
-def test_identical_content_reuses_same_artifact() -> None:
+def test_identical_content_shares_blob_but_distinct_records() -> None:
+    """Same content -> one shared blob (same sha256); each put -> its own record
+    (distinct id), so the second producer's lineage is not lost."""
     store = _store()
 
     async def run() -> None:
         first = await store.put(b"hello", media_type="text/plain", tenant_id="t1")
         second = await store.put(b"hello", media_type="text/plain", tenant_id="t1")
-        assert first.ref.id == second.ref.id
-        assert first.ref.sha256 == second.ref.sha256
-        assert first.ref.id == first.ref.sha256  # content-addressed
+        assert first.ref.sha256 == second.ref.sha256  # shared blob
+        assert first.ref.id != second.ref.id  # distinct records
+        assert first.ref.sha256 != first.ref.id  # id is a UUID, not the content hash
 
     asyncio.run(run())
 
@@ -36,12 +38,15 @@ def test_distinct_content_yields_distinct_artifacts() -> None:
         a = await store.put(b"one", media_type="text/plain", tenant_id="t1")
         b = await store.put(b"two", media_type="text/plain", tenant_id="t1")
         assert a.ref.id != b.ref.id
+        assert a.ref.sha256 != b.ref.sha256
         assert a.ref.size == 3
 
     asyncio.run(run())
 
 
-def test_record_is_immutable_first_wins() -> None:
+def test_each_put_keeps_own_lineage() -> None:
+    """Identical content from two producers yields two records, each carrying
+    its OWN provenance (the old first-wins behavior lost the second's lineage)."""
     store = _store()
 
     async def run() -> None:
@@ -51,28 +56,27 @@ def test_record_is_immutable_first_wins() -> None:
             tenant_id="t1",
             created_by_task_id="task-A",
         )
-        # Same content again with different provenance: the original record
-        # wins, so the artifact is immutable.
         second = await store.put(
             b"data",
             media_type="text/plain",
             tenant_id="t1",
             created_by_task_id="task-B",
         )
-        assert second.created_by_task_id == "task-A"
-        assert second.created_at == first.created_at
+        assert first.created_by_task_id == "task-A"
+        assert second.created_by_task_id == "task-B"
+        assert first.ref.id != second.ref.id
 
     asyncio.run(run())
 
 
-def test_corrupt_content_fails_integrity_check() -> None:
+def test_blob_corruption_is_detected() -> None:
     store = _store()
 
     async def run() -> None:
         record = await store.put(b"payload", media_type="text/plain", tenant_id="t1")
-        # Corrupt the stored blob under the content-addressed path.
+        # Corrupt the stored blob (addressed by sha256, not the record id).
         backend = store._resources._primary
-        path_key = store._content_path(record.ref.id).value
+        path_key = store._blob_path(record.ref.sha256).value
         _content, info = backend._entries[path_key]
         backend._entries[path_key] = (b"TAMPERED", info)
         with pytest.raises(ArtifactIntegrityError):
@@ -139,5 +143,54 @@ def test_get_roundtrips() -> None:
     async def run() -> None:
         record = await store.put(b"roundtrip", media_type="text/plain", tenant_id="t1")
         assert await store.get(record.ref.id, tenant_id="t1") == b"roundtrip"
+
+    asyncio.run(run())
+
+
+def test_same_content_dedupes_to_one_blob() -> None:
+    """Identical content from several producers shares a SINGLE content blob;
+    only the records multiply (one per put)."""
+    store = _store()
+
+    async def run() -> None:
+        await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="A")
+        await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="B")
+        await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="C")
+        backend = store._resources._primary
+        blob_keys = [k for k in backend._entries if "/blobs/sha256/" in k]
+        record_keys = [k for k in backend._entries if "/records/" in k]
+        assert len(blob_keys) == 1  # content deduplicated
+        assert len(record_keys) == 3  # one lineage record per put
+
+    asyncio.run(run())
+
+
+def test_each_record_preserves_own_parents_and_lineage() -> None:
+    """Two records of identical content each carry their own parent lineage and
+    creator -- the second production event's blood line is not overwritten by
+    the first (the original 7.2 bug)."""
+    store = _store()
+
+    async def run() -> None:
+        first = await store.put(
+            b"x",
+            media_type="text/plain",
+            tenant_id="t1",
+            created_by_job_id="job-1",
+            parent_artifact_ids=("p1",),
+        )
+        second = await store.put(
+            b"x",
+            media_type="text/plain",
+            tenant_id="t1",
+            created_by_job_id="job-2",
+            parent_artifact_ids=("p2", "p3"),
+        )
+        fetched_first = await store.stat(first.ref.id, tenant_id="t1")
+        fetched_second = await store.stat(second.ref.id, tenant_id="t1")
+        assert fetched_first.parent_artifact_ids == ("p1",)
+        assert fetched_first.created_by_job_id == "job-1"
+        assert fetched_second.parent_artifact_ids == ("p2", "p3")
+        assert fetched_second.created_by_job_id == "job-2"
 
     asyncio.run(run())

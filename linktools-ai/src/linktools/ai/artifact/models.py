@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """Artifact domain models.
 
-An artifact is an immutable, content-addressed blob -- a model request, a run
-output, a context render, an eval case -- tracked by an :class:`ArtifactRef`
-plus a provenance :class:`ArtifactRecord`. The id IS the content's sha256, so
-the same bytes always resolve to the same artifact.
+An artifact is immutable content -- a model request, a run output, a context
+render, an eval case. The content is a content-addressed blob (deduplicated by
+sha256); each production event is its own :class:`ArtifactRecord` (a UUID id)
+carrying the provenance. So the same bytes share one blob but each put gets a
+distinct record/lineage -- :class:`ArtifactRef`.id is the record id (UUID),
+and ``sha256`` is the blob id.
 """
 
 from collections.abc import Mapping
@@ -16,10 +18,27 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRef:
+    """A handle to an artifact. ``id`` is the ArtifactRecord id (a UUID) -- the
+    lineage handle a caller carries. ``sha256`` is the content blob id, used to
+    dedupe identical bytes. Splitting them lets two puts of the same content
+    share one blob while each keeps its own record/lineage."""
+
     id: str
     sha256: str
     media_type: str
     size: int
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactBlob:
+    """The content half of an artifact: immutable bytes keyed by sha256, shared
+    by every ArtifactRecord that sealed the same content. Has no tenant/lineage
+    -- those live on the per-write ArtifactRecord."""
+
+    sha256: str
+    media_type: str
+    size: int
+    path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +73,7 @@ class ArtifactIntegrityError(Exception):
 
 __all__: "list[str]" = [
     "ArtifactRef",
+    "ArtifactBlob",
     "ArtifactRecord",
     "ArtifactIntegrityError",
     "ResourceSnapshotRef",

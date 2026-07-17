@@ -14,13 +14,12 @@ so a restarted process re-converges before accepting work.
 """
 
 import asyncio
-import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from .models import (    AttemptStatus,
+from .models import (
     ActorChain,
     ActorRef,
     JobRecord,
@@ -37,7 +36,7 @@ from .models import (    AttemptStatus,
 )
 from .protocols import Clock, SystemClock, TaskHandler
 from .metrics import NoopTaskMetrics, TaskMetrics
-from .store import TaskStore
+from .store import TaskRunTimeoutError, TaskStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +79,7 @@ class TaskRuntime:
         clock: "Clock | None" = None,
         metrics: "TaskMetrics | None" = None,
         run_canceler: "Callable[[str], Awaitable[None]] | None" = None,
+        artifact_store=None,
     ) -> None:
         task_store = getattr(storage, "tasks", None)
         if task_store is None:
@@ -97,6 +97,17 @@ class TaskRuntime:
         # TaskRuntime coordinates; the caller wires the actual Runtime.cancel so
         # the task domain stays decoupled from Runtime internals.
         self._run_canceler = run_canceler
+        # The artifact store resolves task input artifacts. If the caller did
+        # not wire one explicitly, build it from the storage resource backend
+        # when available; a runtime with neither simply cannot serve tasks that
+        # declare an input artifact.
+        self._artifact_store = artifact_store
+        if self._artifact_store is None:
+            resources = getattr(storage, "resources", None)
+            if resources is not None:
+                from ..artifact.store import ArtifactStore
+
+                self._artifact_store = ArtifactStore(resources)
         self._recovered = False
         self._recovery_lock = asyncio.Lock()
 
@@ -113,6 +124,7 @@ class TaskRuntime:
     async def create_job(self, job: JobRecord, root_task) -> JobRecord:
         from .validation import (
             validate_handler_name,
+            validate_job_budget,
             validate_metadata,
             validate_task_key,
             validate_task_policies,
@@ -121,6 +133,7 @@ class TaskRuntime:
         validate_handler_name(root_task.handler)
         validate_task_key(root_task.key)
         validate_metadata(dict(root_task.metadata))
+        validate_job_budget(job.budget)
         #  a NON_IDEMPOTENT root task must cap retries at 1.
         validate_task_policies(root_task.retry_policy, root_task.side_effect_policy)
         record = await self._task_store.create_job(job, root_task)
@@ -153,44 +166,62 @@ class TaskRuntime:
         return await self._task_store.submit_signal(signal)
 
     async def ensure_recovered(self) -> None:
-        """Run lease-expiry recovery once (lock + double-check).
+        """Run lease-expiry recovery once (lock + double-check), then reconcile
+        Runs orphaned by the tasks that were reset.
 
-        Uses a lock + double-check so a restarted process re-converges
-        before accepting work; a failed recovery leaves the flag false
-        so the next call retries."""
+        Uses a lock + double-check so a restarted process re-converges before
+        accepting work. Reconciliation runs STRICT at startup: if it raises, the
+        recovered flag stays false so the next call retries -- the startup
+        reconciliation path must not silently swallow every error."""
         async with self._recovery_lock:
             if self._recovered:
                 return
-            await self._task_store.recover_expired(now=self._clock.now(), limit=500)
+            recovered = await self._task_store.recover_expired(
+                now=self._clock.now(), limit=500
+            )
+            # Advance WAITING tasks past their signal deadline on restart too,
+            # so a bounded wait does not park forever across a crash.
+            _due = await self._task_store.reconcile_due(now=self._clock.now(), limit=500)
+            await self._reconcile_orphan_runs(recovered, strict=True)
             self._recovered = True
 
     # ---- worker driving ----
 
-    async def _reconcile_orphan_runs(self, recovered: "Sequence") -> None:
-        """Post-recovery hook: for each task a recovery pass reset, cancel any
-        Run its superseded attempt had bound but left RUNNING (a worker crash
-        can orphan it). Best-effort and deduped -- a failed cancel must not
-        stall recovery, and a Run is canceled at most once even if multiple
-        attempts referenced it."""
+    async def _reconcile_orphan_runs(
+        self, _recovered: "Sequence[TaskRecord]", *, strict: bool = False
+    ) -> None:
+        """Cancel Runs orphaned by superseded attempts (a worker crash can leave
+        a Run RUNNING whose attempt was superseded). ``_recovered`` is accepted
+        for the RecoverHook signature but the orphan source is
+        ``list_orphan_run_ids`` -- a store-wide scan of superseded attempts --
+        so a RETRIED startup pass still re-finds and re-cancels orphans from a
+        failed pass (``recover_expired`` is idempotent, so the recovered list is
+        empty on retry and cannot be the sole source).
+
+        ``strict`` selects the failure mode: startup (True) accumulates cancel
+        errors and re-raises so ``ensure_recovered`` leaves the recovered flag
+        false and the next call retries; the periodic worker hook (False) stays
+        best-effort. ``run_canceler`` must be idempotent (canceling an
+        already-terminal Run is a no-op), so re-scanning on retry is safe."""
         if self._run_canceler is None:
             return
-        seen: "set[str]" = set()
-        for task in recovered:
+        try:
+            orphan_runs = await self._task_store.list_orphan_run_ids(limit=500)
+        except Exception as exc:  # noqa: BLE001
+            if strict:
+                raise RuntimeError(f"orphan-run scan failed: {exc}") from exc
+            return
+        errors: "list[BaseException]" = []
+        for run_id in orphan_runs:
             try:
-                attempts = await self._task_store.list_attempts(task.id)
-            except Exception:  # noqa: BLE001 - a failed read skips that task
-                continue
-            for att in attempts:
-                if (
-                    att.status == AttemptStatus.SUPERSEDED
-                    and att.run_id
-                    and att.run_id not in seen
-                ):
-                    seen.add(att.run_id)
-                    try:
-                        await self._run_canceler(att.run_id)
-                    except Exception:  # noqa: BLE001 - best-effort
-                        pass
+                await self._run_canceler(run_id)
+            except Exception as exc:  # noqa: BLE001
+                if strict:
+                    errors.append(exc)
+        if strict and errors:
+            raise RuntimeError(
+                f"startup orphan-run reconciliation failed ({len(errors)} error(s))"
+            )
 
     async def run(
         self,
@@ -208,6 +239,7 @@ class TaskRuntime:
             clock=self._clock,
             metrics=self._metrics,
             on_recovered=self._reconcile_orphan_runs if self._run_canceler else None,
+            artifact_store=self._artifact_store,
         )
         await worker.run(worker_id=worker_id, shutdown=shutdown)
 
@@ -281,19 +313,32 @@ class TaskRuntime:
             self.run(worker_id=worker_id or f"oneshot-{job_id}", shutdown=shutdown)
         )
         terminal = (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED)
-        deadline = time.monotonic() + wait_timeout
+        # Drive the wait through the Clock so a FakeClock advances virtual time
+        # (no real sleep) and the polling cadence is testable.
+        deadline = self._clock.now() + timedelta(seconds=wait_timeout)
+        reached_terminal = False
         try:
-            while time.monotonic() < deadline:
+            while self._clock.now() < deadline:
                 job_now = await self.get_job(job_id)
                 if job_now is not None and job_now.status in terminal:
+                    reached_terminal = True
                     break
-                await asyncio.sleep(0.02)
+                await self._clock.sleep(0.02)
         finally:
             shutdown.set()
             try:
                 await asyncio.wait_for(wt, timeout=5)
             except Exception:  # noqa: BLE001 - best-effort worker shutdown
                 wt.cancel()
+        if not reached_terminal:
+            # Timed out without a terminal task: cancel the job so in-flight work
+            # stops, then raise (never hand back a still-running task the caller
+            # could mistake for finished).
+            try:
+                await self.request_cancel(job_id, reason="run_one_task wait timeout")
+            except Exception:  # noqa: BLE001 - best-effort cancel before raising
+                pass
+            raise TaskRunTimeoutError(job_id, task_id, wait_timeout)
         return await self.get_task(task_id)
 
 

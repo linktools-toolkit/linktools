@@ -31,7 +31,7 @@ from .protocols import (
 )
 from .runtime import TaskRuntimeOptions
 from ..security.redact import redact_exception, redact_text
-from .store import TaskClaimLostError, TaskStore
+from .store import TaskClaimLostError, TaskStore, claim_matches_task
 
 if TYPE_CHECKING:
     from .models import TaskRecord
@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 # side effects outside the task store (e.g. canceling Runs orphaned by a
 # crashed worker). Best-effort -- errors in the hook must not stall recovery.
 RecoverHook = Callable[[Sequence["TaskRecord"]], Awaitable[None]]
+
+
+class _InputResolutionFailed(Exception):
+    """Internal control-flow signal: the task's input artifact could not be
+    resolved and the failure was already committed (INVALID_INPUT). _execute
+    catches it to return without running the handler."""
 
 
 class TaskWorker:
@@ -52,6 +58,7 @@ class TaskWorker:
         clock: Clock,
         metrics: "TaskMetrics | None" = None,
         on_recovered: "RecoverHook | None" = None,
+        artifact_store=None,
     ) -> None:
         self._task_store = task_store
         self._handlers = handlers
@@ -59,6 +66,10 @@ class TaskWorker:
         self._clock = clock
         self._metrics: TaskMetrics = metrics or NoopTaskMetrics()
         self._on_recovered = on_recovered
+        # The artifact store turns a task's input_artifact_id into the ArtifactRef
+        # its handler receives. Optional: a runtime that never wires one simply
+        # cannot serve tasks that declare an input artifact.
+        self._artifact_store = artifact_store
 
     async def run(
         self,
@@ -79,6 +90,14 @@ class TaskWorker:
                     recovered = await self._task_store.recover_expired(
                         now=self._clock.now(), limit=100
                     )
+                    # Also advance WAITING tasks past their signal deadline so a
+                    # bounded wait is retried or finalized, not parked forever.
+                    try:
+                        await self._task_store.reconcile_due(
+                            now=self._clock.now(), limit=100
+                        )
+                    except Exception:  # noqa: BLE001 - deadline sweep is best-effort
+                        pass
                     if recovered:
                         await self._metrics.inc_counter(
                             "task_recovered_total", labels={"count_bucket": "batch"}
@@ -137,6 +156,50 @@ class TaskWorker:
         finally:
             sem.release()
 
+    async def _resolve_input_artifact(self, *, claim, job, task):
+        """Turn ``task.input_artifact_id`` into the :class:`ArtifactRef` the
+        handler receives. Returns None when the task declared no input. A task
+        that declares an input artifact but it is missing, unresolvable, or
+        belongs to another tenant is committed as INVALID_INPUT and signals via
+        :class:`_InputResolutionFailed` so the handler never runs."""
+        artifact_id = task.input_artifact_id
+        if artifact_id is None:
+            return None
+        if self._artifact_store is None:
+            await self._commit_input_failure(
+                claim,
+                f"task declares input artifact {artifact_id!r} but no artifact store is wired",
+            )
+            raise _InputResolutionFailed
+        try:
+            record = await self._artifact_store.stat(
+                artifact_id, tenant_id=job.principal.tenant_id
+            )
+        except Exception as exc:  # noqa: BLE001 - any store error fails the input
+            await self._commit_input_failure(
+                claim, f"input artifact {artifact_id!r} could not be read: {exc}"
+            )
+            raise _InputResolutionFailed from exc
+        if record is None:
+            await self._commit_input_failure(
+                claim, f"input artifact not found: {artifact_id!r}"
+            )
+            raise _InputResolutionFailed
+        return record.ref
+
+    async def _commit_input_failure(self, claim, message: str) -> None:
+        try:
+            await self._task_store.commit_failure(
+                claim,
+                TaskFailure(
+                    kind=TaskFailureKind.INVALID_INPUT,
+                    error_type="InputArtifact",
+                    message=redact_text(message),
+                ),
+            )
+        except TaskClaimLostError:
+            pass
+
     async def _execute(self, claimed, claimed_at) -> None:
         claim = claimed.claim
         task = claimed.task
@@ -174,24 +237,23 @@ class TaskWorker:
             actor_chain=(
                 task.actor_chain if task.actor_chain is not None else job.actor_chain
             ),
-            delegated_scopes=(
-                task.delegated_scopes
-                if task.delegated_scopes is not None
-                else job.actor_chain.delegated_scopes
-            ),
+            delegated_scopes=task.delegated_scopes,
             budget=job.budget,
             resource_snapshots=task.resource_snapshots,
             cancellation=cancellation,
         )
+        try:
+            input_artifact = await self._resolve_input_artifact(claim=claim, job=job, task=task)
+        except _InputResolutionFailed:
+            # Already committed as INVALID_INPUT; never run the handler against a
+            # missing or unresolvable input artifact.
+            return
         request = TaskRequest(
-            input_artifact=None,
+            input_artifact=input_artifact,
             metadata=dict(task.metadata),
         )
 
         heartbeat = asyncio.create_task(self._heartbeat(claim, cancellation))
-        cancel_watcher = asyncio.create_task(
-            self._watch_cancellation(claim, cancellation)
-        )
         try:
             outcome: "TaskSuccess | TaskFailure | None" = None
             handler_cancelled = False
@@ -275,7 +337,6 @@ class TaskWorker:
                 pass
         finally:
             heartbeat.cancel()
-            cancel_watcher.cancel()
 
     async def _commit_with_retry(
         self,
@@ -324,19 +385,25 @@ class TaskWorker:
             task = await self._task_store.get_task(claim.task_id)
         except Exception:  # noqa: BLE001 - a failed re-read means we can't confirm
             return False
-        return (
-            task is not None
-            and task.status in (TaskStatus.CLAIMED, TaskStatus.CANCELLING)
-            and task.active_attempt_id == claim.attempt_id
-        )
+        return task is not None and claim_matches_task(claim, task)
 
     async def _heartbeat(self, claim, cancellation: CancellationToken) -> None:
-        """Renew the lease periodically while the handler runs. If renewal
-        fails (lease reclaimed), trigger cancellation so the handler stops."""
+        """The SOLE lease renewer and the cancellation observer. It sleeps for
+        the heartbeat interval, renews the lease, and:
+
+        * on a lost claim (TaskClaimLostError -- reclaimed or fencing failed),
+          triggers cancellation so the handler stops;
+        * on a transient store error, counts it and keeps the lease alive;
+        * when the renewed task reads back CANCELLING/CANCELLED (a
+          ``request_cancel`` from another caller landed), triggers cancellation
+          so a cooperative handler stops early.
+
+        Folding status observation into the heartbeat avoids a second task that
+        races it for lease renewal (duplicate writes, renewal contention)."""
         while True:
             await self._clock.sleep(self._options.heartbeat_seconds)
             try:
-                await self._task_store.renew_lease(
+                task = await self._task_store.renew_lease(
                     task_id=claim.task_id,
                     attempt_id=claim.attempt_id,
                     worker_id=claim.worker_id,
@@ -349,37 +416,12 @@ class TaskWorker:
                 cancellation.trigger()
                 return
             except Exception:  # noqa: BLE001 - transient store error: keep retrying
-                # Count it (a silent death here would mask lease-renew failures
-                # from the metrics) and keep going -- the lease is still ours
-                # until it expires, and the sleep above paces the retries.
+                # Count it (a silent death here would mask lease-renew failures)
+                # and keep going -- the lease is still ours until it expires, and
+                # the sleep above paces the retries.
                 await self._metrics.inc_counter("task_lease_renew_failure_total")
                 continue
-
-    async def _watch_cancellation(self, claim, cancellation: CancellationToken) -> None:
-        """Poll the task status; if it transitions to CANCELLING (via
-        request_cancel from another caller), trigger the handler's
-        cancellation token so a cooperative handler can stop early."""
-        while True:
-            await self._clock.sleep(self._options.heartbeat_seconds)
-            try:
-                task = await self._task_store.get_task(claim.task_id)
-                if task is None:
-                    return
-                if task.status.value in ("cancelling", "cancelled"):
-                    cancellation.trigger()
-                    return
-            except Exception:  # noqa: BLE001 - poll failures are non-fatal
-                return
-            try:
-                await self._task_store.renew_lease(
-                    task_id=claim.task_id,
-                    attempt_id=claim.attempt_id,
-                    worker_id=claim.worker_id,
-                    fencing_token=claim.fencing_token,
-                    now=self._clock.now(),
-                    lease_seconds=self._options.lease_seconds,
-                )
-            except TaskClaimLostError:
+            if task.status in (TaskStatus.CANCELLING, TaskStatus.CANCELLED):
                 cancellation.trigger()
                 return
 

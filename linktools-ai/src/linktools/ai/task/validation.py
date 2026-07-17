@@ -99,6 +99,27 @@ def validate_task_policies(retry: object, side_effect: object) -> None:
         )
 
 
+def validate_job_budget(budget: object) -> None:
+    """A job always owns at least its root task, so ``max_tasks`` -- when set --
+    must be >= 1 or the root task can never coexist with its own budget. The
+    other caps (depth/attempts/runtime/tokens/cost) are only bounded below by
+    positivity when set. ``max_tasks`` is the one that can brick a legal job."""
+    max_tasks = getattr(budget, "max_tasks", None)
+    if max_tasks is not None and max_tasks < 1:
+        raise ValueError(
+            "job budget max_tasks must be >= 1 because every job has a root task"
+        )
+    max_depth = getattr(budget, "max_depth", None)
+    if max_depth is not None and max_depth < 0:
+        raise ValueError("job budget max_depth must be >= 0")
+    max_attempts = getattr(budget, "max_attempts", None)
+    if max_attempts is not None and max_attempts < 1:
+        raise ValueError("job budget max_attempts must be >= 1")
+    max_runtime = getattr(budget, "max_runtime_seconds", None)
+    if max_runtime is not None and max_runtime <= 0:
+        raise ValueError("job budget max_runtime_seconds must be > 0")
+
+
 __all__: "list[str]" = [
     "validate_handler_name",
     "validate_task_key",
@@ -108,5 +129,6 @@ __all__: "list[str]" = [
     "validate_output_payload",
     "validate_create_task",
     "validate_task_policies",
+    "validate_job_budget",
     "MAX_OUTPUT_PAYLOAD_BYTES",
 ]

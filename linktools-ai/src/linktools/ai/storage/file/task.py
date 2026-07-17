@@ -26,16 +26,20 @@ from pathlib import Path
 
 from ...task.models import (
     AttemptStatus,
+    CLAIMABLE_JOB_STATUSES,
     JOB_TRANSITIONS,
     JOB_TERMINAL,
     JobRecord,
     JobStatus,
     SideEffectMode,
+    TASK_TERMINAL,
     TaskAttemptRecord,
     TaskRecord,
     TaskSignalRecord,
     TaskStatus,
     TaskTransitionRecord,
+    TaskWaitCondition,
+    TaskFailureKind,
     assert_attempt_transition,
     assert_job_transition,
     assert_task_transition,
@@ -56,7 +60,10 @@ from ...task.protocols import (
 )
 from ...task.store import (
     ClaimedTask,
+    InvalidTaskCommandError,
     JobNotFoundError,
+    RunnableBindingError,
+    TaskBudgetExceededError,
     TaskClaim,
     TaskClaimLostError,
     TaskNotFoundError,
@@ -234,6 +241,16 @@ class FileTaskStore:
         async with self._lock:
             return await asyncio.to_thread(self._recover_expired_sync, now, limit)
 
+    async def reconcile_due(
+        self, *, now: datetime, limit: int = 100
+    ) -> "tuple[TaskRecord, ...]":
+        async with self._lock:
+            return await asyncio.to_thread(self._reconcile_due_sync, now, limit)
+
+    async def list_orphan_run_ids(self, *, limit: int = 500) -> "tuple[str, ...]":
+        async with self._lock:
+            return await asyncio.to_thread(self._list_orphan_run_ids_sync, limit)
+
     async def list_attempts(self, task_id: str) -> "tuple[TaskAttemptRecord, ...]":
         async with self._lock:
             return await asyncio.to_thread(self._list_attempts_sync, task_id)
@@ -250,15 +267,38 @@ class FileTaskStore:
         async with self._lock:
             return await asyncio.to_thread(self._bind_run_sync, **kwargs)
 
+    async def bind_runnable(self, **kwargs) -> TaskRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._bind_runnable_sync, **kwargs)
+
     # ----------------------------------------------------------- sync impl --
 
     def _create_job_sync(self, job: JobRecord, root_task: TaskRecord) -> JobRecord:
+        from ...task.validation import validate_job_budget
+
+        # The store re-validates the budget so the domain invariant holds even
+        # for callers that bypass TaskRuntime.
+        validate_job_budget(job.budget)
         if self._job_path(job.id).exists():
             raise FileExistsError(job.id)
         now = job.created_at
         self._write(self._job_path(job.id), job)
         # Root task is created READY (dependencies satisfied) so it is claimable.
-        root = dataclasses.replace(root_task, job_id=job.id, status=TaskStatus.READY)
+        # Resolve its effective delegated scopes from the job's actor chain at
+        # creation: a root with no explicit scopes inherits the job's scopes
+        # (None = unrestricted). Persisting the resolved value means None at the
+        # TaskRecord level has the single "unrestricted" meaning, never
+        # "unresolved/inherit".
+        from ...task.models import resolve_effective_scopes
+
+        root = dataclasses.replace(
+            root_task,
+            job_id=job.id,
+            status=TaskStatus.READY,
+            delegated_scopes=resolve_effective_scopes(
+                root_task.delegated_scopes, job.actor_chain.delegated_scopes
+            ),
+        )
         self._write(self._task_path(job.id, root.id), root)
         self._append_transition(
             job.id,
@@ -314,27 +354,16 @@ class FileTaskStore:
             if not claimable or task.available_at > now:
                 continue
             job = self._read_job(job_id)
-            if job.status in (JobStatus.CANCELLING, JobStatus.CANCELLED):
+            # Whitelist claimable job statuses: a terminal (SUCCEEDED/FAILED/
+            # CANCELLED) or CANCELLING job must never produce a new attempt, and
+            # a future JobStatus is never claimable by default.
+            if job.status not in CLAIMABLE_JOB_STATUSES:
                 continue
-            # Budget enforcement: task cap + total-attempt cap (each claim is a
-            # new attempt). max_tasks limits total work units; max_attempts
-            # limits the job's aggregate retries across all its tasks.
-            existing = None
-            max_tasks = job.budget.max_tasks
-            max_attempts = job.budget.max_attempts
-            if max_tasks is not None or max_attempts is not None:
-                existing = self._list_tasks_sync(job_id, None)
-                if max_tasks is not None and len(existing) >= max_tasks:
-                    continue
-                if max_attempts is not None:
-                    if sum(t.attempt_count for t in existing) >= max_attempts:
-                        continue
-            # Budget enforcement: refuse to claim once the job has run past its
-            # total runtime cap.
-            max_runtime = job.budget.max_runtime_seconds
-            if max_runtime is not None and job.started_at is not None:
-                if (now - job.started_at).total_seconds() > max_runtime:
-                    continue
+            # Aggregate budget exhaustion (attempts / runtime) is NOT a reason
+            # to skip a candidate and leave it as a permanently-unclaimable
+            # READY zombie -- it finalizes the whole job here and we move on.
+            if self._job_budget_exhausted_sync(job_id, job, now):
+                continue
             key = (task.available_at, task.created_at)
             if best is None or key < best[0]:
                 best = (key, job_id, task)
@@ -434,6 +463,128 @@ class FileTaskStore:
             raise TaskClaimLostError(claim.task_id)
         return task
 
+    def _job_budget_exhausted_sync(
+        self, job_id: str, job: JobRecord, now: datetime
+    ) -> bool:
+        """If the job has exhausted its aggregate attempt or runtime budget,
+        finalize every non-terminal task via the legal CANCELLING -> CANCELLED
+        path and fail the job, so no READY task is left as a permanently-
+        unclaimable zombie. A budget exhaustion is NOT a handler execution, so
+        no new attempt is created. Returns True iff the job was finalized here.
+
+        Tasks land CANCELLED (the only legal terminal edge from READY/RETRY_WAIT
+        without a handler run); the job lands FAILED via CANCELLING -> FAILED
+        and the transition ``reason`` records which budget was exceeded."""
+        budget = job.budget
+        tasks = self._list_tasks_sync(job_id, None)
+        runtime_exceeded = (
+            budget.max_runtime_seconds is not None
+            and job.started_at is not None
+            and (now - job.started_at).total_seconds() > budget.max_runtime_seconds
+        )
+        attempts_exceeded = (
+            budget.max_attempts is not None
+            and sum(t.attempt_count for t in tasks) >= budget.max_attempts
+        )
+        if not (runtime_exceeded or attempts_exceeded):
+            return False
+        reason = (
+            "job_runtime_budget_exceeded"
+            if runtime_exceeded
+            else "job_attempt_budget_exceeded"
+        )
+        for t in tasks:
+            if t.status in TASK_TERMINAL:
+                continue
+            pre = t.status
+            att_id = t.active_attempt_id
+            if pre != TaskStatus.CANCELLING:
+                assert_task_transition(pre, TaskStatus.CANCELLING)
+            assert_task_transition(TaskStatus.CANCELLING, TaskStatus.CANCELLED)
+            cancelled = dataclasses.replace(
+                t,
+                status=TaskStatus.CANCELLED,
+                lease_owner=None,
+                lease_expires_at=None,
+                active_attempt_id=None,
+                updated_at=now,
+                version=t.version + 1,
+            )
+            self._write(self._task_path(job_id, t.id), cancelled)
+            # Close the now-orphaned active attempt: a CLAIMED task had a
+            # RUNNING attempt that must not be left RUNNING forever.
+            if att_id:
+                apath = self._attempt_path(job_id, att_id)
+                if apath.exists():
+                    att = from_jsonable(
+                        TaskAttemptRecord, self._read(apath)  # type: ignore[arg-type]
+                    )
+                    if att.status == AttemptStatus.RUNNING:
+                        self._write(
+                            apath,
+                            dataclasses.replace(
+                                att,
+                                status=AttemptStatus.CANCELLED,
+                                finished_at=now,
+                            ),
+                        )
+            # Record one legal transition per actual step so every audit edge
+            # is itself legal (never a direct READY -> CANCELLED, which the
+            # task transition table forbids).
+            if pre != TaskStatus.CANCELLING:
+                self._append_transition(
+                    job_id,
+                    task_id=t.id,
+                    attempt_id=att_id,
+                    from_status=pre.value,
+                    to_status=TaskStatus.CANCELLING.value,
+                    reason=reason,
+                    now=now,
+                )
+            self._append_transition(
+                job_id,
+                task_id=t.id,
+                attempt_id=att_id,
+                from_status=TaskStatus.CANCELLING.value,
+                to_status=TaskStatus.CANCELLED.value,
+                reason=reason,
+                now=now,
+            )
+        # Job -> FAILED via legal edges only; record one transition per actual
+        # step so every audit edge is itself legal (never a direct WAITING ->
+        # FAILED, which the transition table forbids).
+        pre_job = job.status
+        if pre_job != JobStatus.CANCELLING:
+            assert_job_transition(pre_job, JobStatus.CANCELLING)
+        assert_job_transition(JobStatus.CANCELLING, JobStatus.FAILED)
+        failed = dataclasses.replace(
+            job,
+            status=JobStatus.FAILED,
+            finished_at=now,
+            version=job.version + 1,
+        )
+        self._write(self._job_path(job_id), failed)
+        if pre_job != JobStatus.CANCELLING:
+            self._append_transition(
+                job_id,
+                task_id=None,
+                attempt_id=None,
+                from_status=pre_job.value,
+                to_status=JobStatus.CANCELLING.value,
+                reason=reason,
+                now=now,
+            )
+        self._append_transition(
+            job_id,
+            task_id=None,
+            attempt_id=None,
+            from_status=JobStatus.CANCELLING.value,
+            to_status=JobStatus.FAILED.value,
+            reason=reason,
+            now=now,
+        )
+        return True
+
     def _commit_success_sync(
         self, claim: TaskClaim, outcome: TaskSuccess
     ) -> TaskRecord:
@@ -448,6 +599,37 @@ class FileTaskStore:
         # CANCELLED (no commands applied).
         if task.status == TaskStatus.CANCELLING:
             return self._commit_cancelled_sync(job_id, claim, task, now)
+
+        # Atomic budget pre-check for child creation: count every CreateTask
+        # command ONCE against the job's live task total before any child is
+        # written, so a budget breach fails the whole commit (all or none) and
+        # never leaves the first two of three children created. Done before the
+        # attempt/parent are flipped so the task is not marked successful on a
+        # breach.
+        create_commands = [
+            c for c in outcome.commands if isinstance(c, CreateTask)
+        ]
+        if create_commands:
+            job = self._read_job(job_id)
+            self._assert_child_budget_sync(job_id, job, task, create_commands)
+
+        # CompleteJob all-or-none gate: a handler that both creates children and
+        # completes the job is contradictory -- the new
+        # children would be live siblings. Reject this BEFORE any child is
+        # written, so the commit is atomic (no partial creation followed by a
+        # mid-loop CompleteJob failure that would wedge the task).
+        if any(isinstance(c, CompleteJob) for c in outcome.commands):
+            live_siblings = [
+                t
+                for t in self._list_tasks_sync(job_id, None)
+                if t.id != task.id and t.status not in TASK_TERMINAL
+            ]
+            if create_commands or live_siblings:
+                raise InvalidTaskCommandError(
+                    "CompleteJob requires the committing task to be the only "
+                    "non-terminal task; it cannot combine with CreateTask or "
+                    "run alongside live siblings"
+                )
 
         # Determine target: WaitSignal → WAITING (await external signal);
         # otherwise SUCCEEDED.
@@ -474,15 +656,28 @@ class FileTaskStore:
         new_attempt = dataclasses.replace(
             attempt, status=AttemptStatus.SUCCEEDED, finished_at=now
         )
-        # Persist WaitSignal conditions so submit_signal can match them.
+        # Persist WaitSignal conditions as first-class state (not metadata) so
+        # submit_signal / reconcile_due can match them deterministically. v1
+        # allows a single signal condition per task; a bounded wait carries its
+        # deadline so reconcile_due can expire it.
         if has_wait:
             wait_signals = [c for c in outcome.commands if isinstance(c, WaitSignal)]
-            wait_on = [
-                {"name": ws.name, "correlation_key": ws.correlation_key}
-                for ws in wait_signals
-            ]
+            if len(wait_signals) > 1:
+                raise InvalidTaskCommandError(
+                    "a task may wait for only one signal condition"
+                )
+            ws = wait_signals[0]
+            deadline = (
+                now + timedelta(seconds=ws.timeout_seconds)
+                if ws.timeout_seconds is not None
+                else None
+            )
             new_task = dataclasses.replace(
-                new_task, metadata={**dict(new_task.metadata), "wait_on": wait_on}
+                new_task,
+                wait_conditions=(
+                    TaskWaitCondition(name=ws.name, correlation_key=ws.correlation_key),
+                ),
+                wait_deadline_at=deadline,
             )
         #  the attempt + commands are persisted BEFORE the parent task is
         # flipped to its terminal status, so a crash never leaves the parent
@@ -494,38 +689,14 @@ class FileTaskStore:
             if isinstance(cmd, CreateTask):
                 self._apply_create_task(job_id, task, cmd, now)
             elif isinstance(cmd, CompleteJob):
-                job = self._read_job(job_id)
-                if job.status == JobStatus.RUNNING:
-                    assert_job_transition(job.status, JobStatus.SUCCEEDED)
-                    self._write(
-                        self._job_path(job_id),
-                        dataclasses.replace(
-                            job,
-                            status=JobStatus.SUCCEEDED,
-                            finished_at=now,
-                            output_artifact_id=(
-                                cmd.output_artifact.id if cmd.output_artifact else None
-                            ),
-                        ),
-                    )
+                self._complete_job_sync(job_id, claim.task_id, cmd, now)
             elif isinstance(cmd, CancelTask):
-                ct = self._read_task(job_id, cmd.task_id)
-                if ct and ct.status not in (
-                    TaskStatus.SUCCEEDED,
-                    TaskStatus.FAILED,
-                    TaskStatus.CANCELLED,
-                ):
-                    assert_task_transition(ct.status, TaskStatus.CANCELLING)
-                    assert_task_transition(TaskStatus.CANCELLING, TaskStatus.CANCELLED)
-                    self._write(
-                        self._task_path(job_id, ct.id),
-                        dataclasses.replace(
-                            ct, status=TaskStatus.CANCELLED, updated_at=now
-                        ),
-                    )
+                self._cancel_task_in_job_sync(job_id, cmd, now)
             elif isinstance(cmd, CancelJob):
-                target_job = cmd.job_id or job_id
-                self._request_cancel_sync(target_job, None)
+                # A handler CancelJob always targets the CURRENT job only --
+                # the command carries no job_id, so cross-job cancellation is
+                # not expressible here (use TaskRuntime.request_cancel).
+                self._request_cancel_sync(job_id, cmd.reason)
 
         #  the parent task is flipped to its terminal status LAST, after
         # every child task / signal / dependency update has been persisted, so
@@ -545,6 +716,139 @@ class FileTaskStore:
         self._converge_jobs_sync(now)
         return new_task
 
+    def _assert_child_budget_sync(
+        self,
+        job_id: str,
+        job: JobRecord,
+        parent: TaskRecord,
+        create_commands: "list[CreateTask]",
+    ) -> None:
+        """Atomic child-budget gate: check the live task total + every CreateTask
+        command at once, before any child is written,
+        so a breach fails the whole commit (all-or-none) instead of leaving the
+        first N children created. Depth and count breaches both raise."""
+        max_depth = job.budget.max_depth
+        child_depth = parent.depth + 1
+        if max_depth is not None and child_depth > max_depth:
+            raise TaskBudgetExceededError(
+                f"task depth {child_depth} exceeds max_depth {max_depth}"
+            )
+        max_tasks = job.budget.max_tasks
+        if max_tasks is not None:
+            current = len(self._list_tasks_sync(job_id, None))
+            if current + len(create_commands) > max_tasks:
+                raise TaskBudgetExceededError(
+                    f"job {job_id} task budget exhausted: "
+                    f"{current}/{max_tasks}"
+                )
+
+    def _assert_job_can_complete_sync(
+        self, current_task_id: str, tasks: "tuple[TaskRecord, ...]"
+    ) -> None:
+        """CompleteJob is only legal when the committing task is the sole
+        non-terminal task in the job. A live sibling means the handler is
+        trying to finish the job out from under running work -- reject it so the
+        task stays claimed rather than landing SUCCEEDED prematurely."""
+        live = [
+            t
+            for t in tasks
+            if t.id != current_task_id and t.status not in TASK_TERMINAL
+        ]
+        if live:
+            ids = ", ".join(t.id for t in live[:5])
+            raise InvalidTaskCommandError(
+                "CompleteJob requires all sibling tasks to be terminal; "
+                f"non-terminal tasks: {ids}"
+            )
+
+    def _complete_job_sync(
+        self, job_id: str, current_task_id: str, cmd: CompleteJob, now: datetime
+    ) -> None:
+        job = self._read_job(job_id)
+        if job.status in JOB_TERMINAL:
+            return  # already finished -- nothing CompleteJob can do
+        tasks = self._list_tasks_sync(job_id, None)
+        self._assert_job_can_complete_sync(current_task_id, tasks)
+        output_artifact_id = cmd.output_artifact.id if cmd.output_artifact else None
+        # Move to SUCCEEDED via legal edges only (a WAITING job two-steps
+        # through RUNNING). finished_at + the recorded output land on the
+        # terminal step.
+        steps = (
+            [JobStatus.RUNNING, JobStatus.SUCCEEDED]
+            if job.status == JobStatus.WAITING
+            else [JobStatus.SUCCEEDED]
+        )
+        current = job.status
+        record = job
+        for nxt in steps:
+            if nxt == current:
+                continue
+            if nxt not in JOB_TRANSITIONS.get(current, frozenset()):
+                break
+            record = dataclasses.replace(
+                record,
+                status=nxt,
+                finished_at=now if nxt in JOB_TERMINAL else record.finished_at,
+                output_artifact_id=(
+                    output_artifact_id
+                    if nxt == JobStatus.SUCCEEDED
+                    else record.output_artifact_id
+                ),
+                version=record.version + 1,
+            )
+            current = nxt
+        if record.status != job.status:
+            self._write(self._job_path(job_id), record)
+
+    def _cancel_task_in_job_sync(
+        self, job_id: str, cmd: CancelTask, now: datetime
+    ) -> None:
+        """CancelTask is scoped to the current job: a handler cannot name a task
+        outside the job whose task produced this command. The file backend stores
+        tasks under their job dir, so a foreign id is simply absent -- surfaced
+        here as an explicit scope error rather than a silent no-op."""
+        path = self._task_path(job_id, cmd.task_id)
+        if not path.exists():
+            raise InvalidTaskCommandError(
+                f"CancelTask target {cmd.task_id!r} is not in job {job_id}"
+            )
+        ct = self._read_task(job_id, cmd.task_id)
+        if ct.status in TASK_TERMINAL:
+            return  # already terminal
+        pre = ct.status
+        assert_task_transition(pre, TaskStatus.CANCELLING)
+        assert_task_transition(TaskStatus.CANCELLING, TaskStatus.CANCELLED)
+        self._write(
+            self._task_path(job_id, ct.id),
+            dataclasses.replace(
+                ct,
+                status=TaskStatus.CANCELLED,
+                updated_at=now,
+                version=ct.version + 1,
+            ),
+        )
+        # Record one legal transition per actual step (never a direct
+        # READY -> CANCELLED), matching the budget-finalization audit shape.
+        if pre != TaskStatus.CANCELLING:
+            self._append_transition(
+                job_id,
+                task_id=ct.id,
+                attempt_id=None,
+                from_status=pre.value,
+                to_status=TaskStatus.CANCELLING.value,
+                reason="cancelled",
+                now=now,
+            )
+        self._append_transition(
+            job_id,
+            task_id=ct.id,
+            attempt_id=None,
+            from_status=TaskStatus.CANCELLING.value,
+            to_status=TaskStatus.CANCELLED.value,
+            reason="cancelled",
+            now=now,
+        )
+
     def _apply_create_task(
         self, job_id: str, parent: TaskRecord, cmd: CreateTask, now: datetime
     ) -> None:
@@ -562,10 +866,15 @@ class FileTaskStore:
                     f"duplicate task key {cmd.key!r} in job {job_id}"
                 )
         child_depth = parent.depth + 1
-        # Budget guardrail (max_depth): a child beyond the depth cap is not
-        # created -- the parent still succeeds, recursion stays bounded.
+        # Budget guardrail (max_depth): a child beyond the depth cap fails the
+        # commit -- it is never silently dropped, because a silent drop lets the
+        # parent succeed while its recursion quietly vanishes. (commit_success
+        # checks this atomically up front; this is the defense-in-depth guard
+        # for any direct caller.)
         if job.budget.max_depth is not None and child_depth > job.budget.max_depth:
-            return
+            raise TaskBudgetExceededError(
+                f"task depth {child_depth} exceeds max_depth {job.budget.max_depth}"
+            )
         child_scopes, child_chain = narrow_child_principal(
             parent, cmd.delegated_scopes, cmd.handler, job.actor_chain
         )
@@ -874,13 +1183,11 @@ class FileTaskStore:
             return from_jsonable(type(signal), self._read(path))  # type: ignore[return-value]
         self._write(path, signal)
         for task in self._list_tasks_sync(job_id, TaskStatus.WAITING):
-            wait_on = task.metadata.get("wait_on", [])
-            # A WAITING task with no recorded wait conditions matches nothing:
+            # Match against the task's structured wait_conditions (not metadata):
             # only an explicit (name, correlation_key) it asked for wakes it.
             matched = any(
-                w["name"] == signal.name
-                and w["correlation_key"] == signal.correlation_key
-                for w in wait_on
+                c.name == signal.name and c.correlation_key == signal.correlation_key
+                for c in task.wait_conditions
             )
             if not matched:
                 continue
@@ -889,6 +1196,8 @@ class FileTaskStore:
                 task,
                 status=TaskStatus.READY,
                 available_at=now,
+                wait_conditions=(),
+                wait_deadline_at=None,
                 updated_at=now,
                 version=task.version + 1,
             )
@@ -927,11 +1236,10 @@ class FileTaskStore:
                 if signal.consumed_by_task_id is not None:
                     continue  # already consumed
                 for task in self._list_tasks_sync(job_id, TaskStatus.WAITING):
-                    wait_on = task.metadata.get("wait_on", [])
                     if not any(
-                        w["name"] == signal.name
-                        and w["correlation_key"] == signal.correlation_key
-                        for w in wait_on
+                        c.name == signal.name
+                        and c.correlation_key == signal.correlation_key
+                        for c in task.wait_conditions
                     ):
                         continue
                     assert_task_transition(task.status, TaskStatus.READY)
@@ -939,6 +1247,8 @@ class FileTaskStore:
                         task,
                         status=TaskStatus.READY,
                         available_at=now,
+                        wait_conditions=(),
+                        wait_deadline_at=None,
                         updated_at=now,
                         version=task.version + 1,
                     )
@@ -1032,6 +1342,88 @@ class FileTaskStore:
         self._converge_jobs_sync(now)
         return tuple(recovered)
 
+    def _reconcile_due_sync(self, now, limit) -> "tuple[TaskRecord, ...]":
+        """Move WAITING tasks past their signal deadline to a retry or a
+        terminal cancel. A deadline is not a handler run, so no new attempt is
+        created. Retryable (TIMEOUT in the retry policy AND attempts remain):
+        WAITING -> READY, paced by available_at. Otherwise WAITING ->
+        CANCELLING -> CANCELLED (the only legal terminal edge from WAITING
+        without a handler run; FAILED is unreachable without expanding the
+        state machine)."""
+        handled = []
+        count = 0
+        for job_id, task_file in self._all_task_files():
+            if count >= limit:
+                break
+            task: TaskRecord = from_jsonable(TaskRecord, self._read(task_file))  # type: ignore[assignment]
+            if task.status != TaskStatus.WAITING:
+                continue
+            if task.wait_deadline_at is None or task.wait_deadline_at > now:
+                continue
+            retryable = (
+                TaskFailureKind.TIMEOUT in task.retry_policy.retryable_kinds
+                and task.attempt_count < task.retry_policy.max_attempts
+            )
+            if retryable:
+                delay = _retry_delay(task.retry_policy, task.attempt_count)
+                assert_task_transition(task.status, TaskStatus.READY)
+                reset = dataclasses.replace(
+                    task,
+                    status=TaskStatus.READY,
+                    available_at=now + timedelta(seconds=delay),
+                    wait_conditions=(),
+                    wait_deadline_at=None,
+                    updated_at=now,
+                    version=task.version + 1,
+                )
+                self._write(self._task_path(job_id, task.id), reset)
+                self._append_transition(
+                    job_id,
+                    task_id=task.id,
+                    attempt_id=None,
+                    from_status=task.status.value,
+                    to_status=TaskStatus.READY.value,
+                    reason="signal_timeout_retry",
+                    now=now,
+                )
+            else:
+                assert_task_transition(task.status, TaskStatus.CANCELLING)
+                assert_task_transition(TaskStatus.CANCELLING, TaskStatus.CANCELLED)
+                reset = dataclasses.replace(
+                    task,
+                    status=TaskStatus.CANCELLED,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    active_attempt_id=None,
+                    wait_conditions=(),
+                    wait_deadline_at=None,
+                    updated_at=now,
+                    version=task.version + 1,
+                )
+                self._write(self._task_path(job_id, task.id), reset)
+                self._append_transition(
+                    job_id,
+                    task_id=task.id,
+                    attempt_id=None,
+                    from_status=task.status.value,
+                    to_status=TaskStatus.CANCELLING.value,
+                    reason="signal_timeout",
+                    now=now,
+                )
+                self._append_transition(
+                    job_id,
+                    task_id=task.id,
+                    attempt_id=None,
+                    from_status=TaskStatus.CANCELLING.value,
+                    to_status=TaskStatus.CANCELLED.value,
+                    reason="signal_timeout",
+                    now=now,
+                )
+            handled.append(reset)
+            count += 1
+        self._converge_jobs_sync(now)
+        return tuple(handled)
+
     def _converge_jobs_sync(self, now: datetime) -> None:
         jobs_dir = self._root / "jobs"
         if not jobs_dir.exists():
@@ -1119,6 +1511,35 @@ class FileTaskStore:
             if from_jsonable(TaskAttemptRecord, self._read(f)).task_id == task_id  # type: ignore[arg-type]
         )
 
+    def _list_orphan_run_ids_sync(self, limit: int) -> "tuple[str, ...]":
+        """All run_ids referenced by SUPERSEDED attempts (deduped), independent
+        of the recovered-task list. This is the source reconcile uses so a
+        retried startup pass still re-finds orphans from a failed pass
+        (recover_expired itself is idempotent)."""
+        seen: "set[str]" = set()
+        out: "list[str]" = []
+        for job_dir in sorted((self._root / "jobs").iterdir()) if (self._root / "jobs").exists() else []:
+            attempts_dir = job_dir / "attempts"
+            if not attempts_dir.exists():
+                continue
+            for f in sorted(attempts_dir.iterdir()):
+                try:
+                    att = from_jsonable(
+                        TaskAttemptRecord, self._read(f)  # type: ignore[arg-type]
+                    )
+                except Exception:  # noqa: BLE001 - skip unreadable attempt files
+                    continue
+                if (
+                    att.status == AttemptStatus.SUPERSEDED
+                    and att.run_id
+                    and att.run_id not in seen
+                ):
+                    seen.add(att.run_id)
+                    out.append(att.run_id)
+                    if len(out) >= limit:
+                        return tuple(out)
+        return tuple(out)
+
     def _list_transitions_sync(self, job_id: str) -> "tuple[TaskTransitionRecord, ...]":
         d = self._transitions_dir(job_id)
         if not d.exists():
@@ -1175,6 +1596,55 @@ class FileTaskStore:
         bound = dataclasses.replace(att, run_id=run_id)
         self._write(self._attempt_path(job_id, attempt_id), bound)
         return bound
+
+    def _bind_runnable_sync(
+        self,
+        *,
+        task_id,
+        attempt_id,
+        fencing_token,
+        worker_id,
+        runnable_id,
+        revision,
+        fingerprint,
+    ) -> TaskRecord:
+        owner = self._find_task_owner_job(task_id)
+        if owner is None:
+            raise TaskNotFoundError(task_id)
+        job_id, _ = owner
+        claim = TaskClaim(
+            task_id=task_id,
+            attempt_id=attempt_id,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+        )
+        task = self._guard(job_id, claim)
+        now = self._clock.now()
+        if task.resolved_runnable_id is None:
+            # First resolution: pin it.
+            bound = dataclasses.replace(
+                task,
+                resolved_runnable_id=runnable_id,
+                resolved_runnable_revision=revision,
+                resolved_runnable_fingerprint=fingerprint,
+                updated_at=now,
+                version=task.version + 1,
+            )
+            self._write(self._task_path(job_id, task_id), bound)
+            return bound
+        if (
+            task.resolved_runnable_id == runnable_id
+            and task.resolved_runnable_revision == revision
+            and task.resolved_runnable_fingerprint == fingerprint
+        ):
+            return task  # idempotent re-bind on a retry
+        raise RunnableBindingError(
+            f"runnable binding drift on task {task_id}: pinned "
+            f"{task.resolved_runnable_id}/"
+            f"{task.resolved_runnable_revision}/"
+            f"{task.resolved_runnable_fingerprint} != resolved "
+            f"{runnable_id}/{revision}/{fingerprint}"
+        )
 
 
 def _retry_delay(policy, attempt_number: int) -> float:

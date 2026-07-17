@@ -23,12 +23,14 @@ from linktools.ai.task.models import (
     JobRecord,
     JobStatus,
     RetryPolicy,
+    ScopeSet,
     SideEffectPolicy,
     TaskBudget,
     TaskFailureKind,
     TaskPrincipal,
     TaskRecord,
     TaskStatus,
+    TaskWaitCondition,
 )
 from linktools.ai.task.protocols import TaskFailure, TaskSuccess
 from linktools.ai.task.store import TaskClaimLostError
@@ -344,10 +346,12 @@ def test_wait_signal_command_transitions_to_waiting(task_store) -> None:
             TaskSuccess(commands=(WaitSignal(name="review", correlation_key="c1"),)),
         )
         assert result.status == TaskStatus.WAITING
-        # The wait condition is persisted so submit_signal can match it.
-        assert result.metadata.get("wait_on") == [
-            {"name": "review", "correlation_key": "c1"}
-        ]
+        # The wait condition is persisted as first-class state so submit_signal
+        # can match it; an unbounded wait has no deadline.
+        assert result.wait_conditions == (
+            TaskWaitCondition(name="review", correlation_key="c1"),
+        )
+        assert result.wait_deadline_at is None
 
     _run(run())
 
@@ -581,7 +585,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(task_store) -> Non
         tasks = await task_store.list_tasks("j1")
         child = [t for t in tasks if t.id != "t1"][0]
         # Intersection only: 'read' kept, 'delete' dropped -- no widening.
-        assert child.delegated_scopes == ("read",)
+        assert child.delegated_scopes == ScopeSet.of("read")
         # Actor chain appended the creating handler as a new Actor.
         assert child.actor_chain is not None
         assert child.actor_chain.actors[-1].kind == "TaskHandler"
@@ -592,10 +596,12 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(task_store) -> Non
     _run(run())
 
 
-def test_max_depth_caps_child_creation(task_store) -> None:
-    """Budget max_depth caps recursion: a child beyond the depth cap is not
-    created (the parent still succeeds, recursion stays bounded)."""
+def test_max_depth_exceeded_fails_commit(task_store) -> None:
+    """Plan 5.1.6: a child beyond max_depth must fail the whole commit (raise
+    TaskBudgetExceededError) -- it is never silently dropped. The over-depth
+    child is not created AND the parent is not marked successful."""
     from linktools.ai.task.protocols import CreateTask, TaskSuccess
+    from linktools.ai.task.store import TaskBudgetExceededError
 
     clock = task_store._clock
 
@@ -618,21 +624,25 @@ def test_max_depth_caps_child_creation(task_store) -> None:
         claimed = await task_store.claim(
             worker_id="w", now=clock.now(), lease_seconds=30
         )
-        await task_store.commit_success(
-            claimed.claim,
-            TaskSuccess(commands=(CreateTask(key="child", handler="echo"),)),
-        )
+        with pytest.raises(TaskBudgetExceededError):
+            await task_store.commit_success(
+                claimed.claim,
+                TaskSuccess(commands=(CreateTask(key="child", handler="echo"),)),
+            )
         tasks = await task_store.list_tasks("j1")
         # Only the root exists; the over-depth child was not created.
         assert len(tasks) == 1
         assert tasks[0].id == "t1"
+        # The parent was NOT marked successful; it stays CLAIMED.
+        parent = await task_store.get_task("t1")
+        assert parent.status == TaskStatus.CLAIMED
 
     _run(run())
 
 
-def test_max_runtime_blocks_claim(task_store) -> None:
-    """Budget max_runtime_seconds stops further claims once the job has run
-    past its total runtime cap."""
+def test_job_runtime_budget_does_not_leave_ready_task(task_store) -> None:
+    """Plan 5.1.7: once a job exceeds its runtime cap, a claim finalizes the
+    job (tasks CANCELLED, job FAILED) instead of leaving a READY zombie."""
     clock = task_store._clock
 
     async def run() -> None:
@@ -657,6 +667,58 @@ def test_max_runtime_blocks_claim(task_store) -> None:
             worker_id="w", now=clock.now(), lease_seconds=30
         )
         assert claimed is None
+        job_now = await task_store.get_job("j1")
+        assert job_now.status == JobStatus.FAILED
+        tasks = await task_store.list_tasks("j1")
+        assert all(
+            t.status not in (TaskStatus.READY, TaskStatus.RETRY_WAIT) for t in tasks
+        )
+
+    _run(run())
+
+
+def test_job_attempt_budget_does_not_leave_ready_task(task_store) -> None:
+    """Plan 5.1.7: once a job's aggregate attempt cap is met, a later claim
+    finalizes the job (READY child CANCELLED, job FAILED), no zombie."""
+    from linktools.ai.task.protocols import CreateTask
+
+    clock = task_store._clock
+    started = clock.now()
+
+    async def run() -> None:
+        job = JobRecord(
+            id="j1",
+            status=JobStatus.RUNNING,
+            principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
+            actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
+            budget=TaskBudget(max_attempts=1),
+            root_task_id="t1",
+            input_artifact_id=None,
+            output_artifact_id=None,
+            version=1,
+            created_at=started,
+            started_at=started,
+            finished_at=None,
+        )
+        await task_store.create_job(job, _task(clock))
+        first = await task_store.claim(
+            worker_id="w", now=clock.now(), lease_seconds=30
+        )
+        assert first is not None
+        await task_store.commit_success(
+            first.claim,
+            TaskSuccess(commands=(CreateTask(key="c1", handler="h"),)),
+        )
+        second = await task_store.claim(
+            worker_id="w", now=clock.now(), lease_seconds=30
+        )
+        assert second is None
+        job_now = await task_store.get_job("j1")
+        assert job_now.status == JobStatus.FAILED
+        tasks = await task_store.list_tasks("j1")
+        assert all(
+            t.status not in (TaskStatus.READY, TaskStatus.RETRY_WAIT) for t in tasks
+        )
 
     _run(run())
 

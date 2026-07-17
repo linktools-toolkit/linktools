@@ -15,14 +15,17 @@ threads the job / task / attempt / fencing lineage into RunContext.metadata so
 RunRecord and RunDefinitionSnapshot carry it for cross-domain queries.
 """
 
+import asyncio
+import hashlib
+import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..models import TaskFailureKind
+from ..models import TaskFailureKind, to_jsonable
 from ..protocols import TaskContext, TaskFailure, TaskRequest, TaskSuccess
-from ..store import TaskClaimLostError
+from ..store import RunnableBindingError, TaskClaimLostError
 from ..validation import MAX_OUTPUT_PAYLOAD_BYTES
 
 
@@ -30,6 +33,21 @@ class _OutputTooLarge(Exception):
     """Raised when a sealed RunResult exceeds the per-task payload cap, so the
     handler fails closed BEFORE the oversized blob is written to the
     content-addressed store."""
+
+
+def _fingerprint(spec: object) -> str:
+    """A stable content fingerprint of a resolved runnable spec, so bind_runnable
+    can detect that a mapping change returned a different spec for the same id
+    (even with no revision). Canonical JSON when possible, else repr.
+
+    Assumes the spec serializes deterministically (dict key order is normalized
+    via sort_keys; unordered collections like sets are not -- a spec carrying a
+    set would be non-deterministic and should be normalized by its owner)."""
+    try:
+        payload = json.dumps(to_jsonable(spec), sort_keys=True).encode("utf-8")
+    except Exception:  # noqa: BLE001 - exotic spec: fall back to repr
+        payload = repr(spec).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,12 +61,23 @@ class RunnableResolver(Protocol):
 
 
 class MappingRunnableResolver:
-    """Resolve by ``ref.id`` from a caller-supplied mapping. No scanning."""
+    """Resolve by ``ref.id`` from a caller-supplied id-only mapping. No scanning.
+
+    An id-only mapping CANNOT honor a revision: if ``ref.revision`` is set,
+    ``resolve`` raises rather than silently returning whatever the id currently
+    maps to (which could be a different agent after a mapping change, silently
+    re-running a retry against new code). Wire a revision-aware resolver (keyed
+    by ``(id, revision)``) when revisions matter."""
 
     def __init__(self, mapping: "Mapping[str, object]") -> None:
         self._mapping = dict(mapping)
 
     async def resolve(self, ref: RunnableRef) -> object:
+        if ref.revision is not None:
+            raise ValueError(
+                f"MappingRunnableResolver cannot honor revision {ref.revision!r} "
+                f"for runnable {ref.id!r}; provide a revision-aware resolver"
+            )
         if ref.id not in self._mapping:
             raise KeyError(f"runnable not found: {ref.id!r}")
         return self._mapping[ref.id]
@@ -56,9 +85,13 @@ class MappingRunnableResolver:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTaskInput:
-    """Carried in ``request.metadata`` until artifact-resolved inputs land."""
+    """Carried in ``request.metadata`` until artifact-resolved inputs land.
 
-    runnable_id: str
+    Carries a full :class:`RunnableRef` (id + revision), not just an id, so the
+    resolver can pin the exact runnable and a retry re-resolves the SAME
+    revision instead of silently picking up a changed mapping."""
+
+    runnable: RunnableRef
     prompt: str
     session_id: "str | None" = None
 
@@ -71,42 +104,77 @@ class RuntimeTaskHandler:
         *,
         task_store=None,
         artifact_store=None,
+        cancel_grace_seconds: float = 30.0,
     ) -> None:
         self._runtime = runtime
         self._resolver = resolver
         self._task_store = task_store
         self._artifact_store = artifact_store
+        # Grace window given to a cancelled Run to stop cleanly before the
+        # handler force-cancels its coroutine.
+        self._cancel_grace_seconds = cancel_grace_seconds
 
     async def execute(
         self, request: TaskRequest, context: TaskContext
     ) -> "TaskSuccess | TaskFailure":
-        if context.delegated_scopes == ():
+        if context.delegated_scopes.is_empty:
             return TaskFailure(
                 kind=TaskFailureKind.POLICY_DENIED,
                 error_type="ScopeDenied",
                 message="task delegated_scopes were revoked; execution refused",
             )
         try:
-            inp = RuntimeTaskInput(
-                runnable_id=request.metadata["runnable_id"],
-                prompt=request.metadata["prompt"],
-                session_id=request.metadata.get("session_id"),
-            )
+            runnable = _runnable_from_metadata(request.metadata)
+            prompt = request.metadata["prompt"]
         except KeyError as exc:
             return TaskFailure(
                 kind=TaskFailureKind.INVALID_INPUT,
                 error_type=type(exc).__name__,
                 message=f"missing input key: {exc}",
             )
+        inp = RuntimeTaskInput(
+            runnable=runnable,
+            prompt=prompt,
+            session_id=request.metadata.get("session_id"),
+        )
 
         try:
-            spec = await self._resolver.resolve(RunnableRef(id=inp.runnable_id))
+            spec = await self._resolver.resolve(inp.runnable)
         except Exception as exc:  # noqa: BLE001
             return TaskFailure(
                 kind=TaskFailureKind.PERMANENT,
                 error_type=type(exc).__name__,
                 message=f"runnable resolution failed: {exc}",
             )
+
+        # Pin the resolved runnable on the task: the first attempt binds it, a
+        # retry re-resolves and bind_runnable rejects a drift. This is what stops
+        # a mapping change between attempts from silently re-running a different
+        # agent. Best-effort for stores that don't implement bind_runnable (both
+        # production backends do); such a store simply skips drift protection.
+        if self._task_store is not None and hasattr(self._task_store, "bind_runnable"):
+            try:
+                await self._task_store.bind_runnable(
+                    task_id=context.task_id,
+                    attempt_id=context.attempt_id,
+                    fencing_token=context.fencing_token,
+                    worker_id=context.worker_id,
+                    runnable_id=inp.runnable.id,
+                    revision=inp.runnable.revision,
+                    fingerprint=_fingerprint(spec),
+                )
+            except RunnableBindingError as exc:
+                return TaskFailure(
+                    kind=TaskFailureKind.PERMANENT,
+                    error_type="RunnableDrift",
+                    message=str(exc),
+                )
+            except TaskClaimLostError:
+                return TaskFailure(
+                    kind=TaskFailureKind.SUPERSEDED,
+                    error_type="ClaimLost",
+                    message="lease was lost before runnable bind; task reclaimed",
+                )
 
         run_id = f"run-{uuid.uuid4().hex[:12]}"
 
@@ -135,27 +203,9 @@ class RuntimeTaskHandler:
             if snapshot_failure is not None:
                 return snapshot_failure
 
-        try:
-            result = await self._runtime.run(
-                spec,
-                inp.prompt,
-                session_id=inp.session_id,
-                run_id=run_id,
-                user_id=context.principal.user_id,
-                tenant_id=context.principal.tenant_id,
-                context_metadata=_task_correlation(context),
-            )
-        except Exception as exc:  # noqa: BLE001
-            # An agent run drives tools / MCP / writes; once it has started, a
-            # raised exception means the side-effect state is unknowable. Treat
-            # it as SIDE_EFFECT_UNKNOWN (non-retryable) so a transient failure
-            # never re-runs a side-effectful run. The message is
-            # redacted by the worker before persistence.
-            return TaskFailure(
-                kind=TaskFailureKind.SIDE_EFFECT_UNKNOWN,
-                error_type=type(exc).__name__,
-                message=str(exc),
-            )
+        result = await self._run_with_cancellation(spec, inp, run_id, context)
+        if isinstance(result, TaskFailure):
+            return result
 
         output_artifact = None
         if self._artifact_store is not None and result is not None:
@@ -174,6 +224,84 @@ class RuntimeTaskHandler:
         return TaskSuccess(
             output_artifact=output_artifact,
             metadata={"run_id": run_id},
+        )
+
+    async def _run_with_cancellation(
+        self, spec, inp, run_id: str, context: TaskContext
+    ):
+        """Drive ``runtime.run`` while racing the task's cancellation token.
+
+        Returns the RunResult on success, or a :class:`TaskFailure` (CANCELLED
+        or SIDE_EFFECT_UNKNOWN) on cancellation/failure. When cancellation fires
+        first, the run is stopped via ``runtime.cancel`` and given a grace
+        window before its coroutine is force-cancelled; the task then lands
+        CANCELLED -- never SIDE_EFFECT_UNKNOWN -- because the run was stopped by
+        us, not by an unknown side-effect failure."""
+        run_task = asyncio.ensure_future(
+            self._runtime.run(
+                spec,
+                inp.prompt,
+                session_id=inp.session_id,
+                run_id=run_id,
+                user_id=context.principal.user_id,
+                tenant_id=context.principal.tenant_id,
+                context_metadata=_task_correlation(context),
+            )
+        )
+        cancel_task = asyncio.ensure_future(context.cancellation.wait())
+        try:
+            await asyncio.wait(
+                {run_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # Worker shutdown: stop both and re-raise so the worker leaves the
+            # task CLAIMED for recovery (its own CancelledError handling).
+            cancel_task.cancel()
+            run_task.cancel()
+            await asyncio.gather(run_task, cancel_task, return_exceptions=True)
+            raise
+
+        if run_task.done() and not run_task.cancelled():
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+            try:
+                return await run_task
+            except Exception as exc:  # noqa: BLE001
+                # The run itself raised. If it was cancelled mid-flight, land
+                # CANCELLED; only a spontaneous failure with no cancellation is
+                # an unknown side-effect.
+                if context.cancellation.is_set:
+                    return TaskFailure(
+                        kind=TaskFailureKind.CANCELLED,
+                        error_type="TaskCancelled",
+                        message="task execution was cancelled",
+                        retryable=False,
+                    )
+                return TaskFailure(
+                    kind=TaskFailureKind.SIDE_EFFECT_UNKNOWN,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+
+        # Cancellation won the race (or the run is still pending): stop the run.
+        cancel_task.cancel()
+        await asyncio.gather(cancel_task, return_exceptions=True)
+        try:
+            await self._runtime.cancel(run_id)
+        except Exception:  # noqa: BLE001 - best-effort: still try to reap the task
+            pass
+        try:
+            await asyncio.wait_for(run_task, timeout=self._cancel_grace_seconds)
+        except asyncio.TimeoutError:
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+        except Exception:  # noqa: BLE001 - the run raised while being stopped
+            pass
+        return TaskFailure(
+            kind=TaskFailureKind.CANCELLED,
+            error_type="TaskCancelled",
+            message="task execution was cancelled",
+            retryable=False,
         )
 
     async def _validate_snapshots(self, context: TaskContext) -> "TaskFailure | None":
@@ -235,6 +363,20 @@ class RuntimeTaskHandler:
         return record.ref
 
 
+def _runnable_from_metadata(metadata: "Mapping[str, object]") -> RunnableRef:
+    """Build a RunnableRef from task metadata. Prefers the structured
+    ``runnable`` dict ``{"id", "revision"}``; falls back to the flat
+    ``runnable_id`` (+ optional ``runnable_revision``) keys for older callers.
+    Raises KeyError if neither form names a runnable."""
+    if "runnable" in metadata:
+        raw = metadata["runnable"]
+        return RunnableRef(id=raw["id"], revision=raw.get("revision"))
+    return RunnableRef(
+        id=metadata["runnable_id"],
+        revision=metadata.get("runnable_revision"),
+    )
+
+
 def _task_correlation(context: TaskContext) -> "dict[str, object]":
     """Build the context_metadata dict threaded into Runtime.run so the Run
     carries its Task lineage (job / task / attempt / fencing) and the logical
@@ -249,9 +391,10 @@ def _task_correlation(context: TaskContext) -> "dict[str, object]":
     if context.principal.workspace_key is not None:
         meta["workspace_key"] = context.principal.workspace_key
     # Propagate the narrowed scopes + actor chain so the Run record carries the
-    # task's effective permission lineage. None means unrestricted.
-    if context.delegated_scopes is not None:
-        meta["delegated_scopes"] = tuple(context.delegated_scopes)
+    # task's effective permission lineage. An unrestricted ScopeSet is omitted
+    # (the downstream Runtime reads a missing key as unrestricted).
+    if not context.delegated_scopes.unrestricted:
+        meta["delegated_scopes"] = tuple(context.delegated_scopes.values)
     if context.actor_chain is not None:
         meta["actor_chain"] = [
             {"kind": a.kind, "id": a.id} for a in context.actor_chain.actors
