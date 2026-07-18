@@ -335,9 +335,9 @@ class FileTaskStore:
                         commands=commands, metadata=payload.get("metadata", {}))
                 try:
                     if kind == "success":
-                        await asyncio.to_thread(self._commit_success_sync, claim, outcome, path)
+                        await asyncio.to_thread(self._commit_success_sync, claim, outcome, path, True)
                     else:
-                        await asyncio.to_thread(self._commit_failure_sync, claim, outcome, path)
+                        await asyncio.to_thread(self._commit_failure_sync, claim, outcome, path, True)
                     if not self._journal.ensure_step(path, "COMPLETED"):
                         raise FileTaskCommitRecoveryError(
                             f"commit journal {path.name} did not reach COMPLETED")
@@ -478,6 +478,8 @@ class FileTaskStore:
             if not claimable or task.available_at > now:
                 continue
             job = self._read_job(job_id)
+            if self._job_has_incomplete_journal_sync(job_id):
+                continue
             # Whitelist claimable job statuses: a terminal (SUCCEEDED/FAILED/
             # CANCELLED) or CANCELLING job must never produce a new attempt, and
             # a future JobStatus is never claimable by default.
@@ -573,6 +575,19 @@ class FileTaskStore:
             task=claimed,
             attempt=attempt,
         )
+
+    def _job_has_incomplete_journal_sync(self, job_id: str) -> bool:
+        for path in self._journal.root.glob("*.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                claim = raw.get("claim", {})
+                task_id = claim.get("task_id")
+                owner = self._find_task_owner_job(task_id) if task_id else None
+                if owner is not None and owner[0] == job_id:
+                    return True
+            except (OSError, ValueError, KeyError, TypeError):
+                return True
+        return False
 
     def _guard(self, job_id: str, claim: TaskClaim) -> TaskRecord:
         task = self._read_task(job_id, claim.task_id)
@@ -711,14 +726,13 @@ class FileTaskStore:
 
     def _commit_success_sync(
         self, claim: TaskClaim, outcome: TaskSuccess,
-        journal_path: "Path | None" = None,
+        journal_path: "Path | None" = None, recovery: bool = False,
     ) -> TaskRecord:
         now = self._clock.now()
         owner = self._find_task_owner_job(claim.task_id)
         if owner is None:
             raise TaskNotFoundError(claim.task_id)
         job_id, _ = owner
-        task = self._guard(job_id, claim)
         steps = {"PREPARED": 0, "ATTEMPT_WRITTEN": 1,
                  "COMMANDS_APPLIED": 2, "TASK_WRITTEN": 3, "TRANSITION_WRITTEN": 4, "JOB_CONVERGED": 5, "COMPLETED": 6}
         current_step = "PREPARED"
@@ -726,6 +740,17 @@ class FileTaskStore:
             current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
                 "step", "PREPARED"
             )
+        task = self._get_task_sync(claim.task_id)
+        if task is None:
+            raise TaskNotFoundError(claim.task_id)
+        if recovery and steps[current_step] >= steps["TASK_WRITTEN"]:
+            self._converge_jobs_sync(now)
+            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            self._journal.mark_step(journal_path, "COMPLETED")
+            return task
+        if not recovery:
+            task = self._guard(job_id, claim)
         # Cancel precedence: if the task was moved to CANCELLING while
         # the handler ran, the handler's success is discarded and the task lands
         # CANCELLED (no commands applied).
@@ -1115,20 +1140,30 @@ class FileTaskStore:
 
     def _commit_failure_sync(
         self, claim: TaskClaim, outcome: TaskFailure,
-        journal_path: "Path | None" = None,
+        journal_path: "Path | None" = None, recovery: bool = False,
     ) -> TaskRecord:
         now = self._clock.now()
         owner = self._find_task_owner_job(claim.task_id)
         if owner is None:
             raise TaskNotFoundError(claim.task_id)
         job_id, _ = owner
-        task = self._guard(job_id, claim)
         steps = {"PREPARED": 0, "ATTEMPT_WRITTEN": 1,
                  "TASK_WRITTEN": 2, "TRANSITION_WRITTEN": 3, "JOB_CONVERGED": 4, "COMPLETED": 5}
         current_step = "PREPARED"
         if journal_path is not None and journal_path.exists():
             current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
                 "step", "PREPARED")
+        task = self._get_task_sync(claim.task_id)
+        if task is None:
+            raise TaskNotFoundError(claim.task_id)
+        if recovery and steps[current_step] >= steps["TASK_WRITTEN"]:
+            self._converge_jobs_sync(now)
+            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            self._journal.mark_step(journal_path, "COMPLETED")
+            return task
+        if not recovery:
+            task = self._guard(job_id, claim)
         if task.status == TaskStatus.CANCELLING:
             # Cancel precedence: a CANCELLING task lands CANCELLED even
             # if the handler reported a failure.

@@ -213,6 +213,7 @@ class ApprovalStore(Protocol):
         reason: "str | None",
         arguments: "Mapping[str, Any]",
         approval_id: str,
+        binding: "Mapping[str, Any]",
     ) -> ApprovalRequest:
         """Return the existing request for ``(run_id, tool_call_id)`` if one
         already exists (PENDING or APPROVED/REJECTED -- any status), else

@@ -244,8 +244,13 @@ class FileSessionStore:
                             payload = path.read_bytes()
                             if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
                                 raise SessionCorruptionError("session batch message hash mismatch")
-                            if json.loads(payload).get("id") != entry["message_id"]:
+                            decoded = json.loads(payload)
+                            if decoded.get("id") != entry["message_id"]:
                                 raise SessionCorruptionError("session batch message id mismatch")
+                            if decoded.get("session_id") not in (None, raw["session_id"]):
+                                raise SessionCorruptionError("session batch session_id mismatch")
+                            if int(decoded.get("sequence", -1)) != seq:
+                                raise SessionCorruptionError("session batch sequence mismatch")
                         end = max((int(entry["sequence"]) for entry in entries), default=0)
                         if end >= int(current.metadata.get("_committed_sequence", 0)):
                             metadata = dict(current.metadata)
