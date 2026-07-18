@@ -134,6 +134,9 @@ class ActorChain:
         # Normalize legacy tuple/None input to a concrete ScopeSet at the
         # boundary so a persisted ActorChain is never None-typed.
         if not isinstance(self.delegated_scopes, ScopeSet):
+            if self.delegated_scopes is None:
+                object.__setattr__(self, "delegated_scopes", ScopeSet.empty())
+                return
             object.__setattr__(
                 self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
             )
@@ -216,6 +219,9 @@ class TaskRecord:
     def __post_init__(self) -> None:
         # Normalize legacy tuple/None to a concrete ScopeSet at the boundary.
         if not isinstance(self.delegated_scopes, ScopeSet):
+            if self.delegated_scopes is None:
+                object.__setattr__(self, "delegated_scopes", ScopeSet.empty())
+                return
             object.__setattr__(
                 self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
             )

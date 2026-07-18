@@ -43,9 +43,22 @@ class ScopeSet:
     unrestricted: bool = False
     values: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        normalized = tuple(sorted({
+            item.strip() for item in self.values
+            if isinstance(item, str) and item.strip()
+        }))
+        if self.unrestricted and normalized:
+            raise ValueError("unrestricted ScopeSet cannot contain explicit scopes")
+        object.__setattr__(self, "values", normalized)
+
     @classmethod
     def allow_all(cls) -> "ScopeSet":
         return cls(unrestricted=True)
+
+    @classmethod
+    def empty(cls) -> "ScopeSet":
+        return cls()
 
     @classmethod
     def of(cls, *scopes: str) -> "ScopeSet":
@@ -54,9 +67,11 @@ class ScopeSet:
     @classmethod
     def from_any(cls, value):
         if value is None:
-            return cls(unrestricted=True)
+            raise TypeError("ScopeSet cannot be constructed from None")
         if isinstance(value, cls):
             return value
+        if isinstance(value, str):
+            raise TypeError("ScopeSet requires an iterable, not a string")
         return cls(values=tuple(value))
 
     @property
@@ -88,10 +103,7 @@ class PrincipalContext:
         if not isinstance(self.actor, ActorRef):
             raise TypeError("PrincipalContext.actor must be an ActorRef")
         if not isinstance(self.scopes, ScopeSet):
-            # Deserialize legacy task principals at this boundary. New
-            # callers should pass ScopeSet explicitly; task wire compatibility
-            # is retained without changing the persisted representation.
-            object.__setattr__(self, "scopes", ScopeSet.from_any(self.scopes))
+            raise TypeError("PrincipalContext.scopes must be an explicit ScopeSet")
 
     def require_tenant(self, tenant_id: "str | None") -> None:
         """Fail-closed tenant check (§5.4). Raises if the target resource has

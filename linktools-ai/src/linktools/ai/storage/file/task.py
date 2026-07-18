@@ -19,7 +19,6 @@ and was reclaimed cannot overwrite the new owner's result.
 import asyncio
 import dataclasses
 import json
-import pickle
 import random
 import uuid
 from datetime import datetime, timedelta
@@ -54,7 +53,7 @@ class FileTaskCommitJournal:
     """Durable outcome journal used by :class:`FileTaskStore`.
 
     The store owns the state-machine replay; this small type centralizes the
-    on-disk location and atomic pickle write so tests and operators have an
+    on-disk JSON step journal so recovery is explicit and inspectable.
     explicit journal boundary.
     """
 
@@ -63,7 +62,7 @@ class FileTaskCommitJournal:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path(self, attempt_id: str) -> Path:
-        return self.root / f"{attempt_id}.pkl"
+        return self.root / f"{attempt_id}.json"
 from ...task.protocols import (
     CancelJob,
     CancelTask,
@@ -250,19 +249,22 @@ class FileTaskStore:
 
     @staticmethod
     def _write_journal(path: Path, payload) -> None:
+        claim, outcome, kind = payload
         tmp = path.with_suffix(".tmp")
-        with tmp.open("wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-            fh.flush()
-            import os
-            os.fsync(fh.fileno())
+        record = {"schema_version": 1, "step": "PREPARED", "kind": kind,
+                  "claim": to_jsonable(claim), "outcome": to_jsonable(outcome)}
+        _atomic_write(tmp, json.dumps(record, sort_keys=True).encode("utf-8"))
         tmp.replace(path)
 
     async def recover_incomplete_commits(self) -> None:
         """Replay durable outcomes before expired-lease recovery."""
         async with self._lock:
-            for path in sorted(self._journal.root.glob("*.pkl")):
-                claim, outcome, kind = pickle.loads(path.read_bytes())
+            for path in sorted(self._journal.root.glob("*.json")):
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                claim = from_jsonable(TaskClaim, raw["claim"])
+                kind = raw["kind"]
+                outcome_type = TaskFailure if kind == "failure" else TaskSuccess
+                outcome = from_jsonable(outcome_type, raw["outcome"])
                 try:
                     if kind == "success":
                         await asyncio.to_thread(self._commit_success_sync, claim, outcome)
