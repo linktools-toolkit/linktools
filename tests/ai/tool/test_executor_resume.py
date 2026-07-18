@@ -109,8 +109,11 @@ def _approved_request(
         reason=reason,
         arguments={"path": "/"},
         descriptor_fingerprint="descriptor-v1",
+        handler_revision="handler-v1",
+        provider_revision="provider-v1",
         policy_revision="policy-v1",
         capability_revision="capability-v1",
+        result_processor_revision="processor-v1",
     )
     return dataclasses.replace(
         pending,
@@ -129,6 +132,10 @@ def _context(tool_call_id: "str | None" = "tcid-XYZ") -> ToolContext:
         run_id="run-123",
         session_id="sess-456",
         tool_call_id=tool_call_id,
+        metadata={"descriptor_fingerprint": "descriptor-v1",
+                  "handler_revision": "handler-v1", "provider_revision": "provider-v1",
+                  "policy_revision": "policy-v1", "capability_revision": "capability-v1",
+                  "result_processor_revision": "processor-v1"},
     )
 
 

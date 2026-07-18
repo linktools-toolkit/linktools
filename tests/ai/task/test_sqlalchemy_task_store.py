@@ -10,6 +10,7 @@ stops a stale worker overwriting a new result.
 """
 
 import asyncio
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -555,7 +556,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(task_store) -> Non
             principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
             actor_chain=ActorChain(
                 actors=(ActorRef("user", "alice"),),
-                delegated_scopes=("read", "write", "exec"),
+                delegated_scopes=ScopeSet.of("read", "write", "exec"),
             ),
             budget=TaskBudget(),
             root_task_id="t1",
@@ -566,7 +567,8 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(task_store) -> Non
             started_at=None,
             finished_at=None,
         )
-        await task_store.create_job(job, _task(clock))
+        await task_store.create_job(job, dataclasses.replace(
+            _task(clock), delegated_scopes=ScopeSet.allow_all()))
         claimed = await task_store.claim(
             worker_id="w", now=clock.now(), lease_seconds=30
         )

@@ -27,6 +27,7 @@ from linktools.ai.task.models import (
     TaskTransitionRecord,
     ActorChain,
     ActorRef,
+    ScopeSet,
     ResourceSnapshotRef,
     assert_attempt_transition,
     assert_job_transition,
@@ -44,7 +45,7 @@ def _principal() -> TaskPrincipal:
 
 
 def _actor_chain() -> ActorChain:
-    return ActorChain(actors=(ActorRef("user", "alice"),), delegated_scopes=("read",))
+    return ActorChain(actors=(ActorRef("user", "alice"),), delegated_scopes=ScopeSet.of("read"))
 
 
 def _budget() -> TaskBudget:

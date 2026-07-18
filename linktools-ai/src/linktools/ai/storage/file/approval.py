@@ -77,6 +77,8 @@ def _request_to_json(request: ApprovalRequest) -> dict:
         "policy_revision": request.policy_revision,
         "capability_revision": request.capability_revision,
         "result_processor_revision": request.result_processor_revision,
+        "binding": dict(request.binding),
+        "binding_fingerprint": request.binding_fingerprint,
         "schema_version": request.schema_version,
     }
 
@@ -122,6 +124,8 @@ def _request_from_json(raw: dict) -> ApprovalRequest:
         policy_revision=raw.get("policy_revision"),
         capability_revision=raw.get("capability_revision"),
         result_processor_revision=raw.get("result_processor_revision"),
+        binding=raw.get("binding", {}),
+        binding_fingerprint=raw.get("binding_fingerprint", ""),
         schema_version=int(raw.get("schema_version", 0)),
     )
 
@@ -217,6 +221,12 @@ class FileApprovalStore:
         approval_id: str,
         binding: dict | None = None,
     ) -> ApprovalRequest:
+        required_binding = ("descriptor_fingerprint", "handler_revision",
+            "provider_revision", "policy_revision", "capability_revision",
+            "result_processor_revision", "arguments_hash")
+        if not binding or any(not isinstance(binding.get(k), str) or not binding[k]
+                              for k in required_binding):
+            raise ApprovalConflictError("approval execution binding is incomplete")
         # dedup on (run_id, tool_call_id) BEFORE
         # creating -- a retry, a duplicate model drive, or a re-entrant pause
         # for the same tool_call must reuse the existing request rather than
@@ -230,7 +240,8 @@ class FileApprovalStore:
             # same dedupe key reused with a different
             # tool_name/arguments is a conflict, not a replay.
             check_dedupe_conflict(
-                existing[-1], tool_name=tool_name, arguments=arguments
+                existing[-1], tool_name=tool_name, arguments=arguments,
+                arguments_hash=binding.get("arguments_hash") if binding else None,
             )
             return existing[-1]
         request = build_approval_request(

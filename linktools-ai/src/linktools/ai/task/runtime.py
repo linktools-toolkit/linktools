@@ -43,6 +43,7 @@ from .store import TaskRunTimeoutError, TaskStore
 class TaskRuntimeOptions:
     lease_seconds: float = 30.0
     heartbeat_seconds: float = 10.0
+    cancel_grace_seconds: float = 5.0
     poll_interval_seconds: float = 0.5
     max_concurrency: int = 1
     max_payload_bytes: int = 1024 * 1024
@@ -53,6 +54,8 @@ class TaskRuntimeOptions:
     def __post_init__(self) -> None:
         if self.heartbeat_seconds >= self.lease_seconds:
             raise ValueError("heartbeat_seconds must be < lease_seconds")
+        if self.cancel_grace_seconds <= 0:
+            raise ValueError("cancel_grace_seconds must be > 0")
         if self.max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
         for cap in (
@@ -328,6 +331,7 @@ class TaskRuntime:
         # (no real sleep) and the polling cadence is testable.
         deadline = self._clock.now() + timedelta(seconds=wait_timeout)
         reached_terminal = False
+        cancel_error = None
         try:
             while self._clock.now() < deadline:
                 job_now = await self.get_job(job_id)
@@ -340,20 +344,29 @@ class TaskRuntime:
             # worker is stopped; otherwise an in-flight handler can outlive
             # this one-shot call and continue side effects.
             if not reached_terminal:
-                await self.request_cancel(job_id, reason="run_one_task wait timeout")
-                cancel_deadline = self._clock.now() + timedelta(seconds=5)
-                while self._clock.now() < cancel_deadline:
-                    current = await self.get_job(job_id)
-                    if current is not None and current.status in terminal:
-                        break
-                    await self._clock.sleep(0.02)
+                try:
+                    await self.request_cancel(job_id, reason="run_one_task wait timeout")
+                    cancel_deadline = self._clock.now() + timedelta(
+                        seconds=self._options.cancel_grace_seconds
+                    )
+                    while self._clock.now() < cancel_deadline:
+                        current = await self.get_job(job_id)
+                        if current is not None and current.status in terminal:
+                            break
+                        await self._clock.sleep(0.02)
+                except Exception as exc:  # cancellation failure remains explicit
+                    cancel_error = exc
             shutdown.set()
-            shutdown_deadline = self._clock.now() + timedelta(seconds=5)
+            shutdown_deadline = self._clock.now() + timedelta(
+                seconds=self._options.cancel_grace_seconds
+            )
             while not wt.done() and self._clock.now() < shutdown_deadline:
                 await self._clock.sleep(0.02)
             if not wt.done():
                 wt.cancel()
             await asyncio.gather(wt, return_exceptions=True)
+            if cancel_error is not None:
+                raise cancel_error
         if not reached_terminal:
             # Timed out without a terminal task: cancel the job so in-flight work
             # stops, then raise (never hand back a still-running task the caller

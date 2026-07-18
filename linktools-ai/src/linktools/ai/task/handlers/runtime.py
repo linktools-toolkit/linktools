@@ -106,8 +106,8 @@ class RuntimeTaskHandler:
         runtime,
         resolver: RunnableResolver,
         *,
-        task_store=None,
-        artifact_store=None,
+        task_store,
+        artifact_store,
         cancel_grace_seconds: float = 30.0,
     ) -> None:
         if task_store is None or artifact_store is None:
@@ -303,15 +303,20 @@ class RuntimeTaskHandler:
         except Exception as exc:  # authorization/cancellation failure is not success
             run_task.cancel()
             await asyncio.gather(run_task, return_exceptions=True)
-            return TaskFailure(kind=TaskFailureKind.CANCELLED,
+            return TaskFailure(kind=TaskFailureKind.SIDE_EFFECT_UNKNOWN,
                 error_type=type(exc).__name__, message=str(exc), retryable=False)
         try:
             await asyncio.wait_for(run_task, timeout=self._cancel_grace_seconds)
         except asyncio.TimeoutError:
             run_task.cancel()
             await asyncio.gather(run_task, return_exceptions=True)
-        except Exception:  # noqa: BLE001 - the run raised while being stopped
-            pass
+            return TaskFailure(kind=TaskFailureKind.SIDE_EFFECT_UNKNOWN,
+                error_type="RuntimeCancelTimeout",
+                message="runtime did not reach terminal state within cancel grace",
+                retryable=False)
+        except Exception as exc:  # the run failed while cancellation converged
+            return TaskFailure(kind=TaskFailureKind.SIDE_EFFECT_UNKNOWN,
+                error_type=type(exc).__name__, message=str(exc), retryable=False)
         return TaskFailure(
             kind=TaskFailureKind.CANCELLED,
             error_type="TaskCancelled",
@@ -401,6 +406,7 @@ def _task_correlation(context: TaskContext) -> "dict[str, object]":
         "job_id": context.job_id,
         "task_id": context.task_id,
         "attempt_id": context.attempt_id,
+        "task_attempt_id": context.attempt_id,
         "fencing_token": context.fencing_token,
     }
     if context.principal.workspace_key is not None:

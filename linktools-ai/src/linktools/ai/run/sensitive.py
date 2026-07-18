@@ -65,8 +65,12 @@ async def authorize_sensitive_operation(
     from ..security.authorization import AuthorizationResource
     from ..security.actions import SecurityAction
 
+    authorization_action = {"cancel": SecurityAction.RUN_CANCEL,
+                            "resume": SecurityAction.RUN_RESUME}.get(action, action)
+    if principal.actor.kind == "task-attempt" and action == "cancel":
+        authorization_action = SecurityAction.RUN_CANCEL_SELF
     await authorization.authorize(
         principal,
-        {"cancel": SecurityAction.RUN_CANCEL, "resume": SecurityAction.RUN_RESUME}.get(action, action),
+        authorization_action,
         AuthorizationResource(kind="run", id=run_id, tenant_id=run_tenant),
     )

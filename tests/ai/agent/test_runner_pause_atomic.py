@@ -60,6 +60,15 @@ from linktools.ai.tool.models import (
 TOOL_NAME = "risky"
 
 
+def _approval_binding(arguments):
+    from linktools.ai.agent.approval import compute_arguments_hash
+    return {"descriptor_fingerprint": "descriptor-v1",
+        "handler_revision": "handler-v1", "provider_revision": "provider-v1",
+        "policy_revision": "policy-v1", "capability_revision": "capability-v1",
+        "result_processor_revision": "processor-v1",
+        "arguments_hash": compute_arguments_hash(TOOL_NAME, arguments)}
+
+
 class _RiskyProvider(CapabilityProvider):
     supported_kinds = ("test",)
 
@@ -298,6 +307,9 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
         reason="prior",
         arguments={"x": 1},
         approval_id="approval-fixed",
+        descriptor_fingerprint="descriptor-v1", handler_revision="handler-v1",
+        provider_revision="provider-v1", policy_revision="policy-v1",
+        capability_revision="capability-v1", result_processor_revision="processor-v1",
     )
     asyncio.run(storage.approvals.create(pre_existing))
 
@@ -309,6 +321,11 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
             reason="new-reason",
             arguments={"x": 1},
             approval_id="approval-different",
+            binding={"descriptor_fingerprint": "descriptor-v1",
+                "handler_revision": "handler-v1", "provider_revision": "provider-v1",
+                "policy_revision": "policy-v1", "capability_revision": "capability-v1",
+                "result_processor_revision": "processor-v1",
+                "arguments_hash": pre_existing.arguments_hash},
         )
     )
     assert result.id == "approval-fixed", (
@@ -334,6 +351,9 @@ def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
         reason="prior",
         arguments={"x": 1},
         approval_id="approval-fixed",
+        descriptor_fingerprint="descriptor-v1", handler_revision="handler-v1",
+        provider_revision="provider-v1", policy_revision="policy-v1",
+        capability_revision="capability-v1", result_processor_revision="processor-v1",
     )
     asyncio.run(storage.approvals.create(pre_existing))
 
@@ -346,6 +366,7 @@ def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
                 reason="new-reason",
                 arguments={"x": 2},
                 approval_id="approval-different",
+                binding=_approval_binding({"x": 2}),
             )
         )
 
@@ -364,9 +385,10 @@ def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_
             tool_call_id="tc-shared",
             tool_name=TOOL_NAME,
             reason="r",
-            arguments={"x": 1},
-            approval_id=f"approval-{i}",
-        )
+                arguments={"x": 1},
+                approval_id=f"approval-{i}",
+                binding=_approval_binding({"x": 1}),
+            )
 
     async def _run_all():
         return await asyncio.gather(*(_attempt(i) for i in range(10)))

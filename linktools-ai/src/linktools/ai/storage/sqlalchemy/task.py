@@ -166,6 +166,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
             f"task {row.id} envelope schema_version {env_version} (expected "
             f"{TASK_ENVELOPE_SCHEMA_VERSION})"
         )
+    legacy_missing_scopes = False
     if env_version == TASK_ENVELOPE_SCHEMA_VERSION:
         # A v1 envelope MUST carry the security + signal-wait fields. A missing
         # one is a corrupt/incomplete row -- fail closed rather than defaulting
@@ -222,10 +223,15 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
     else:
         # Legacy (pre-schema-version) row: tolerant read with safe defaults.
         depth = env.get("depth", 0)
+        legacy_missing_scopes = env.get("delegated_scopes") is None
         delegated_scopes = _scopes_from_env(env.get("delegated_scopes"))
+        raw_chain = env.get("actor_chain")
+        if isinstance(raw_chain, dict) and raw_chain.get("delegated_scopes") is None:
+            raw_chain = {**raw_chain, "delegated_scopes": to_jsonable(ScopeSet.empty())}
+            legacy_missing_scopes = True
         actor_chain = (
-            from_jsonable(ActorChain, env["actor_chain"])
-            if env.get("actor_chain") is not None
+            from_jsonable(ActorChain, raw_chain)
+            if raw_chain is not None
             else None
         )
         wait_conditions = tuple(
@@ -270,7 +276,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         resolved_runnable_revision=env.get("resolved_runnable_revision"),
         resolved_runnable_fingerprint=env.get("resolved_runnable_fingerprint"),
         metadata={**env["metadata"], **({"_legacy_missing_scopes": True}
-                 if env.get("delegated_scopes") is None else {})},
+                 if legacy_missing_scopes else {})},
     )
 
 
@@ -287,11 +293,15 @@ def _job_envelope(job: JobRecord) -> str:
 
 def _row_to_job(row: TaskJobRow) -> JobRecord:
     env = json.loads(row.data_json)
+    raw_chain = env["actor_chain"]
+    legacy_missing_scopes = isinstance(raw_chain, dict) and raw_chain.get("delegated_scopes") is None
+    if legacy_missing_scopes:
+        raw_chain = {**raw_chain, "delegated_scopes": to_jsonable(ScopeSet.empty())}
     return JobRecord(
         id=row.id,
         status=JobStatus(row.status),
         principal=from_jsonable(TaskPrincipal, env["principal"]),
-        actor_chain=from_jsonable(ActorChain, env["actor_chain"]),
+        actor_chain=from_jsonable(ActorChain, raw_chain),
         budget=from_jsonable(TaskBudget, env["budget"]),
         root_task_id=row.root_task_id,
         input_artifact_id=row.input_artifact_id,
@@ -300,7 +310,8 @@ def _row_to_job(row: TaskJobRow) -> JobRecord:
         created_at=_as_utc(row.created_at),
         started_at=_as_utc(row.started_at),
         finished_at=_as_utc(row.finished_at),
-        metadata=env["metadata"],
+        metadata={**env["metadata"], **({"_legacy_missing_scopes": True}
+                 if legacy_missing_scopes else {})},
     )
 
 

@@ -32,7 +32,8 @@ from linktools.ai.task.models import ActorRef, ScopeSet
 _NOW = datetime(2026, 7, 6, tzinfo=timezone.utc)
 
 
-def _seed_run(store, run_id: str, status: RunStatus = RunStatus.RUNNING) -> None:
+def _seed_run(store, run_id: str, status: RunStatus = RunStatus.RUNNING,
+              task_attempt_id: "str | None" = None) -> None:
     async def _seed():
         await store.runs.create(
             RunRecord(
@@ -50,7 +51,8 @@ def _seed_run(store, run_id: str, status: RunStatus = RunStatus.RUNNING) -> None
                 created_at=_NOW,
                 started_at=None,
                 finished_at=None,
-                metadata={"tenant_id": "t1"},
+                metadata={"tenant_id": "t1", **({"task_attempt_id": task_attempt_id}
+                         if task_attempt_id is not None else {})},
             )
         )
         if status is RunStatus.PENDING:
@@ -140,6 +142,21 @@ def test_cancel_with_principal_emits_no_deprecation(tmp_path):
         warnings.simplefilter("always")
         asyncio.run(runtime.cancel("run-5", principal=_principal()))
     assert not any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_task_attempt_can_cancel_only_its_bound_run(tmp_path):
+    storage = FileStorage(root=tmp_path)
+    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
+    _seed_run(storage, "run-self", task_attempt_id="attempt-1")
+    principal = PrincipalContext(tenant_id="t1", user_id="alice",
+        actor=ActorRef(kind="task-attempt", id="attempt-1"),
+        scopes=ScopeSet.of("run.cancel:self"))
+    asyncio.run(runtime.cancel("run-self", principal=principal))
+    assert asyncio.run(storage.runs.get("run-self")).status is RunStatus.CANCELLED
+
+    _seed_run(storage, "run-other", task_attempt_id="attempt-2")
+    with pytest.raises(PrincipalAccessDeniedError):
+        asyncio.run(runtime.cancel("run-other", principal=principal))
 
 
 def test_resume_without_principal_denied_by_default(tmp_path):

@@ -217,13 +217,22 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
                 PauseRunCommand(
                     run_id="run",
                     expected_version=expected_version,
-                    approval_request={
+                        approval_request={
                         "approval_id": approval_id,
                         "tool_call_id": tool_call_id,
                         "tool_name": "shell",
                         "reason": "review",
-                        "arguments": {"cmd": "ls"},
-                    },
+                            "arguments": {"cmd": "ls"},
+                            "descriptor_fingerprint": "descriptor-v1",
+                            "handler_revision": "handler-v1",
+                            "provider_revision": "provider-v1",
+                            "policy_revision": "policy-v1",
+                            "capability_revision": "capability-v1",
+                            "result_processor_revision": "processor-v1",
+                            "arguments_hash": __import__(
+                                "linktools.ai.agent.approval", fromlist=["compute_arguments_hash"]
+                            ).compute_arguments_hash("shell", {"cmd": "ls"}),
+                        },
                     checkpoint_payload=b'{"m":[]}',
                     event_context=_ctx("run", "sess"),
                     commit_id=commit_id,

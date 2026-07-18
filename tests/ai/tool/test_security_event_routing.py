@@ -16,7 +16,9 @@ class _Executor:
         return False
 
     async def execute(self, request, context, handler, **kwargs):
-        return await handler(**request.arguments)
+        result = await handler(**request.arguments)
+        processor = kwargs.get("result_processor")
+        return result if processor is None else await processor(result)
 
 
 def _executor():

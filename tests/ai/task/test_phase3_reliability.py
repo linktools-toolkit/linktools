@@ -92,9 +92,9 @@ def _envelope_task(clock, *, depth=2) -> TaskRecord:
         created_at=clock,
         updated_at=clock,
         depth=depth,
-        delegated_scopes=("read", "write"),
+        delegated_scopes=ScopeSet.of("read", "write"),
         actor_chain=ActorChain(
-            actors=(ActorRef("user", "alice"),), delegated_scopes=("read", "write")
+            actors=(ActorRef("user", "alice"),), delegated_scopes=ScopeSet.of("read", "write")
         ),
     )
 
@@ -111,7 +111,8 @@ def test_sql_task_round_trip_preserves_depth_scopes_actor_chain(tmp_path) -> Non
             id="j1",
             status=JobStatus.PENDING,
             principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
-            actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
+            actor_chain=ActorChain(actors=(ActorRef("user", "alice"),),
+                delegated_scopes=ScopeSet.allow_all()),
             budget=TaskBudget(),
             root_task_id="t1",
             input_artifact_id=None,
@@ -470,7 +471,7 @@ def test_root_task_inherits_job_scopes_at_creation(tmp_path) -> None:
             principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
             actor_chain=ActorChain(
                 actors=(ActorRef("user", "alice"),),
-                delegated_scopes=("read", "write"),
+                delegated_scopes=ScopeSet.of("read", "write"),
             ),
             budget=TaskBudget(),
             root_task_id="t1",
@@ -504,6 +505,7 @@ def test_root_task_inherits_job_scopes_at_creation(tmp_path) -> None:
             version=1,
             created_at=now,
             updated_at=now,
+            delegated_scopes=ScopeSet.allow_all(),
         )
         await store.create_job(job, root)
         persisted = await store.get_task("t1")

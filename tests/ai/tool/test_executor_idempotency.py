@@ -70,6 +70,34 @@ def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_p
     assert first == 42 and second == 42, "both calls return the (cached) result"
 
 
+def test_safe_result_is_identical_on_first_call_and_replay(tmp_path):
+    store = _file_store(tmp_path)
+    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    calls = {"handler": 0, "processor": 0}
+
+    async def handler():
+        calls["handler"] += 1
+        return {"secret": "raw", "public": "ok"}
+
+    async def processor(raw):
+        calls["processor"] += 1
+        return {"public": raw["public"]}
+
+    async def run():
+        kwargs = dict(descriptor=_DESC, effective_policy=_POLICY,
+            idempotency_key="safe-1", result_processor=processor,
+            result_processor_revision="processor-v1")
+        first = await executor.execute(ToolRequest(tool_name="safe", arguments={}),
+            ToolContext(run_id="r1", session_id="s1"), handler, **kwargs)
+        replay = await executor.execute(ToolRequest(tool_name="safe", arguments={}),
+            ToolContext(run_id="r1", session_id="s1"), handler, **kwargs)
+        return first, replay
+
+    first, replay = asyncio.run(run())
+    assert first == replay == {"public": "ok"}
+    assert calls == {"handler": 1, "processor": 1}
+
+
 # ---------------------------------------------------------------------------
 # 2. Same idempotency_key + DIFFERENT arguments -> IdempotencyConflictError
 #    (request_hash includes the arguments, so the second reserve sees a hash

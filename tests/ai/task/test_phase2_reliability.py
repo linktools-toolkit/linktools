@@ -16,6 +16,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from linktools.ai.artifact.store import ArtifactStore
+from linktools.ai.security.principal import ScopeSet
+from linktools.ai.storage.resource.memory import MemoryResourceBackend
+from linktools.ai.storage.resource.store import ResourceStore
 from linktools.ai.storage.facade import FileStorage
 from linktools.ai.task.handlers.runtime import (
     MappingRunnableResolver,
@@ -186,8 +189,18 @@ class _BlockingRuntime:
         await asyncio.Event().wait()  # never returns on its own
         return None
 
-    async def cancel(self, run_id: str) -> None:
+    async def cancel(self, run_id: str, *, principal=None) -> None:
         self.cancels.append(run_id)
+
+
+class _NoopTaskStore:
+    async def bind_run(self, **kwargs): return None
+
+
+def _handler(runtime, resolver, **kwargs):
+    return RuntimeTaskHandler(runtime, resolver, task_store=_NoopTaskStore(),
+        artifact_store=ArtifactStore(ResourceStore(primary=MemoryResourceBackend())),
+        **kwargs)
 
 
 class _RaisingRuntime:
@@ -222,7 +235,7 @@ def _ctx(cancellation: CancellationToken) -> TaskContext:
         worker_id="w",
         principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
-        delegated_scopes=("x",),
+        delegated_scopes=ScopeSet.of("x"),
         budget=TaskBudget(),
         resource_snapshots=(),
         cancellation=cancellation,
@@ -233,7 +246,7 @@ def test_cancel_propagates_to_runtime_and_returns_cancelled() -> None:
     async def run() -> None:
         rt = _BlockingRuntime()
         resolver = MappingRunnableResolver({"a": object()})
-        handler = RuntimeTaskHandler(rt, resolver, cancel_grace_seconds=0.1)
+        handler = _handler(rt, resolver, cancel_grace_seconds=0.1)
         ct = CancellationToken()
         request = TaskRequest(
             input_artifact=None, metadata={"runnable_id": "a", "prompt": "p"}
@@ -246,7 +259,8 @@ def test_cancel_propagates_to_runtime_and_returns_cancelled() -> None:
         asyncio.create_task(fire())
         outcome = await handler.execute(request, _ctx(ct))
         assert isinstance(outcome, TaskFailure)
-        assert outcome.kind == TaskFailureKind.CANCELLED
+        assert outcome.kind == TaskFailureKind.SIDE_EFFECT_UNKNOWN
+        assert outcome.error_type == "RuntimeCancelTimeout"
         assert len(rt.cancels) == 1  # runtime.cancel(run_id) was called
 
     asyncio.run(run())
@@ -256,7 +270,7 @@ def test_run_failure_under_cancellation_is_cancelled_not_side_effect_unknown() -
     async def run() -> None:
         rt = _RaisingRuntime()
         resolver = MappingRunnableResolver({"a": object()})
-        handler = RuntimeTaskHandler(rt, resolver, cancel_grace_seconds=0.1)
+        handler = _handler(rt, resolver, cancel_grace_seconds=0.1)
         ct = CancellationToken()
         ct.trigger()  # cancellation already set when the run raises
         request = TaskRequest(
@@ -276,7 +290,7 @@ def test_run_success_is_not_overridden_by_cancellation() -> None:
         resolver = MappingRunnableResolver({"a": object()})
         # An artifact_store is needed for the handler to seal the result; pass a
         # minimal fake whose put returns a record-shaped object.
-        handler = RuntimeTaskHandler(rt, resolver, artifact_store=None)
+        handler = _handler(rt, resolver)
         ct = CancellationToken()  # never triggered
         request = TaskRequest(
             input_artifact=None, metadata={"runnable_id": "a", "prompt": "p"}
@@ -605,7 +619,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             _OkRuntime(),
             MappingRunnableResolver({"a": "spec-after-change"}),
             task_store=store,
-            artifact_store=None,
+            artifact_store=ArtifactStore(ResourceStore(primary=MemoryResourceBackend())),
         )
         ct = CancellationToken()
         ctx = TaskContext(
@@ -616,7 +630,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             worker_id=c.worker_id,
             principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
             actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
-            delegated_scopes=("x",),
+            delegated_scopes=ScopeSet.of("x"),
             budget=TaskBudget(),
             resource_snapshots=(),
             cancellation=ct,

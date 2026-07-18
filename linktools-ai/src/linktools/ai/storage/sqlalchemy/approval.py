@@ -60,6 +60,7 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 
 def _row_to_request(row: ApprovalRow) -> ApprovalRequest:
+    metadata = json.loads(row.metadata_json)
     return ApprovalRequest(
         id=row.id,
         run_id=row.run_id,
@@ -73,14 +74,17 @@ def _row_to_request(row: ApprovalRow) -> ApprovalRequest:
         created_at=_as_utc(row.created_at),
         resolved_at=_as_utc(row.resolved_at),
         resolved_by=row.resolved_by,
-        metadata=json.loads(row.metadata_json),
+        metadata={k: v for k, v in metadata.items() if not k.startswith("_binding_")},
         tenant_id=row.tenant_id,
         descriptor_fingerprint=row.descriptor_fingerprint,
         handler_revision=row.handler_revision,
         provider_revision=row.provider_revision,
         policy_revision=row.policy_revision,
         capability_revision=row.capability_revision,
+        result_processor_revision=metadata.get("_binding_result_processor_revision"),
         schema_version=row.schema_version or 0,
+        binding=metadata.get("_binding_payload", {}),
+        binding_fingerprint=metadata.get("_binding_fingerprint", ""),
     )
 
 
@@ -181,7 +185,10 @@ class SqlAlchemyApprovalStore:
                     created_at=request.created_at,
                     resolved_at=request.resolved_at,
                     resolved_by=request.resolved_by,
-                    metadata_json=json.dumps(dict(request.metadata)),
+                    metadata_json=json.dumps({**dict(request.metadata),
+                        "_binding_payload": dict(request.binding),
+                        "_binding_fingerprint": request.binding_fingerprint,
+                        "_binding_result_processor_revision": request.result_processor_revision}),
                     tenant_id=request.tenant_id,
                     descriptor_fingerprint=request.descriptor_fingerprint,
                     handler_revision=request.handler_revision,
@@ -243,9 +250,16 @@ class SqlAlchemyApprovalStore:
         both passing the SELECT check and both inserting. On the (rare)
         collision, this method re-selects and returns the winner instead of
         raising, so both callers observe the SAME persisted request."""
+        required_binding = ("descriptor_fingerprint", "handler_revision",
+            "provider_revision", "policy_revision", "capability_revision",
+            "result_processor_revision", "arguments_hash")
+        if not binding or any(not isinstance(binding.get(k), str) or not binding[k]
+                              for k in required_binding):
+            raise ApprovalConflictError("approval execution binding is incomplete")
         existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
         if existing is not None:
-            check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments)
+            check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments,
+                arguments_hash=binding.get("arguments_hash") if binding else None)
             return existing
 
         request = build_approval_request(

@@ -35,6 +35,7 @@ ALLOWED_APPROVAL_TRANSITIONS: "Mapping[ApprovalStatus, frozenset[ApprovalStatus]
 def compute_arguments_hash(
     tool_name: str,
     arguments: "Mapping[str, Any]",
+    arguments_hash: "str | None" = None,
 ) -> str:
     """Stable identity hash for a tool call: SHA-256 over the canonical JSON
     of ``{"tool": tool_name, "arguments": arguments}``. Canonical encoding
@@ -78,6 +79,8 @@ class ApprovalRequest:
     capability_revision: "str | None" = None
     result_processor_revision: "str | None" = None
     schema_version: int = 1
+    binding: "Mapping[str, Any]" = field(default_factory=dict)
+    binding_fingerprint: str = ""
 
 
 def build_approval_request(
@@ -95,6 +98,7 @@ def build_approval_request(
     policy_revision: "str | None" = None,
     capability_revision: "str | None" = None,
     result_processor_revision: "str | None" = None,
+    arguments_hash: "str | None" = None,
 ) -> ApprovalRequest:
     """Mint a PENDING ApprovalRequest (fresh UTC timestamps, version=1).
 
@@ -111,6 +115,18 @@ def build_approval_request(
 
     now = datetime.now(timezone.utc)
     raw_args = dict(arguments) if arguments is not None else {}
+    from ..tool.binding import ToolExecutionBinding
+    effective_arguments_hash = arguments_hash or compute_arguments_hash(tool_name, raw_args)
+    revisions = (descriptor_fingerprint, handler_revision, provider_revision,
+                 policy_revision, capability_revision, result_processor_revision)
+    binding = None
+    if all(isinstance(value, str) and value for value in revisions):
+        binding = ToolExecutionBinding(schema_version=1, tool_name=tool_name,
+            arguments_hash=effective_arguments_hash,
+            descriptor_fingerprint=descriptor_fingerprint,
+            handler_revision=handler_revision, provider_revision=provider_revision,
+            policy_revision=policy_revision, capability_revision=capability_revision,
+            result_processor_revision=result_processor_revision)
     return ApprovalRequest(
         id=approval_id if approval_id is not None else str(uuid.uuid4()),
         run_id=run_id,
@@ -118,7 +134,7 @@ def build_approval_request(
         tool_name=tool_name,
         reason=reason,
         redacted_arguments=redact_for_audit(raw_args),
-        arguments_hash=compute_arguments_hash(tool_name, raw_args),
+        arguments_hash=effective_arguments_hash,
         status=ApprovalStatus.PENDING,
         version=1,
         created_at=now,
@@ -131,6 +147,8 @@ def build_approval_request(
         policy_revision=policy_revision,
         capability_revision=capability_revision,
         result_processor_revision=result_processor_revision,
+        binding={} if binding is None else binding.to_payload(),
+        binding_fingerprint="" if binding is None else binding.fingerprint(),
     )
 
 
@@ -139,6 +157,7 @@ def check_dedupe_conflict(
     *,
     tool_name: str,
     arguments: "Mapping[str, Any]",
+    arguments_hash: "str | None" = None,
 ) -> None:
     """Guard ``create_or_get_pending()``: when an existing request is found for
     ``(run_id, tool_call_id)``, it must be for the SAME call -- a dedupe key
@@ -149,9 +168,8 @@ def check_dedupe_conflict(
     :class:`~linktools.ai.errors.ApprovalConflictError`."""
     from ..errors import ApprovalConflictError
 
-    if existing.tool_name != tool_name or existing.arguments_hash != compute_arguments_hash(
-        tool_name, arguments
-    ):
+    expected_hash = arguments_hash or compute_arguments_hash(tool_name, arguments)
+    if existing.tool_name != tool_name or existing.arguments_hash != expected_hash:
         raise ApprovalConflictError(
             f"approval dedupe key (run_id={existing.run_id!r}, "
             f"tool_call_id={existing.tool_call_id!r}) already exists with "

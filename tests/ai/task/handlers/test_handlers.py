@@ -16,6 +16,7 @@ from linktools.ai.task.models import (
     TaskFailureKind,
     TaskPrincipal,
 )
+from linktools.ai.security.principal import ScopeSet
 from linktools.ai.task.protocols import (
     CancellationToken,
     TaskContext,
@@ -33,7 +34,7 @@ def _ctx() -> TaskContext:
         worker_id="w1",
         principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
-        delegated_scopes=None,
+        delegated_scopes=ScopeSet.allow_all(),
         budget=TaskBudget(),
         resource_snapshots=(),
         cancellation=CancellationToken(),
@@ -122,10 +123,32 @@ class _FakeRuntime:
         return {"output": "done"}
 
 
+class _FakeTaskStore:
+    async def bind_runnable(self, **kwargs):
+        return None
+
+    async def bind_run(self, **kwargs):
+        return None
+
+
+def _stores():
+    from linktools.ai.artifact import ArtifactStore
+    from linktools.ai.storage.resource.memory import MemoryResourceBackend
+    from linktools.ai.storage.resource.store import ResourceStore
+    return _FakeTaskStore(), ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+
+
+def _runtime_handler(runtime, resolver, **kwargs):
+    task_store, artifacts = _stores()
+    return RuntimeTaskHandler(runtime, resolver,
+        task_store=kwargs.pop("task_store", task_store),
+        artifact_store=kwargs.pop("artifact_store", artifacts), **kwargs)
+
+
 def test_runtime_handler_calls_runtime_with_principal() -> None:
     rt = _FakeRuntime()
     resolver = MappingRunnableResolver({"agent-1": "fake-spec"})
-    handler = RuntimeTaskHandler(rt, resolver)
+    handler = _runtime_handler(rt, resolver)
 
     async def run():
         outcome = await handler.execute(
@@ -160,7 +183,7 @@ def test_runtime_handler_mid_run_exception_is_side_effect_unknown() -> None:
             raise RuntimeError("model 500 mid-tool-call")
 
     resolver = MappingRunnableResolver({"agent-1": "fake-spec"})
-    handler = RuntimeTaskHandler(_BoomRuntime(), resolver)
+    handler = _runtime_handler(_BoomRuntime(), resolver)
 
     async def run():
         outcome = await handler.execute(
@@ -176,7 +199,7 @@ def test_runtime_handler_mid_run_exception_is_side_effect_unknown() -> None:
 
 
 def test_runtime_handler_missing_input() -> None:
-    handler = RuntimeTaskHandler(_FakeRuntime(), MappingRunnableResolver({}))
+    handler = _runtime_handler(_FakeRuntime(), MappingRunnableResolver({}))
 
     async def run():
         outcome = await handler.execute(
@@ -189,7 +212,7 @@ def test_runtime_handler_missing_input() -> None:
 
 
 def test_runtime_handler_resolver_miss() -> None:
-    handler = RuntimeTaskHandler(
+    handler = _runtime_handler(
         _FakeRuntime(), MappingRunnableResolver({"only": "spec"})
     )
 
@@ -214,7 +237,7 @@ def test_runtime_handler_seals_run_result_to_artifact() -> None:
 
     rt = _FakeRuntime()
     artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
-    handler = RuntimeTaskHandler(
+    handler = _runtime_handler(
         rt,
         MappingRunnableResolver({"agent-1": "fake-spec"}),
         artifact_store=artifacts,
@@ -250,7 +273,7 @@ def test_runtime_handler_rejects_oversized_output_before_writing() -> None:
             return {"output": "x" * (2 * 1024 * 1024)}  # 2 MiB > 1 MiB cap
 
     artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
-    handler = RuntimeTaskHandler(
+    handler = _runtime_handler(
         _HugeRuntime(),
         MappingRunnableResolver({"agent-1": "fake-spec"}),
         artifact_store=artifacts,
@@ -281,7 +304,7 @@ def test_runtime_handler_rejects_stale_resource_snapshot() -> None:
 
     rt = _FakeRuntime()
     artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
-    handler = RuntimeTaskHandler(
+    handler = _runtime_handler(
         rt,
         MappingRunnableResolver({"agent-1": "fake-spec"}),
         artifact_store=artifacts,
@@ -294,7 +317,7 @@ def test_runtime_handler_rejects_stale_resource_snapshot() -> None:
         worker_id="w1",
         principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
-        delegated_scopes=None,
+        delegated_scopes=ScopeSet.allow_all(),
         budget=TaskBudget(),
         resource_snapshots=(
             ResourceSnapshotRef(

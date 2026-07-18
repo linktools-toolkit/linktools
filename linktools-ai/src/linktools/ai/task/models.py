@@ -128,18 +128,12 @@ class TaskPrincipal:
 @dataclass(frozen=True, slots=True)
 class ActorChain:
     actors: "tuple[ActorRef, ...]"
-    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.allow_all)
+    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.empty)
 
     def __post_init__(self) -> None:
-        # Normalize legacy tuple/None input to a concrete ScopeSet at the
-        # boundary so a persisted ActorChain is never None-typed.
+        # Runtime construction is strict; persistence adapters own legacy migration.
         if not isinstance(self.delegated_scopes, ScopeSet):
-            if self.delegated_scopes is None:
-                object.__setattr__(self, "delegated_scopes", ScopeSet.empty())
-                return
-            object.__setattr__(
-                self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
-            )
+            raise TypeError("ActorChain.delegated_scopes requires explicit ScopeSet")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,18 +207,13 @@ class TaskRecord:
     created_at: datetime
     updated_at: datetime
     depth: int = 0
-    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.allow_all)
+    delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.empty)
     actor_chain: "ActorChain | None" = None
 
     def __post_init__(self) -> None:
-        # Normalize legacy tuple/None to a concrete ScopeSet at the boundary.
+        # Runtime construction is strict; persistence adapters own legacy migration.
         if not isinstance(self.delegated_scopes, ScopeSet):
-            if self.delegated_scopes is None:
-                object.__setattr__(self, "delegated_scopes", ScopeSet.empty())
-                return
-            object.__setattr__(
-                self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
-            )
+            raise TypeError("TaskRecord.delegated_scopes requires explicit ScopeSet")
     # Signal-wait state (set when a handler returns WaitSignal). wait_deadline_at
     # is None for an unbounded wait; reconcile_due moves a WAITING task past its
     # deadline to a retry or a terminal cancel.

@@ -9,6 +9,7 @@ SQLAlchemy backend (later phase) is exercised by parameterizing ``task_store``.
 """
 
 import asyncio
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -160,6 +161,37 @@ def test_completed_task_is_not_reclaimed(task_store: FileTaskStore) -> None:
             await task_store.claim(worker_id="other", now=clock.now(), lease_seconds=30)
             is None
         )
+
+    _run(run())
+
+
+def test_json_commit_journal_recovers_without_reexecuting_commands(
+    task_store: FileTaskStore, monkeypatch
+) -> None:
+    from linktools.ai.task.protocols import CreateTask, TaskSuccess
+    clock = task_store._clock
+    original = task_store._journal.mark_step
+    failed = {"once": False}
+
+    def interrupt(path, step):
+        if step == "COMMANDS_APPLIED" and not failed["once"]:
+            failed["once"] = True
+            raise OSError("simulated crash")
+        original(path, step)
+
+    async def run():
+        await task_store.create_job(_job(clock), _task(clock))
+        claimed = await task_store.claim(worker_id="w", now=clock.now(), lease_seconds=30)
+        monkeypatch.setattr(task_store._journal, "mark_step", interrupt)
+        with pytest.raises(OSError, match="simulated crash"):
+            await task_store.commit_success(claimed.claim, TaskSuccess(commands=(
+                CreateTask(key="child", handler="echo"),)))
+        monkeypatch.setattr(task_store._journal, "mark_step", original)
+        await task_store.recover_incomplete_commits()
+        tasks = await task_store.list_tasks("j1")
+        assert len([task for task in tasks if task.key == "child"]) == 1
+        assert (await task_store.get_task("t1")).status is TaskStatus.SUCCEEDED
+        assert not list(task_store._journal.root.glob("*.json"))
 
     _run(run())
 
@@ -693,7 +725,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(
             principal=TaskPrincipal(tenant_id="t1", user_id="alice"),
             actor_chain=ActorChain(
                 actors=(ActorRef("user", "alice"),),
-                delegated_scopes=("read", "write", "exec"),
+                delegated_scopes=ScopeSet.of("read", "write", "exec"),
             ),
             budget=TaskBudget(),
             root_task_id="t1",
@@ -704,7 +736,9 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(
             started_at=None,
             finished_at=None,
         )
-        await task_store.create_job(job, _task(clock))
+        await task_store.create_job(
+            job, dataclasses.replace(_task(clock), delegated_scopes=ScopeSet.allow_all())
+        )
         claimed = await task_store.claim(
             worker_id="w", now=clock.now(), lease_seconds=30
         )

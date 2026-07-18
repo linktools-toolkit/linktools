@@ -531,6 +531,10 @@ class ApprovalError(LinktoolsAIError):
     """Base class for Approval-store errors."""
 
 
+class ToolBindingError(LinktoolsAIError):
+    """A tool execution cannot be bound to stable revisions."""
+
+
 class ApprovalNotFoundError(ApprovalError):
     pass
 

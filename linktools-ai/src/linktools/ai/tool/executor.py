@@ -174,6 +174,7 @@ class ToolExecutor:
             # the ApprovalRequest atomically with the checkpoint/transition/
             # event writes, so there is a single approval path.
             tool_call_id = context.tool_call_id or str(uuid.uuid4())
+            from ..agent.approval import compute_arguments_hash
             raise RunPaused(
                 run_id=run_id,
                 approval_id=str(uuid.uuid4()),
@@ -189,7 +190,9 @@ class ToolExecutor:
                         "capability_revision", "result_processor_revision",
                     )
                     if key in context.metadata
-                },
+                } | {"arguments_hash": compute_arguments_hash(
+                    request.tool_name, request.arguments
+                )},
             )
 
     async def retry_tool_commit(self, claim, *, result: Any | None = None) -> Any:
@@ -229,7 +232,8 @@ class ToolExecutor:
         )
         from ..agent.approval import compute_arguments_hash
         binding = {"tool_name": request.tool_name,
-                   "arguments_hash": compute_arguments_hash(request.tool_name, request.arguments)}
+                   "arguments_hash": compute_arguments_hash(request.tool_name, request.arguments),
+                   "schema_version": 1}
         binding.update({key: context.metadata.get(key) for key in (
             "descriptor_fingerprint", "handler_revision", "provider_revision",
             "policy_revision", "capability_revision", "result_processor_revision")})
@@ -248,9 +252,14 @@ class ToolExecutor:
         if self._approval_store is None or run_id is None or tool_call_id is None or not binding:
             return False
         requests = await self._approval_store.list_for_run(run_id)
+        from .binding import ToolExecutionBinding
+        try:
+            expected_binding = ToolExecutionBinding(**binding)
+        except (TypeError, ValueError):
+            return False
         return any(
             r.tool_call_id == tool_call_id and r.status is ApprovalStatus.APPROVED
-            and all(getattr(r, key, None) == value for key, value in binding.items())
+            and r.binding_fingerprint == expected_binding.fingerprint()
             for r in requests
         )
 
@@ -270,6 +279,15 @@ class ToolExecutor:
         if any(not isinstance(context.metadata.get(key), str) or not context.metadata.get(key)
                for key in required):
             return False
+        from .binding import ToolExecutionBinding
+        expected_binding = ToolExecutionBinding(schema_version=1,
+            tool_name=request.tool_name, arguments_hash=expected,
+            descriptor_fingerprint=context.metadata["descriptor_fingerprint"],
+            handler_revision=context.metadata["handler_revision"],
+            provider_revision=context.metadata["provider_revision"],
+            policy_revision=context.metadata["policy_revision"],
+            capability_revision=context.metadata["capability_revision"],
+            result_processor_revision=context.metadata["result_processor_revision"])
         return any(
             r.tool_call_id == context.tool_call_id
             and r.status is ApprovalStatus.APPROVED
@@ -277,8 +295,7 @@ class ToolExecutor:
                 r.schema_version >= 1
                 and r.tool_name == request.tool_name
                 and r.arguments_hash == expected
-                and all(isinstance(getattr(r, key, None), str) and
-                        getattr(r, key) == context.metadata.get(key) for key in required)
+                and r.binding_fingerprint == expected_binding.fingerprint()
             )
             for r in requests
         )
@@ -298,6 +315,7 @@ class ToolExecutor:
         idempotency_scope: "str | None" = None,
         result_processor: "Callable[[Any], Any] | None" = None,
         result_processor_revision: str = "identity-v1",
+        execution_binding: "Any | None" = None,
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -345,6 +363,11 @@ class ToolExecutor:
         With no ``idempotency_store`` (or no ``idempotency_key``), idempotency
         is off: the handler runs every call and nothing is persisted."""
         await self.check(request, context)
+        if execution_binding is not None:
+            if execution_binding.tool_name != request.tool_name:
+                raise ToolDeniedError("tool execution binding tool name mismatch")
+            if execution_binding.result_processor_revision != result_processor_revision:
+                raise ToolDeniedError("tool execution binding processor revision mismatch")
         # Idempotency is scoped to context.run_id so the same idempotency_key
         # can be reused across different runs without colliding. ``scope`` is
         # part of the request_hash too, so a hash mismatch always reflects a
@@ -458,26 +481,37 @@ class ToolExecutor:
         # --- Commit phase: the Handler succeeded (its side effect happened).
         # Record the execution receipt, then land the fenced commit. A failure
         # here is NEVER resolved by re-running the Handler.
+        receipt_artifact_id = None
         if use_idempotency:
             from ..errors import ToolCommitError
 
-            receipt_artifact_id = None
             if self._receipt_store is not None:
-                import json
                 from ..json import canonical_json
                 tenant_id = self._tenant_id_resolver(context) if self._tenant_id_resolver else None
                 if tenant_id:
-                    receipt = await self._receipt_store.put(
-                        canonical_json(result).encode("utf-8"),
-                        media_type="application/json",
-                        tenant_id=tenant_id,
-                        metadata={"tool_name": request.tool_name, "request_hash": request_hash},
-                    )
-                    receipt_artifact_id = receipt.ref.id
+                    try:
+                        receipt = await self._receipt_store.put(
+                            canonical_json(result).encode("utf-8"),
+                            media_type="application/json", tenant_id=tenant_id,
+                            metadata={"tool_name": request.tool_name,
+                                      "request_hash": request_hash})
+                        receipt_artifact_id = receipt.ref.id
+                    except Exception as exc:
+                        await self._idempotency_store.mark_unknown(claim)
+                        raise ToolCommitError(
+                            "raw execution receipt could not be persisted") from exc
 
+        try:
             safe_result = result if result_processor is None else result_processor(result)
             if asyncio.iscoroutine(safe_result):
                 safe_result = await safe_result
+        except Exception:
+            if use_idempotency:
+                await self._idempotency_store.mark_unknown(claim)
+            raise
+
+        if use_idempotency:
+
             try:
                 if receipt_artifact_id is None:
                     await self._idempotency_store.mark_executed(claim, safe_result)
@@ -515,4 +549,4 @@ class ToolExecutor:
                     f"result commit could not be confirmed; record left EXECUTED "
                     f"for recovery"
                 ) from commit_exc
-        return result
+        return safe_result

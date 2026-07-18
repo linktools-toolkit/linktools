@@ -82,12 +82,13 @@ def test_principal_context_reuses_canonical_actor_and_scope_types():
     assert isinstance(p.scopes, ScopeSet)
 
 
-def test_principal_context_normalizes_legacy_scope_input():
-    # None -> unrestricted (legacy "no scope limit"); tuple -> values.
-    assert _principal(scopes=None).scopes == ScopeSet(unrestricted=True)
-    assert _principal(scopes=("read", "write")).scopes == ScopeSet(
-        values=("read", "write")
-    )
+def test_principal_context_requires_explicit_scope_set():
+    with pytest.raises(TypeError):
+        PrincipalContext(tenant_id="t1", user_id="alice",
+            actor=ActorRef(kind="user", id="alice"), scopes=None)
+    with pytest.raises(TypeError):
+        PrincipalContext(tenant_id="t1", user_id="alice",
+            actor=ActorRef(kind="user", id="alice"), scopes=("read", "write"))
 
 
 # --- require_tenant (fail-closed) -------------------------------------------

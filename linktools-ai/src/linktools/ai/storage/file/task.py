@@ -147,7 +147,13 @@ class FileTaskStore:
         path = self._job_path(job_id)
         if not path.exists():
             raise JobNotFoundError(job_id)
-        return from_jsonable(JobRecord, self._read(path))  # type: ignore[return-value]
+        raw = self._read(path)
+        if isinstance(raw, dict) and isinstance(raw.get("actor_chain"), dict) \
+                and raw["actor_chain"].get("delegated_scopes") is None:
+            raw["actor_chain"] = {**raw["actor_chain"],
+                "delegated_scopes": to_jsonable(ScopeSet.empty())}
+            raw["metadata"] = {**raw.get("metadata", {}), "_legacy_missing_scopes": True}
+        return from_jsonable(JobRecord, raw)  # type: ignore[return-value]
 
     def _read_task(self, job_id: str, task_id: str) -> TaskRecord:
         path = self._task_path(job_id, task_id)
@@ -156,6 +162,11 @@ class FileTaskStore:
         raw = self._read(path)
         if isinstance(raw, dict) and raw.get("delegated_scopes") is None:
             raw["delegated_scopes"] = to_jsonable(ScopeSet.empty())
+            raw["metadata"] = {**raw.get("metadata", {}), "_legacy_missing_scopes": True}
+        if isinstance(raw, dict) and isinstance(raw.get("actor_chain"), dict) \
+                and raw["actor_chain"].get("delegated_scopes") is None:
+            raw["actor_chain"] = {**raw["actor_chain"],
+                "delegated_scopes": to_jsonable(ScopeSet.empty())}
             raw["metadata"] = {**raw.get("metadata", {}), "_legacy_missing_scopes": True}
         return from_jsonable(TaskRecord, raw)  # type: ignore[return-value]
 
@@ -171,14 +182,18 @@ class FileTaskStore:
                 yield job_dir.name, task_file
 
     def _append_transition(
-        self, job_id: str, *, task_id, attempt_id, from_status, to_status, reason, now
+        self, job_id: str, *, task_id, attempt_id, from_status, to_status, reason, now,
+        transition_id=None,
     ) -> None:
         seq = (
             len(list(self._transitions_dir(job_id).iterdir()))
             if self._transitions_dir(job_id).exists()
             else 0
         )
-        tid = f"{seq:010d}"
+        tid = transition_id or f"{seq:010d}"
+        path = self._transitions_dir(job_id) / f"{tid}.json"
+        if path.exists():
+            return
         record = TaskTransitionRecord(
             id=tid,
             job_id=job_id,
@@ -189,7 +204,7 @@ class FileTaskStore:
             reason=reason,
             occurred_at=now,
         )
-        self._write(self._transitions_dir(job_id) / f"{tid}.json", record)
+        self._write(path, record)
 
     # --------------------------------------------------------- public API --
     # Each holds the process lock across a to_thread sync call.
@@ -243,7 +258,7 @@ class FileTaskStore:
         async with self._lock:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "success"))
-            result = await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+            result = await asyncio.to_thread(self._commit_success_sync, claim, outcome, journal)
             self._journal.mark_step(journal, "COMMITTED")
             journal.unlink(missing_ok=True)
             return result
@@ -254,7 +269,7 @@ class FileTaskStore:
         async with self._lock:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "failure"))
-            result = await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+            result = await asyncio.to_thread(self._commit_failure_sync, claim, outcome, journal)
             self._journal.mark_step(journal, "COMMITTED")
             journal.unlink(missing_ok=True)
             return result
@@ -263,8 +278,15 @@ class FileTaskStore:
     def _write_journal(path: Path, payload) -> None:
         claim, outcome, kind = payload
         tmp = path.with_suffix(".tmp")
+        outcome_payload = to_jsonable(outcome)
+        if kind == "success":
+            outcome_payload = dict(outcome_payload)
+            outcome_payload["commands"] = [
+                {"type": type(command).__name__, "payload": to_jsonable(command)}
+                for command in outcome.commands
+            ]
         record = {"schema_version": 1, "step": "PREPARED", "kind": kind,
-                  "claim": to_jsonable(claim), "outcome": to_jsonable(outcome)}
+                  "claim": to_jsonable(claim), "outcome": outcome_payload}
         _atomic_write(tmp, json.dumps(record, sort_keys=True).encode("utf-8"))
         tmp.replace(path)
 
@@ -274,14 +296,35 @@ class FileTaskStore:
             for path in sorted(self._journal.root.glob("*.json")):
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 claim = from_jsonable(TaskClaim, raw["claim"])
+                current = self._get_task_sync(claim.task_id)
+                if current is not None and current.status in TASK_TERMINAL:
+                    owner = self._find_task_owner_job(claim.task_id)
+                    if owner is not None:
+                        self._resolve_dependencies(owner[0], self._clock.now())
+                        self._converge_jobs_sync(self._clock.now())
+                    path.unlink(missing_ok=True)
+                    continue
                 kind = raw["kind"]
-                outcome_type = TaskFailure if kind == "failure" else TaskSuccess
-                outcome = from_jsonable(outcome_type, raw["outcome"])
+                if kind == "failure":
+                    outcome = from_jsonable(TaskFailure, raw["outcome"])
+                else:
+                    payload = dict(raw["outcome"])
+                    command_types = {cls.__name__: cls for cls in (
+                        CreateTask, WaitSignal, CompleteJob, CancelTask, CancelJob)}
+                    commands = tuple(from_jsonable(
+                        command_types[item["type"]], item["payload"])
+                        for item in payload.get("commands", ()))
+                    from ...artifact.models import ArtifactRef
+                    output = payload.get("output_artifact")
+                    outcome = TaskSuccess(
+                        output_artifact=(None if output is None else
+                            from_jsonable(ArtifactRef, output)),
+                        commands=commands, metadata=payload.get("metadata", {}))
                 try:
                     if kind == "success":
-                        await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+                        await asyncio.to_thread(self._commit_success_sync, claim, outcome, path)
                     else:
-                        await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+                        await asyncio.to_thread(self._commit_failure_sync, claim, outcome, path)
                     self._journal.mark_step(path, "COMMITTED")
                     path.unlink(missing_ok=True)
                 except TaskClaimLostError:
@@ -652,7 +695,8 @@ class FileTaskStore:
         return True
 
     def _commit_success_sync(
-        self, claim: TaskClaim, outcome: TaskSuccess
+        self, claim: TaskClaim, outcome: TaskSuccess,
+        journal_path: "Path | None" = None,
     ) -> TaskRecord:
         now = self._clock.now()
         owner = self._find_task_owner_job(claim.task_id)
@@ -660,6 +704,13 @@ class FileTaskStore:
             raise TaskNotFoundError(claim.task_id)
         job_id, _ = owner
         task = self._guard(job_id, claim)
+        steps = {"PREPARED": 0, "ATTEMPT_WRITTEN": 1,
+                 "COMMANDS_APPLIED": 2, "TASK_WRITTEN": 3, "FINALIZED": 4}
+        current_step = "PREPARED"
+        if journal_path is not None and journal_path.exists():
+            current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
+                "step", "PREPARED"
+            )
         # Cancel precedence: if the task was moved to CANCELLING while
         # the handler ran, the handler's success is discarded and the task lands
         # CANCELLED (no commands applied).
@@ -675,6 +726,9 @@ class FileTaskStore:
         create_commands = [
             c for c in outcome.commands if isinstance(c, CreateTask)
         ]
+        create_keys = [c.key for c in create_commands]
+        if len(create_keys) != len(set(create_keys)):
+            raise ValueError("duplicate task key within commit")
         if create_commands:
             job = self._read_job(job_id)
             self._assert_child_budget_sync(job_id, job, task, create_commands)
@@ -718,10 +772,13 @@ class FileTaskStore:
             version=task.version + 1,
         )
         attempt = self._read_attempt(job_id, claim.attempt_id)
-        assert_attempt_transition(attempt.status, AttemptStatus.SUCCEEDED)
-        new_attempt = dataclasses.replace(
-            attempt, status=AttemptStatus.SUCCEEDED, finished_at=now
-        )
+        if attempt.status == AttemptStatus.SUCCEEDED:
+            new_attempt = attempt
+        else:
+            assert_attempt_transition(attempt.status, AttemptStatus.SUCCEEDED)
+            new_attempt = dataclasses.replace(
+                attempt, status=AttemptStatus.SUCCEEDED, finished_at=now
+            )
         # Persist WaitSignal conditions as first-class state (not metadata) so
         # submit_signal / reconcile_due can match them deterministically. v1
         # allows a single signal condition per task; a bounded wait carries its
@@ -748,26 +805,35 @@ class FileTaskStore:
         #  the attempt + commands are persisted BEFORE the parent task is
         # flipped to its terminal status, so a crash never leaves the parent
         # succeeded while its child tasks are missing.
-        self._write(self._attempt_path(job_id, claim.attempt_id), new_attempt)
+        if steps[current_step] < steps["ATTEMPT_WRITTEN"]:
+            self._write(self._attempt_path(job_id, claim.attempt_id), new_attempt)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "ATTEMPT_WRITTEN")
+            current_step = "ATTEMPT_WRITTEN"
 
         # Apply commands atomically.
-        for cmd in outcome.commands:
-            if isinstance(cmd, CreateTask):
-                self._apply_create_task(job_id, task, cmd, now)
-            elif isinstance(cmd, CompleteJob):
-                self._complete_job_sync(job_id, claim.task_id, cmd, now)
-            elif isinstance(cmd, CancelTask):
-                self._cancel_task_in_job_sync(job_id, cmd, now)
-            elif isinstance(cmd, CancelJob):
-                # A handler CancelJob always targets the CURRENT job only --
-                # the command carries no job_id, so cross-job cancellation is
-                # not expressible here (use TaskRuntime.request_cancel).
-                self._request_cancel_sync(job_id, cmd.reason)
+        if steps[current_step] < steps["COMMANDS_APPLIED"]:
+            for cmd in outcome.commands:
+                if isinstance(cmd, CreateTask):
+                    self._apply_create_task(job_id, task, cmd, now)
+                elif isinstance(cmd, CompleteJob):
+                    self._complete_job_sync(job_id, claim.task_id, cmd, now)
+                elif isinstance(cmd, CancelTask):
+                    self._cancel_task_in_job_sync(job_id, cmd, now)
+                elif isinstance(cmd, CancelJob):
+                    self._request_cancel_sync(job_id, cmd.reason)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "COMMANDS_APPLIED")
+            current_step = "COMMANDS_APPLIED"
 
         #  the parent task is flipped to its terminal status LAST, after
         # every child task / signal / dependency update has been persisted, so
         # the "parent succeeded but child not created" window never opens.
-        self._write(self._task_path(job_id, task.id), new_task)
+        if steps[current_step] < steps["TASK_WRITTEN"]:
+            self._write(self._task_path(job_id, task.id), new_task)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "TASK_WRITTEN")
+            current_step = "TASK_WRITTEN"
         self._append_transition(
             job_id,
             task_id=task.id,
@@ -776,10 +842,14 @@ class FileTaskStore:
             to_status=target.value,
             reason="wait_signal" if has_wait else "succeeded",
             now=now,
+            transition_id=uuid.uuid5(uuid.NAMESPACE_URL,
+                f"task-commit:{claim.attempt_id}:{target.value}").hex,
         )
         # Resolve dependencies: PENDING → READY when all deps SUCCEEDED.
         self._resolve_dependencies(job_id, now)
         self._converge_jobs_sync(now)
+        if journal_path is not None:
+            self._journal.mark_step(journal_path, "FINALIZED")
         return new_task
 
     def _assert_child_budget_sync(
@@ -928,6 +998,8 @@ class FileTaskStore:
         # silently duplicated.
         for existing in self._list_tasks_sync(job_id, None):
             if existing.key == cmd.key:
+                if existing.parent_task_id == parent.id:
+                    return
                 raise ValueError(
                     f"duplicate task key {cmd.key!r} in job {job_id}"
                 )
@@ -944,7 +1016,7 @@ class FileTaskStore:
         child_scopes, child_chain = narrow_child_principal(
             parent, cmd.delegated_scopes, cmd.handler, job.actor_chain
         )
-        child_id = f"{parent.id}-{cmd.key}-{uuid.uuid4().hex[:8]}"
+        child_id = f"{parent.id}-{cmd.key}-{uuid.uuid5(uuid.NAMESPACE_URL, f'{job_id}:{parent.id}:{cmd.key}').hex[:8]}"
         child = TaskRecord(
             id=child_id,
             job_id=job_id,
@@ -1015,7 +1087,8 @@ class FileTaskStore:
                 )
 
     def _commit_failure_sync(
-        self, claim: TaskClaim, outcome: TaskFailure
+        self, claim: TaskClaim, outcome: TaskFailure,
+        journal_path: "Path | None" = None,
     ) -> TaskRecord:
         now = self._clock.now()
         owner = self._find_task_owner_job(claim.task_id)
@@ -1023,20 +1096,24 @@ class FileTaskStore:
             raise TaskNotFoundError(claim.task_id)
         job_id, _ = owner
         task = self._guard(job_id, claim)
+        steps = {"PREPARED": 0, "TASK_WRITTEN": 1,
+                 "ATTEMPT_WRITTEN": 2, "FINALIZED": 3}
+        current_step = "PREPARED"
+        if journal_path is not None and journal_path.exists():
+            current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
+                "step", "PREPARED")
         if task.status == TaskStatus.CANCELLING:
             # Cancel precedence: a CANCELLING task lands CANCELLED even
             # if the handler reported a failure.
             return self._commit_cancelled_sync(job_id, claim, task, now)
         attempt = self._read_attempt(job_id, claim.attempt_id)
-        assert_attempt_transition(attempt.status, AttemptStatus.FAILED)
-        new_attempt = dataclasses.replace(
-            attempt,
-            status=AttemptStatus.FAILED,
-            finished_at=now,
-            failure_kind=outcome.kind,
-            error_type=outcome.error_type,
-            error_message=outcome.message,
-        )
+        if attempt.status == AttemptStatus.FAILED:
+            new_attempt = attempt
+        else:
+            assert_attempt_transition(attempt.status, AttemptStatus.FAILED)
+            new_attempt = dataclasses.replace(attempt, status=AttemptStatus.FAILED,
+                finished_at=now, failure_kind=outcome.kind,
+                error_type=outcome.error_type, error_message=outcome.message)
         retryable = outcome.retryable
         if retryable is None:
             retryable = outcome.kind in task.retry_policy.retryable_kinds
@@ -1075,8 +1152,15 @@ class FileTaskStore:
             )
             to_status = TaskStatus.FAILED.value
             reason = "failed"
-        self._write(self._task_path(job_id, task.id), new_task)
-        self._write(self._attempt_path(job_id, claim.attempt_id), new_attempt)
+        if steps[current_step] < steps["TASK_WRITTEN"]:
+            self._write(self._task_path(job_id, task.id), new_task)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "TASK_WRITTEN")
+            current_step = "TASK_WRITTEN"
+        if steps[current_step] < steps["ATTEMPT_WRITTEN"]:
+            self._write(self._attempt_path(job_id, claim.attempt_id), new_attempt)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "ATTEMPT_WRITTEN")
         self._append_transition(
             job_id,
             task_id=task.id,
@@ -1085,9 +1169,13 @@ class FileTaskStore:
             to_status=to_status,
             reason=reason,
             now=now,
+            transition_id=uuid.uuid5(uuid.NAMESPACE_URL,
+                f"task-commit:{claim.attempt_id}:{to_status}").hex,
         )
         # A failed task may complete the job (all tasks terminal); converge.
         self._converge_jobs_sync(now)
+        if journal_path is not None:
+            self._journal.mark_step(journal_path, "FINALIZED")
         return new_task
 
     def _commit_cancelled_sync(

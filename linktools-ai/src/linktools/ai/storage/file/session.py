@@ -168,6 +168,9 @@ class FileSessionStore:
         session_id: str,
         messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
+        # A SessionRecord may have been materialized after an earlier staged
+        # batch. Recover and validate that batch before advancing the marker.
+        self.recover_incomplete_batches()
         # Message files are staged first; the session record's committed
         # sequence is the batch commit marker. Readers ignore files above it,
         # so a crash cannot expose a partial batch. Orphaned files are retained
@@ -248,11 +251,19 @@ class FileSessionStore:
                             metadata = dict(current.metadata)
                             metadata["_committed_sequence"] = end
                             self._update_sync(raw["session_id"], status=None, metadata=metadata)
-                    marker.unlink(missing_ok=True)
+                        marker.unlink(missing_ok=True)
                 except Exception:
                     # Leave corrupt markers for operator repair; readers remain
                     # isolated by the last committed sequence.
                     continue
+            record_path = session_dir / "record.json"
+            if record_path.exists():
+                current = self._get_sync(session_dir.name)
+                if current is not None and "_committed_sequence" not in current.metadata:
+                    metadata = dict(current.metadata)
+                    metadata["_committed_sequence"] = 0
+                    metadata["_legacy_missing_committed_sequence"] = True
+                    self._update_sync(current.id, status=None, metadata=metadata)
 
     async def append_messages(
         self,

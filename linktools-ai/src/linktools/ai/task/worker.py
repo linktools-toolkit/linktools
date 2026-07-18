@@ -261,6 +261,9 @@ class TaskWorker:
             handler_cancelled = False
             started = self._clock.now()
             try:
+                if not await self._still_holds_claim(claim):
+                    cancellation.trigger()
+                    return
                 timeout = task.timeout_seconds
                 coro = handler.execute(request, context)
                 if timeout is not None:
