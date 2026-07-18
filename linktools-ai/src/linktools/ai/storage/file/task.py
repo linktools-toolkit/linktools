@@ -744,9 +744,22 @@ class FileTaskStore:
         if task is None:
             raise TaskNotFoundError(claim.task_id)
         if recovery and steps[current_step] >= steps["TASK_WRITTEN"]:
-            self._converge_jobs_sync(now)
-            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
-            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            target = task.status.value
+            reason = "wait_signal" if target == TaskStatus.WAITING.value else "succeeded"
+            transition_id = uuid.uuid5(uuid.NAMESPACE_URL,
+                f"task-commit:{claim.attempt_id}:{target}").hex
+            if steps[current_step] < steps["TRANSITION_WRITTEN"]:
+                self._append_transition(job_id, task_id=task.id,
+                    attempt_id=claim.attempt_id, from_status=TaskStatus.CLAIMED.value,
+                    to_status=target, reason=reason, now=now,
+                    transition_id=transition_id)
+                self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+                current_step = "TRANSITION_WRITTEN"
+            if steps[current_step] < steps["JOB_CONVERGED"]:
+                self._resolve_dependencies(job_id, now)
+                self._converge_jobs_sync(now)
+                self._journal.mark_step(journal_path, "JOB_CONVERGED")
+                current_step = "JOB_CONVERGED"
             self._journal.mark_step(journal_path, "COMPLETED")
             return task
         if not recovery:
@@ -1157,9 +1170,22 @@ class FileTaskStore:
         if task is None:
             raise TaskNotFoundError(claim.task_id)
         if recovery and steps[current_step] >= steps["TASK_WRITTEN"]:
-            self._converge_jobs_sync(now)
-            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
-            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            target = task.status.value
+            reason = "retry" if target == TaskStatus.RETRY_WAIT.value else "failed"
+            transition_id = uuid.uuid5(uuid.NAMESPACE_URL,
+                f"task-commit:{claim.attempt_id}:{target}").hex
+            if steps[current_step] < steps["TRANSITION_WRITTEN"]:
+                self._append_transition(job_id, task_id=task.id,
+                    attempt_id=claim.attempt_id, from_status=TaskStatus.CLAIMED.value,
+                    to_status=target, reason=reason, now=now,
+                    transition_id=transition_id)
+                self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+                current_step = "TRANSITION_WRITTEN"
+            if steps[current_step] < steps["JOB_CONVERGED"]:
+                self._resolve_dependencies(job_id, now)
+                self._converge_jobs_sync(now)
+                self._journal.mark_step(journal_path, "JOB_CONVERGED")
+                current_step = "JOB_CONVERGED"
             self._journal.mark_step(journal_path, "COMPLETED")
             return task
         if not recovery:
