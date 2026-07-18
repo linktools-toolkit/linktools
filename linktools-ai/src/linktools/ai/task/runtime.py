@@ -341,6 +341,12 @@ class TaskRuntime:
             # this one-shot call and continue side effects.
             if not reached_terminal:
                 await self.request_cancel(job_id, reason="run_one_task wait timeout")
+                cancel_deadline = self._clock.now() + timedelta(seconds=5)
+                while self._clock.now() < cancel_deadline:
+                    current = await self.get_job(job_id)
+                    if current is not None and current.status in terminal:
+                        break
+                    await self._clock.sleep(0.02)
             shutdown.set()
             shutdown_deadline = self._clock.now() + timedelta(seconds=5)
             while not wt.done() and self._clock.now() < shutdown_deadline:
