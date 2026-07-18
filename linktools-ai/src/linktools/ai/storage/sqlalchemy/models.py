@@ -79,6 +79,8 @@ class ToolIdempotencyRow(Base):
     claimed_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     lease_expires_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     receipt_artifact_id: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    binding_fingerprint: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    result_processor_revision: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
 class RevisionRow(Base):

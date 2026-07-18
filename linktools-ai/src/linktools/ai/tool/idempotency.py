@@ -105,6 +105,8 @@ class IdempotencyRecord:
     claimed_at: "datetime | None" = None
     lease_expires_at: "datetime | None" = None
     receipt_artifact_id: "str | None" = None
+    binding_fingerprint: "str | None" = None
+    result_processor_revision: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +150,7 @@ class IdempotencyStore(Protocol):
         """
         ...
 
-    async def mark_executed(self, claim: "IdempotencyClaim", result: Any, *, receipt_artifact_id: str | None = None) -> None:
+    async def mark_executed(self, claim: "IdempotencyClaim", result: Any, *, receipt_artifact_id: str | None = None, binding_fingerprint: str | None = None, result_processor_revision: str | None = None) -> None:
         """Transition RESERVED -> EXECUTED and store ``result`` as the
         execution receipt. The Handler has returned; it must not be invoked
         again. The claim's owner_id + generation must match the persisted

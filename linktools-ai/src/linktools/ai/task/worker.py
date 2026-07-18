@@ -250,6 +250,7 @@ class TaskWorker:
             # Already committed as INVALID_INPUT; never run the handler against a
             # missing or unresolvable input artifact.
             heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             return
         request = TaskRequest(
             input_artifact=input_artifact,
@@ -342,6 +343,7 @@ class TaskWorker:
                 pass
         finally:
             heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _commit_with_retry(
         self,
@@ -414,9 +416,7 @@ class TaskWorker:
         # failures leaves it stale, and once the clock passes it the lease is
         # gone locally. Initialized to now + lease -- the claim was just made,
         # so its lease runs out roughly one lease interval from here.
-        confirmed_lease_expires_at = self._clock.now() + timedelta(
-            seconds=self._options.lease_seconds
-        )
+        confirmed_lease_expires_at = claim.task.lease_expires_at
         while True:
             await self._clock.sleep(self._options.heartbeat_seconds)
             try:
@@ -447,9 +447,7 @@ class TaskWorker:
                     return
                 continue
             # Renew succeeded: the lease is confirmed held until now + lease.
-            confirmed_lease_expires_at = self._clock.now() + timedelta(
-                seconds=self._options.lease_seconds
-            )
+            confirmed_lease_expires_at = task.lease_expires_at
             if task.status in (TaskStatus.CANCELLING, TaskStatus.CANCELLED):
                 cancellation.trigger()
                 return

@@ -206,6 +206,7 @@ class ApprovalStore(Protocol):
     async def create_or_get_pending(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         tool_call_id: str,
         tool_name: str,

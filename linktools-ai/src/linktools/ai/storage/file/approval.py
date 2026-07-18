@@ -21,6 +21,7 @@ The ``asyncio.Lock`` is held in the async wrapper and spans the
 ``to_thread`` call (not the other way around)."""
 
 import asyncio
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -213,6 +214,7 @@ class FileApprovalStore:
     def _create_or_get_pending_sync(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         tool_call_id: str,
         tool_name: str,
@@ -245,6 +247,7 @@ class FileApprovalStore:
             )
             return existing[-1]
         request = build_approval_request(
+            tenant_id=tenant_id,
             run_id=run_id,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
@@ -258,6 +261,7 @@ class FileApprovalStore:
     async def create_or_get_pending(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         tool_call_id: str,
         tool_name: str,
@@ -269,6 +273,7 @@ class FileApprovalStore:
         async with self._lock:
             return await asyncio.to_thread(
                 self._create_or_get_pending_sync,
+                tenant_id=tenant_id,
                 run_id=run_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -332,21 +337,9 @@ class FileApprovalStore:
         # reason on a different request.
         if rejection_reason is not _UNSET:
             new_metadata[REJECTION_REASON_METADATA_KEY] = rejection_reason
-        resolved = ApprovalRequest(
-            id=current.id,
-            run_id=current.run_id,
-            tool_call_id=current.tool_call_id,
-            tool_name=current.tool_name,
-            reason=current.reason,
-            redacted_arguments=current.redacted_arguments,
-            arguments_hash=current.arguments_hash,
-            status=target,
-            version=current.version + 1,
-            created_at=current.created_at,
-            resolved_at=now,
-            resolved_by=resolved_by,
-            metadata=new_metadata,
-        )
+        resolved = dataclasses.replace(current, status=target,
+            version=current.version + 1, resolved_at=now,
+            resolved_by=resolved_by, metadata=new_metadata)
         _atomic_write(
             self._path(approval_id),
             json.dumps(_request_to_json(resolved)).encode("utf-8"),

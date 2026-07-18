@@ -315,6 +315,7 @@ def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_pat
 
     result = asyncio.run(
         storage.approvals.create_or_get_pending(
+                tenant_id="tenant-a3",
             run_id="run-a3",
             tool_call_id="tc-fixed",
             tool_name=TOOL_NAME,
@@ -360,6 +361,7 @@ def test_sqla_create_or_get_pending_conflicts_on_different_arguments(tmp_path):
     with pytest.raises(ApprovalConflictError):
         asyncio.run(
             storage.approvals.create_or_get_pending(
+                tenant_id="tenant-a4",
                 run_id="run-a4",
                 tool_call_id="tc-fixed",
                 tool_name=TOOL_NAME,
@@ -381,6 +383,7 @@ def test_sqla_create_or_get_pending_concurrent_calls_create_exactly_one_row(tmp_
 
     async def _attempt(i: int):
         return await storage.approvals.create_or_get_pending(
+            tenant_id="tenant-a5",
             run_id="run-a5",
             tool_call_id="tc-shared",
             tool_name=TOOL_NAME,

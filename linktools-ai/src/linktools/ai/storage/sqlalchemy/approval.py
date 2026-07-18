@@ -167,37 +167,30 @@ class SqlAlchemyApprovalStore:
 
     # -- write ---------------------------------------------------------
 
+    @staticmethod
+    def _row_from_request(request: ApprovalRequest) -> ApprovalRow:
+        metadata = {**dict(request.metadata),
+            "_binding_payload": dict(request.binding),
+            "_binding_fingerprint": request.binding_fingerprint,
+            "_binding_result_processor_revision": request.result_processor_revision}
+        return ApprovalRow(id=request.id, run_id=request.run_id,
+            tool_call_id=request.tool_call_id, tool_name=request.tool_name,
+            reason=request.reason,
+            redacted_arguments_json=json.dumps(dict(request.redacted_arguments)),
+            arguments_hash=request.arguments_hash, status=request.status.value,
+            version=request.version, created_at=request.created_at,
+            resolved_at=request.resolved_at, resolved_by=request.resolved_by,
+            metadata_json=json.dumps(metadata), tenant_id=request.tenant_id,
+            descriptor_fingerprint=request.descriptor_fingerprint,
+            handler_revision=request.handler_revision,
+            provider_revision=request.provider_revision,
+            policy_revision=request.policy_revision,
+            capability_revision=request.capability_revision,
+            schema_version=request.schema_version)
+
     async def create(self, request: ApprovalRequest) -> ApprovalRequest:
         async def _do(session):
-            session.add(
-                ApprovalRow(
-                    id=request.id,
-                    run_id=request.run_id,
-                    tool_call_id=request.tool_call_id,
-                    tool_name=request.tool_name,
-                    reason=request.reason,
-                    redacted_arguments_json=json.dumps(
-                        dict(request.redacted_arguments)
-                    ),
-                    arguments_hash=request.arguments_hash,
-                    status=request.status.value,
-                    version=request.version,
-                    created_at=request.created_at,
-                    resolved_at=request.resolved_at,
-                    resolved_by=request.resolved_by,
-                    metadata_json=json.dumps({**dict(request.metadata),
-                        "_binding_payload": dict(request.binding),
-                        "_binding_fingerprint": request.binding_fingerprint,
-                        "_binding_result_processor_revision": request.result_processor_revision}),
-                    tenant_id=request.tenant_id,
-                    descriptor_fingerprint=request.descriptor_fingerprint,
-                    handler_revision=request.handler_revision,
-                    provider_revision=request.provider_revision,
-                    policy_revision=request.policy_revision,
-                    capability_revision=request.capability_revision,
-                    schema_version=request.schema_version,
-                )
-            )
+            session.add(self._row_from_request(request))
 
         try:
             await self._execute_in_session(_do)
@@ -234,6 +227,7 @@ class SqlAlchemyApprovalStore:
     async def create_or_get_pending(
         self,
         *,
+        tenant_id: str,
         run_id: str,
         tool_call_id: str,
         tool_name: str,
@@ -263,6 +257,7 @@ class SqlAlchemyApprovalStore:
             return existing
 
         request = build_approval_request(
+            tenant_id=tenant_id,
             run_id=run_id,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
@@ -273,23 +268,7 @@ class SqlAlchemyApprovalStore:
         )
 
         def _row() -> ApprovalRow:
-            return ApprovalRow(
-                id=request.id,
-                run_id=request.run_id,
-                tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name,
-                reason=request.reason,
-                redacted_arguments_json=json.dumps(
-                    dict(request.redacted_arguments)
-                ),
-                arguments_hash=request.arguments_hash,
-                status=request.status.value,
-                version=request.version,
-                created_at=request.created_at,
-                resolved_at=request.resolved_at,
-                resolved_by=request.resolved_by,
-                metadata_json=json.dumps(dict(request.metadata)),
-            )
+            return self._row_from_request(request)
 
         # NOTE on NOT using session.begin_nested() here: a SAVEPOINT that
         # releases cleanly (no conflict) was measured to NOT properly

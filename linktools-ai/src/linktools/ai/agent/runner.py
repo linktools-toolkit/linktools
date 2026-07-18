@@ -952,6 +952,7 @@ class AgentRunner:
                                         run_id=context.run_id,
                                         expected_version=running_version,
                                         approval_request={
+                                            "tenant_id": context.tenant_id,
                                             "approval_id": paused.approval_id,
                                             "tool_call_id": paused.tool_call_id,
                                             "tool_name": paused.tool_name or "",

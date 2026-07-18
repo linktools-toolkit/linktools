@@ -261,7 +261,18 @@ class FileSessionStore:
                 current = self._get_sync(session_dir.name)
                 if current is not None and "_committed_sequence" not in current.metadata:
                     metadata = dict(current.metadata)
-                    metadata["_committed_sequence"] = 0
+                    committed = 0
+                    for seq in range(1, 10**9):
+                        p = session_dir / "messages" / f"{seq:010d}.json"
+                        if not p.exists():
+                            break
+                        payload = _load_json(p)
+                        if payload.get("session_id") not in (None, current.id):
+                            raise SessionCorruptionError("session id mismatch")
+                        if int(payload.get("sequence", -1)) != seq:
+                            raise SessionCorruptionError("session sequence mismatch")
+                        committed = seq
+                    metadata["_committed_sequence"] = committed
                     metadata["_legacy_missing_committed_sequence"] = True
                     self._update_sync(current.id, status=None, metadata=metadata)
 

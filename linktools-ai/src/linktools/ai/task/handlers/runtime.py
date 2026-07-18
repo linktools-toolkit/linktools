@@ -158,9 +158,13 @@ class RuntimeTaskHandler:
         # a mapping change between attempts from silently re-running a different
         # agent. Best-effort for stores that don't implement bind_runnable (both
         # production backends do); such a store simply skips drift protection.
-        if self._task_store is not None and hasattr(self._task_store, "bind_runnable"):
-            try:
-                await self._task_store.bind_runnable(
+        # Validate snapshots before binding a run id: failed validation must
+        # leave the attempt without a run identity.
+        snapshot_failure = await self._validate_snapshots(context)
+        if snapshot_failure is not None:
+            return snapshot_failure
+        try:
+            await self._task_store.bind_runnable(
                     task_id=context.task_id,
                     attempt_id=context.attempt_id,
                     fencing_token=context.fencing_token,
@@ -169,13 +173,13 @@ class RuntimeTaskHandler:
                     revision=inp.runnable.revision,
                     fingerprint=_fingerprint(spec),
                 )
-            except RunnableBindingError as exc:
+        except RunnableBindingError as exc:
                 return TaskFailure(
                     kind=TaskFailureKind.PERMANENT,
                     error_type="RunnableDrift",
                     message=str(exc),
                 )
-            except TaskClaimLostError:
+        except TaskClaimLostError:
                 return TaskFailure(
                     kind=TaskFailureKind.SUPERSEDED,
                     error_type="ClaimLost",
@@ -185,17 +189,16 @@ class RuntimeTaskHandler:
         run_id = f"run-{uuid.uuid4().hex[:12]}"
 
         # Bind the run_id to the attempt so task → run traceability works.
-        if self._task_store is not None:
-            try:
-                await self._task_store.bind_run(
+        try:
+            await self._task_store.bind_run(
                     task_id=context.task_id,
                     attempt_id=context.attempt_id,
                     fencing_token=context.fencing_token,
                     worker_id=context.worker_id,
                     run_id=run_id,
                 )
-            except TaskClaimLostError:
-                return TaskFailure(
+        except TaskClaimLostError:
+            return TaskFailure(
                     kind=TaskFailureKind.SUPERSEDED,
                     error_type="ClaimLost",
                     message="lease was lost before bind_run; task reclaimed",
@@ -204,17 +207,12 @@ class RuntimeTaskHandler:
         # Validate pinned resource snapshots before running: a stale or missing
         # snapshot makes the run non-deterministic, so fail fast rather than
         # execute against resources that may have changed.
-        if self._artifact_store is not None:
-            snapshot_failure = await self._validate_snapshots(context)
-            if snapshot_failure is not None:
-                return snapshot_failure
-
         result = await self._run_with_cancellation(spec, inp, run_id, context)
         if isinstance(result, TaskFailure):
             return result
 
         output_artifact = None
-        if self._artifact_store is not None and result is not None:
+        if result is not None:
             try:
                 output_artifact = await self._seal_run_result(result, context)
             except _OutputTooLarge:

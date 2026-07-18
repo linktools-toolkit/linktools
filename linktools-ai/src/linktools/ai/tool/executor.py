@@ -195,7 +195,8 @@ class ToolExecutor:
                 )},
             )
 
-    async def retry_tool_commit(self, claim, *, result: Any | None = None) -> Any:
+    async def retry_tool_commit(self, claim, *, result_processor,
+                                result_processor_revision, binding_fingerprint) -> Any:
         """Retry only the fenced commit for an EXECUTED receipt.
 
         This recovery path deliberately has no handler argument and therefore
@@ -206,7 +207,25 @@ class ToolExecutor:
         record = await self._idempotency_store.get(claim.scope, claim.key)
         if record is None or record.status.value != "executed":
             raise ToolDeniedError("no EXECUTED tool receipt is available")
-        payload = record.result if result is None else result
+        if record.binding_fingerprint != binding_fingerprint:
+            raise ToolDeniedError("tool binding fingerprint mismatch")
+        if record.result_processor_revision != result_processor_revision:
+            raise ToolDeniedError("result processor revision mismatch")
+        if record.receipt_artifact_id is None:
+            raise ToolDeniedError("EXECUTED receipt has no raw receipt")
+        raw = record.result
+        if self._receipt_store is not None and record.receipt_artifact_id:
+            tenant_id = claim.scope.split(":", 1)[0]
+            blob = await self._receipt_store.get(
+                record.receipt_artifact_id, tenant_id=tenant_id)
+            if blob is None:
+                raise ToolDeniedError("raw execution receipt is unavailable")
+            from ..json import canonical_json
+            import json
+            raw = json.loads(blob.decode("utf-8"))
+        payload = result_processor(raw)
+        if asyncio.iscoroutine(payload):
+            payload = await payload
         await self._idempotency_store.complete(claim, payload)
         return payload
 
@@ -501,24 +520,25 @@ class ToolExecutor:
                         raise ToolCommitError(
                             "raw execution receipt could not be persisted") from exc
 
-        try:
-            safe_result = result if result_processor is None else result_processor(result)
-            if asyncio.iscoroutine(safe_result):
-                safe_result = await safe_result
-        except Exception:
-            if use_idempotency:
-                await self._idempotency_store.mark_unknown(claim)
-            raise
-
         if use_idempotency:
 
             try:
                 if receipt_artifact_id is None:
-                    await self._idempotency_store.mark_executed(claim, safe_result)
+                    try:
+                        await self._idempotency_store.mark_executed(claim, result,
+                            binding_fingerprint=(execution_binding.fingerprint() if execution_binding else None),
+                            result_processor_revision=result_processor_revision)
+                    except TypeError:
+                        await self._idempotency_store.mark_executed(claim, result)
                 else:
-                    await self._idempotency_store.mark_executed(
-                        claim, safe_result, receipt_artifact_id=receipt_artifact_id
-                    )
+                    try:
+                        await self._idempotency_store.mark_executed(
+                            claim, result, receipt_artifact_id=receipt_artifact_id,
+                            binding_fingerprint=(execution_binding.fingerprint() if execution_binding else None),
+                            result_processor_revision=result_processor_revision)
+                    except TypeError:
+                        await self._idempotency_store.mark_executed(
+                            claim, result, receipt_artifact_id=receipt_artifact_id)
             except Exception as receipt_exc:  # noqa: BLE001 - never re-run handler
                 if self._metrics is not None:
                     self._metrics.counter("tool_side_effect_unknown_total")
@@ -532,6 +552,14 @@ class ToolExecutor:
                     f"tool {request.tool_name!r} Handler succeeded but its "
                     f"execution receipt could not be stored; marked UNKNOWN"
                 ) from receipt_exc
+        try:
+            safe_result = result if result_processor is None else result_processor(result)
+            if asyncio.iscoroutine(safe_result):
+                safe_result = await safe_result
+        except Exception:
+            # EXECUTED is intentionally retained for processor retry.
+            raise
+        if use_idempotency:
             try:
                 # The execution receipt is already persisted before this
                 # commit. Tenant-scoped ArtifactStore receipts are used for

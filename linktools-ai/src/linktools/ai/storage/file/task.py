@@ -49,6 +49,9 @@ from ...task.models import (
 )
 from ...security.principal import ScopeSet
 
+class FileTaskCommitRecoveryError(RuntimeError):
+    """A journal replay found state neither at its old nor target value."""
+
 
 class FileTaskCommitJournal:
     """Durable outcome journal used by :class:`FileTaskStore`.
@@ -67,8 +70,23 @@ class FileTaskCommitJournal:
 
     def mark_step(self, path: Path, step: str) -> None:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        order = {name: i for i, name in enumerate(("PREPARED", "ATTEMPT_WRITTEN", "COMMANDS_APPLIED", "TASK_WRITTEN", "TRANSITION_WRITTEN", "JOB_CONVERGED", "COMPLETED"))}
+        current = raw.get("step", "PREPARED")
+        if step not in order or current not in order or order[step] < order[current]:
+            raise FileTaskCommitRecoveryError(
+                f"invalid journal step transition {current!r} -> {step!r}")
         raw["step"] = step
         _atomic_write(path, json.dumps(raw, sort_keys=True).encode("utf-8"))
+
+    def ensure_step(self, path: Path, step: str) -> bool:
+        """Validate that a journal is at or beyond *step*; callers may then
+        perform the idempotent state ensure for that boundary."""
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        order = {name: i for i, name in enumerate(("PREPARED", "ATTEMPT_WRITTEN", "COMMANDS_APPLIED", "TASK_WRITTEN", "TRANSITION_WRITTEN", "JOB_CONVERGED", "COMPLETED"))}
+        current = raw.get("step")
+        if current not in order or step not in order:
+            raise FileTaskCommitRecoveryError("unknown journal step")
+        return order[current] >= order[step]
 from ...task.protocols import (
     CancelJob,
     CancelTask,
@@ -259,7 +277,8 @@ class FileTaskStore:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "success"))
             result = await asyncio.to_thread(self._commit_success_sync, claim, outcome, journal)
-            self._journal.mark_step(journal, "COMMITTED")
+            if not self._journal.ensure_step(journal, "COMPLETED"):
+                raise FileTaskCommitRecoveryError("commit did not complete")
             journal.unlink(missing_ok=True)
             return result
 
@@ -270,7 +289,8 @@ class FileTaskStore:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "failure"))
             result = await asyncio.to_thread(self._commit_failure_sync, claim, outcome, journal)
-            self._journal.mark_step(journal, "COMMITTED")
+            if not self._journal.ensure_step(journal, "COMPLETED"):
+                raise FileTaskCommitRecoveryError("commit did not complete")
             journal.unlink(missing_ok=True)
             return result
 
@@ -297,13 +317,6 @@ class FileTaskStore:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 claim = from_jsonable(TaskClaim, raw["claim"])
                 current = self._get_task_sync(claim.task_id)
-                if current is not None and current.status in TASK_TERMINAL:
-                    owner = self._find_task_owner_job(claim.task_id)
-                    if owner is not None:
-                        self._resolve_dependencies(owner[0], self._clock.now())
-                        self._converge_jobs_sync(self._clock.now())
-                    path.unlink(missing_ok=True)
-                    continue
                 kind = raw["kind"]
                 if kind == "failure":
                     outcome = from_jsonable(TaskFailure, raw["outcome"])
@@ -325,11 +338,13 @@ class FileTaskStore:
                         await asyncio.to_thread(self._commit_success_sync, claim, outcome, path)
                     else:
                         await asyncio.to_thread(self._commit_failure_sync, claim, outcome, path)
-                    self._journal.mark_step(path, "COMMITTED")
+                    if not self._journal.ensure_step(path, "COMPLETED"):
+                        raise FileTaskCommitRecoveryError(
+                            f"commit journal {path.name} did not reach COMPLETED")
                     path.unlink(missing_ok=True)
                 except TaskClaimLostError:
                     # Preserve the journal: a later lease owner may complete it.
-                    continue
+                    raise
 
     async def request_cancel(
         self, job_id: str, *, reason: "str | None" = None
@@ -705,7 +720,7 @@ class FileTaskStore:
         job_id, _ = owner
         task = self._guard(job_id, claim)
         steps = {"PREPARED": 0, "ATTEMPT_WRITTEN": 1,
-                 "COMMANDS_APPLIED": 2, "TASK_WRITTEN": 3, "FINALIZED": 4}
+                 "COMMANDS_APPLIED": 2, "TASK_WRITTEN": 3, "TRANSITION_WRITTEN": 4, "JOB_CONVERGED": 5, "COMPLETED": 6}
         current_step = "PREPARED"
         if journal_path is not None and journal_path.exists():
             current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
@@ -849,7 +864,9 @@ class FileTaskStore:
         self._resolve_dependencies(job_id, now)
         self._converge_jobs_sync(now)
         if journal_path is not None:
-            self._journal.mark_step(journal_path, "FINALIZED")
+            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            self._journal.mark_step(journal_path, "COMPLETED")
         return new_task
 
     def _assert_child_budget_sync(
@@ -999,6 +1016,16 @@ class FileTaskStore:
         for existing in self._list_tasks_sync(job_id, None):
             if existing.key == cmd.key:
                 if existing.parent_task_id == parent.id:
+                    expected_input = cmd.input_artifact.id if cmd.input_artifact else None
+                    if (existing.handler != cmd.handler or
+                        existing.input_artifact_id != expected_input or
+                        existing.dependencies != tuple(cmd.dependencies) or
+                        existing.retry_policy != cmd.retry_policy or
+                        existing.side_effect_policy != cmd.side_effect_policy or
+                        existing.timeout_seconds != cmd.timeout_seconds or
+                        dict(existing.metadata) != dict(cmd.metadata)):
+                        raise FileTaskCommitRecoveryError(
+                            f"conflicting task definition for key {cmd.key!r}")
                     return
                 raise ValueError(
                     f"duplicate task key {cmd.key!r} in job {job_id}"
@@ -1096,8 +1123,8 @@ class FileTaskStore:
             raise TaskNotFoundError(claim.task_id)
         job_id, _ = owner
         task = self._guard(job_id, claim)
-        steps = {"PREPARED": 0, "TASK_WRITTEN": 1,
-                 "ATTEMPT_WRITTEN": 2, "FINALIZED": 3}
+        steps = {"PREPARED": 0, "ATTEMPT_WRITTEN": 1,
+                 "TASK_WRITTEN": 2, "TRANSITION_WRITTEN": 3, "JOB_CONVERGED": 4, "COMPLETED": 5}
         current_step = "PREPARED"
         if journal_path is not None and journal_path.exists():
             current_step = json.loads(journal_path.read_text(encoding="utf-8")).get(
@@ -1152,15 +1179,15 @@ class FileTaskStore:
             )
             to_status = TaskStatus.FAILED.value
             reason = "failed"
-        if steps[current_step] < steps["TASK_WRITTEN"]:
-            self._write(self._task_path(job_id, task.id), new_task)
-            if journal_path is not None:
-                self._journal.mark_step(journal_path, "TASK_WRITTEN")
-            current_step = "TASK_WRITTEN"
         if steps[current_step] < steps["ATTEMPT_WRITTEN"]:
             self._write(self._attempt_path(job_id, claim.attempt_id), new_attempt)
             if journal_path is not None:
                 self._journal.mark_step(journal_path, "ATTEMPT_WRITTEN")
+            current_step = "ATTEMPT_WRITTEN"
+        if steps[current_step] < steps["TASK_WRITTEN"]:
+            self._write(self._task_path(job_id, task.id), new_task)
+            if journal_path is not None:
+                self._journal.mark_step(journal_path, "TASK_WRITTEN")
         self._append_transition(
             job_id,
             task_id=task.id,
@@ -1175,7 +1202,9 @@ class FileTaskStore:
         # A failed task may complete the job (all tasks terminal); converge.
         self._converge_jobs_sync(now)
         if journal_path is not None:
-            self._journal.mark_step(journal_path, "FINALIZED")
+            self._journal.mark_step(journal_path, "TRANSITION_WRITTEN")
+            self._journal.mark_step(journal_path, "JOB_CONVERGED")
+            self._journal.mark_step(journal_path, "COMPLETED")
         return new_task
 
     def _commit_cancelled_sync(

@@ -48,6 +48,7 @@ class SqlAlchemyRunCommitCoordinator:
             if command.approval_request.get("tool_call_id") is not None:
                 approval = await tx.approvals.create_or_get_pending(
                     run_id=command.run_id,
+                    tenant_id=command.approval_request.get("tenant_id", ""),
                     tool_call_id=command.approval_request["tool_call_id"],
                     tool_name=command.approval_request.get("tool_name", ""),
                     reason=command.approval_request.get("reason"),

@@ -59,6 +59,8 @@ def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
         claimed_at=_as_utc(row.claimed_at),
         lease_expires_at=_as_utc(row.lease_expires_at),
         receipt_artifact_id=row.receipt_artifact_id,
+        binding_fingerprint=row.binding_fingerprint,
+        result_processor_revision=row.result_processor_revision,
     )
 
 
@@ -363,7 +365,7 @@ class SqlAlchemyIdempotencyStore:
 
         await self._execute_in_session(_do)
 
-    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None) -> None:
+    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None, binding_fingerprint=None, result_processor_revision=None) -> None:
         """CAS RESERVED -> EXECUTED, storing the result as the execution receipt.
         rowcount != 1 raises LostIdempotencyClaimError."""
         now = datetime.now(timezone.utc)
@@ -384,6 +386,8 @@ class SqlAlchemyIdempotencyStore:
                     result_json=canonical_json(result),
                     error_text=None,
                     receipt_artifact_id=receipt_artifact_id,
+                    binding_fingerprint=binding_fingerprint,
+                    result_processor_revision=result_processor_revision,
                 )
             )
             if proxy.rowcount != 1:

@@ -36,7 +36,7 @@ from .models import (
 )
 from .protocols import Clock, SystemClock, TaskHandler
 from .metrics import NoopTaskMetrics, TaskMetrics
-from .store import TaskRunTimeoutError, TaskStore
+from .store import TaskRunTimeoutError, TaskCancellationDidNotConvergeError, TaskStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +371,14 @@ class TaskRuntime:
             # Timed out without a terminal task: cancel the job so in-flight work
             # stops, then raise (never hand back a still-running task the caller
             # could mistake for finished).
+            job_final = await self.get_job(job_id)
+            task_final = await self.get_task(task_id)
+            if (job_final is None or job_final.status not in terminal or
+                    task_final is None or task_final.status not in terminal):
+                raise TaskCancellationDidNotConvergeError(
+                    job_id, task_id, getattr(job_final, "status", "missing"),
+                    getattr(task_final, "status", "missing"),
+                    self._options.cancel_grace_seconds)
             raise TaskRunTimeoutError(job_id, task_id, wait_timeout)
         return await self.get_task(task_id)
 

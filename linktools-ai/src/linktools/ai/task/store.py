@@ -87,6 +87,13 @@ class TaskRunTimeoutError(TimeoutError):
         self.task_id = task_id
         self.timeout_seconds = timeout_seconds
 
+class TaskCancellationDidNotConvergeError(RuntimeError):
+    def __init__(self, job_id, task_id, job_status, task_status, cancel_grace_seconds):
+        super().__init__(f"cancellation did not converge for task {task_id} (job {job_id})")
+        self.job_id, self.task_id = job_id, task_id
+        self.job_status, self.task_status = job_status, task_status
+        self.cancel_grace_seconds = cancel_grace_seconds
+
 
 @dataclass(frozen=True, slots=True)
 class TaskClaim:
@@ -245,5 +252,6 @@ __all__: "list[str]" = [
     "UnsupportedTaskSchemaError",
     "RunnableBindingError",
     "TaskRunTimeoutError",
+    "TaskCancellationDidNotConvergeError",
     "claim_matches_task",
 ]

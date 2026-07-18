@@ -55,6 +55,8 @@ def _record_to_json(record: IdempotencyRecord) -> dict:
         "claimed_at": _dt_iso(record.claimed_at),
         "lease_expires_at": _dt_iso(record.lease_expires_at),
         "receipt_artifact_id": record.receipt_artifact_id,
+        "binding_fingerprint": record.binding_fingerprint,
+        "result_processor_revision": record.result_processor_revision,
     }
 
 
@@ -80,6 +82,8 @@ def _record_from_json(raw: dict) -> IdempotencyRecord:
         if raw.get("lease_expires_at") is None
         else datetime.fromisoformat(raw["lease_expires_at"]),
         receipt_artifact_id=raw.get("receipt_artifact_id"),
+        binding_fingerprint=raw.get("binding_fingerprint"),
+        result_processor_revision=raw.get("result_processor_revision"),
     )
 
 
@@ -286,7 +290,7 @@ class FileIdempotencyStore:
         async with self._lock:
             await asyncio.to_thread(self._complete_sync, claim, result)
 
-    def _mark_executed_sync(self, claim: IdempotencyClaim, result: Any, receipt_artifact_id=None) -> None:
+    def _mark_executed_sync(self, claim: IdempotencyClaim, result: Any, receipt_artifact_id=None, binding_fingerprint=None, result_processor_revision=None) -> None:
         current = self._read(claim.scope, claim.key)
         if current is None or not _fence_matches(
             current, claim, {IdempotencyStatus.RESERVED}
@@ -302,15 +306,17 @@ class FileIdempotencyStore:
             result=result,
             error=None,
             receipt_artifact_id=receipt_artifact_id,
+            binding_fingerprint=binding_fingerprint,
+            result_processor_revision=result_processor_revision,
         )
         _atomic_write(
             self._path(claim.scope, claim.key),
             json.dumps(_record_to_json(updated)).encode("utf-8"),
         )
 
-    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None) -> None:
+    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None, binding_fingerprint=None, result_processor_revision=None) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._mark_executed_sync, claim, result, receipt_artifact_id)
+            await asyncio.to_thread(self._mark_executed_sync, claim, result, receipt_artifact_id, binding_fingerprint, result_processor_revision)
 
     def _mark_unknown_sync(self, claim: IdempotencyClaim) -> None:
         current = self._read(claim.scope, claim.key)
