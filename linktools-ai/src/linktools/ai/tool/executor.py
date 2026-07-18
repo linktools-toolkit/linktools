@@ -392,21 +392,8 @@ class ToolExecutor:
             claim_result = await self._idempotency_store.claim(**claim_kwargs)
             disposition = claim_result.disposition
             if disposition is ClaimDisposition.REPLAY:
-                if (
-                    self._receipt_store is not None
-                    and claim_result.record is not None
-                    and claim_result.record.receipt_artifact_id is not None
-                ):
-                    tenant_id = self._tenant_id_resolver(context) if self._tenant_id_resolver else None
-                    if not tenant_id:
-                        raise ToolDeniedError("receipt replay requires a tenant-scoped context")
-                    payload = await self._receipt_store.get(
-                        claim_result.record.receipt_artifact_id, tenant_id=tenant_id
-                    )
-                    if payload is None:
-                        raise ToolDeniedError("tool receipt is unavailable")
-                    import json
-                    return json.loads(payload.decode("utf-8"))
+                # Replay returns the committed safe result. The receipt is
+                # raw/audit-only and must never become the user-visible result.
                 return claim_result.record.result
             if disposition is ClaimDisposition.IN_PROGRESS:
                 raise IdempotencyInProgressError(
@@ -488,12 +475,15 @@ class ToolExecutor:
                     )
                     receipt_artifact_id = receipt.ref.id
 
+            safe_result = result if result_processor is None else result_processor(result)
+            if asyncio.iscoroutine(safe_result):
+                safe_result = await safe_result
             try:
                 if receipt_artifact_id is None:
-                    await self._idempotency_store.mark_executed(claim, result)
+                    await self._idempotency_store.mark_executed(claim, safe_result)
                 else:
                     await self._idempotency_store.mark_executed(
-                        claim, result, receipt_artifact_id=receipt_artifact_id
+                        claim, safe_result, receipt_artifact_id=receipt_artifact_id
                     )
             except Exception as receipt_exc:  # noqa: BLE001 - never re-run handler
                 if self._metrics is not None:
@@ -513,9 +503,6 @@ class ToolExecutor:
                 # commit. Tenant-scoped ArtifactStore receipts are used for
                 # production runs; the raw value remains for local legacy
                 # stores that do not carry a Tenant.
-                safe_result = result if result_processor is None else result_processor(result)
-                if asyncio.iscoroutine(safe_result):
-                    safe_result = await safe_result
                 await self._idempotency_store.complete(claim, safe_result)
             except Exception as commit_exc:  # noqa: BLE001 - never re-run handler
                 if self._metrics is not None:

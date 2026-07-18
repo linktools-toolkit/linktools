@@ -57,6 +57,11 @@ async def authorize_sensitive_operation(
     if run_tenant is None:
         run = await storage.runs.get(run_id)
         run_tenant = (run.metadata.get("tenant_id") if run is not None else None)
+    if principal.actor.kind == "task-attempt":
+        run = await storage.runs.get(run_id)
+        bound_attempt = run.metadata.get("task_attempt_id") if run is not None else None
+        if bound_attempt != principal.actor.id:
+            raise PrincipalAccessDeniedError("task attempt is not bound to this run")
     from ..security.authorization import AuthorizationResource
     from ..security.actions import SecurityAction
 

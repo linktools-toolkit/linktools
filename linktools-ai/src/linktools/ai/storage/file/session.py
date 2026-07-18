@@ -277,7 +277,9 @@ class FileSessionStore:
             return ()
         result = []
         session = self._get_sync(session_id)
-        committed_sequence = int(session.metadata.get("_committed_sequence", 2**63 - 1)) if session else 0
+        # Legacy records without an explicit commit marker are fail-closed;
+        # recovery must validate a batch before making messages visible.
+        committed_sequence = int(session.metadata.get("_committed_sequence", 0)) if session else 0
         for path in sorted(messages_dir.glob("*.json")):
             message = _message_from_json(_load_json(path))
             if message.sequence > committed_sequence:

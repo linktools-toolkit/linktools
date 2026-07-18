@@ -82,9 +82,7 @@ class TaskContext:
         # handed to a handler is never None-typed.
         if not isinstance(self.delegated_scopes, ScopeSet):
             if self.delegated_scopes is None:
-                # An omitted in-memory context is the trusted local default;
-                # persisted task records normalize legacy null to empty.
-                object.__setattr__(self, "delegated_scopes", ScopeSet.allow_all())
+                raise TypeError("TaskContext.delegated_scopes requires explicit ScopeSet")
                 return
             object.__setattr__(
                 self, "delegated_scopes", ScopeSet.from_any(self.delegated_scopes)
