@@ -47,6 +47,7 @@ from ...task.models import (
     narrow_child_principal,
     to_jsonable,
 )
+from ...security.principal import ScopeSet
 
 
 class FileTaskCommitJournal:
@@ -63,6 +64,11 @@ class FileTaskCommitJournal:
 
     def path(self, attempt_id: str) -> Path:
         return self.root / f"{attempt_id}.json"
+
+    def mark_step(self, path: Path, step: str) -> None:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["step"] = step
+        _atomic_write(path, json.dumps(raw, sort_keys=True).encode("utf-8"))
 from ...task.protocols import (
     CancelJob,
     CancelTask,
@@ -147,7 +153,11 @@ class FileTaskStore:
         path = self._task_path(job_id, task_id)
         if not path.exists():
             raise TaskNotFoundError(task_id)
-        return from_jsonable(TaskRecord, self._read(path))  # type: ignore[return-value]
+        raw = self._read(path)
+        if isinstance(raw, dict) and raw.get("delegated_scopes") is None:
+            raw["delegated_scopes"] = to_jsonable(ScopeSet.empty())
+            raw["metadata"] = {**raw.get("metadata", {}), "_legacy_missing_scopes": True}
+        return from_jsonable(TaskRecord, raw)  # type: ignore[return-value]
 
     def _all_task_files(self):
         jobs = self._root / "jobs"
@@ -234,6 +244,7 @@ class FileTaskStore:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "success"))
             result = await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+            self._journal.mark_step(journal, "COMMITTED")
             journal.unlink(missing_ok=True)
             return result
 
@@ -244,6 +255,7 @@ class FileTaskStore:
             journal = self._journal.path(claim.attempt_id)
             await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "failure"))
             result = await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+            self._journal.mark_step(journal, "COMMITTED")
             journal.unlink(missing_ok=True)
             return result
 
@@ -270,9 +282,11 @@ class FileTaskStore:
                         await asyncio.to_thread(self._commit_success_sync, claim, outcome)
                     else:
                         await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+                    self._journal.mark_step(path, "COMMITTED")
+                    path.unlink(missing_ok=True)
                 except TaskClaimLostError:
-                    pass
-                path.unlink(missing_ok=True)
+                    # Preserve the journal: a later lease owner may complete it.
+                    continue
 
     async def request_cancel(
         self, job_id: str, *, reason: "str | None" = None

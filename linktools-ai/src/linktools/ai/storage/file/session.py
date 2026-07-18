@@ -7,6 +7,7 @@ Each public async method delegates to a ``_*_sync`` private method via
 ``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
 
 import asyncio
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -174,27 +175,30 @@ class FileSessionStore:
         messages_dir = self._session_dir(session_id) / "messages"
         next_seq = self._next_sequence_sync(session_id)
         batch_path = self._session_dir(session_id) / f"batch-{next_seq:010d}.journal"
-        _atomic_write(
-            batch_path,
-            json.dumps({"session_id": session_id, "start": next_seq,
-                        "count": len(messages)}).encode("utf-8"),
-        )
-        persisted = []
+        staged = []
         for offset, message in enumerate(messages):
             sequence = next_seq + offset
-            full = SessionMessage(
-                id=str(uuid.uuid4()),
-                session_id=session_id,
-                sequence=sequence,
-                role=message.role,
-                content=message.content,
-                run_id=message.run_id,
-                created_at=datetime.now(timezone.utc),
-                metadata=message.metadata,
-            )
+            full = SessionMessage(id=str(uuid.uuid4()), session_id=session_id,
+                sequence=sequence, role=message.role, content=message.content,
+                run_id=message.run_id, created_at=datetime.now(timezone.utc),
+                metadata=message.metadata)
+            payload = _message_to_json(full)
+            encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+            staged.append((full, payload, hashlib.sha256(encoded).hexdigest()))
+        _atomic_write(
+            batch_path,
+            json.dumps({"schema_version": 1, "session_id": session_id,
+                        "messages": [{"sequence": m.sequence, "message_id": m.id,
+                                      "sha256": digest, "payload": payload}
+                                     for m, payload, digest in staged]},
+                       sort_keys=True).encode("utf-8"),
+        )
+        persisted = []
+        for full, payload, _digest in staged:
+            sequence = full.sequence
             _atomic_write(
                 messages_dir / f"{sequence:010d}.json",
-                json.dumps(_message_to_json(full)).encode("utf-8"),
+                json.dumps(payload, sort_keys=True).encode("utf-8"),
             )
             persisted.append(full)
         current = self._get_sync(session_id)
@@ -202,7 +206,6 @@ class FileSessionStore:
             # Legacy callers may append to an externally-created session id
             # before materializing SessionRecord metadata. Keep those writes
             # visible; subsequent appends can establish the commit marker.
-            batch_path.unlink(missing_ok=True)
             return tuple(persisted)
         committed = next_seq + len(persisted) - 1 if persisted else int(
             current.metadata.get("_committed_sequence", next_seq - 1)
@@ -229,7 +232,18 @@ class FileSessionStore:
                     raw = _load_json(marker)
                     current = self._get_sync(raw["session_id"])
                     if current is not None:
-                        end = int(raw["start"]) + int(raw["count"]) - 1
+                        entries = raw["messages"]
+                        for entry in entries:
+                            seq = int(entry["sequence"])
+                            path = session_dir / "messages" / f"{seq:010d}.json"
+                            if not path.exists():
+                                _atomic_write(path, json.dumps(entry["payload"], sort_keys=True).encode("utf-8"))
+                            payload = path.read_bytes()
+                            if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+                                raise SessionCorruptionError("session batch message hash mismatch")
+                            if json.loads(payload).get("id") != entry["message_id"]:
+                                raise SessionCorruptionError("session batch message id mismatch")
+                        end = max((int(entry["sequence"]) for entry in entries), default=0)
                         if end >= int(current.metadata.get("_committed_sequence", 0)):
                             metadata = dict(current.metadata)
                             metadata["_committed_sequence"] = end

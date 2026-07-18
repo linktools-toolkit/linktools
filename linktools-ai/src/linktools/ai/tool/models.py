@@ -62,6 +62,15 @@ class ToolDescriptor:
             raise TypeError("ToolDescriptor.mutating must be a boolean")
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 
+    def fingerprint(self) -> str:
+        import hashlib
+        from ..json import canonical_json
+        payload = {"name": self.name, "source": self.source,
+                   "category": self.category, "risk": self.risk,
+                   "mutating": self.mutating, "capability_kind": self.capability_kind,
+                   "capability_name": self.capability_name, "metadata": dict(self.metadata)}
+        return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class ManagedToolDefinition:

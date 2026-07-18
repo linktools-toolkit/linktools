@@ -76,6 +76,7 @@ class ApprovalRequest:
     provider_revision: "str | None" = None
     policy_revision: "str | None" = None
     capability_revision: "str | None" = None
+    result_processor_revision: "str | None" = None
     schema_version: int = 1
 
 
@@ -93,6 +94,7 @@ def build_approval_request(
     provider_revision: "str | None" = None,
     policy_revision: "str | None" = None,
     capability_revision: "str | None" = None,
+    result_processor_revision: "str | None" = None,
 ) -> ApprovalRequest:
     """Mint a PENDING ApprovalRequest (fresh UTC timestamps, version=1).
 
@@ -128,6 +130,7 @@ def build_approval_request(
         provider_revision=provider_revision,
         policy_revision=policy_revision,
         capability_revision=capability_revision,
+        result_processor_revision=result_processor_revision,
     )
 
 

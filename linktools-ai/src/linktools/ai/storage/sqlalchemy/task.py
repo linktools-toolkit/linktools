@@ -118,11 +118,11 @@ def _scopes_from_env(raw: object) -> ScopeSet:
     """Reconstruct a ScopeSet from its persisted envelope form. The current
     shape is the ScopeSet dict ``{"unrestricted", "values"}``; legacy rows
     (written before the ScopeSet type) carry a bare scope list or None
-    (== unrestricted) and are tolerated here."""
+    (== missing) are restored fail-closed as empty."""
     if isinstance(raw, dict):
         return from_jsonable(ScopeSet, raw)  # type: ignore[arg-type]
     if raw is None:
-        return ScopeSet.allow_all()
+        return ScopeSet.empty()
     return ScopeSet.of(*raw)  # type: ignore[arg-type]
 
 
@@ -269,7 +269,8 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         resolved_runnable_id=env.get("resolved_runnable_id"),
         resolved_runnable_revision=env.get("resolved_runnable_revision"),
         resolved_runnable_fingerprint=env.get("resolved_runnable_fingerprint"),
-        metadata=env["metadata"],
+        metadata={**env["metadata"], **({"_legacy_missing_scopes": True}
+                 if env.get("delegated_scopes") is None else {})},
     )
 
 

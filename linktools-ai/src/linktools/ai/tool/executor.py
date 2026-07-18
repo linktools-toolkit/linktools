@@ -186,7 +186,7 @@ class ToolExecutor:
                     for key in (
                         "descriptor_fingerprint", "handler_revision",
                         "provider_revision", "policy_revision",
-                        "capability_revision",
+                        "capability_revision", "result_processor_revision",
                     )
                     if key in context.metadata
                 },
@@ -227,10 +227,17 @@ class ToolExecutor:
             if self._run_id_resolver is not None
             else context.run_id
         )
-        return await self.is_approved(run_id, context.tool_call_id)
+        from ..agent.approval import compute_arguments_hash
+        binding = {"tool_name": request.tool_name,
+                   "arguments_hash": compute_arguments_hash(request.tool_name, request.arguments)}
+        binding.update({key: context.metadata.get(key) for key in (
+            "descriptor_fingerprint", "handler_revision", "provider_revision",
+            "policy_revision", "capability_revision", "result_processor_revision")})
+        return await self._is_approved_binding(run_id, context.tool_call_id, binding=binding)
 
-    async def is_approved(
-        self, run_id: "str | None", tool_call_id: "str | None"
+    async def _is_approved_binding(
+        self, run_id: "str | None", tool_call_id: "str | None",
+        *, binding: "dict[str, Any] | None" = None,
     ) -> bool:
         """Public resume gate: True iff the approval_store holds an APPROVED
         request matching ``(run_id, tool_call_id)``. Used by managed-path
@@ -238,11 +245,12 @@ class ToolExecutor:
         recognize a re-driven call after external approval -- without it, a
         stateless pipeline would re-raise RunPaused on every resume drive and
         the run could never complete. False when no store/tool_call_id wired."""
-        if self._approval_store is None or run_id is None or tool_call_id is None:
+        if self._approval_store is None or run_id is None or tool_call_id is None or not binding:
             return False
         requests = await self._approval_store.list_for_run(run_id)
         return any(
             r.tool_call_id == tool_call_id and r.status is ApprovalStatus.APPROVED
+            and all(getattr(r, key, None) == value for key, value in binding.items())
             for r in requests
         )
 
@@ -257,6 +265,11 @@ class ToolExecutor:
         requests = await self._approval_store.list_for_run(run_id)
         from ..agent.approval import compute_arguments_hash
         expected = compute_arguments_hash(request.tool_name, request.arguments)
+        required = ("descriptor_fingerprint", "handler_revision", "provider_revision",
+                    "policy_revision", "capability_revision", "result_processor_revision")
+        if any(not isinstance(context.metadata.get(key), str) or not context.metadata.get(key)
+               for key in required):
+            return False
         return any(
             r.tool_call_id == context.tool_call_id
             and r.status is ApprovalStatus.APPROVED
@@ -264,6 +277,8 @@ class ToolExecutor:
                 r.schema_version >= 1
                 and r.tool_name == request.tool_name
                 and r.arguments_hash == expected
+                and all(isinstance(getattr(r, key, None), str) and
+                        getattr(r, key) == context.metadata.get(key) for key in required)
             )
             for r in requests
         )
@@ -281,6 +296,8 @@ class ToolExecutor:
         idempotency_key: "str | None" = None,
         schema_version: str = "1",
         idempotency_scope: "str | None" = None,
+        result_processor: "Callable[[Any], Any] | None" = None,
+        result_processor_revision: str = "identity-v1",
     ) -> Any:
         """Policy-check then run ``handler``, optionally with timeout/retry.
 
@@ -496,7 +513,10 @@ class ToolExecutor:
                 # commit. Tenant-scoped ArtifactStore receipts are used for
                 # production runs; the raw value remains for local legacy
                 # stores that do not carry a Tenant.
-                await self._idempotency_store.complete(claim, result)
+                safe_result = result if result_processor is None else result_processor(result)
+                if asyncio.iscoroutine(safe_result):
+                    safe_result = await safe_result
+                await self._idempotency_store.complete(claim, safe_result)
             except Exception as commit_exc:  # noqa: BLE001 - never re-run handler
                 if self._metrics is not None:
                     self._metrics.counter("tool_commit_retry_total")

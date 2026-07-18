@@ -243,18 +243,19 @@ class TaskWorker:
             resource_snapshots=task.resource_snapshots,
             cancellation=cancellation,
         )
+        heartbeat = asyncio.create_task(self._heartbeat(claim, cancellation))
         try:
             input_artifact = await self._resolve_input_artifact(claim=claim, job=job, task=task)
         except _InputResolutionFailed:
             # Already committed as INVALID_INPUT; never run the handler against a
             # missing or unresolvable input artifact.
+            heartbeat.cancel()
             return
         request = TaskRequest(
             input_artifact=input_artifact,
             metadata=dict(task.metadata),
         )
 
-        heartbeat = asyncio.create_task(self._heartbeat(claim, cancellation))
         try:
             outcome: "TaskSuccess | TaskFailure | None" = None
             handler_cancelled = False

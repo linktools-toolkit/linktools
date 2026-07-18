@@ -27,6 +27,7 @@ from ..models import TaskFailureKind, to_jsonable
 from ..protocols import TaskContext, TaskFailure, TaskRequest, TaskSuccess
 from ..store import RunnableBindingError, TaskClaimLostError
 from ..validation import MAX_OUTPUT_PAYLOAD_BYTES
+from ...security.principal import ActorRef, PrincipalContext, ScopeSet
 
 
 class _OutputTooLarge(Exception):
@@ -109,6 +110,8 @@ class RuntimeTaskHandler:
         artifact_store=None,
         cancel_grace_seconds: float = 30.0,
     ) -> None:
+        if task_store is None or artifact_store is None:
+            raise TypeError("RuntimeTaskHandler requires task_store and artifact_store")
         self._runtime = runtime
         self._resolver = resolver
         self._task_store = task_store
@@ -289,10 +292,19 @@ class RuntimeTaskHandler:
         # Cancellation won the race (or the run is still pending): stop the run.
         cancel_task.cancel()
         await asyncio.gather(cancel_task, return_exceptions=True)
+        task_principal = PrincipalContext(
+            tenant_id=context.principal.tenant_id,
+            user_id=context.principal.user_id,
+            actor=ActorRef("task-attempt", context.attempt_id),
+            scopes=ScopeSet.of("run.cancel:self"),
+        )
         try:
-            await self._runtime.cancel(run_id)
-        except Exception:  # noqa: BLE001 - best-effort: still try to reap the task
-            pass
+            await self._runtime.cancel(run_id, principal=task_principal)
+        except Exception as exc:  # authorization/cancellation failure is not success
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+            return TaskFailure(kind=TaskFailureKind.CANCELLED,
+                error_type=type(exc).__name__, message=str(exc), retryable=False)
         try:
             await asyncio.wait_for(run_task, timeout=self._cancel_grace_seconds)
         except asyncio.TimeoutError:

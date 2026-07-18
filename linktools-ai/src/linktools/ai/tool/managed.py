@@ -182,7 +182,14 @@ class ManagedToolAdapter:
             """Resume gate for managed-path approval: a re-driven call after
             external approval must NOT re-raise RunPaused (a stateless pipeline
             otherwise would, looping the run forever)."""
-            return await self._tool_executor.is_approved(run_id, call_id)
+            from ..agent.approval import compute_arguments_hash
+            metadata = getattr(ctx, "metadata", {}) if ctx is not None else {}
+            binding = {"tool_name": self._descriptor.name,
+                       "arguments_hash": compute_arguments_hash(self._descriptor.name, arguments)}
+            binding.update({key: metadata.get(key) for key in (
+                "descriptor_fingerprint", "handler_revision", "provider_revision",
+                "policy_revision", "capability_revision", "result_processor_revision")})
+            return await self._tool_executor._is_approved_binding(run_id, call_id, binding=binding)
 
         # 1. Resolve + merge policy, then collapse the tri-state result to
         # concrete values. A layer that never declared a field (e.g. no

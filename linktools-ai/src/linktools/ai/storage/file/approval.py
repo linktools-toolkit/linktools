@@ -76,6 +76,7 @@ def _request_to_json(request: ApprovalRequest) -> dict:
         "provider_revision": request.provider_revision,
         "policy_revision": request.policy_revision,
         "capability_revision": request.capability_revision,
+        "result_processor_revision": request.result_processor_revision,
         "schema_version": request.schema_version,
     }
 
@@ -120,6 +121,7 @@ def _request_from_json(raw: dict) -> ApprovalRequest:
         provider_revision=raw.get("provider_revision"),
         policy_revision=raw.get("policy_revision"),
         capability_revision=raw.get("capability_revision"),
+        result_processor_revision=raw.get("result_processor_revision"),
         schema_version=int(raw.get("schema_version", 0)),
     )
 

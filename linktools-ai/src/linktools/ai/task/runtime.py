@@ -273,7 +273,7 @@ class TaskRuntime:
         Enables eval/task-mode executors to run one case reliably (with retries)
         without re-implementing the worker loop or importing task models.
         ``wait_timeout`` bounds how long to wait for the job to finish."""
-        now = datetime.now(timezone.utc)
+        now = self._clock.now()
         job_id = f"oneshot-{uuid.uuid4().hex[:10]}"
         task_id = f"task-{uuid.uuid4().hex[:10]}"
         principal = TaskPrincipal(tenant_id=tenant_id, user_id=user_id)
@@ -342,10 +342,12 @@ class TaskRuntime:
             if not reached_terminal:
                 await self.request_cancel(job_id, reason="run_one_task wait timeout")
             shutdown.set()
-            try:
-                await asyncio.wait_for(wt, timeout=5)
-            except Exception:  # noqa: BLE001 - best-effort worker shutdown
+            shutdown_deadline = self._clock.now() + timedelta(seconds=5)
+            while not wt.done() and self._clock.now() < shutdown_deadline:
+                await self._clock.sleep(0.02)
+            if not wt.done():
                 wt.cancel()
+            await asyncio.gather(wt, return_exceptions=True)
         if not reached_terminal:
             # Timed out without a terminal task: cancel the job so in-flight work
             # stops, then raise (never hand back a still-running task the caller
