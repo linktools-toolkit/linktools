@@ -183,6 +183,7 @@ class RunPaused(RunError):
         reason: "str | None" = None,
         arguments: "dict | None" = None,
         idempotency_key: "str | None" = None,
+        binding: "dict | None" = None,
     ) -> None:
         super().__init__(
             f"run paused waiting for approval: run_id={run_id} approval_id={approval_id}"
@@ -194,6 +195,7 @@ class RunPaused(RunError):
         self.reason = reason
         self.arguments = arguments or {}
         self.idempotency_key = idempotency_key
+        self.binding = binding or {}
 
 
 class SessionError(LinktoolsAIError):

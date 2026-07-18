@@ -74,6 +74,7 @@ class RuntimeComponents:
     cancellation: RuntimeCancellationOptions = dataclasses.field(default_factory=RuntimeCancellationOptions)
     schema_registry: OutputSchemaRegistry = dataclasses.field(default_factory=OutputSchemaRegistry)
     metrics: Any = dataclasses.field(default_factory=InMemoryMetrics)
+    authorization: Any = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -98,6 +99,7 @@ class RuntimeBuildConfig:
     cancellation: RuntimeCancellationOptions = dataclasses.field(default_factory=RuntimeCancellationOptions)
     schema_registry: OutputSchemaRegistry | None = None
     metrics: Any = None
+    authorization: Any = None
 
 
 def _build_file_commit_coordinator(storage):
@@ -491,6 +493,13 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         run_definitions=config.storage.run_definitions,
     )
 
+    if config.authorization is None:
+        from ..security.authorization import DenyAllAuthorization, ScopeAuthorization
+
+        authorization = ScopeAuthorization() if config.local_trusted_mode else DenyAllAuthorization()
+    else:
+        authorization = config.authorization
+
     return RuntimeComponents(
         storage=config.storage,
         provider_bundle=bundle,
@@ -510,4 +519,5 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         cancellation=config.cancellation,
         schema_registry=config.schema_registry or OutputSchemaRegistry(),
         metrics=config.metrics or InMemoryMetrics(),
+        authorization=authorization,
     )

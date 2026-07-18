@@ -25,6 +25,7 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.runtime import Runtime
 from linktools.ai.security.principal import PrincipalContext
+from linktools.ai.security.authorization import ScopeAuthorization
 from linktools.ai.storage.facade import FileStorage
 from linktools.ai.task.models import ActorRef, ScopeSet
 
@@ -49,6 +50,7 @@ def _seed_run(store, run_id: str, status: RunStatus = RunStatus.RUNNING) -> None
                 created_at=_NOW,
                 started_at=None,
                 finished_at=None,
+                metadata={"tenant_id": "t1"},
             )
         )
         if status is RunStatus.PENDING:
@@ -114,7 +116,7 @@ def test_cancel_without_principal_allowed_in_local_trusted_mode(tmp_path):
 
 def test_cancel_with_principal_proceeds_and_audits(tmp_path):
     storage = FileStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)  # strict, but principal given
+    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
     _seed_run(storage, "run-4", RunStatus.RUNNING)
 
     asyncio.run(
@@ -131,7 +133,7 @@ def test_cancel_with_principal_proceeds_and_audits(tmp_path):
 
 def test_cancel_with_principal_emits_no_deprecation(tmp_path):
     storage = FileStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)
+    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
     _seed_run(storage, "run-5", RunStatus.RUNNING)
 
     with warnings.catch_warnings(record=True) as caught:

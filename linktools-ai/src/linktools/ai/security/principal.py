@@ -24,7 +24,47 @@ explicitly: ``from linktools.ai.security.principal import PrincipalContext``.
 from dataclasses import dataclass
 
 from ..errors import PrincipalAccessDeniedError
-from ..task.models import ActorRef, ScopeSet
+
+
+@dataclass(frozen=True, slots=True)
+class ActorRef:
+    kind: str
+    id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind.strip():
+            raise ValueError("ActorRef.kind must be non-empty")
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("ActorRef.id must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeSet:
+    unrestricted: bool = False
+    values: tuple[str, ...] = ()
+
+    @classmethod
+    def allow_all(cls) -> "ScopeSet":
+        return cls(unrestricted=True)
+
+    @classmethod
+    def of(cls, *scopes: str) -> "ScopeSet":
+        return cls(values=tuple(scopes))
+
+    @classmethod
+    def from_any(cls, value):
+        if value is None:
+            return cls(unrestricted=True)
+        if isinstance(value, cls):
+            return value
+        return cls(values=tuple(value))
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.unrestricted and not self.values
+
+    def contains(self, scope: str) -> bool:
+        return self.unrestricted or scope in self.values
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +87,10 @@ class PrincipalContext:
             raise ValueError("PrincipalContext.tenant_id must be a non-empty string")
         if not isinstance(self.actor, ActorRef):
             raise TypeError("PrincipalContext.actor must be an ActorRef")
-        # Normalize legacy tuple/None at the boundary so a persisted
-        # PrincipalContext is never None-typed -- mirrors
-        # ActorChain.delegated_scopes normalization. None is treated as
-        # unrestricted (ScopeSet.from_any) to preserve legacy "no scope limit".
         if not isinstance(self.scopes, ScopeSet):
+            # Deserialize legacy task principals at this boundary. New
+            # callers should pass ScopeSet explicitly; task wire compatibility
+            # is retained without changing the persisted representation.
             object.__setattr__(self, "scopes", ScopeSet.from_any(self.scopes))
 
     def require_tenant(self, tenant_id: "str | None") -> None:
@@ -75,3 +114,13 @@ class PrincipalContext:
         caller-supplied. Used as ``resolved_by`` on approve/reject and the
         ``cancel_requested_by`` / resume audit fields."""
         return f"{self.actor.kind}:{self.actor.id}"
+
+
+def trusted_local_principal(*, tenant_id: str = "local") -> PrincipalContext:
+    """Explicit principal for single-user/local deployments and tests."""
+    return PrincipalContext(
+        tenant_id=tenant_id,
+        user_id=None,
+        actor=ActorRef(kind="system", id="trusted-local"),
+        scopes=ScopeSet.allow_all(),
+    )

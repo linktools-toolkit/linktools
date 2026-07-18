@@ -38,15 +38,18 @@ class _OutputTooLarge(Exception):
 def _fingerprint(spec: object) -> str:
     """A stable content fingerprint of a resolved runnable spec, so bind_runnable
     can detect that a mapping change returned a different spec for the same id
-    (even with no revision). Canonical JSON when possible, else repr.
+    (even with no revision). Only canonical JSON is accepted; nondeterministic
+    repr-based fingerprints are rejected.
 
     Assumes the spec serializes deterministically (dict key order is normalized
     via sort_keys; unordered collections like sets are not -- a spec carrying a
     set would be non-deterministic and should be normalized by its owner)."""
     try:
         payload = json.dumps(to_jsonable(spec), sort_keys=True).encode("utf-8")
-    except Exception:  # noqa: BLE001 - exotic spec: fall back to repr
-        payload = repr(spec).encode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - no nondeterministic repr fallback
+        raise ValueError(
+            "runnable resolver must provide a deterministically serializable fingerprint"
+        ) from exc
     return hashlib.sha256(payload).hexdigest()
 
 

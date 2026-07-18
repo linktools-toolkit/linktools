@@ -213,6 +213,7 @@ class FileApprovalStore:
         reason: "str | None",
         arguments: dict,
         approval_id: str,
+        binding: dict | None = None,
     ) -> ApprovalRequest:
         # dedup on (run_id, tool_call_id) BEFORE
         # creating -- a retry, a duplicate model drive, or a re-entrant pause
@@ -237,6 +238,7 @@ class FileApprovalStore:
             reason=reason,
             arguments=arguments,
             approval_id=approval_id,
+            **(binding or {}),
         )
         return self._create_sync(request)
 
@@ -249,6 +251,7 @@ class FileApprovalStore:
         reason: "str | None",
         arguments: dict,
         approval_id: str,
+        binding: dict | None = None,
     ) -> ApprovalRequest:
         async with self._lock:
             return await asyncio.to_thread(
@@ -259,6 +262,7 @@ class FileApprovalStore:
                 reason=reason,
                 arguments=arguments,
                 approval_id=approval_id,
+                binding=binding,
             )
 
     async def approve(

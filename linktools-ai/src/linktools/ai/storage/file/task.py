@@ -19,6 +19,7 @@ and was reclaimed cannot overwrite the new owner's result.
 import asyncio
 import dataclasses
 import json
+import pickle
 import random
 import uuid
 from datetime import datetime, timedelta
@@ -47,6 +48,22 @@ from ...task.models import (
     narrow_child_principal,
     to_jsonable,
 )
+
+
+class FileTaskCommitJournal:
+    """Durable outcome journal used by :class:`FileTaskStore`.
+
+    The store owns the state-machine replay; this small type centralizes the
+    on-disk location and atomic pickle write so tests and operators have an
+    explicit journal boundary.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def path(self, attempt_id: str) -> Path:
+        return self.root / f"{attempt_id}.pkl"
 from ...task.protocols import (
     CancelJob,
     CancelTask,
@@ -74,6 +91,7 @@ from ._util import _atomic_write, _validate_id_segment
 class FileTaskStore:
     def __init__(self, root: Path, *, clock: "Clock | None" = None) -> None:
         self._root = Path(root)
+        self._journal = FileTaskCommitJournal(self._root / "commit-journal")
         self._lock = asyncio.Lock()
         self._clock = clock or SystemClock()
 
@@ -214,13 +232,45 @@ class FileTaskStore:
         if outcome.output_artifact is not None:
             validate_output_payload(outcome.output_artifact.size)
         async with self._lock:
-            return await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+            journal = self._journal.path(claim.attempt_id)
+            await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "success"))
+            result = await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+            journal.unlink(missing_ok=True)
+            return result
 
     async def commit_failure(
         self, claim: TaskClaim, outcome: TaskFailure
     ) -> TaskRecord:
         async with self._lock:
-            return await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+            journal = self._journal.path(claim.attempt_id)
+            await asyncio.to_thread(self._write_journal, journal, (claim, outcome, "failure"))
+            result = await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+            journal.unlink(missing_ok=True)
+            return result
+
+    @staticmethod
+    def _write_journal(path: Path, payload) -> None:
+        tmp = path.with_suffix(".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            fh.flush()
+            import os
+            os.fsync(fh.fileno())
+        tmp.replace(path)
+
+    async def recover_incomplete_commits(self) -> None:
+        """Replay durable outcomes before expired-lease recovery."""
+        async with self._lock:
+            for path in sorted(self._journal.root.glob("*.pkl")):
+                claim, outcome, kind = pickle.loads(path.read_bytes())
+                try:
+                    if kind == "success":
+                        await asyncio.to_thread(self._commit_success_sync, claim, outcome)
+                    else:
+                        await asyncio.to_thread(self._commit_failure_sync, claim, outcome)
+                except TaskClaimLostError:
+                    pass
+                path.unlink(missing_ok=True)
 
     async def request_cancel(
         self, job_id: str, *, reason: "str | None" = None

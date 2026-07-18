@@ -957,6 +957,7 @@ class AgentRunner:
                                             "tool_name": paused.tool_name or "",
                                             "reason": paused.reason,
                                             "arguments": paused.arguments,
+                                            **paused.binding,
                                         },
                                         checkpoint_payload=serialize_messages(
                                             run.all_messages()

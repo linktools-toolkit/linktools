@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any
 
 from ..artifact.models import ArtifactRef, ResourceSnapshotRef
+from ..security.principal import ActorRef, ScopeSet
 
 
 # ----------------------------------------------------------------- enums --
@@ -122,48 +123,6 @@ class TaskPrincipal:
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, str) or not self.tenant_id.strip():
             raise ValueError("TaskPrincipal.tenant_id must be a non-empty string")
-
-
-@dataclass(frozen=True, slots=True)
-class ActorRef:
-    kind: str
-    id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ScopeSet:
-    """A resolved set of delegated scopes -- always a concrete value, never
-    None. ``unrestricted=True`` means the job placed no scope limit; otherwise
-    ``values`` is the exact set held (possibly empty == no scopes / denied).
-
-    Replaces the old ``tuple[str, ...] | None`` whose None was ambiguous
-    (unresolved vs unrestricted vs inherit). Construction accepts a legacy
-    tuple/None via :meth:`from_any`, normalized to a ScopeSet at the dataclass
-    boundary so a persisted record is never None."""
-
-    unrestricted: bool = False
-    values: "tuple[str, ...]" = ()
-
-    @classmethod
-    def allow_all(cls) -> "ScopeSet":
-        return cls(unrestricted=True)
-
-    @classmethod
-    def of(cls, *scopes: str) -> "ScopeSet":
-        return cls(values=tuple(scopes))
-
-    @classmethod
-    def from_any(cls, value: "ScopeSet | tuple[str, ...] | list[str] | None") -> "ScopeSet":
-        if value is None:
-            return cls(unrestricted=True)
-        if isinstance(value, ScopeSet):
-            return value
-        return cls(values=tuple(value))
-
-    @property
-    def is_empty(self) -> bool:
-        """No scopes granted at all (not unrestricted AND no values) -- deny."""
-        return not self.unrestricted and not self.values
 
 
 @dataclass(frozen=True, slots=True)

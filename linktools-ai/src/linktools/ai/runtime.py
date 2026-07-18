@@ -101,6 +101,7 @@ class Runtime:
         cancellation: "RuntimeCancellationOptions | None" = None,
         schema_registry: "OutputSchemaRegistry | None" = None,
         metrics: "ObservabilityMetrics | None" = None,
+        authorization: Any = None,
     ) -> "Runtime":
         """Assemble a Runtime from optional sub-components + a ProviderBundle.
 
@@ -129,6 +130,7 @@ class Runtime:
             cancellation=cancellation or RuntimeCancellationOptions(),
             schema_registry=schema_registry,
             metrics=metrics,
+            authorization=authorization,
         )
         c = build_runtime_components(config)
         return cls(components=c)
@@ -226,6 +228,7 @@ class Runtime:
             run_id=run_id,
             principal=principal,
             action=action,
+            authorization=self._components.authorization,
         )
 
     async def cancel(
@@ -383,7 +386,7 @@ class Runtime:
         """Approve through the Principal-bound service, never a caller id."""
         from .agent.approval_service import ApprovalService
 
-        return await ApprovalService(self._components.storage.approvals).approve(
+        return await ApprovalService(self._components.storage.approvals, self._components.authorization).approve(
             approval_id, principal=principal, expected_version=expected_version
         )
 
@@ -397,7 +400,7 @@ class Runtime:
     ):
         from .agent.approval_service import ApprovalService
 
-        return await ApprovalService(self._components.storage.approvals).reject(
+        return await ApprovalService(self._components.storage.approvals, self._components.authorization).reject(
             approval_id,
             principal=principal,
             expected_version=expected_version,

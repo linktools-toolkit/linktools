@@ -63,6 +63,21 @@ class AllowOwnerAuthorization:
         principal.require_tenant(resource.tenant_id)
 
 
+class SameTenantAuthorization(AllowOwnerAuthorization):
+    """Tenant-isolation policy; it intentionally grants no scope semantics."""
+
+
+class ScopeAuthorization:
+    """Default scoped policy: tenant match plus an explicit action scope."""
+
+    async def authorize(self, principal, action, resource) -> None:
+        principal.require_tenant(resource.tenant_id)
+        if not principal.scopes.unrestricted and not principal.scopes.contains(action):
+            raise PrincipalAccessDeniedError(
+                f"principal lacks required scope: {action}"
+            )
+
+
 class DenyAllAuthorization:
     """Deny every request. The safe default for a Runtime constructed without
     an explicit authorization service, so the absence of policy can never be

@@ -92,16 +92,22 @@ class ToolExecutor:
         options = self._idempotency_options
         handler_task = asyncio.ensure_future(coro)
         lease_lost = []
+        # The claim's persisted expiry is the last point at which this worker
+        # is allowed to produce side effects. Transient renew failures cannot
+        # extend that deadline locally.
+        confirmed_deadline = getattr(claim, "lease_expires_at", None)
 
         async def _heartbeat():
+            nonlocal confirmed_deadline
             while True:
                 await asyncio.sleep(options.heartbeat_seconds)
                 try:
-                    await self._idempotency_store.renew(
+                    renewed = await self._idempotency_store.renew(
                         claim,
                         now=datetime.now(timezone.utc),
                         lease_seconds=options.lease_seconds,
                     )
+                    confirmed_deadline = renewed.lease_expires_at
                 except LostIdempotencyClaimError as exc:
                     if self._metrics is not None:
                         self._metrics.counter("tool_idempotency_lease_lost_total")
@@ -111,14 +117,16 @@ class ToolExecutor:
                     handler_task.cancel()
                     return
                 except Exception:
-                    # Transient store error (disk full, connection drop,
-                    # deadlock) during renew. Tolerate and retry on the next
-                    # interval -- killing the heartbeat here would let the
-                    # error shadow the handler's eventual success (the finally
-                    # awaits this task), fail the claim, and re-drive the
-                    # Handler on retry. If the lease truly lapses, a later
-                    # renew surfaces LostIdempotencyClaimError (stolen) and
-                    # cancels the handler then.
+                    # Transient store error: retry only while the last
+                    # confirmed lease is still valid. Once it expires, stop
+                    # the handler fail-closed; another worker may reclaim it.
+                    if confirmed_deadline is not None and datetime.now(timezone.utc) >= confirmed_deadline:
+                        exc = LostIdempotencyClaimError(
+                            f"idempotent claim ({claim.scope}, {claim.key}) lease expired"
+                        )
+                        lease_lost.append(exc)
+                        handler_task.cancel()
+                        return
                     continue
 
         heartbeat = asyncio.create_task(_heartbeat())
@@ -154,7 +162,7 @@ class ToolExecutor:
             # externally (e.g. via the pause UI) and is now being re-driven by
             # the model with the same tool_call_id -- let it through instead
             # of re-raising RunPaused.
-            if await self._already_approved(request, context):
+            if await self._approved_binding_matches(request, context):
                 return
             run_id = (
                 self._run_id_resolver(context)
@@ -173,6 +181,15 @@ class ToolExecutor:
                 tool_name=request.tool_name,
                 reason=decision.reason,
                 arguments=dict(request.arguments),
+                binding={
+                    key: context.metadata[key]
+                    for key in (
+                        "descriptor_fingerprint", "handler_revision",
+                        "provider_revision", "policy_revision",
+                        "capability_revision",
+                    )
+                    if key in context.metadata
+                },
             )
 
     async def retry_tool_commit(self, claim, *, result: Any | None = None) -> Any:
@@ -226,6 +243,28 @@ class ToolExecutor:
         requests = await self._approval_store.list_for_run(run_id)
         return any(
             r.tool_call_id == tool_call_id and r.status is ApprovalStatus.APPROVED
+            for r in requests
+        )
+
+    async def _approved_binding_matches(self, request: ToolRequest, context: ToolContext) -> bool:
+        """Approval replay must match the current tool and argument binding.
+
+        Legacy records without a binding are intentionally not reusable.
+        """
+        if self._approval_store is None or context.tool_call_id is None:
+            return False
+        run_id = self._run_id_resolver(context) if self._run_id_resolver else context.run_id
+        requests = await self._approval_store.list_for_run(run_id)
+        from ..agent.approval import compute_arguments_hash
+        expected = compute_arguments_hash(request.tool_name, request.arguments)
+        return any(
+            r.tool_call_id == context.tool_call_id
+            and r.status is ApprovalStatus.APPROVED
+            and (
+                r.schema_version >= 1
+                and r.tool_name == request.tool_name
+                and r.arguments_hash == expected
+            )
             for r in requests
         )
 

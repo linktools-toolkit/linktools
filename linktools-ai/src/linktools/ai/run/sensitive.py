@@ -27,6 +27,7 @@ async def authorize_sensitive_operation(
     run_id: str,
     principal,
     action: str,
+    authorization=None,
 ) -> None:
     """Enforce the Principal gate + tenant ownership for a sensitive op.
 
@@ -53,5 +54,14 @@ async def authorize_sensitive_operation(
     # tenant exists to compare against.
     definition = await storage.run_definitions.get(run_id)
     run_tenant = definition.tenant_id if definition is not None else None
-    if run_tenant is not None:
-        principal.require_tenant(run_tenant)
+    if run_tenant is None:
+        run = await storage.runs.get(run_id)
+        run_tenant = (run.metadata.get("tenant_id") if run is not None else None)
+    from ..security.authorization import AuthorizationResource
+    from ..security.actions import SecurityAction
+
+    await authorization.authorize(
+        principal,
+        {"cancel": SecurityAction.RUN_CANCEL, "resume": SecurityAction.RUN_RESUME}.get(action, action),
+        AuthorizationResource(kind="run", id=run_id, tenant_id=run_tenant),
+    )

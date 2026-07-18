@@ -53,6 +53,10 @@ class SqlAlchemyRunCommitCoordinator:
                     reason=command.approval_request.get("reason"),
                     arguments=command.approval_request.get("arguments", {}),
                     approval_id=approval_id,
+                    binding={k: command.approval_request[k] for k in (
+                        "descriptor_fingerprint", "handler_revision", "provider_revision",
+                        "policy_revision", "capability_revision"
+                    ) if k in command.approval_request},
                 )
                 approval_id = approval.id
 

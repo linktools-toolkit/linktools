@@ -108,6 +108,14 @@ class TaskRuntime:
                 from ..artifact.store import ArtifactStore
 
                 self._artifact_store = ArtifactStore(resources)
+        # Runtime-backed handlers require both durable stores in production;
+        # reject a silently degraded registration at the orchestration boundary.
+        for name, handler in self._handlers.items():
+            if type(handler).__name__ == "RuntimeTaskHandler":
+                if getattr(handler, "_task_store", None) is None or self._artifact_store is None:
+                    raise ValueError(
+                        f"handler {name!r} requires task_store and artifact_store"
+                    )
         self._recovered = False
         self._recovery_lock = asyncio.Lock()
 
@@ -176,6 +184,9 @@ class TaskRuntime:
         async with self._recovery_lock:
             if self._recovered:
                 return
+            recover_commits = getattr(self._task_store, "recover_incomplete_commits", None)
+            if recover_commits is not None:
+                await recover_commits()
             recovered = await self._task_store.recover_expired(
                 now=self._clock.now(), limit=500
             )
@@ -325,6 +336,11 @@ class TaskRuntime:
                     break
                 await self._clock.sleep(0.02)
         finally:
+            # Business cancellation must reach the claimed task before the
+            # worker is stopped; otherwise an in-flight handler can outlive
+            # this one-shot call and continue side effects.
+            if not reached_terminal:
+                await self.request_cancel(job_id, reason="run_one_task wait timeout")
             shutdown.set()
             try:
                 await asyncio.wait_for(wt, timeout=5)
@@ -334,10 +350,6 @@ class TaskRuntime:
             # Timed out without a terminal task: cancel the job so in-flight work
             # stops, then raise (never hand back a still-running task the caller
             # could mistake for finished).
-            try:
-                await self.request_cancel(job_id, reason="run_one_task wait timeout")
-            except Exception:  # noqa: BLE001 - best-effort cancel before raising
-                pass
             raise TaskRunTimeoutError(job_id, task_id, wait_timeout)
         return await self.get_task(task_id)
 

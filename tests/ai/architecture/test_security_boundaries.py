@@ -86,8 +86,8 @@ def test_principal_context_is_defined_and_reuses_actor_types() -> None:
     assert "ActorRef" in field_types["actor"]
     assert "ScopeSet" in field_types["scopes"]
     # The reused types are exactly the task.models value types.
-    assert ActorRef.__module__ == "linktools.ai.task.models"
-    assert ScopeSet.__module__ == "linktools.ai.task.models"
+    assert ActorRef.__module__ == "linktools.ai.security.principal"
+    assert ScopeSet.__module__ == "linktools.ai.security.principal"
 
 
 def test_authorization_service_is_defined() -> None:

@@ -233,6 +233,7 @@ class SqlAlchemyApprovalStore:
         reason: "str | None",
         arguments: "dict[str, Any]",
         approval_id: str,
+        binding: "dict[str, Any] | None" = None,
     ) -> ApprovalRequest:
         """Dedup on (run_id, tool_call_id): a retry, a duplicate model drive, or a re-entrant pause for the
         same tool_call reuses the existing request rather than creating a
@@ -254,6 +255,7 @@ class SqlAlchemyApprovalStore:
             reason=reason,
             arguments=arguments,
             approval_id=approval_id,
+            **(binding or {}),
         )
 
         def _row() -> ApprovalRow:

@@ -115,6 +115,7 @@ class FileSessionStore:
         # appending to the same session cannot compute the same sequence.
         self._locks: "dict[str, asyncio.Lock]" = {}
         self._locks_guard = asyncio.Lock()
+        self.recover_incomplete_batches()
 
     async def _session_lock(self, session_id: str) -> asyncio.Lock:
         async with self._locks_guard:
@@ -166,13 +167,18 @@ class FileSessionStore:
         session_id: str,
         messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
-        # Each message is written individually via the crash-safe atomic helper,
-        # so a crash mid-batch leaves a consistent ordered PREFIX (each file is
-        # fully durable before the next starts; an orphan temp is invisible to
-        # the *.json glob). A full all-or-nothing batch journal (commit marker +
-        # recovery) is a larger build, tracked separately.
+        # Message files are staged first; the session record's committed
+        # sequence is the batch commit marker. Readers ignore files above it,
+        # so a crash cannot expose a partial batch. Orphaned files are retained
+        # for recovery/audit and are never treated as committed.
         messages_dir = self._session_dir(session_id) / "messages"
         next_seq = self._next_sequence_sync(session_id)
+        batch_path = self._session_dir(session_id) / f"batch-{next_seq:010d}.journal"
+        _atomic_write(
+            batch_path,
+            json.dumps({"session_id": session_id, "start": next_seq,
+                        "count": len(messages)}).encode("utf-8"),
+        )
         persisted = []
         for offset, message in enumerate(messages):
             sequence = next_seq + offset
@@ -191,7 +197,48 @@ class FileSessionStore:
                 json.dumps(_message_to_json(full)).encode("utf-8"),
             )
             persisted.append(full)
+        current = self._get_sync(session_id)
+        if current is None:
+            # Legacy callers may append to an externally-created session id
+            # before materializing SessionRecord metadata. Keep those writes
+            # visible; subsequent appends can establish the commit marker.
+            batch_path.unlink(missing_ok=True)
+            return tuple(persisted)
+        committed = next_seq + len(persisted) - 1 if persisted else int(
+            current.metadata.get("_committed_sequence", next_seq - 1)
+        )
+        metadata = dict(current.metadata)
+        metadata["_committed_sequence"] = committed
+        updated = SessionRecord(
+            id=current.id, parent_id=current.parent_id, status=current.status,
+            version=current.version + 1, created_at=current.created_at,
+            updated_at=datetime.now(timezone.utc), user_id=current.user_id,
+            tenant_id=current.tenant_id, metadata=metadata,
+        )
+        _atomic_write(self._record_path(session_id), json.dumps(_record_to_json(updated)).encode("utf-8"))
+        batch_path.unlink(missing_ok=True)
         return tuple(persisted)
+
+    def recover_incomplete_batches(self) -> None:
+        """Finalize batch markers whose message files were fully staged."""
+        for session_dir in self._root.iterdir():
+            if not session_dir.is_dir():
+                continue
+            for marker in session_dir.glob("batch-*.journal"):
+                try:
+                    raw = _load_json(marker)
+                    current = self._get_sync(raw["session_id"])
+                    if current is not None:
+                        end = int(raw["start"]) + int(raw["count"]) - 1
+                        if end >= int(current.metadata.get("_committed_sequence", 0)):
+                            metadata = dict(current.metadata)
+                            metadata["_committed_sequence"] = end
+                            self._update_sync(raw["session_id"], status=None, metadata=metadata)
+                    marker.unlink(missing_ok=True)
+                except Exception:
+                    # Leave corrupt markers for operator repair; readers remain
+                    # isolated by the last committed sequence.
+                    continue
 
     async def append_messages(
         self,
@@ -215,8 +262,12 @@ class FileSessionStore:
         if not messages_dir.exists():
             return ()
         result = []
+        session = self._get_sync(session_id)
+        committed_sequence = int(session.metadata.get("_committed_sequence", 2**63 - 1)) if session else 0
         for path in sorted(messages_dir.glob("*.json")):
             message = _message_from_json(_load_json(path))
+            if message.sequence > committed_sequence:
+                continue
             if message.sequence <= after_sequence:
                 continue
             result.append(message)

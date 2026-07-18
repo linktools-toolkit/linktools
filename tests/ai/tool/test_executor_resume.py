@@ -107,6 +107,10 @@ def _approved_request(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         reason=reason,
+        arguments={"path": "/"},
+        descriptor_fingerprint="descriptor-v1",
+        policy_revision="policy-v1",
+        capability_revision="capability-v1",
     )
     return dataclasses.replace(
         pending,
