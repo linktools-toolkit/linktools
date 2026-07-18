@@ -7,7 +7,15 @@ immutable run-definition snapshot through this coordinator so the snapshot's
 shape, fingerprint, and identity restoration are defined once -- not duplicated
 across Runtime and SwarmRunner (the prior double-create). A run that cannot be
 persisted for resume is rejected here rather than silently resuming from a
-caller-supplied spec later."""
+caller-supplied spec later.
+
+The snapshot carries an :class:`ExecutionManifest` -- revisions / fingerprints
+of the runnable, model, tools, and resources the run was prepared against. The
+agent-run path compiles FIRST and threads the resolved model bundle in, so the
+manifest's provider revision is populated; tool-handler revisions are still
+None (handlers resolve at execution time, not prepare time). The resume path
+runs the ManifestResolver against the persisted manifest and refuses a
+NON_RESUMABLE snapshot or a drifted environment."""
 
 import hashlib
 from datetime import datetime, timezone
@@ -21,6 +29,7 @@ from .definition import (
     serialize_swarm_spec,
     spec_fingerprint,
 )
+from .manifest import Resumability, build_execution_manifest, manifest_to_dict
 
 if TYPE_CHECKING:
     from .context import RunContext
@@ -34,25 +43,42 @@ class RunPreparationCoordinator:
         self._run_definitions = run_definitions
 
     async def prepare_agent_run(
-        self, *, spec: Any, context: "RunContext"
+        self,
+        *,
+        spec: Any,
+        context: "RunContext",
+        model_bundle: Any = None,
     ) -> RunDefinitionSnapshot:
         """Build + persist the snapshot for an agent run. The fingerprint is the
         canonical-JSON hash of the serialized spec, so resume detects tampering
         or a drifted output_schema. serialized_spec + manifest are deep-frozen
         so the caller mutating its own dict after prepare cannot affect the
-        persisted snapshot."""
+        persisted snapshot.
+
+        ``model_bundle`` is the resolved model bundle (available when prepare
+        runs after compile); its revision is recorded in the manifest so resume
+        can refuse on provider drift. Optional so callers that prepare before
+        resolving the model (swarm members, tests) still work -- the manifest
+        then records no provider revision."""
+        fingerprint = spec_fingerprint(spec)
         snapshot = RunDefinitionSnapshot(
             run_id=context.run_id,
             runnable_type=str(context.runnable_type.value),
             runnable_id=context.runnable_id,
             serialized_spec=freeze_value(serialize_agent_spec(spec)),
-            spec_fingerprint=spec_fingerprint(spec),
+            spec_fingerprint=fingerprint,
             user_id=context.user_id,
             tenant_id=context.tenant_id,
             workspace=context.workspace,
             provider_revision=None,
             created_at=datetime.now(timezone.utc),
-            manifest=_manifest(spec),
+            manifest=_agent_manifest(
+                spec,
+                str(context.runnable_type.value),
+                fingerprint,
+                model_bundle=model_bundle,
+            ),
+            resumability=Resumability.RESUMABLE.value,
         )
         await self._run_definitions.create(snapshot)
         return snapshot
@@ -84,24 +110,30 @@ class RunPreparationCoordinator:
             workspace=context.workspace,
             provider_revision=None,
             created_at=datetime.now(timezone.utc),
-            manifest=_manifest(spec),
+            manifest=_agent_manifest(spec, str(context.runnable_type.value), swarm_fp),
+            resumability=Resumability.RESUMABLE.value,
         )
         await self._run_definitions.create(snapshot)
         return snapshot
 
 
-def _manifest(spec: Any) -> "Mapping[str, Any]":
-    """The execution manifest: revisions of the bundle/policy/capabilities the
-    run was prepared against. Captures what is cheaply available now (the spec
-    id + a frozen snapshot of the tool declarations); richer provider/MCP/skill
-    revisions are layered in as callers expose them. Frozen so it cannot drift
-    after the snapshot is taken."""
-    return freeze_value(
-        {
-            "runnable_id": getattr(spec, "id", None),
-            "tools": [
-                {"kind": getattr(t, "kind", None), "name": getattr(t, "name", None)}
-                for t in (getattr(spec, "tools", None) or ())
-            ],
-        }
+def _agent_manifest(
+    spec: Any,
+    runnable_type: str,
+    fingerprint: str,
+    *,
+    model_bundle: Any = None,
+) -> "Mapping[str, Any]":
+    """Serialize the ExecutionManifest built from the spec-level inputs (the
+    runnable id/type/fingerprint, the declared model name, and each tool
+    declaration's descriptor fingerprint) plus the resolved model bundle's
+    revision when available. Frozen so it cannot drift after the snapshot is
+    taken. Compiled-handler revisions are layered in from the compiled run in a
+    follow-up (tool handlers are currently resolved at execution time)."""
+    manifest = build_execution_manifest(
+        spec,
+        runnable_type=runnable_type,
+        runnable_fingerprint=fingerprint,
+        model_provider=model_bundle,
     )
+    return freeze_value(manifest_to_dict(manifest))

@@ -98,6 +98,11 @@ class ToolContext:
     # after approve() must find the matching approval). None when the context
     # is constructed outside a real pydantic-ai call (executor falls back to uuid).
     tool_call_id: "str | None" = None
+    # Optional trusted principal propagated by Runtime into managed tools. A
+    # missing principal is retained for local single-tenant compatibility, but
+    # must never widen an idempotency scope.
+    principal: Any = None
+    tenant_id: str | None = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 

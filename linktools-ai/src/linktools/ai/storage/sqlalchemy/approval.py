@@ -66,13 +66,21 @@ def _row_to_request(row: ApprovalRow) -> ApprovalRequest:
         tool_call_id=row.tool_call_id,
         tool_name=row.tool_name,
         reason=row.reason,
-        arguments=json.loads(row.arguments_json),
+        redacted_arguments=json.loads(row.redacted_arguments_json),
+        arguments_hash=row.arguments_hash,
         status=ApprovalStatus(row.status),
         version=row.version,
         created_at=_as_utc(row.created_at),
         resolved_at=_as_utc(row.resolved_at),
         resolved_by=row.resolved_by,
         metadata=json.loads(row.metadata_json),
+        tenant_id=row.tenant_id,
+        descriptor_fingerprint=row.descriptor_fingerprint,
+        handler_revision=row.handler_revision,
+        provider_revision=row.provider_revision,
+        policy_revision=row.policy_revision,
+        capability_revision=row.capability_revision,
+        schema_version=row.schema_version or 0,
     )
 
 
@@ -164,13 +172,23 @@ class SqlAlchemyApprovalStore:
                     tool_call_id=request.tool_call_id,
                     tool_name=request.tool_name,
                     reason=request.reason,
-                    arguments_json=json.dumps(dict(request.arguments)),
+                    redacted_arguments_json=json.dumps(
+                        dict(request.redacted_arguments)
+                    ),
+                    arguments_hash=request.arguments_hash,
                     status=request.status.value,
                     version=request.version,
                     created_at=request.created_at,
                     resolved_at=request.resolved_at,
                     resolved_by=request.resolved_by,
                     metadata_json=json.dumps(dict(request.metadata)),
+                    tenant_id=request.tenant_id,
+                    descriptor_fingerprint=request.descriptor_fingerprint,
+                    handler_revision=request.handler_revision,
+                    provider_revision=request.provider_revision,
+                    policy_revision=request.policy_revision,
+                    capability_revision=request.capability_revision,
+                    schema_version=request.schema_version,
                 )
             )
 
@@ -245,7 +263,10 @@ class SqlAlchemyApprovalStore:
                 tool_call_id=request.tool_call_id,
                 tool_name=request.tool_name,
                 reason=request.reason,
-                arguments_json=json.dumps(dict(request.arguments)),
+                redacted_arguments_json=json.dumps(
+                    dict(request.redacted_arguments)
+                ),
+                arguments_hash=request.arguments_hash,
                 status=request.status.value,
                 version=request.version,
                 created_at=request.created_at,

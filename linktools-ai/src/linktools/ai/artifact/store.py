@@ -118,7 +118,9 @@ class ArtifactStore:
         sha = hashlib.sha256(content).hexdigest()
         # Content is deduplicated by sha256: the same bytes land at one blob
         # path. if_none_match fails if the blob is already present -- treat that
-        # as reuse, not an error.
+        # as reuse, but VERIFY the stored blob actually hashes to ``sha``: a
+        # mismatch means the blob at this path is corrupt/tampered, and creating
+        # a new ArtifactRecord pointing at it would propagate corruption.
         try:
             await self._resources.put(
                 self._blob_path(sha),
@@ -126,7 +128,17 @@ class ArtifactStore:
                 options=WriteOptions(if_none_match=True, content_type=media_type),
             )
         except ResourcePreconditionFailedError:
-            pass
+            existing = await self._resources.get(self._blob_path(sha))
+            if existing is None:
+                raise ArtifactIntegrityError(
+                    f"blob for sha256 {sha[:12]} vanished during put"
+                )
+            actual = hashlib.sha256(existing.content).hexdigest()
+            if actual != sha:
+                raise ArtifactIntegrityError(
+                    f"blob at sha256 {sha[:12]} is corrupt (actual {actual[:12]}); "
+                    f"refusing to record a reference to it"
+                )
 
         # A fresh record PER put: distinct id even for identical content, so the
         # second producer keeps its own lineage (the bug was that identical

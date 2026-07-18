@@ -39,6 +39,7 @@ class SqlAlchemyRunDefinitionStore:
                         manifest_json=canonical_json(snapshot.manifest)
                         if snapshot.manifest
                         else "{}",
+                        resumability=snapshot.resumability,
                     )
                 )
 
@@ -62,4 +63,5 @@ class SqlAlchemyRunDefinitionStore:
                 provider_revision=None,
                 created_at=row.created_at,
                 manifest=json.loads(row.manifest_json) if row.manifest_json else {},
+                resumability=row.resumability or "resumable",
             )

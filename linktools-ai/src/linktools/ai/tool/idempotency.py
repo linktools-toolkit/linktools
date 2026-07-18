@@ -48,12 +48,28 @@ if TYPE_CHECKING:
 
 
 class IdempotencyStatus(str, Enum):
-    """Three-state lifecycle of an idempotent tool call. String enum
-    so the value round-trips through JSON / SQL columns as a plain string."""
+    """Lifecycle of an idempotent tool call. String enum so the value
+    round-trips through JSON / SQL columns as a plain string.
+
+    The EXECUTED / UNKNOWN states separate "the Handler ran (its side effect
+    happened)" from "the result was safely committed" so that a commit failure
+    after a successful Handler is never resolved by re-running the Handler:
+
+    * RESERVED  -- a worker owns the call and is about to run the Handler;
+    * EXECUTED  -- the Handler returned; it MUST NOT be invoked again. The
+                   result is held on the record (the execution receipt) so the
+                   commit can be retried or recovered without a re-run;
+    * COMPLETED -- the fenced commit landed; ``result`` is safe to replay;
+    * FAILED    -- the Handler failed (or the call is permanently rejected);
+    * UNKNOWN   -- the Handler ran but the commit could not be confirmed, so
+                   the persisted result cannot be trusted as the outcome.
+    """
 
     RESERVED = "reserved"
+    EXECUTED = "executed"
     COMPLETED = "completed"
     FAILED = "failed"
+    UNKNOWN = "unknown"
 
 
 class ClaimDisposition(str, Enum):
@@ -88,6 +104,7 @@ class IdempotencyRecord:
     generation: int = 0
     claimed_at: "datetime | None" = None
     lease_expires_at: "datetime | None" = None
+    receipt_artifact_id: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,17 +136,41 @@ class IdempotencyStore(Protocol):
         """Fenced claim on ``(scope, key)``. The state machine:
         - no record -> CLAIMED generation=1, owner=owner_id -> ACQUIRED
         - COMPLETED + same hash -> REPLAY (return cached result)
+        - EXECUTED + same hash -> REPLAY (the Handler already ran; its result
+          is held on the record and is safe to return -- the side effect
+          happened, only the final commit is outstanding)
         - RESERVED + same hash + lease not expired + same owner -> ACQUIRED (re-drive)
         - RESERVED + same hash + lease not expired + other owner -> IN_PROGRESS
         - RESERVED + lease expired OR FAILED -> re-claim generation+1, new owner -> ACQUIRED
+        - UNKNOWN + same hash -> CONFLICT (cannot safely re-drive an unknowable
+          side effect; the caller must decide escalation, not silent retry)
         - different request_hash -> CONFLICT
         """
         ...
 
+    async def mark_executed(self, claim: "IdempotencyClaim", result: Any, *, receipt_artifact_id: str | None = None) -> None:
+        """Transition RESERVED -> EXECUTED and store ``result`` as the
+        execution receipt. The Handler has returned; it must not be invoked
+        again. The claim's owner_id + generation must match the persisted
+        record or the call is rejected (fenced). Idempotent in intent: the
+        caller uses it once, then :meth:`complete`."""
+        ...
+
+    async def mark_unknown(self, claim: "IdempotencyClaim") -> None:
+        """Transition RESERVED -> UNKNOWN. Used when ``mark_executed`` could
+        not be confirmed: the Handler ran (its side effect happened) but no
+        execution receipt could be persisted, so the outcome is unknowable.
+        Accepts RESERVED only -- an EXECUTED receipt already holds a
+        recoverable result and must NOT be downgraded (a later claim replays
+        it); mark_unknown on an EXECUTED record is rejected (fence miss).
+        Never resolves to a re-run of the Handler."""
+        ...
+
     async def complete(self, claim: "IdempotencyClaim", result: Any) -> None:
-        """Mark the record COMPLETED with ``result``. The claim's owner_id +
-        generation must match the persisted record or the call is rejected (a
-        stale worker cannot overwrite a newer owner's record)."""
+        """Transition EXECUTED -> COMPLETED (or RESERVED -> COMPLETED for the
+        no-side-effect fast path) and persist ``result``. The claim's owner_id
+        + generation must match the persisted record or the call is rejected
+        (a stale worker cannot overwrite a newer owner's record)."""
         ...
 
     async def fail(self, claim: "IdempotencyClaim", error: str) -> None:
@@ -139,6 +180,21 @@ class IdempotencyStore(Protocol):
 
     async def get(self, scope: str, key: str) -> "IdempotencyRecord | None":
         """Look up by ``(scope, key)``. None if no record exists."""
+        ...
+
+    async def renew(
+        self,
+        claim: "IdempotencyClaim",
+        *,
+        now: "datetime",
+        lease_seconds: float,
+    ) -> "IdempotencyRecord":
+        """Extend the lease on a RESERVED claim the caller still owns. Fenced
+        by owner_id + generation: a stolen / superseded claim is rejected
+        (``LostIdempotencyClaimError``), never silently renewed. Returns the
+        refreshed record with the new ``lease_expires_at``. Used by the
+        ToolExecutor heartbeat to keep a long Handler's claim from being
+        stolen mid-execution."""
         ...
 
 
@@ -244,6 +300,32 @@ class DefaultIdempotencyKeyBuilder:
             ]
         payload = "|".join(identity).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolIdempotencyOptions:
+    """Lease + heartbeat tuning for a long-running idempotent Handler.
+
+    The ToolExecutor runs a background renew loop while the Handler awaits:
+    every ``heartbeat_seconds`` it extends the claim's lease to
+    ``lease_seconds``. If a renew fails (the claim was stolen -- another worker
+    re-claimed an expired lease), the Handler is cancelled so it does not keep
+    producing side effects under a lost claim. Requires
+    ``heartbeat_seconds < lease_seconds`` so the lease never lapses between
+    heartbeats."""
+
+    lease_seconds: float = 60.0
+    heartbeat_seconds: float = 20.0
+
+    def __post_init__(self) -> None:
+        if self.heartbeat_seconds >= self.lease_seconds:
+            raise IdempotencyConfigurationError(
+                "heartbeat_seconds must be < lease_seconds"
+            )
+        if self.heartbeat_seconds <= 0 or self.lease_seconds <= 0:
+            raise IdempotencyConfigurationError(
+                "lease_seconds and heartbeat_seconds must be positive"
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
 from linktools.ai.storage.sqlalchemy.models import Base
 
@@ -29,16 +30,21 @@ def _now() -> datetime:
 def _record(
     *,
     memory_id: "str | None" = None,
+    tenant_id: str = "t1",
     owner_id: str = "u1",
     content: str = "hello world",
     category: "str | None" = None,
     confidence: "float | None" = None,
     version: int = 1,
     metadata: "dict | None" = None,
+    user_id: "str | None" = None,
+    workspace_id: "str | None" = None,
+    session_id: "str | None" = None,
 ) -> MemoryRecord:
     now = _now()
     return MemoryRecord(
         id=memory_id or f"m-{uuid.uuid4().hex}",
+        tenant_id=tenant_id,
         owner_id=owner_id,
         content=content,
         category=category,
@@ -47,6 +53,9 @@ def _record(
         created_at=now,
         updated_at=now,
         metadata=metadata if metadata is not None else {},
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=session_id,
     )
 
 
@@ -113,29 +122,34 @@ def test_get_missing_returns_none(tmp_path):
 def test_search_filters_owner_category_query_and_limit(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            a = _record(owner_id="u1", content="hello world", category="note")
-            b = _record(owner_id="u1", content="hello there", category="log")
-            c = _record(owner_id="u2", content="hello other", category="note")
-            d = _record(owner_id="u1", content="goodbye", category="note")
+            a = _record(owner_id="u1", user_id="u1", content="hello world", category="note")
+            b = _record(owner_id="u1", user_id="u1", content="hello there", category="log")
+            c = _record(owner_id="u2", user_id="u2", content="hello other", category="note")
+            d = _record(owner_id="u1", user_id="u1", content="goodbye", category="note")
             for r in (a, b, c, d):
                 await store.remember(r)
 
-            # owner_id + query substring (LIKE is case-insensitive on ASCII here,
-            # but the substring 'hello' is what binds).
-            owned = await store.search("hello", owner_id="u1")
+            # user sub-scope + query substring (c is a different user -> excluded).
+            owned = await store.search(
+                "hello", scope=MemoryScope(tenant_id="t1", user_id="u1")
+            )
             ids = {r.id for r in owned}
             assert ids == {a.id, b.id}
 
             # category narrows further
-            noted = await store.search("hello", owner_id="u1", category="note")
+            noted = await store.search(
+                "hello", scope=MemoryScope(tenant_id="t1", user_id="u1"), category="note"
+            )
             assert {r.id for r in noted} == {a.id}
 
-            # limit truncates
-            limited = await store.search("hello", limit=1)
+            # limit truncates (tenant-wide scope sees a, b, c)
+            limited = await store.search(
+                "hello", scope=MemoryScope(tenant_id="t1"), limit=1
+            )
             assert len(limited) == 1
 
             # non-matching query returns empty tuple
-            assert await store.search("zzz") == ()
+            assert await store.search("zzz", scope=MemoryScope(tenant_id="t1")) == ()
 
     asyncio.run(_run_case())
 
@@ -266,9 +280,96 @@ def test_search_category_filter_isolates_categories(tmp_path):
             )
             await store.remember(note_rec)
             await store.remember(log_rec)
-            only_note = await store.search("same query", category="note")
+            scope = MemoryScope(tenant_id="t1", user_id="user-x")
+            only_note = await store.search("same query", scope=scope, category="note")
             assert {r.id for r in only_note} == {"m-note"}
-            only_log = await store.search("same query", category="log")
+            only_log = await store.search("same query", scope=scope, category="log")
             assert {r.id for r in only_log} == {"m-log"}
+
+    asyncio.run(_run_case())
+
+
+# ---------------------------------------------------------------------------
+# 8. Tenant isolation + legacy quarantine (§12.7 / §12.10)
+# ---------------------------------------------------------------------------
+
+
+def test_search_isolates_tenants_with_same_owner(tmp_path):
+    # §12.10: tenant-a/alice and tenant-b/alice share an owner_id but must not
+    # see each other's memories. owner_id is display-only.
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            await store.remember(
+                _record(
+                    memory_id="a1",
+                    tenant_id="tenant-a",
+                    owner_id="alice",
+                    user_id="alice",
+                    content="hello a",
+                )
+            )
+            await store.remember(
+                _record(
+                    memory_id="b1",
+                    tenant_id="tenant-b",
+                    owner_id="alice",
+                    user_id="alice",
+                    content="hello b",
+                )
+            )
+            a_hits = await store.search(
+                "hello", scope=MemoryScope(tenant_id="tenant-a")
+            )
+            assert {r.id for r in a_hits} == {"a1"}
+            b_hits = await store.search(
+                "hello", scope=MemoryScope(tenant_id="tenant-b")
+            )
+            assert {r.id for r in b_hits} == {"b1"}
+
+    asyncio.run(_run_case())
+
+
+def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
+    # §12.9: a pre-tenant row (tenant_id IS NULL) is read under the reserved
+    # legacy tenant. A real tenant's search never matches it (NULL != tenant-a);
+    # only an explicit legacy-scope search does.
+    async def _run_case():
+        from linktools.ai.memory.scope import LEGACY_TENANT_ID
+        from linktools.ai.storage.sqlalchemy.models import MemoryRow
+        from sqlalchemy import insert
+
+        async with _store_ctx(tmp_path) as store:
+            # Insert a legacy row directly with tenant_id=NULL.
+            async def _seed(session):
+                await session.execute(
+                    insert(MemoryRow).values(
+                        id="legacy-1",
+                        tenant_id=None,
+                        owner_id="alice",
+                        content="legacy hello secret",
+                        category=None,
+                        confidence=None,
+                        version=1,
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                        metadata_json="{}",
+                        user_id=None,
+                        workspace_id=None,
+                        session_id=None,
+                    )
+                )
+
+            await store._execute_in_session(_seed)
+            # A real tenant does not see the legacy row.
+            real_hits = await store.search(
+                "legacy", scope=MemoryScope(tenant_id="tenant-a", user_id="alice")
+            )
+            assert real_hits == ()
+            # Only the explicit legacy scope sees it.
+            legacy_hits = await store.search(
+                "legacy", scope=MemoryScope(tenant_id=LEGACY_TENANT_ID)
+            )
+            assert {r.id for r in legacy_hits} == {"legacy-1"}
+            assert legacy_hits[0].tenant_id == LEGACY_TENANT_ID
 
     asyncio.run(_run_case())

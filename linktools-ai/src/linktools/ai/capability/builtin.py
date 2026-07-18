@@ -107,7 +107,12 @@ def _builtin_descriptors(
     if "terminal" in enabled:
         desc.append(
             ToolDescriptor(
-                name="bash", category="terminal", risk="high", mutating=True, **kw
+                name="bash",
+                category="terminal",
+                risk="high",
+                mutating=True,
+                metadata={"requires_isolation": True, "network_access": "unknown"},
+                **kw,
             )
         )
     return tuple(desc)

@@ -6,11 +6,23 @@
 Protocol covers the five operations the builtin toolset already exposes.
 """
 
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+
+class ExecutionIsolationLevel(str, Enum):
+    """Trust boundary provided by an execution backend."""
+
+    TRUSTED_LOCAL = "trusted_local"
+    CONTAINER = "container"
+    REMOTE_SANDBOX = "remote_sandbox"
 
 
 @runtime_checkable
 class ExecutionBackend(Protocol):
+    @property
+    def isolation_level(self) -> ExecutionIsolationLevel: ...
+
     async def list_dir(
         self, path: str = ".", recursive: bool = False
     ) -> "dict[str, Any]": ...

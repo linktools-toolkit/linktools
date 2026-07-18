@@ -334,6 +334,8 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
 
     async def _seed():
         # Runtime.run with an explicit session_id requires the session to exist.
+        # The session is created under the same tenant the run will carry, so
+        # resolve_session's strict (tenant_id) equality check passes.
         await storage.sessions.create(
             SessionRecord(
                 id="rt-session-mem",
@@ -342,15 +344,17 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
                 version=1,
                 created_at=now,
                 updated_at=now,
+                tenant_id="rt-tenant",
             )
         )
-        # Owner resolution falls back to session_id when user_id/tenant_id are
-        # None, so seed the memory with the same session id. Content includes
-        # the query keyword ("hello") because FileMemoryStore.search is
-        # keyword-substring based.
+        # Memory is tenant-scoped: seed it under the same tenant the run will
+        # carry, so the DefaultMemoryPolicy's tenant-bound search finds it.
+        # Content includes the query keyword ("hello") because
+        # FileMemoryStore.search is keyword-substring based.
         await storage.memories.remember(
             MemoryRecord(
                 id="mem-rt-1",
+                tenant_id="rt-tenant",
                 owner_id="rt-session-mem",
                 content="hello context: runtime-memory-token",
                 category=None,
@@ -372,7 +376,11 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
 
     async def _run():
         return await runtime.run(
-            spec, "hello", session_id="rt-session-mem", run_id="rt-run-mem-1"
+            spec,
+            "hello",
+            session_id="rt-session-mem",
+            run_id="rt-run-mem-1",
+            tenant_id="rt-tenant",
         )
 
     result = asyncio.run(_run())

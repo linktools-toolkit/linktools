@@ -24,6 +24,7 @@ from linktools.ai.task.models import (
     TaskStatus,
 )
 from linktools.ai.task.protocols import (
+    CancellationToken,
     TaskContext,
     TaskFailure,
     TaskRequest,
@@ -379,6 +380,54 @@ def test_heartbeat_renew_failure_is_counted_not_silently_dropped(tmp_path) -> No
         await asyncio.wait_for(wt, timeout=5)
         assert succeeded, "task must still succeed despite renew failures"
         # The heartbeat counted each failed renewal instead of dying silently.
+        assert metrics.counter("task_lease_renew_failure_total") >= 1.0
+
+    asyncio.run(run())
+
+
+def test_heartbeat_cancels_when_renew_failures_burn_past_lease(tmp_path) -> None:
+    # When transient renew failures persist past the lease deadline, the
+    # heartbeat must trigger the cancellation token so the handler stops
+    # producing side effects under a stale claim (double-execution guard).
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    from linktools.ai.storage.file.task import FileTaskStore
+    from linktools.ai.task.metrics import CountersTaskMetrics
+    from linktools.ai.task.worker import TaskWorker
+
+    class _FakeClock:
+        def __init__(self) -> None:
+            self._t = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+
+        def now(self) -> "datetime":
+            return self._t
+
+        async def sleep(self, seconds: float) -> None:
+            self._t = self._t + timedelta(seconds=seconds)
+            # Yield so asyncio.wait_for can interrupt this loop if the deadline
+            # arm ever regresses (otherwise the tight loop hangs instead of
+            # failing cleanly).
+            await asyncio.sleep(0)
+
+    async def run() -> None:
+        clock = _FakeClock()
+        inner = FileTaskStore(tmp_path, clock=clock)
+        flaky = _FlakyRenewStore(inner)  # renew_lease always raises
+        metrics = CountersTaskMetrics()
+        worker = TaskWorker(
+            task_store=flaky, handlers={}, options=FAST, clock=clock, metrics=metrics
+        )
+        claim = types.SimpleNamespace(
+            task_id="t1", attempt_id="a1", worker_id="w", fencing_token=1
+        )
+        cancellation = CancellationToken()
+        # The heartbeat loops: each iteration sleeps heartbeat_seconds (which
+        # advances the fake clock), renew fails (counter++), until the clock
+        # crosses the lease deadline (now > confirmed_lease_expires_at) -- then
+        # cancellation triggers and the loop returns.
+        await asyncio.wait_for(worker._heartbeat(claim, cancellation), timeout=5)
+        assert cancellation.is_set, "cancellation must fire once the lease burns"
         assert metrics.counter("task_lease_renew_failure_total") >= 1.0
 
     asyncio.run(run())

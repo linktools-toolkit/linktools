@@ -30,6 +30,7 @@ from .idempotency import IdempotencyStore, compute_request_hash
 
 if TYPE_CHECKING:
     from ..agent.approval import ApprovalStore
+    from .idempotency import ToolIdempotencyOptions
     from .models import ToolDescriptor
     from .policy import EffectiveToolPolicy
 
@@ -45,16 +46,101 @@ class ToolExecutor:
         run_id_resolver: "Callable[[ToolContext], str] | None" = None,
         idempotency_store: "IdempotencyStore | None" = None,
         retry_policy: Any = None,
+        idempotency_options: "ToolIdempotencyOptions | None" = None,
+        receipt_store: Any = None,
+        tenant_id_resolver: "Callable[[ToolContext], str | None] | None" = None,
+        metrics: Any = None,
     ) -> None:
         self._policy = policy
         self._approval_store = approval_store
         self._run_id_resolver = run_id_resolver
         self._idempotency_store = idempotency_store
+        # When set, a long-running idempotent Handler is kept alive by a
+        # background renew loop (the lease heartbeat); None disables the
+        # heartbeat (the claim's initial lease from claim() governs).
+        self._idempotency_options = idempotency_options
+        self._receipt_store = receipt_store
+        self._tenant_id_resolver = tenant_id_resolver
+        self._metrics = metrics
         # Retry is policy-driven: only clearly-transient errors, and never a
         # mutating non-idempotent tool. DefaultRetryPolicy when none supplied.
         from .retry import DefaultRetryPolicy
 
         self._retry_policy = retry_policy or DefaultRetryPolicy()
+
+    async def _invoke_handler(self, handler, arguments, timeout, claim):
+        """Invoke the handler once with timeout and -- when idempotency options
+        are configured and a claim is held -- a background lease-renew
+        heartbeat. Returns the result or raises."""
+        if self._idempotency_options is not None and claim is not None:
+            return await self._run_with_heartbeat(
+                handler(**arguments), claim, timeout
+            )
+        if timeout is not None:
+            return await asyncio.wait_for(handler(**arguments), timeout=timeout)
+        return await handler(**arguments)
+
+    async def _run_with_heartbeat(self, coro, claim, timeout):
+        """Run ``coro`` as a task while a background loop renews the claim's
+        lease. If a renew fails the claim was stolen -- the handler task is
+        cancelled (it must not keep producing side effects under a lost claim)
+        and LostIdempotencyClaimError is raised."""
+        from datetime import datetime, timezone
+
+        from ..errors import LostIdempotencyClaimError
+
+        options = self._idempotency_options
+        handler_task = asyncio.ensure_future(coro)
+        lease_lost = []
+
+        async def _heartbeat():
+            while True:
+                await asyncio.sleep(options.heartbeat_seconds)
+                try:
+                    await self._idempotency_store.renew(
+                        claim,
+                        now=datetime.now(timezone.utc),
+                        lease_seconds=options.lease_seconds,
+                    )
+                except LostIdempotencyClaimError as exc:
+                    if self._metrics is not None:
+                        self._metrics.counter("tool_idempotency_lease_lost_total")
+                    # Claim stolen / superseded: stop the handler so it does not
+                    # keep producing side effects under a lost claim.
+                    lease_lost.append(exc)
+                    handler_task.cancel()
+                    return
+                except Exception:
+                    # Transient store error (disk full, connection drop,
+                    # deadlock) during renew. Tolerate and retry on the next
+                    # interval -- killing the heartbeat here would let the
+                    # error shadow the handler's eventual success (the finally
+                    # awaits this task), fail the claim, and re-drive the
+                    # Handler on retry. If the lease truly lapses, a later
+                    # renew surfaces LostIdempotencyClaimError (stolen) and
+                    # cancels the handler then.
+                    continue
+
+        heartbeat = asyncio.create_task(_heartbeat())
+        try:
+            if timeout is not None:
+                return await asyncio.wait_for(handler_task, timeout=timeout)
+            return await handler_task
+        except asyncio.CancelledError:
+            # Distinguish a lease-loss cancellation (heartbeat cancelled the
+            # handler) from an external cancellation.
+            if lease_lost:
+                raise LostIdempotencyClaimError(
+                    f"idempotent claim ({claim.scope}, {claim.key}) "
+                    f"was stolen mid-execution"
+                ) from lease_lost[0]
+            raise
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
@@ -88,6 +174,21 @@ class ToolExecutor:
                 reason=decision.reason,
                 arguments=dict(request.arguments),
             )
+
+    async def retry_tool_commit(self, claim, *, result: Any | None = None) -> Any:
+        """Retry only the fenced commit for an EXECUTED receipt.
+
+        This recovery path deliberately has no handler argument and therefore
+        cannot re-drive an external side effect.
+        """
+        if self._idempotency_store is None:
+            raise ToolDeniedError("tool commit recovery requires an idempotency store")
+        record = await self._idempotency_store.get(claim.scope, claim.key)
+        if record is None or record.status.value != "executed":
+            raise ToolDeniedError("no EXECUTED tool receipt is available")
+        payload = record.result if result is None else result
+        await self._idempotency_store.complete(claim, payload)
+        return payload
 
     async def _already_approved(
         self, request: ToolRequest, context: ToolContext
@@ -211,22 +312,45 @@ class ToolExecutor:
 
             from .idempotency import ClaimDisposition
 
-            scope = idempotency_scope or context.run_id
+        scope = idempotency_scope or context.run_id
+        principal = getattr(context, "principal", None)
+        if principal is not None:
+            scope = ":".join(
+                (
+                    str(getattr(principal, "tenant_id", "")),
+                    str(getattr(principal, "user_id", "")),
+                    str(getattr(getattr(principal, "actor", None), "id", "")),
+                    scope,
+                )
+            )
+        if use_idempotency:
             request_hash = compute_request_hash(
-                request.tool_name,
-                request.arguments,
-                scope,
+                request.tool_name, request.arguments, scope,
                 schema_version=schema_version,
             )
             owner_id = _uuid.uuid4().hex
-            claim_result = await self._idempotency_store.claim(
-                scope=scope,
-                key=idempotency_key,
-                request_hash=request_hash,
-                owner_id=owner_id,
-            )
+            claim_kwargs = {"scope": scope, "key": idempotency_key,
+                            "request_hash": request_hash, "owner_id": owner_id}
+            if self._idempotency_options is not None:
+                claim_kwargs["lease_seconds"] = self._idempotency_options.lease_seconds
+            claim_result = await self._idempotency_store.claim(**claim_kwargs)
             disposition = claim_result.disposition
             if disposition is ClaimDisposition.REPLAY:
+                if (
+                    self._receipt_store is not None
+                    and claim_result.record is not None
+                    and claim_result.record.receipt_artifact_id is not None
+                ):
+                    tenant_id = self._tenant_id_resolver(context) if self._tenant_id_resolver else None
+                    if not tenant_id:
+                        raise ToolDeniedError("receipt replay requires a tenant-scoped context")
+                    payload = await self._receipt_store.get(
+                        claim_result.record.receipt_artifact_id, tenant_id=tenant_id
+                    )
+                    if payload is None:
+                        raise ToolDeniedError("tool receipt is unavailable")
+                    import json
+                    return json.loads(payload.decode("utf-8"))
                 return claim_result.record.result
             if disposition is ClaimDisposition.IN_PROGRESS:
                 raise IdempotencyInProgressError(
@@ -236,25 +360,30 @@ class ToolExecutor:
                 raise IdempotencyConflictError(
                     f"idempotency key {idempotency_key!r} reused with a different request"
                 )
-            # ACQUIRED: run the handler, then complete/fail with the fenced claim.
             claim = claim_result.claim
         arguments = dict(request.arguments)
-        last_error: "Exception | None" = None
         from .retry import backoff_delay
+        from ..errors import LostIdempotencyClaimError  # noqa: F401 (isinstance below)
 
+        # --- Handler phase: retry transient HANDLER errors only. A failure
+        # caught here means the side effect may NOT have happened yet, so
+        # retrying the Handler is safe. The fenced idempotency commit is
+        # intentionally OUT of this loop so a commit failure can never resolve
+        # by re-invoking the Handler (the forbidden commit-failure-retries-handler pattern).
+        last_error: "Exception | None" = None
+        result: "Any" = None
+        succeeded = False
         attempt = 0
         while True:
             try:
-                if timeout is not None:
-                    result = await asyncio.wait_for(
-                        handler(**arguments), timeout=timeout
-                    )
-                else:
-                    result = await handler(**arguments)
-                if use_idempotency:
-                    await self._idempotency_store.complete(claim, result)
-                return result
+                result = await self._invoke_handler(handler, arguments, timeout, claim)
+                succeeded = True
+                break
             except Exception as exc:  # noqa: BLE001 - decide via retry policy
+                if isinstance(exc, LostIdempotencyClaimError):
+                    # Claim was stolen mid-execution: do not retry and do not
+                    # fail the (already-lost) claim -- propagate to the caller.
+                    raise
                 last_error = exc
                 if attempt >= max_retries:
                     break
@@ -268,13 +397,76 @@ class ToolExecutor:
                 # Transient: back off (cancellable) and retry.
                 await asyncio.sleep(backoff_delay(attempt + 1))
                 attempt += 1
-        if use_idempotency:
-            from ..security.redact import redact_exception
 
-            safe_error = (
-                redact_exception(last_error)
-                if last_error is not None
-                else "unknown error"
-            )
-            await self._idempotency_store.fail(claim, safe_error)
-        raise last_error  # type: ignore[misc]
+        if not succeeded:
+            # Handler never returned: no confirmed side effect, so failing the
+            # claim is safe.
+            if use_idempotency:
+                from ..security.redact import redact_exception
+
+                safe_error = (
+                    redact_exception(last_error)
+                    if last_error is not None
+                    else "unknown error"
+                )
+                await self._idempotency_store.fail(claim, safe_error)
+            raise last_error  # type: ignore[misc]
+
+        # --- Commit phase: the Handler succeeded (its side effect happened).
+        # Record the execution receipt, then land the fenced commit. A failure
+        # here is NEVER resolved by re-running the Handler.
+        if use_idempotency:
+            from ..errors import ToolCommitError
+
+            receipt_artifact_id = None
+            if self._receipt_store is not None:
+                import json
+                from ..json import canonical_json
+                tenant_id = self._tenant_id_resolver(context) if self._tenant_id_resolver else None
+                if tenant_id:
+                    receipt = await self._receipt_store.put(
+                        canonical_json(result).encode("utf-8"),
+                        media_type="application/json",
+                        tenant_id=tenant_id,
+                        metadata={"tool_name": request.tool_name, "request_hash": request_hash},
+                    )
+                    receipt_artifact_id = receipt.ref.id
+
+            try:
+                if receipt_artifact_id is None:
+                    await self._idempotency_store.mark_executed(claim, result)
+                else:
+                    await self._idempotency_store.mark_executed(
+                        claim, result, receipt_artifact_id=receipt_artifact_id
+                    )
+            except Exception as receipt_exc:  # noqa: BLE001 - never re-run handler
+                if self._metrics is not None:
+                    self._metrics.counter("tool_side_effect_unknown_total")
+                # No receipt could be stored, so the outcome is unknowable.
+                # Best-effort UNKNOWN (the side effect happened); never re-drive.
+                try:
+                    await self._idempotency_store.mark_unknown(claim)
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
+                raise ToolCommitError(
+                    f"tool {request.tool_name!r} Handler succeeded but its "
+                    f"execution receipt could not be stored; marked UNKNOWN"
+                ) from receipt_exc
+            try:
+                # The execution receipt is already persisted before this
+                # commit. Tenant-scoped ArtifactStore receipts are used for
+                # production runs; the raw value remains for local legacy
+                # stores that do not carry a Tenant.
+                await self._idempotency_store.complete(claim, result)
+            except Exception as commit_exc:  # noqa: BLE001 - never re-run handler
+                if self._metrics is not None:
+                    self._metrics.counter("tool_commit_retry_total")
+                # The receipt (EXECUTED) landed, so the outcome is recoverable:
+                # leave the record EXECUTED for retry_tool_commit / startup
+                # recovery to re-attempt the commit. Do NOT re-run the Handler.
+                raise ToolCommitError(
+                    f"tool {request.tool_name!r} Handler succeeded but its "
+                    f"result commit could not be confirmed; record left EXECUTED "
+                    f"for recovery"
+                ) from commit_exc
+        return result

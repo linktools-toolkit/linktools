@@ -7,12 +7,14 @@ import asyncio
 
 from linktools.ai.knowledge.document import Document
 from linktools.ai.knowledge.retriever import MemoryRetriever, Retriever
+from linktools.ai.knowledge.scope import RetrievalScope
 from linktools.ai.memory.models import MemoryRecord
 
 
 def _make_record(**overrides):
     defaults = dict(
         id="m-1",
+        tenant_id="t1",
         owner_id="u1",
         content="hello world",
         category=None,
@@ -26,17 +28,29 @@ def _make_record(**overrides):
     return MemoryRecord(**defaults)
 
 
+def _scope(*, tenant_id="t1", user_id="u1"):
+    return RetrievalScope(tenant_id=tenant_id, user_id=user_id)
+
+
 class _StubStore:
-    """Dict-backed async MemoryStore stub: filters by owner_id + content substring."""
+    """Dict-backed async MemoryStore stub: tenant-scoped (hard tenant filter
+    + NULL-or-equal user sub-scope) + content substring, mirroring the real
+    backends."""
 
     def __init__(self, records):
         # records: iterable of MemoryRecord
         self._records = list(records)
 
-    async def search(self, query, *, owner_id=None, category=None, limit=10):
+    async def search(self, query, *, scope, limit=10, category=None):
         hits = []
         for r in self._records:
-            if owner_id is not None and r.owner_id != owner_id:
+            if r.tenant_id != scope.tenant_id:
+                continue
+            if (
+                scope.user_id is not None
+                and r.user_id is not None
+                and r.user_id != scope.user_id
+            ):
                 continue
             if query and query not in r.content:
                 continue
@@ -45,9 +59,9 @@ class _StubStore:
 
 
 def _run_search_basic():
-    store = _StubStore([_make_record(id="m-1", owner_id="u1", content="hello world")])
-    retriever = MemoryRetriever(store, owner_id="u1")
-    docs = asyncio.run(retriever.search("hello"))
+    store = _StubStore([_make_record(id="m-1", owner_id="u1", user_id="u1", content="hello world")])
+    retriever = MemoryRetriever(store)
+    docs = asyncio.run(retriever.search("hello", scope=_scope()))
     assert len(docs) == 1
     doc = docs[0]
     assert isinstance(doc, Document)
@@ -62,33 +76,35 @@ def test_search_basic():
     _run_search_basic()
 
 
-def _run_filter_overrides_owner():
+def _run_scope_user_filters():
+    # The scope's user_id is the filter: a u2 scope sees only m-2 even though
+    # m-1 shares the tenant.
     store = _StubStore(
         [
-            _make_record(id="m-1", owner_id="u1", content="hello a"),
-            _make_record(id="m-2", owner_id="u2", content="hello b"),
+            _make_record(id="m-1", owner_id="u1", user_id="u1", content="hello a"),
+            _make_record(id="m-2", owner_id="u2", user_id="u2", content="hello b"),
         ]
     )
-    retriever = MemoryRetriever(store, owner_id="u1")
-    docs = asyncio.run(retriever.search("hello", filters={"owner_id": "u2"}))
+    retriever = MemoryRetriever(store)
+    docs = asyncio.run(retriever.search("hello", scope=_scope(user_id="u2")))
     assert len(docs) == 1
     assert docs[0].id == "m-2"
     assert docs[0].content == "hello b"
 
 
-def test_filter_overrides_owner():
-    _run_filter_overrides_owner()
+def test_scope_user_filters():
+    _run_scope_user_filters()
 
 
 def _run_limit_honored():
     store = _StubStore(
         [
-            _make_record(id=f"m-{i}", owner_id="u1", content=f"hello {i}")
+            _make_record(id=f"m-{i}", owner_id="u1", user_id="u1", content=f"hello {i}")
             for i in range(5)
         ]
     )
-    retriever = MemoryRetriever(store, owner_id="u1")
-    docs = asyncio.run(retriever.search("hello", limit=2))
+    retriever = MemoryRetriever(store)
+    docs = asyncio.run(retriever.search("hello", scope=_scope(), limit=2))
     assert len(docs) == 2
 
 
@@ -97,9 +113,9 @@ def test_limit_honored():
 
 
 def _run_empty_result():
-    store = _StubStore([_make_record(id="m-1", owner_id="u1", content="hello")])
-    retriever = MemoryRetriever(store, owner_id="u1")
-    docs = asyncio.run(retriever.search("missing-keyword"))
+    store = _StubStore([_make_record(id="m-1", owner_id="u1", user_id="u1", content="hello")])
+    retriever = MemoryRetriever(store)
+    docs = asyncio.run(retriever.search("missing-keyword", scope=_scope()))
     assert docs == ()
 
 

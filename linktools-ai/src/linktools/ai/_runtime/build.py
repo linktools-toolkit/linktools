@@ -19,6 +19,7 @@ from ..capability.assembler import CapabilityAssembler
 from ..capability.builtin import BuiltinProvider
 from ..capability.models import CapabilityRuntimeOptions
 from ..execution.protocols import ExecutionBackend
+from ..execution.protocols import ExecutionIsolationLevel
 from ..middleware.pipeline import MiddlewarePipeline
 from ..model.router import ModelRouter
 from ..mcp.client import MCPConnectionManager
@@ -27,6 +28,9 @@ from ..package.capability_provider import PackageProvider
 from ..providers.bundle import ProviderBundle
 from ..run.controller import RunController
 from ..run.models import RunnableType
+from ..run.options import RuntimeCancellationOptions
+from ..run.schema_registry import OutputSchemaRegistry
+from ..observability.metrics import InMemoryMetrics
 from ..session.models import SessionRecord, SessionStatus
 from ..skill.provider import SkillProvider
 from ..storage.facade import Storage
@@ -61,6 +65,15 @@ class RuntimeComponents:
     execution: "ExecutionBackend | None"
     mcp_connection_manager: "MCPConnectionManager | None"
     commit_coordinator: Any = None
+    # When False (the default, production-safe) Runtime.cancel / resume reject
+    # a missing ``principal``; when True the Runtime is explicitly
+    # single-tenant / local-trusted and a missing principal is allowed (with a
+    # deprecation warning). Never default True: do not ship loose.
+    local_trusted_mode: bool = False
+    multi_tenant: bool = False
+    cancellation: RuntimeCancellationOptions = dataclasses.field(default_factory=RuntimeCancellationOptions)
+    schema_registry: OutputSchemaRegistry = dataclasses.field(default_factory=OutputSchemaRegistry)
+    metrics: Any = dataclasses.field(default_factory=InMemoryMetrics)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -79,6 +92,12 @@ class RuntimeBuildConfig:
     capability_options: "CapabilityRuntimeOptions | None" = None
     allow_mcp_wildcard: bool = False
     mcp_connection_manager: "MCPConnectionManager | None" = None
+    # Default False (strict): sensitive APIs reject a missing principal.
+    local_trusted_mode: bool = False
+    multi_tenant: bool = False
+    cancellation: RuntimeCancellationOptions = dataclasses.field(default_factory=RuntimeCancellationOptions)
+    schema_registry: OutputSchemaRegistry | None = None
+    metrics: Any = None
 
 
 def _build_file_commit_coordinator(storage):
@@ -336,6 +355,15 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     RuntimeBuildConfig. Internal splits: resolve security + exposure -> build
     executor -> build capability assembler -> build compiler -> build runner ->
     build swarm runner."""
+    if config.multi_tenant and config.execution is not None:
+        # Protocol runtime checks cannot distinguish a trusted local backend;
+        # use its declared isolation level when available.
+        if getattr(config.execution, "isolation_level", None) == ExecutionIsolationLevel.TRUSTED_LOCAL and not config.local_trusted_mode:
+            from ..errors import UnsafeExecutionBackendError
+
+            raise UnsafeExecutionBackendError(
+                "LocalExecutionBackend is trusted-only and cannot serve multi-tenant runs"
+            )
     if config.storage.run_definitions is None:
         # Fail fast at build time, not when a subagent/worker tool first
         # pauses on approval and Runtime.resume(child_run_id) cannot find a
@@ -374,6 +402,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     resolved_executor = config.tool_executor
     if resolved_executor is None:
         from ..policy.engine import PolicyEngine
+        from ..artifact.store import ArtifactStore
 
         rules: "list[Any]" = []
         if baseline.enabled and baseline.command_policy is not None:
@@ -386,6 +415,9 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             policy=PolicyEngine(rules=tuple(rules)),
             approval_store=config.storage.approvals,
             idempotency_store=config.storage.idempotency,
+            metrics=config.metrics or InMemoryMetrics(),
+            receipt_store=ArtifactStore(config.storage.resources),
+            tenant_id_resolver=lambda context: context.tenant_id,
         )
     compiler = AgentCompiler(
         model_router=router,
@@ -473,4 +505,9 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         execution=config.execution,
         mcp_connection_manager=mcp_manager,
         commit_coordinator=runner._commit_coordinator,
+        local_trusted_mode=config.local_trusted_mode,
+        multi_tenant=config.multi_tenant,
+        cancellation=config.cancellation,
+        schema_registry=config.schema_registry or OutputSchemaRegistry(),
+        metrics=config.metrics or InMemoryMetrics(),
     )

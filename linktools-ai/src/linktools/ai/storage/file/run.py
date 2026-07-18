@@ -8,6 +8,7 @@ Each public async method delegates to a ``_*_sync`` private method via
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +63,16 @@ def _to_json(record: RunRecord) -> dict:
         if record.finished_at is None
         else record.finished_at.isoformat(),
         "metadata": dict(record.metadata),
+        "cancel_requested_at": None
+        if record.cancel_requested_at is None
+        else record.cancel_requested_at.isoformat(),
+        "cancel_requested_by": record.cancel_requested_by,
+        "cancel_reason": record.cancel_reason,
+        "worker_id": record.worker_id,
+        "execution_token": record.execution_token,
+        "heartbeat_at": None if record.heartbeat_at is None else record.heartbeat_at.isoformat(),
+        "manifest_id": record.manifest_id,
+        "resumability": record.resumability,
     }
 
 
@@ -88,6 +99,20 @@ def _from_json(raw: dict) -> RunRecord:
         if raw["finished_at"] is None
         else datetime.fromisoformat(raw["finished_at"]),
         metadata=raw["metadata"],
+        # Reader tolerates the pre-audit-field format: records written before
+        # cancel_requested_* landed simply lack the keys.
+        cancel_requested_at=(
+            None
+            if raw.get("cancel_requested_at") is None
+            else datetime.fromisoformat(raw["cancel_requested_at"])
+        ),
+        cancel_requested_by=raw.get("cancel_requested_by"),
+        cancel_reason=raw.get("cancel_reason"),
+        worker_id=raw.get("worker_id"),
+        execution_token=raw.get("execution_token"),
+        heartbeat_at=(None if raw.get("heartbeat_at") is None else datetime.fromisoformat(raw["heartbeat_at"])),
+        manifest_id=raw.get("manifest_id"),
+        resumability=raw.get("resumability"),
     )
 
 
@@ -120,6 +145,27 @@ class FileRunStore:
     async def get(self, run_id: str) -> "RunRecord | None":
         return await asyncio.to_thread(self._get_sync, run_id)
 
+    def _claim_execution_sync(self, run_id: str, worker_id: str, token: str) -> RunRecord:
+        current = self._get_sync(run_id)
+        if current is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        if current.execution_token is not None and current.execution_token != token:
+            raise RunConflictError("run execution is already fenced by another worker")
+        updated = replace(current, worker_id=worker_id, execution_token=token, heartbeat_at=datetime.now(current.created_at.tzinfo))
+        _atomic_write(self._path(run_id), json.dumps(_to_json(updated)).encode("utf-8"))
+        return updated
+
+    async def claim_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._claim_execution_sync, run_id, worker_id, execution_token)
+
+    async def heartbeat_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord:
+        async with self._lock:
+            current = await asyncio.to_thread(self._get_sync, run_id)
+            if current is None or current.worker_id != worker_id or current.execution_token != execution_token:
+                raise RunConflictError("run execution heartbeat fencing failed")
+            return await asyncio.to_thread(self._claim_execution_sync, run_id, worker_id, execution_token)
+
     def _transition_sync(
         self,
         run_id: str,
@@ -128,6 +174,9 @@ class FileRunStore:
         expected_version: int,
         result: "RunResult | None",
         error: "RunErrorInfo | None",
+        cancel_requested_at: "datetime | None",
+        cancel_requested_by: "str | None",
+        cancel_reason: "str | None",
     ) -> RunRecord:
         current = self._get_sync(run_id)
         if current is None:
@@ -162,6 +211,25 @@ class FileRunStore:
             started_at=started_at,
             finished_at=finished_at,
             metadata=current.metadata,
+            # Audit fields: a transition may carry a cancel request forward
+            # (set when entering CANCELLING/CANCELLED via a Principal); once
+            # set they are preserved across later transitions so the audit
+            # trail survives the CANCELLING -> CANCELLED handoff.
+            cancel_requested_at=(
+                cancel_requested_at
+                if cancel_requested_at is not None
+                else current.cancel_requested_at
+            ),
+            cancel_requested_by=(
+                cancel_requested_by
+                if cancel_requested_by is not None
+                else current.cancel_requested_by
+            ),
+            cancel_reason=(
+                cancel_reason
+                if cancel_reason is not None
+                else current.cancel_reason
+            ),
         )
         _atomic_write(self._path(run_id), json.dumps(_to_json(updated)).encode("utf-8"))
         return updated
@@ -174,6 +242,9 @@ class FileRunStore:
         expected_version: int,
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
+        cancel_requested_at: "datetime | None" = None,
+        cancel_requested_by: "str | None" = None,
+        cancel_reason: "str | None" = None,
     ) -> RunRecord:
         async with self._lock:
             return await asyncio.to_thread(
@@ -183,6 +254,9 @@ class FileRunStore:
                 expected_version=expected_version,
                 result=result,
                 error=error,
+                cancel_requested_at=cancel_requested_at,
+                cancel_requested_by=cancel_requested_by,
+                cancel_reason=cancel_reason,
             )
 
     def _list_children_sync(self, run_id: str) -> "tuple[RunRecord, ...]":

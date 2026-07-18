@@ -147,7 +147,9 @@ def test_create_then_get_roundtrip(store_factory):
         assert fetched.tool_call_id == "c1"
         assert fetched.tool_name == "terminal"
         assert fetched.reason == "need shell"
-        assert dict(fetched.arguments) == {"cmd": "ls", "args": ["-l"]}
+        assert dict(fetched.redacted_arguments) == {"cmd": "ls", "args": ["-l"]}
+        # The identity hash round-trips and matches a freshly computed one.
+        assert fetched.arguments_hash == created.arguments_hash
         # build_approval_request leaves metadata as the empty default; it must
         # round-trip as an empty mapping (not None) on both backends.
         assert dict(fetched.metadata) == {}

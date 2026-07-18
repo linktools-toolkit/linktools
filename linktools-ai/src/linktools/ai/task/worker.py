@@ -16,6 +16,7 @@ cancellation token so a cooperative handler can stop; commit then fails with
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from .models import JobStatus, TaskFailureKind, TaskStatus
@@ -393,13 +394,25 @@ class TaskWorker:
 
         * on a lost claim (TaskClaimLostError -- reclaimed or fencing failed),
           triggers cancellation so the handler stops;
-        * on a transient store error, counts it and keeps the lease alive;
+        * on a transient store error, counts it and keeps retrying -- but ONLY
+          until the last-confirmed lease expiry has passed. Once the clock
+          crosses that deadline the local lease is gone (another worker may
+          already have re-claimed), so continuing the handler risks
+          double-execution; cancellation is triggered and the loop exits;
         * when the renewed task reads back CANCELLING/CANCELLED (a
           ``request_cancel`` from another caller landed), triggers cancellation
           so a cooperative handler stops early.
 
         Folding status observation into the heartbeat avoids a second task that
         races it for lease renewal (duplicate writes, renewal contention)."""
+        # The latest moment the lease was CONFIRMED held by this worker. A
+        # successful renew pushes it out; a sustained run of transient renew
+        # failures leaves it stale, and once the clock passes it the lease is
+        # gone locally. Initialized to now + lease -- the claim was just made,
+        # so its lease runs out roughly one lease interval from here.
+        confirmed_lease_expires_at = self._clock.now() + timedelta(
+            seconds=self._options.lease_seconds
+        )
         while True:
             await self._clock.sleep(self._options.heartbeat_seconds)
             try:
@@ -417,10 +430,22 @@ class TaskWorker:
                 return
             except Exception:  # noqa: BLE001 - transient store error: keep retrying
                 # Count it (a silent death here would mask lease-renew failures)
-                # and keep going -- the lease is still ours until it expires, and
-                # the sleep above paces the retries.
+                # and keep going while the lease is still ours. But if transient
+                # failures have burned past the last-confirmed expiry, the lease
+                # is gone -- stop the handler rather than keep producing side
+                # effects under a stale claim.
                 await self._metrics.inc_counter("task_lease_renew_failure_total")
+                if (
+                    confirmed_lease_expires_at is not None
+                    and self._clock.now() > confirmed_lease_expires_at
+                ):
+                    cancellation.trigger()
+                    return
                 continue
+            # Renew succeeded: the lease is confirmed held until now + lease.
+            confirmed_lease_expires_at = self._clock.now() + timedelta(
+                seconds=self._options.lease_seconds
+            )
             if task.status in (TaskStatus.CANCELLING, TaskStatus.CANCELLED):
                 cancellation.trigger()
                 return

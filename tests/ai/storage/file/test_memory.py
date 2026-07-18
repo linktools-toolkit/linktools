@@ -13,6 +13,7 @@ import pytest
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.storage.file.memory import FileMemoryStore
 
 
@@ -23,16 +24,21 @@ def _now() -> datetime:
 def _record(
     *,
     memory_id: "str | None" = None,
+    tenant_id: str = "t1",
     owner_id: str = "u1",
     content: str = "hello world",
     category: "str | None" = None,
     confidence: "float | None" = None,
     version: int = 1,
     metadata: "dict | None" = None,
+    user_id: "str | None" = None,
+    workspace_id: "str | None" = None,
+    session_id: "str | None" = None,
 ) -> MemoryRecord:
     now = _now()
     return MemoryRecord(
         id=memory_id or f"m-{uuid.uuid4().hex}",
+        tenant_id=tenant_id,
         owner_id=owner_id,
         content=content,
         category=category,
@@ -41,6 +47,9 @@ def _record(
         created_at=now,
         updated_at=now,
         metadata=metadata if metadata is not None else {},
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=session_id,
     )
 
 
@@ -92,28 +101,32 @@ def test_get_missing_returns_none(tmp_path):
 def test_search_filters_owner_category_query_and_limit(tmp_path):
     async def _run_case():
         store = FileMemoryStore(root=tmp_path)
-        a = _record(owner_id="u1", content="hello world", category="note")
-        b = _record(owner_id="u1", content="hello there", category="log")
-        c = _record(owner_id="u2", content="hello other", category="note")
-        d = _record(owner_id="u1", content="goodbye", category="note")
+        a = _record(owner_id="u1", user_id="u1", content="hello world", category="note")
+        b = _record(owner_id="u1", user_id="u1", content="hello there", category="log")
+        c = _record(owner_id="u2", user_id="u2", content="hello other", category="note")
+        d = _record(owner_id="u1", user_id="u1", content="goodbye", category="note")
         for r in (a, b, c, d):
             await store.remember(r)
 
-        # owner_id + query substring
-        owned = await store.search("hello", owner_id="u1")
+        # user sub-scope + query substring (c is a different user -> excluded)
+        owned = await store.search(
+            "hello", scope=MemoryScope(tenant_id="t1", user_id="u1")
+        )
         ids = {r.id for r in owned}
         assert ids == {a.id, b.id}
 
         # category narrows further
-        noted = await store.search("hello", owner_id="u1", category="note")
+        noted = await store.search(
+            "hello", scope=MemoryScope(tenant_id="t1", user_id="u1"), category="note"
+        )
         assert {r.id for r in noted} == {a.id}
 
-        # limit truncates
-        limited = await store.search("hello", limit=1)
+        # limit truncates (tenant-wide scope sees a, b, c)
+        limited = await store.search("hello", scope=MemoryScope(tenant_id="t1"), limit=1)
         assert len(limited) == 1
 
         # non-matching query returns empty tuple
-        assert await store.search("zzz") == ()
+        assert await store.search("zzz", scope=MemoryScope(tenant_id="t1")) == ()
 
     asyncio.run(_run_case())
 
@@ -230,5 +243,82 @@ def test_path_traversal_memory_id_rejected(tmp_path):
         store = FileMemoryStore(root=tmp_path)
         with pytest.raises(ValueError):
             await store.get("../evil")
+
+    asyncio.run(_run_case())
+
+
+# ---------------------------------------------------------------------------
+# 8. Tenant partitioning + legacy quarantine (§12.8 / §12.10)
+# ---------------------------------------------------------------------------
+
+
+def test_tenant_id_path_traversal_rejected(tmp_path):
+    # §12.8: the tenant path segment is validated, so a caller-controlled
+    # tenant_id can't escape the store root via "../".
+    async def _run_case():
+        store = FileMemoryStore(root=tmp_path)
+        with pytest.raises(ValueError):
+            await store.search(
+                "x", scope=MemoryScope(tenant_id="../evil"), limit=1
+            )
+        with pytest.raises(ValueError):
+            await store.remember(
+                _record(memory_id="m-x", tenant_id="../evil")
+            )
+
+    asyncio.run(_run_case())
+
+
+def test_search_isolates_tenants_via_partition(tmp_path):
+    # §12.8 / §12.10: search scans ONLY the requesting tenant's subdir, so one
+    # tenant can never enumerate another's records (even with a shared owner).
+    async def _run_case():
+        store = FileMemoryStore(root=tmp_path)
+        await store.remember(
+            _record(memory_id="a1", tenant_id="tenant-a", owner_id="alice", content="hello a")
+        )
+        await store.remember(
+            _record(memory_id="b1", tenant_id="tenant-b", owner_id="alice", content="hello b")
+        )
+        a_hits = await store.search("hello", scope=MemoryScope(tenant_id="tenant-a"))
+        assert {r.id for r in a_hits} == {"a1"}
+        b_hits = await store.search("hello", scope=MemoryScope(tenant_id="tenant-b"))
+        assert {r.id for r in b_hits} == {"b1"}
+
+    asyncio.run(_run_case())
+
+
+def test_legacy_flat_record_quarantined_from_real_tenant(tmp_path):
+    # §12.9: a pre-tenant record (flat layout, no tenant_id field) is read
+    # under the reserved legacy tenant. A real tenant's search must NEVER see
+    # it; only an explicit legacy-scope search does (migration quarantine).
+    import json as _json
+
+    async def _run_case():
+        store = FileMemoryStore(root=tmp_path)
+        # Write a legacy flat record directly: root/{id}.json, no tenant_id.
+        legacy = {
+            "id": "legacy-1",
+            "owner_id": "alice",
+            "content": "legacy hello secret",
+            "category": None,
+            "confidence": None,
+            "version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {},
+        }
+        (tmp_path / "legacy-1.json").write_text(_json.dumps(legacy))
+        # A real tenant (even "alice's" tenant) does not see the legacy record.
+        real_hits = await store.search(
+            "legacy", scope=MemoryScope(tenant_id="tenant-a", user_id="alice")
+        )
+        assert real_hits == ()
+        # Only the explicit legacy scope sees it.
+        from linktools.ai.memory.scope import LEGACY_TENANT_ID
+
+        legacy_hits = await store.search("legacy", scope=MemoryScope(tenant_id=LEGACY_TENANT_ID))
+        assert {r.id for r in legacy_hits} == {"legacy-1"}
+        assert legacy_hits[0].tenant_id == LEGACY_TENANT_ID
 
     asyncio.run(_run_case())

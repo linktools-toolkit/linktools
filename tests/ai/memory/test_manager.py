@@ -13,6 +13,7 @@ from linktools.ai.errors import MemoryConflictError
 from linktools.ai.memory.index import KeywordMemoryIndex, MemorySearchHit
 from linktools.ai.memory.manager import MemoryManager
 from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.memory.store import _UNSET
 
 
@@ -20,9 +21,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _scope(*, tenant_id: str = "t1", user_id: "str | None" = "u1") -> MemoryScope:
+    return MemoryScope(tenant_id=tenant_id, user_id=user_id)
+
+
 class _StubStore:
     """Dict-backed in-process MemoryStore: `remember` stores by id (raising on
-    duplicate), `search` filters by owner_id + substring on content."""
+    duplicate), `search` is tenant-scoped (hard tenant filter + NULL-or-equal
+    sub-scope narrowing), mirroring the real backends."""
 
     def __init__(self):
         self._records: "dict[str, MemoryRecord]" = {}
@@ -34,13 +40,31 @@ class _StubStore:
         self,
         query: str,
         *,
-        owner_id: "str | None" = None,
+        scope: MemoryScope,
         category: "str | None" = None,
         limit: int = 10,
     ) -> "tuple[MemoryRecord, ...]":
         out = []
         for r in self._records.values():
-            if owner_id is not None and r.owner_id != owner_id:
+            if r.tenant_id != scope.tenant_id:
+                continue
+            if (
+                scope.user_id is not None
+                and r.user_id is not None
+                and r.user_id != scope.user_id
+            ):
+                continue
+            if (
+                scope.workspace_id is not None
+                and r.workspace_id is not None
+                and r.workspace_id != scope.workspace_id
+            ):
+                continue
+            if (
+                scope.session_id is not None
+                and r.session_id is not None
+                and r.session_id != scope.session_id
+            ):
                 continue
             if category is not None and r.category != category:
                 continue
@@ -100,7 +124,7 @@ def test_remember_then_recall_substring():
         store = _StubStore()
         mgr = MemoryManager(store=store)
 
-        record = await mgr.remember("u1", "hello world", category="note")
+        record = await mgr.remember(_scope(), "hello world", category="note")
         assert record.version == 1
         assert record.owner_id == "u1"
         assert record.category == "note"
@@ -108,7 +132,7 @@ def test_remember_then_recall_substring():
         uuid.UUID(record.id)
         assert record.metadata == {}
 
-        hits = await mgr.recall("u1", "hello")
+        hits = await mgr.recall(_scope(), "hello")
         assert len(hits) == 1
         assert hits[0].id == record.id
         assert hits[0].content == "hello world"
@@ -116,13 +140,15 @@ def test_remember_then_recall_substring():
     asyncio.run(_run())
 
 
-def test_recall_filters_by_owner_id():
+def test_recall_filters_by_user_subscope():
     async def _run():
         store = _StubStore()
         mgr = MemoryManager(store=store)
 
-        await mgr.remember("u1", "hello world")
-        assert await mgr.recall("u2", "hello") == ()
+        # Remembered under user u1 (same tenant); a u2 recall in the same
+        # tenant must not see it.
+        await mgr.remember(_scope(user_id="u1"), "hello world")
+        assert await mgr.recall(_scope(user_id="u2"), "hello") == ()
 
     asyncio.run(_run())
 
@@ -132,7 +158,7 @@ def test_forget_then_get_is_none():
         store = _StubStore()
         mgr = MemoryManager(store=store)
 
-        record = await mgr.remember("u1", "hello world")
+        record = await mgr.remember(_scope(), "hello world")
         await mgr.forget(record.id, expected_version=1)
         assert await store.get(record.id) is None
 
@@ -144,7 +170,7 @@ def test_remember_round_trips_metadata():
         store = _StubStore()
         mgr = MemoryManager(store=store)
 
-        record = await mgr.remember("u1", "hi", metadata={"k": "v"})
+        record = await mgr.remember(_scope(), "hi", metadata={"k": "v"})
         assert record.metadata == {"k": "v"}
 
     asyncio.run(_run())
@@ -157,10 +183,10 @@ def test_keyword_index_search_returns_uniform_score():
     async def _run():
         store = _StubStore()
         mgr = MemoryManager(store=store)
-        record = await mgr.remember("u1", "hello world")
+        record = await mgr.remember(_scope(), "hello world")
 
         idx = KeywordMemoryIndex(store)
-        hits = await idx.search("hello")
+        hits = await idx.search("hello", scope=_scope())
         assert len(hits) == 1
         assert hits[0] == MemorySearchHit(memory_id=record.id, score=1.0)
 
@@ -171,10 +197,10 @@ def test_keyword_index_search_no_match_returns_empty():
     async def _run():
         store = _StubStore()
         mgr = MemoryManager(store=store)
-        await mgr.remember("u1", "hello world")
+        await mgr.remember(_scope(), "hello world")
 
         idx = KeywordMemoryIndex(store)
-        assert await idx.search("nomatch") == ()
+        assert await idx.search("nomatch", scope=_scope()) == ()
 
     asyncio.run(_run())
 
@@ -187,6 +213,7 @@ def test_keyword_index_index_and_remove_are_noops():
         now = _now()
         record = MemoryRecord(
             id="m-x",
+            tenant_id="t1",
             owner_id="u1",
             content="x",
             category=None,
@@ -212,14 +239,14 @@ def test_manager_with_index_remember_and_forget():
         idx = KeywordMemoryIndex(store)
         mgr = MemoryManager(store=store, index=idx)
 
-        record = await mgr.remember("u1", "hello world")
+        record = await mgr.remember(_scope(), "hello world")
         # index.search should reflect the remembered record (index.index was called).
-        hits = await idx.search("hello")
+        hits = await idx.search("hello", scope=_scope())
         assert len(hits) == 1
         assert hits[0].memory_id == record.id
 
         await mgr.forget(record.id, expected_version=1)
         # After forget, index.remove was called (store-backed index reflects it).
-        assert await mgr.recall("u1", "hello") == ()
+        assert await mgr.recall(_scope(), "hello") == ()
 
     asyncio.run(_run())

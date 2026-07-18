@@ -4,11 +4,12 @@
 ALLOWED_APPROVAL_TRANSITIONS map, the ApprovalStore Protocol, and the
 build_approval_request factory.
 
-This phase ships persistence + audit + events + external resolve; full run
-pause/resume is not yet available. Mirrors the frozen-dataclass + str-Enum +
+This module provides persistence + audit + events + external resolve for the
+run pause/resume flow. Mirrors the frozen-dataclass + str-Enum +
 transition-map + @runtime_checkable Protocol conventions used by
 swarm.models / swarm.store."""
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,20 +32,51 @@ ALLOWED_APPROVAL_TRANSITIONS: "Mapping[ApprovalStatus, frozenset[ApprovalStatus]
 }
 
 
+def compute_arguments_hash(
+    tool_name: str,
+    arguments: "Mapping[str, Any]",
+) -> str:
+    """Stable identity hash for a tool call: SHA-256 over the canonical JSON
+    of ``{"tool": tool_name, "arguments": arguments}``. Canonical encoding
+    makes two argument dicts that compare equal hash identically regardless of
+    key order. Computed over the REAL arguments (never the redacted audit
+    copy) so two calls differing only in a secret value are distinct calls,
+    not a false conflict."""
+    from ..json import canonical_json
+
+    payload = canonical_json({"tool": tool_name, "arguments": dict(arguments)})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalRequest:
+    """A persisted request to approve a tool call. The call's REAL arguments
+    are never persisted here (they may carry secrets): only the
+    ``redacted_arguments`` audit copy and the ``arguments_hash`` identity
+    fingerprint are stored. The handler receives the real arguments in
+    memory (on resume the model re-emits them from message history), so this
+    record is for approval/audit only, never for re-driving the call."""
+
     id: str
     run_id: str
     tool_call_id: str
     tool_name: str
     reason: "str | None"
-    arguments: "Mapping[str, Any]"
+    redacted_arguments: "Mapping[str, Any]"
+    arguments_hash: str
     status: ApprovalStatus
     version: int
     created_at: datetime
     resolved_at: "datetime | None"
     resolved_by: "str | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+    tenant_id: "str | None" = None
+    descriptor_fingerprint: "str | None" = None
+    handler_revision: "str | None" = None
+    provider_revision: "str | None" = None
+    policy_revision: "str | None" = None
+    capability_revision: "str | None" = None
+    schema_version: int = 1
 
 
 def build_approval_request(
@@ -55,29 +87,47 @@ def build_approval_request(
     reason: "str | None" = None,
     arguments: "Mapping[str, Any] | None" = None,
     approval_id: "str | None" = None,
+    tenant_id: "str | None" = None,
+    descriptor_fingerprint: "str | None" = None,
+    handler_revision: "str | None" = None,
+    provider_revision: "str | None" = None,
+    policy_revision: "str | None" = None,
+    capability_revision: "str | None" = None,
 ) -> ApprovalRequest:
     """Mint a PENDING ApprovalRequest (fresh UTC timestamps, version=1).
 
-    ``arguments`` is copied into a plain dict so callers cannot mutate the
-    record's state by holding onto the source mapping. ``approval_id``
-    lets a caller that already minted an id --
+    ``arguments`` is the REAL call payload (may contain secrets). It is
+    redacted via :func:`redact_for_audit` before it reaches the record, and a
+    fingerprint (``arguments_hash``) over the real arguments is stored so the
+    call can be identified for dedupe / drift detection without persisting
+    the secrets. ``approval_id`` lets a caller that already minted an id --
     ToolExecutor mints one for ``RunPaused.approval_id`` before this request
     is ever persisted -- pass it through so the id reported to the caller
     matches the id actually stored. Defaults to a fresh uuid4 when omitted.
     """
+    from ..security.redact import redact_for_audit
+
     now = datetime.now(timezone.utc)
+    raw_args = dict(arguments) if arguments is not None else {}
     return ApprovalRequest(
         id=approval_id if approval_id is not None else str(uuid.uuid4()),
         run_id=run_id,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         reason=reason,
-        arguments=dict(arguments) if arguments is not None else {},
+        redacted_arguments=redact_for_audit(raw_args),
+        arguments_hash=compute_arguments_hash(tool_name, raw_args),
         status=ApprovalStatus.PENDING,
         version=1,
         created_at=now,
         resolved_at=None,
         resolved_by=None,
+        tenant_id=tenant_id,
+        descriptor_fingerprint=descriptor_fingerprint,
+        handler_revision=handler_revision,
+        provider_revision=provider_revision,
+        policy_revision=policy_revision,
+        capability_revision=capability_revision,
     )
 
 
@@ -87,16 +137,18 @@ def check_dedupe_conflict(
     tool_name: str,
     arguments: "Mapping[str, Any]",
 ) -> None:
-    """when
-    ``create_or_get_pending()`` finds an existing request for
-    ``(run_id, tool_call_id)``, it must not silently hand back a request
-    that was actually for a DIFFERENT call -- same dedupe key reused with
-    different ``tool_name``/``arguments`` is a conflict, not a replay.
-    ``reason`` is deliberately excluded per spec (informational only, not a
-    call-identity field). Raises :class:`~linktools.ai.errors.ApprovalConflictError`."""
+    """Guard ``create_or_get_pending()``: when an existing request is found for
+    ``(run_id, tool_call_id)``, it must be for the SAME call -- a dedupe key
+    reused with a different ``tool_name`` / arguments is a conflict, not a
+    replay. Identity is compared via ``arguments_hash`` (the real arguments'
+    fingerprint), never the redacted audit copy. ``reason`` is excluded
+    (informational only). Raises
+    :class:`~linktools.ai.errors.ApprovalConflictError`."""
     from ..errors import ApprovalConflictError
 
-    if existing.tool_name != tool_name or dict(existing.arguments) != dict(arguments):
+    if existing.tool_name != tool_name or existing.arguments_hash != compute_arguments_hash(
+        tool_name, arguments
+    ):
         raise ApprovalConflictError(
             f"approval dedupe key (run_id={existing.run_id!r}, "
             f"tool_call_id={existing.tool_call_id!r}) already exists with "

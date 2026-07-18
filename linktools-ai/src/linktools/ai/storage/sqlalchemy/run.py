@@ -54,6 +54,14 @@ def _row_to_record(row: RunRow) -> RunRecord:
         started_at=_as_utc(row.started_at),
         finished_at=_as_utc(row.finished_at),
         metadata=json.loads(row.metadata_json),
+        cancel_requested_at=_as_utc(row.cancel_requested_at),
+        cancel_requested_by=row.cancel_requested_by,
+        cancel_reason=row.cancel_reason,
+        worker_id=row.worker_id,
+        execution_token=row.execution_token,
+        heartbeat_at=_as_utc(row.heartbeat_at),
+        manifest_id=row.manifest_id,
+        resumability=row.resumability,
     )
 
 
@@ -107,6 +115,14 @@ class SqlAlchemyRunStore:
                     started_at=run.started_at,
                     finished_at=run.finished_at,
                     metadata_json=json.dumps(dict(run.metadata)),
+                    cancel_requested_at=run.cancel_requested_at,
+                    cancel_requested_by=run.cancel_requested_by,
+                    cancel_reason=run.cancel_reason,
+                    worker_id=run.worker_id,
+                    execution_token=run.execution_token,
+                    heartbeat_at=run.heartbeat_at,
+                    manifest_id=run.manifest_id,
+                    resumability=run.resumability,
                 )
             )
 
@@ -121,6 +137,36 @@ class SqlAlchemyRunStore:
 
         return await self._execute_in_session(_do)
 
+    async def claim_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord:
+        now = datetime.now(timezone.utc)
+        async def _do(session):
+            stmt = update(RunRow).where(RunRow.id == run_id).where(
+                (RunRow.execution_token.is_(None)) | (RunRow.execution_token == execution_token)
+            ).values(worker_id=worker_id, execution_token=execution_token, heartbeat_at=now)
+            result = await session.execute(stmt)
+            if result.rowcount == 0:
+                raise RunConflictError("run execution is already fenced by another worker")
+        await self._execute_in_session(_do)
+        record = await self.get(run_id)
+        if record is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        return record
+
+    async def heartbeat_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord:
+        now = datetime.now(timezone.utc)
+        async def _do(session):
+            result = await session.execute(update(RunRow).where(
+                RunRow.id == run_id, RunRow.worker_id == worker_id,
+                RunRow.execution_token == execution_token,
+            ).values(heartbeat_at=now))
+            if result.rowcount == 0:
+                raise RunConflictError("run execution heartbeat fencing failed")
+        await self._execute_in_session(_do)
+        record = await self.get(run_id)
+        if record is None:
+            raise RunNotFoundError(f"run not found: {run_id}")
+        return record
+
     async def transition(
         self,
         run_id: str,
@@ -129,6 +175,9 @@ class SqlAlchemyRunStore:
         expected_version: int,
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
+        cancel_requested_at: "datetime | None" = None,
+        cancel_requested_by: "str | None" = None,
+        cancel_reason: "str | None" = None,
     ) -> RunRecord:
         # a Python read-then-compare-then-flush is forbidden for core state
         # updates -- two concurrent transactions can both SELECT the same
@@ -169,6 +218,16 @@ class SqlAlchemyRunStore:
                     "detail": dict(error.detail),
                 }
             )
+        # Cancel-request audit: applied when the transition carries a cancel
+        # request (set on entering CANCELLING/CANCELLED via a Principal). Once
+        # set, later transitions pass None and the column is not touched,
+        # preserving the audit trail across the CANCELLING -> CANCELLED handoff.
+        if cancel_requested_at is not None:
+            values["cancel_requested_at"] = cancel_requested_at
+        if cancel_requested_by is not None:
+            values["cancel_requested_by"] = cancel_requested_by
+        if cancel_reason is not None:
+            values["cancel_reason"] = cancel_reason
 
         async def _do(session):
             stmt = (

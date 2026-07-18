@@ -14,10 +14,9 @@ from .exposure import CapabilityToolExposurePolicy
 
 
 def requires_capability_assembler(*, tools, execution) -> bool:
-    if tools == ():
-        return False
-    if tools is None:
-        return execution is not None
+    # ``None`` and ``()`` both mean no capabilities. Builtins are enabled only
+    # by an explicit RuntimeTool/Capability option and are materialized by the
+    # caller before reaching this predicate.
     return bool(tools)
 
 
@@ -61,6 +60,9 @@ class CapabilityRuntimeOptions:
     prompt_context_formatter: Any = None
     subagent_context_policy: Any = None
     allow_mcp_wildcard: bool = False
+    # Builtins are opt-in. ``None`` is accepted only by legacy callers that
+    # construct AgentRunner directly; Runtime-built graphs default closed.
+    enable_builtin_tools: bool = False
 
 
 @dataclass(slots=True)

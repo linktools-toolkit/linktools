@@ -5,7 +5,7 @@ import pytest
 
 from linktools.ai.execution import local as local_module
 from linktools.ai.execution.local import LocalExecutionBackend
-from linktools.ai.execution.protocols import ExecutionBackend
+from linktools.ai.execution.protocols import ExecutionBackend, ExecutionIsolationLevel
 
 
 @pytest.fixture()
@@ -15,6 +15,7 @@ def backend(tmp_path: Path) -> LocalExecutionBackend:
 
 def test_local_backend_satisfies_protocol(backend):
     assert isinstance(backend, ExecutionBackend)
+    assert backend.isolation_level is ExecutionIsolationLevel.TRUSTED_LOCAL
 
 
 def test_write_then_read_file_roundtrip(backend, tmp_path):

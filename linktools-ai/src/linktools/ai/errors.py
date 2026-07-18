@@ -14,6 +14,24 @@ class RuntimeInitializationError(LinktoolsAIError):
     """The runtime cannot safely initialize a required component."""
 
 
+class UnsafeExecutionBackendError(RuntimeInitializationError):
+    """A trusted-local backend was used where tenant isolation is required."""
+
+
+class SecurityError(LinktoolsAIError):
+    """Security-domain failures: a sensitive operation was attempted without a
+    valid Principal, or the Principal lacks the tenant/scope the target
+    resource requires (production-hardening plan §5.1 / §7)."""
+
+
+class PrincipalAccessDeniedError(SecurityError):
+    """A sensitive operation was denied because no PrincipalContext was
+    supplied, or the supplied Principal's tenant does not own the target
+    resource. Surfaces the §5.4 fail-closed default: when tenant / scope /
+    version cannot be confirmed, the operation is rejected rather than
+    allowed on the strength of a guessable id alone (§5.5)."""
+
+
 class ResourceError(LinktoolsAIError):
     """Base class for ResourceStore-related errors."""
 
@@ -112,6 +130,21 @@ class InvalidRunTransitionError(RunError):
     pass
 
 
+class RunNotResumableError(RunError):
+    """A run marked NON_RESUMABLE at creation time cannot be resumed (§13.7).
+    Raised at resume entry instead of attempting a resume that could never be
+    deterministic (unversioned handler / ephemeral provider / dynamic output /
+    missing resource snapshot)."""
+
+
+class ManifestDriftError(RunError):
+    """The current environment no longer matches the ExecutionManifest the run
+    was prepared against (§13.6) -- e.g. the resolved model provider's revision
+    changed between prepare and resume. Raised by ManifestResolver.resolve;
+    resume refuses rather than silently re-resolving against the drifted
+    environment."""
+
+
 class RunInvariantError(RunError):
     """A run completed without the authoritative state the runtime contract
     requires (e.g. no terminal RunResult after a non-pausing execute). Raised
@@ -131,7 +164,7 @@ class RunPaused(RunError):
     only catches ToolDeniedError/ToolApprovalRequiredError -> SkipToolExecution)
     lets it propagate. AgentRunner catches it; nothing else should.
 
-    ``approval_id`` is a fresh id MINTED here (not yet persisted anywhere) --
+    ``approval_id`` is a fresh id minted here and then persisted by the
     ToolExecutor no longer writes the ApprovalRequest itself; it only mints
     the id so the id it reports is the same one AgentRunner's suspension
     handler will actually persist. ``run_id`` is already resolved through
@@ -178,6 +211,13 @@ class SessionSequenceConflictError(SessionError):
     """Raised when the SessionStore cannot reserve a unique message sequence
     after repeated conflicts (the store is the sole sequence
     authority, mirroring EventSequenceConflictError)."""
+
+
+class SessionCorruptionError(SessionError):
+    """A session record / message file is present but unreadable (truncated or
+    malformed JSON). Distinct from "session does not exist": the file is
+    preserved in place and the path is included so a repair tool can target it
+    rather than the store silently masking corruption as a missing session."""
 
 
 class EventError(LinktoolsAIError):
@@ -240,6 +280,18 @@ class PipelineExecutionError(ToolError):
 class TransientToolError(ToolError):
     """A tool execution error that MAY succeed on retry (network blip, transient
     lock conflict, etc.). ManagedToolAdapter retries these up to max_retries."""
+
+
+class ToolCommitError(ToolError):
+    """The tool Handler ran (its side effect happened) but the fenced result
+    commit could not be confirmed. The Handler MUST NOT be re-invoked.
+
+    The idempotency record's resulting state depends on which step failed:
+    if recording the execution receipt (``mark_executed``) could not be
+    confirmed the record is UNKNOWN (outcome unknowable); if the receipt landed
+    but the final ``complete`` failed, the record is left EXECUTED (recoverable
+    -- a later claim replays it). Wraps the underlying failure
+    (``__cause__``)."""
 
 
 class ToolIdempotencyConflictError(ToolError):

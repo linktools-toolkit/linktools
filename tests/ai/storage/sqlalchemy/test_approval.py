@@ -71,7 +71,7 @@ def test_create_then_get_roundtrips_all_fields(tmp_path):
             assert fetched.tool_call_id == "call-1"
             assert fetched.tool_name == "shell"
             assert fetched.reason == "needs human review"
-            assert fetched.arguments == {"cmd": "rm -rf /"}
+            assert fetched.redacted_arguments == {"cmd": "rm -rf /"}
             assert fetched.status is ApprovalStatus.PENDING
             assert fetched.version == 1
             assert fetched.created_at == req.created_at

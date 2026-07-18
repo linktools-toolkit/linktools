@@ -332,6 +332,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_RequireApprovalPipeline()),
         options=CapabilityRuntimeOptions(tool_exposure=CapabilityToolExposurePolicy()),
+        local_trusted_mode=True,
     )
     spec = AgentSpec(
         id="e2e",

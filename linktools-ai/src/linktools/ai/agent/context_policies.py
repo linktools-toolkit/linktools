@@ -7,7 +7,11 @@ systems can substitute any of these Protocols.
 
 - MemoryPolicy: selects which MemoryRecords to inject (and may write new ones).
 - RetrievalPolicy: retrieves knowledge items for the run.
-- PromptContextFormatter: renders memory/knowledge into prompt sections."""
+- PromptContextFormatter: renders memory/knowledge into prompt sections.
+
+Both default policies build a tenant-bound scope from the RunContext and FAIL
+CLOSED when the context has no tenant: they return an empty result rather than
+searching globally. There is no unscoped / cross-tenant retrieval path."""
 
 from typing import TYPE_CHECKING, Any, Protocol, Sequence, runtime_checkable
 
@@ -48,32 +52,66 @@ class PromptContextFormatter(Protocol):
     def format_knowledge(self, items: "Sequence[KnowledgeItem]") -> str: ...
 
 
+def _workspace_id_from(context: "RunContext") -> "str | None":
+    # The spec derives workspace_id from metadata; fall back to the WorkspaceRef
+    # id when the run carries one but the metadata key was not set.
+    ws = context.metadata.get("workspace_key")
+    if ws is not None:
+        return str(ws)
+    if context.workspace is not None:
+        return getattr(context.workspace, "id", None)
+    return None
+
+
 class DefaultMemoryPolicy:
-    """Searches the memory store scoped to the run owner (user -> tenant ->
-    session) with a small limit. ``maybe_write_memories`` is a no-op by
-    default; writing is a separate policy decision."""
+    """Searches the memory store scoped to the run's tenant (narrowed by user /
+    workspace / session sub-scopes) with a small limit. A run without a tenant
+    gets NO memories -- fail closed, never a global search.
+    ``maybe_write_memories`` is a no-op by default; writing is a separate policy
+    decision."""
 
     def __init__(self, store: Any, *, limit: int = 5) -> None:
         self._store = store
         self._limit = limit
 
     async def select_memories(self, context, query):
-        owner = context.user_id or context.tenant_id or context.session_id
-        return await self._store.search(query, owner_id=owner, limit=self._limit)
+        from ..memory.scope import MemoryScope
+
+        if not context.tenant_id:
+            # Fail closed: a missing tenant never searches globally.
+            return ()
+        scope = MemoryScope(
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            workspace_id=_workspace_id_from(context),
+            session_id=context.session_id,
+        )
+        return await self._store.search(query, scope=scope, limit=self._limit)
 
     async def maybe_write_memories(self, context, result) -> None:
         return None
 
 
 class DefaultRetrievalPolicy:
-    """Retrieves knowledge items via the wired retriever with a small limit."""
+    """Retrieves knowledge items via the wired retriever, scoped to the run's
+    tenant. A run without a tenant retrieves nothing -- fail closed."""
 
     def __init__(self, retriever: Any, *, limit: int = 5) -> None:
         self._retriever = retriever
         self._limit = limit
 
     async def retrieve(self, context, query):
-        return await self._retriever.search(query, limit=self._limit)
+        from ..knowledge.scope import RetrievalScope
+
+        if not context.tenant_id:
+            return ()
+        scope = RetrievalScope(
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            workspace_id=_workspace_id_from(context),
+            session_id=context.session_id,
+        )
+        return await self._retriever.search(query, scope=scope, limit=self._limit)
 
 
 class DefaultPromptContextFormatter:

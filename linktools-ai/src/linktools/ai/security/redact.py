@@ -23,9 +23,12 @@ _SECRET_KEY_MARKERS = (
     "access_token",
     "refresh_token",
     "password",
+    "passwd",
     "secret",
     "cookie",
     "set-cookie",
+    "private_key",
+    "access_key",
 )
 
 _MASK = "***REDACTED***"

@@ -67,7 +67,8 @@ def _full_request():
         tool_call_id="c-1",
         tool_name="terminal",
         reason="rm -rf",
-        arguments={"target": "/"},
+        redacted_arguments={"target": "/"},
+        arguments_hash="hash-target",
         status=ApprovalStatus.PENDING,
         version=1,
         created_at=now,
@@ -84,7 +85,7 @@ def test_approval_request_construct_all_fields():
     assert req.tool_call_id == "c-1"
     assert req.tool_name == "terminal"
     assert req.reason == "rm -rf"
-    assert req.arguments == {"target": "/"}
+    assert req.redacted_arguments == {"target": "/"}
     assert req.status is ApprovalStatus.PENDING
     assert req.version == 1
     assert req.resolved_at is None
@@ -105,7 +106,8 @@ def test_approval_request_metadata_defaults_empty():
         tool_call_id="c-1",
         tool_name="terminal",
         reason=None,
-        arguments={},
+        redacted_arguments={},
+        arguments_hash="hash-empty",
         status=ApprovalStatus.PENDING,
         version=1,
         created_at=now,
@@ -136,7 +138,7 @@ def test_build_approval_request_defaults():
     assert req.version == 1
     assert req.resolved_at is None
     assert req.resolved_by is None
-    assert req.arguments == {}
+    assert req.redacted_arguments == {}
     assert req.metadata == {}
     assert req.created_at.tzinfo is timezone.utc
 
@@ -154,10 +156,10 @@ def test_build_approval_request_copies_arguments():
     req = build_approval_request(
         run_id="r1", tool_call_id="c1", tool_name="t", arguments=src
     )
-    assert req.arguments == {"a": 1, "b": 2}
+    assert req.redacted_arguments == {"a": 1, "b": 2}
     # mutating the source after the fact does not leak into the record
     src["a"] = 999
-    assert req.arguments == {"a": 1, "b": 2}
+    assert req.redacted_arguments == {"a": 1, "b": 2}
 
 
 def test_build_approval_request_distinct_ids():
@@ -222,3 +224,57 @@ def test_approval_store_stub_methods_are_async():
         "list_for_run",
     ):
         assert inspect.iscoroutinefunction(getattr(stub, method_name)), method_name
+
+
+# --- §11.1 / §11.2: argument redaction + identity hash ----------------------
+
+
+def test_build_approval_request_redacts_secret_arguments():
+    # The REAL arguments never reach the persisted record: secret-keyed values
+    # are masked in redacted_arguments, while the identity hash is computed
+    # over the REAL arguments (so two calls differing only in a secret are
+    # distinct calls, not a false dedupe hit).
+    from linktools.ai.agent.approval import compute_arguments_hash
+
+    raw = {"host": "prod.db", "password": "s3cr3t", "token": "abc", "cmd": "ls"}
+    req = build_approval_request(
+        run_id="r", tool_call_id="c", tool_name="deploy", arguments=raw
+    )
+    assert req.redacted_arguments["password"] == "***REDACTED***"
+    assert req.redacted_arguments["token"] == "***REDACTED***"
+    assert req.redacted_arguments["host"] == "prod.db"  # non-secret visible
+    assert req.redacted_arguments["cmd"] == "ls"
+    # Hash over the REAL arguments.
+    assert req.arguments_hash == compute_arguments_hash("deploy", raw)
+    # Two calls differing only in the secret value hash differently.
+    other = build_approval_request(
+        run_id="r",
+        tool_call_id="c2",
+        tool_name="deploy",
+        arguments={"host": "prod.db", "password": "DIFFERENT", "cmd": "ls"},
+    )
+    assert other.arguments_hash != req.arguments_hash
+
+
+def test_check_dedupe_conflict_uses_hash_not_raw():
+    # Dedupe identity is the arguments hash; the redacted copy is never compared
+    # (two calls redacting to the same mask but with different real secrets must
+    # still conflict-detect as distinct -- covered above; here: same real args
+    # do not conflict, different real args do).
+    from linktools.ai.agent.approval import check_dedupe_conflict
+
+    existing = build_approval_request(
+        run_id="r", tool_call_id="c", tool_name="deploy",
+        arguments={"password": "x", "host": "h"},
+    )
+    # Same args -> no conflict.
+    check_dedupe_conflict(
+        existing, tool_name="deploy",
+        arguments={"password": "x", "host": "h"},
+    )
+    # Different args -> conflict (even though the redacted copy masks both).
+    with pytest.raises(Exception):
+        check_dedupe_conflict(
+            existing, tool_name="deploy",
+            arguments={"password": "y", "host": "h"},
+        )

@@ -85,6 +85,27 @@ def test_blob_corruption_is_detected() -> None:
     asyncio.run(run())
 
 
+def test_put_refuses_to_record_reference_to_corrupt_blob() -> None:
+    # A second put of identical content hits the if_none_match conflict path
+    # (the blob already exists at the sha path). If that stored blob was
+    # corrupted/tampered, put must FAIL rather than silently create a new
+    # ArtifactRecord pointing at the corrupt blob.
+    store = _store()
+
+    async def run() -> None:
+        record = await store.put(b"payload", media_type="text/plain", tenant_id="t1")
+        # Corrupt the stored blob in place (content no longer hashes to its
+        # sha256-keyed path).
+        backend = store._resources._primary
+        path_key = store._blob_path(record.ref.sha256).value
+        _content, info = backend._entries[path_key]
+        backend._entries[path_key] = (b"TAMPERED", info)
+        with pytest.raises(ArtifactIntegrityError):
+            await store.put(b"payload", media_type="text/plain", tenant_id="t1")
+
+    asyncio.run(run())
+
+
 def test_cross_tenant_access_denied() -> None:
     store = _store()
 

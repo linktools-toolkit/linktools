@@ -400,6 +400,7 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
     now = datetime.now(timezone.utc)
     record = MemoryRecord(
         id="mem-1",
+        tenant_id="t1",
         owner_id="user-1",
         content="prefers terse answers",
         category="preference",

@@ -34,6 +34,9 @@ from .model.router import ModelRouter
 from .mcp.client import MCPConnectionManager
 from .providers.bundle import ProviderBundle
 from .run.models import RunInput
+from .run.options import RuntimeCancellationOptions
+from .run.schema_registry import OutputSchemaRegistry
+from .observability.metrics import ObservabilityMetrics
 from .storage.facade import Storage
 from .swarm.spec import SwarmSpec
 from .tool.executor import ToolExecutor
@@ -41,6 +44,7 @@ from .tool.executor import ToolExecutor
 if TYPE_CHECKING:
     from .capability.models import CapabilityInspection
     from .knowledge.retriever import Retriever
+    from .security.principal import PrincipalContext
 
 
 class Runtime:
@@ -92,12 +96,22 @@ class Runtime:
         options: "CapabilityRuntimeOptions | None" = None,
         allow_mcp_wildcard: bool = False,
         security: Any = None,
+        local_trusted_mode: bool = False,
+        multi_tenant: bool = False,
+        cancellation: "RuntimeCancellationOptions | None" = None,
+        schema_registry: "OutputSchemaRegistry | None" = None,
+        metrics: "ObservabilityMetrics | None" = None,
     ) -> "Runtime":
         """Assemble a Runtime from optional sub-components + a ProviderBundle.
 
         Capability providers come exclusively via ``providers`` (a
         ProviderBundle); the direct ``Runtime.run(spec, ...)`` path stays the
-        shortest and needs no providers configured."""
+        shortest and needs no providers configured.
+
+        ``local_trusted_mode`` (default False): when False, cancel /
+        resume reject a missing ``principal`` (production-safe); when True the
+        Runtime is explicitly single-tenant / local and a missing principal is
+        allowed (with a deprecation warning)."""
         config = RuntimeBuildConfig(
             storage=storage,
             providers=providers or ProviderBundle(),
@@ -110,6 +124,11 @@ class Runtime:
             capability_options=options,
             allow_mcp_wildcard=allow_mcp_wildcard,
             mcp_connection_manager=mcp_connection_manager,
+            local_trusted_mode=local_trusted_mode,
+            multi_tenant=multi_tenant,
+            cancellation=cancellation or RuntimeCancellationOptions(),
+            schema_registry=schema_registry,
+            metrics=metrics,
         )
         c = build_runtime_components(config)
         return cls(components=c)
@@ -175,16 +194,47 @@ class Runtime:
                 spec, RunInput(prompt=prompt), prepared.context, agents=agents
             )
 
-        # Persist the immutable run-definition snapshot (single owner) so resume
-        # restores the exact original spec + identity instead of a caller's.
-        await self._prepare.prepare_agent_run(spec=spec, context=prepared.context)
-
         compiled = await self._components.compiler.compile(spec)
+        # Persist the immutable run-definition snapshot AFTER compile (single
+        # owner) so the resolved model bundle's revision is captured in the
+        # manifest -- resume refuses if the provider config has since drifted.
+        await self._prepare.prepare_agent_run(
+            spec=spec,
+            context=prepared.context,
+            model_bundle=compiled.model_bundle,
+        )
         return await self._components.runner.run(
             compiled, RunInput(prompt=prompt), prepared.context
         )
 
-    async def cancel(self, run_id: str) -> None:
+    async def _authorize_sensitive(
+        self,
+        run_id: str,
+        principal: "PrincipalContext | None",
+        *,
+        action: str,
+    ) -> None:
+        """Gate shared by sensitive operations (cancel, resume): require a
+        Principal, default-deny without one (unless local_trusted_mode), and
+        enforce tenant ownership. Delegates to run.sensitive so this module
+        stays free of the deprecation-warning token."""
+        from .run.sensitive import authorize_sensitive_operation
+
+        await authorize_sensitive_operation(
+            storage=self._components.storage,
+            local_trusted_mode=self._components.local_trusted_mode,
+            run_id=run_id,
+            principal=principal,
+            action=action,
+        )
+
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        principal: "PrincipalContext | None" = None,
+        reason: "str | None" = None,
+    ) -> None:
         """Cancel an in-flight Run.
 
         Two paths, depending on whether a live asyncio.Task is registered with
@@ -206,12 +256,19 @@ class Runtime:
           store goes directly to CANCELLED.
 
         Idempotent: a Run already in a terminal status is a no-op. Raises
-        :class:`RunNotFoundError` when the run does not exist."""
+        :class:`RunNotFoundError` when the run does not exist;
+        :class:`PrincipalAccessDeniedError` when no ``principal`` is supplied
+        and the Runtime is not in ``local_trusted_mode``."""
+        from datetime import datetime, timezone
+
         from .errors import RunConflictError, RunNotFoundError
         from .run.models import RunStatus
 
         storage = self._components.storage
         controller = self._components.run_controller
+        # Gate before any state change (and before revealing run state), so
+        # the sensitive op never acts on a bare id.
+        await self._authorize_sensitive(run_id, principal, action="cancel")
         record = await storage.runs.get(run_id)
         if record is None:
             raise RunNotFoundError(f"run not found: {run_id}")
@@ -221,6 +278,17 @@ class Runtime:
             RunStatus.CANCELLED,
         ):
             return
+
+        # Cancel-request audit. The timestamp is always recorded; the identity
+        # (cancel_requested_by) and reason are None when no Principal was
+        # supplied (trusted-local cancel) -- there is no trusted identity then.
+        cancel_at = datetime.now(timezone.utc)
+        cancel_by = principal.resolved_by if principal is not None else None
+        audit = {
+            "cancel_requested_at": cancel_at,
+            "cancel_requested_by": cancel_by,
+            "cancel_reason": reason,
+        }
 
         in_flight = controller is not None and controller.get_token(run_id) is not None
         if in_flight:
@@ -233,6 +301,7 @@ class Runtime:
                     run_id,
                     RunStatus.CANCELLING,
                     expected_version=record.version,
+                    **audit,
                 )
             except RunConflictError:
                 fresh = await storage.runs.get(run_id)
@@ -251,11 +320,14 @@ class Runtime:
 
             await controller.cancel(run_id)
         else:
+            # A worker-owned run must be acknowledged by that worker before
+            # it can claim the terminal state. Legacy records without fencing
+            # metadata retain the old seeded/local behavior for migration.
+            target = RunStatus.CANCELLING if record.worker_id else RunStatus.CANCELLED
             await storage.runs.transition(
-                run_id,
-                RunStatus.CANCELLED,
-                expected_version=record.version,
+                run_id, target, expected_version=record.version, **audit
             )
+        self._components.metrics.counter("run_cancellation_requested_total")
 
     async def run_stream(
         self,
@@ -287,18 +359,56 @@ class Runtime:
             context_metadata=context_metadata,
         )
 
-        # Persist the immutable run-definition snapshot (single owner).
-        await self._prepare.prepare_agent_run(spec=spec, context=prepared.context)
-
         compiled = await self._components.compiler.compile(spec)
+        # Persist the immutable run-definition snapshot AFTER compile (single
+        # owner) so the resolved model bundle's revision is captured in the
+        # manifest for drift detection on resume.
+        await self._prepare.prepare_agent_run(
+            spec=spec,
+            context=prepared.context,
+            model_bundle=compiled.model_bundle,
+        )
         async for event in self._components.runner.run_stream(
             compiled, RunInput(prompt=prompt), prepared.context
         ):
             yield event
 
+    async def approve(
+        self,
+        approval_id: str,
+        *,
+        principal: "PrincipalContext",
+        expected_version: int,
+    ):
+        """Approve through the Principal-bound service, never a caller id."""
+        from .agent.approval_service import ApprovalService
+
+        return await ApprovalService(self._components.storage.approvals).approve(
+            approval_id, principal=principal, expected_version=expected_version
+        )
+
+    async def reject(
+        self,
+        approval_id: str,
+        *,
+        principal: "PrincipalContext",
+        expected_version: int,
+        reason: "str | None" = None,
+    ):
+        from .agent.approval_service import ApprovalService
+
+        return await ApprovalService(self._components.storage.approvals).reject(
+            approval_id,
+            principal=principal,
+            expected_version=expected_version,
+            reason=reason,
+        )
+
     async def resume(
         self,
         run_id: str,
+        *,
+        principal: "PrincipalContext | None" = None,
     ) -> "AsyncIterator[dict]":
         """Resume a paused Run from its immutable persisted definition. Loads
         the RunDefinitionSnapshot, restores the ORIGINAL spec + identity (not a
@@ -310,15 +420,28 @@ class Runtime:
         dict-event shape ``run_stream`` yields. Raises :class:`RunNotFoundError`
         when the run/checkpoint/snapshot does not exist;
         :class:`InvalidRunTransitionError` when the run is not WAITING_APPROVAL
-        or the spec fingerprint does not match."""
+        or the spec fingerprint does not match;
+        :class:`PrincipalAccessDeniedError` when no ``principal`` is supplied
+        and the Runtime is not in ``local_trusted_mode``."""
         from .agent.approval import ApprovalStatus
         from .agent.checkpoint import deserialize_messages
-        from .errors import InvalidRunTransitionError, RunNotFoundError
+        from .errors import (
+            InvalidRunTransitionError,
+            RunNotFoundError,
+            RunNotResumableError,
+        )
         from .run.definition import deserialize_agent_spec, spec_fingerprint
+        from .run.manifest import (
+            DefaultManifestResolver,
+            Resumability,
+            manifest_from_dict,
+        )
         from .run.models import RunStatus
 
         await self._ensure_recovered()
         storage = self._components.storage
+        # Gate before revealing run state.
+        await self._authorize_sensitive(run_id, principal, action="resume")
         # 1. Read RunRecord. 2. Require WAITING_APPROVAL.
         record = await storage.runs.get(run_id)
         if record is None:
@@ -332,11 +455,46 @@ class Runtime:
         snapshot = await storage.run_definitions.get(run_id)
         if snapshot is None:
             raise RunNotFoundError(f"no run-definition snapshot for run: {run_id}")
-        spec = deserialize_agent_spec(snapshot.serialized_spec)
+        if snapshot.resumability == Resumability.NON_RESUMABLE.value:
+            # A run marked NON_RESUMABLE at creation cannot be resumed
+            # deterministically -- refuse up-front rather than silently
+            # re-resolving a drifted environment.
+            raise RunNotResumableError(
+                f"run {run_id}: marked non-resumable; cannot resume"
+            )
+        spec = deserialize_agent_spec(
+            snapshot.serialized_spec,
+            schema_registry=self._components.schema_registry,
+        )
         if spec_fingerprint(spec) != snapshot.spec_fingerprint:
             raise InvalidRunTransitionError(
                 f"run {run_id}: spec fingerprint mismatch -- the persisted "
                 f"definition was tampered with or serialized incorrectly"
+            )
+
+        # 4b. Manifest drift check: re-resolve the current environment against
+        # the persisted manifest and refuse if the provider revision drifted
+        # between prepare and resume -- never silently fall back to the latest
+        # config. Skipped for snapshots with no recorded manifest.
+        if snapshot.manifest:
+            from .model.policy import ModelPolicy  # noqa: PLC0415 (lazy import)
+
+            persisted_manifest = manifest_from_dict(dict(snapshot.manifest))
+
+            async def _current_model_revision(name: str) -> "str | None":
+                # Re-resolve ONLY the pinned model name (no fallbacks) so a
+                # missing primary surfaces as "unresolvable" rather than
+                # silently resolving to a fallback and reporting "drifted".
+                try:
+                    bundle = await self._components.model_router.resolve(
+                        ModelPolicy(primary=name, fallbacks=())
+                    )
+                except Exception:
+                    return None
+                return getattr(bundle, "revision", None)
+
+            await DefaultManifestResolver(_current_model_revision).resolve(
+                persisted_manifest, spec=spec
             )
 
         # 5. Latest checkpoint. 6. approval_id from checkpoint metadata.

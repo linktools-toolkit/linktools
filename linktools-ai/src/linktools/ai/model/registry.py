@@ -81,12 +81,39 @@ class RuntimeModelConfig:
 
 @dataclass(slots=True)
 class ModelBundle:
-    """A configured model plus the per-call execution limits derived from config."""
+    """A configured model plus the per-call execution limits derived from config.
+
+    Exposes ``revision`` (a stable hash of the non-secret config identity) so a
+    run prepared against this bundle can detect provider drift on resume: a
+    changed model_type / endpoint / protocol between prepare and resume is a
+    real revision change, while key rotation (api_key / auth_token) is NOT --
+    secrets are deliberately excluded from the hash so rotating them does not
+    invalidate every resumable run."""
 
     config: RuntimeModelConfig
     model: OpenAIChatModel
     settings: ModelSettings
     usage_limits: UsageLimits
+
+    @property
+    def revision(self) -> str:
+        import hashlib
+
+        from ..json import canonical_json
+
+        cfg = self.config
+        # Only the non-secret config-identity fields. api_key / auth_token / the
+        # opaque raw dict are excluded so the revision is stable under key
+        # rotation and never persists a secret-derived value.
+        identity = {
+            "model_type": cfg.model_type,
+            "protocol": cfg.protocol,
+            "model": cfg.model,
+            "base_url": cfg.base_url,
+            "timeout_seconds": cfg.timeout_seconds,
+            "base_url_mode": cfg.base_url_mode,
+        }
+        return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
 
 
 class ModelRegistry:

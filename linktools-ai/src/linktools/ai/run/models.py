@@ -126,6 +126,21 @@ class RunRecord:
     started_at: "datetime | None"
     finished_at: "datetime | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+    # Cancel-request audit: who requested cancellation, when, and why.
+    # Populated when transitioning to CANCELLING / CANCELLED via a Principal
+    # (cancel_requested_by is the Principal.resolved_by, never caller-supplied).
+    # None on runs never cancelled, or cancelled in trusted-local mode without
+    # a Principal. Optional + defaulted so old records / stores round-trip.
+    cancel_requested_at: "datetime | None" = None
+    cancel_requested_by: "str | None" = None
+    cancel_reason: "str | None" = None
+    # Worker fencing for cross-process ownership. Legacy records may omit
+    # these fields; new workers must populate them before executing.
+    worker_id: "str | None" = None
+    execution_token: "str | None" = None
+    heartbeat_at: "datetime | None" = None
+    manifest_id: "str | None" = None
+    resumability: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .protocols import ExecutionIsolationLevel
+
 
 @dataclass(frozen=True, slots=True)
 class LocalExecutionBackend:
@@ -24,6 +26,10 @@ class LocalExecutionBackend:
     # each proc is spawned and removed again once it is awaited (success or
     # timeout), so this only ever contains processes still in flight.
     _subprocesses: "dict[str, asyncio.subprocess.Process]" = field(default_factory=dict)
+
+    @property
+    def isolation_level(self) -> ExecutionIsolationLevel:
+        return ExecutionIsolationLevel.TRUSTED_LOCAL
 
     async def list_dir(
         self, path: str = ".", recursive: bool = False

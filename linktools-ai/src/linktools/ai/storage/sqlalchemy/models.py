@@ -78,6 +78,7 @@ class ToolIdempotencyRow(Base):
     generation: Mapped[int] = mapped_column(default=0)
     claimed_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     lease_expires_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    receipt_artifact_id: Mapped["str | None"] = mapped_column(String(256), nullable=True)
 
 
 class RevisionRow(Base):
@@ -107,6 +108,18 @@ class RunRow(Base):
     started_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     finished_at: Mapped["datetime | None"] = mapped_column(nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text)
+    # Cancel-request audit (nullable: absent on older rows and on runs never
+    # cancelled).
+    cancel_requested_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    cancel_requested_by: Mapped["str | None"] = mapped_column(
+        String(128), nullable=True
+    )
+    worker_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    execution_token: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    heartbeat_at: Mapped["datetime | None"] = mapped_column(nullable=True)
+    manifest_id: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    resumability: Mapped["str | None"] = mapped_column(String(32), nullable=True)
+    cancel_reason: Mapped["str | None"] = mapped_column(Text, nullable=True)
 
 
 class RunCheckpointRow(Base):
@@ -152,6 +165,9 @@ class RunDefinitionRow(Base):
     workspace: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime]
     manifest_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    resumability: Mapped["str | None"] = mapped_column(
+        String(32), nullable=True
+    )
 
 
 class SessionRow(Base):
@@ -278,7 +294,20 @@ class SwarmTaskAttemptRow(Base):
 class MemoryRow(Base):
     __tablename__ = "ai_memories"
 
+    # tenant_id is the hard isolation boundary. NULL is tolerated only for
+    # legacy rows persisted before tenant-scoping: those rows are read back
+    # with a synthesized legacy tenant and never match a real tenant's search
+    # (NULL != 'tenant-a' in SQL), so old data is quarantined without a
+    # migration script. The three composite indexes back the common scoped
+    # search shapes (tenant+user / tenant+workspace / tenant+session).
+    __table_args__ = (
+        Index("ix_memory_tenant_user", "tenant_id", "user_id"),
+        Index("ix_memory_tenant_workspace", "tenant_id", "workspace_id"),
+        Index("ix_memory_tenant_session", "tenant_id", "session_id"),
+    )
+
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     owner_id: Mapped[str] = mapped_column(String(128), index=True)
     content: Mapped[str] = mapped_column(Text)
     category: Mapped["str | None"] = mapped_column(
@@ -289,6 +318,9 @@ class MemoryRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
     metadata_json: Mapped[str] = mapped_column(Text)
+    user_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    workspace_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    session_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
 class ApprovalRow(Base):
@@ -311,13 +343,23 @@ class ApprovalRow(Base):
     tool_call_id: Mapped[str] = mapped_column(String(128))
     tool_name: Mapped[str] = mapped_column(String(255))
     reason: Mapped["str | None"] = mapped_column(Text, nullable=True)
-    arguments_json: Mapped[str] = mapped_column(Text)
+    # The REAL arguments are never persisted (may carry secrets). Only the
+    # redacted audit copy + the identity hash are stored.
+    redacted_arguments_json: Mapped[str] = mapped_column(Text)
+    arguments_hash: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(32))
     version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     resolved_at: Mapped["datetime | None"] = mapped_column(DateTime, nullable=True)
     resolved_by: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped["str | None"] = mapped_column(String(128), nullable=True, index=True)
+    descriptor_fingerprint: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    handler_revision: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    provider_revision: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    policy_revision: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    capability_revision: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 # --- Reliable-task tables. Complex policy/context fields

@@ -115,10 +115,11 @@ class FileResourceBackend:
             with os.fdopen(fd, "wb") as f:
                 f.write(content)
             os.replace(tmp_name, path)
-        except BaseException:
+        finally:
+            # finally so cancellation propagates naturally while still removing
+            # the temp file on any failure (no-op on success once replace ran).
             if os.path.exists(tmp_name):
                 os.remove(tmp_name)
-            raise
 
     def _read_revision(self) -> int:
         if not self._revision_file.exists():

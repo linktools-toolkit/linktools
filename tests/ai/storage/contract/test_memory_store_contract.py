@@ -18,6 +18,7 @@ import pytest
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.storage.file.memory import FileMemoryStore
 
 
@@ -31,16 +32,21 @@ from linktools.ai.storage.file.memory import FileMemoryStore
 
 def make_record(
     memory_id: str = "mem-1",
+    tenant_id: str = "t1",
     owner_id: str = "owner-1",
     content: str = "hello world",
     category: "str | None" = "fact",
     confidence: "float | None" = 0.9,
     version: int = 1,
     metadata: "dict | None" = None,
+    user_id: "str | None" = None,
+    workspace_id: "str | None" = None,
+    session_id: "str | None" = None,
 ) -> MemoryRecord:
     now = datetime.now(timezone.utc)
     return MemoryRecord(
         id=memory_id,
+        tenant_id=tenant_id,
         owner_id=owner_id,
         content=content,
         category=category,
@@ -49,6 +55,9 @@ def make_record(
         created_at=now,
         updated_at=now,
         metadata={"k": "v"} if metadata is None else metadata,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=session_id,
     )
 
 
@@ -197,6 +206,7 @@ def test_search_filters_substring_and_limit(store_factory):
             make_record(
                 memory_id="m1",
                 owner_id="alice",
+                user_id="alice",
                 content="hello world",
                 category="fact",
             )
@@ -205,6 +215,7 @@ def test_search_filters_substring_and_limit(store_factory):
             make_record(
                 memory_id="m2",
                 owner_id="alice",
+                user_id="alice",
                 content="goodbye world",
                 category="note",
             )
@@ -213,22 +224,31 @@ def test_search_filters_substring_and_limit(store_factory):
             make_record(
                 memory_id="m3",
                 owner_id="bob",
+                user_id="bob",
                 content="hello bob",
                 category="fact",
             )
         )
-        # Substring + owner filter narrows to alice's "hello" hit only.
-        alice_hello = await store.search("hello", owner_id="alice")
+        # Substring + user sub-scope narrows to alice's "hello" hit only.
+        alice_hello = await store.search(
+            "hello", scope=MemoryScope(tenant_id="t1", user_id="alice")
+        )
         assert {r.id for r in alice_hello} == {"m1"}
-        # Category filter covers both owners' "fact" rows containing "hello".
-        facts = await store.search("hello", category="fact")
+        # Category filter (tenant-wide, no user) covers both users' "fact" rows
+        # containing "hello".
+        facts = await store.search(
+            "hello", scope=MemoryScope(tenant_id="t1"), category="fact"
+        )
         assert {r.id for r in facts} == {"m1", "m3"}
         # No matcher -> empty tuple (not None, not list).
-        assert await store.search("zzz") == ()
+        assert await store.search("zzz", scope=MemoryScope(tenant_id="t1")) == ()
         # limit caps results: "world" matches m1 + m2, limit=1 returns one.
-        assert len(await store.search("world", limit=1)) == 1
+        assert (
+            len(await store.search("world", scope=MemoryScope(tenant_id="t1"), limit=1))
+            == 1
+        )
         # Default limit (10) returns every matcher when fewer than limit.
-        all_world = await store.search("world")
+        all_world = await store.search("world", scope=MemoryScope(tenant_id="t1"))
         assert {r.id for r in all_world} == {"m1", "m2"}
 
     asyncio.run(_run())
@@ -354,5 +374,123 @@ def test_path_traversal_in_memory_id_is_rejected(tmp_path):
             await store.update("../evil", expected_version=1, content="x")
         with pytest.raises(ValueError):
             await store.forget("../evil", expected_version=1)
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# 8. Tenant isolation (§12.10): cross-tenant隔离 with a SHARED owner_id, plus
+#    user / workspace / session sub-scope narrowing. owner_id is display-only;
+#    tenant_id is the hard boundary. Parametrized over both backends.
+# ---------------------------------------------------------------------------
+
+
+def test_search_isolates_tenants_with_same_owner(store_factory):
+    # §12.10: tenant-a/alice and tenant-b/alice share an owner_id but must not
+    # see each other's memories. (owner_id is display-only; tenant_id is the
+    # authorization boundary.)
+    store = store_factory()
+
+    async def _run():
+        await store.remember(
+            make_record(
+                memory_id="a1",
+                tenant_id="tenant-a",
+                owner_id="alice",
+                user_id="alice",
+                content="secret tenant-a",
+            )
+        )
+        await store.remember(
+            make_record(
+                memory_id="b1",
+                tenant_id="tenant-b",
+                owner_id="alice",
+                user_id="alice",
+                content="secret tenant-b",
+            )
+        )
+        a_hits = await store.search("secret", scope=MemoryScope(tenant_id="tenant-a"))
+        assert {r.id for r in a_hits} == {"a1"}
+        b_hits = await store.search("secret", scope=MemoryScope(tenant_id="tenant-b"))
+        assert {r.id for r in b_hits} == {"b1"}
+
+    asyncio.run(_run())
+
+
+def test_search_narrows_by_user_workspace_session_subscope(store_factory):
+    # A NULL sub-scope field on the record means "shared at tenant level" and is
+    # visible to any user/workspace/session; a NON-NULL field on the scoped axis
+    # excludes records whose value on that axis differs. Narrowing is per-axis.
+    store = store_factory()
+
+    async def _run():
+        await store.remember(
+            make_record(memory_id="shared", tenant_id="t1", content="alpha shared")
+        )
+        # user axis: two distinct users
+        await store.remember(
+            make_record(memory_id="u1", tenant_id="t1", user_id="u1", content="alpha u1")
+        )
+        await store.remember(
+            make_record(memory_id="u2", tenant_id="t1", user_id="u2", content="alpha u2")
+        )
+        # workspace axis
+        await store.remember(
+            make_record(
+                memory_id="ws1", tenant_id="t1", workspace_id="ws-1", content="alpha ws1"
+            )
+        )
+        await store.remember(
+            make_record(
+                memory_id="ws2", tenant_id="t1", workspace_id="ws-2", content="alpha ws2"
+            )
+        )
+        # session axis
+        await store.remember(
+            make_record(
+                memory_id="s1", tenant_id="t1", session_id="sess-1", content="alpha s1"
+            )
+        )
+        await store.remember(
+            make_record(
+                memory_id="s2", tenant_id="t1", session_id="sess-2", content="alpha s2"
+            )
+        )
+        # tenant-wide (no sub-scope) sees every record.
+        all_hits = await store.search("alpha", scope=MemoryScope(tenant_id="t1"))
+        assert {r.id for r in all_hits} == {
+            "shared",
+            "u1",
+            "u2",
+            "ws1",
+            "ws2",
+            "s1",
+            "s2",
+        }
+        # user=u1 excludes u2 (records with no user stay visible).
+        u1_ids = {
+            r.id
+            for r in await store.search(
+                "alpha", scope=MemoryScope(tenant_id="t1", user_id="u1")
+            )
+        }
+        assert "u1" in u1_ids and "u2" not in u1_ids and "shared" in u1_ids
+        # workspace=ws-1 excludes ws2.
+        ws_ids = {
+            r.id
+            for r in await store.search(
+                "alpha", scope=MemoryScope(tenant_id="t1", workspace_id="ws-1")
+            )
+        }
+        assert "ws1" in ws_ids and "ws2" not in ws_ids and "shared" in ws_ids
+        # session=sess-1 excludes s2.
+        sess_ids = {
+            r.id
+            for r in await store.search(
+                "alpha", scope=MemoryScope(tenant_id="t1", session_id="sess-1")
+            )
+        }
+        assert "s1" in sess_ids and "s2" not in sess_ids and "shared" in sess_ids
 
     asyncio.run(_run())

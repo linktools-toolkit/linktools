@@ -41,7 +41,7 @@ def _registry(model_fn):
     return registry
 
 
-def _run_context(run_id="run-1", session_id="session-1") -> RunContext:
+def _run_context(run_id="run-1", session_id="session-1", tenant_id=None) -> RunContext:
     return RunContext(
         run_id=run_id,
         root_run_id=run_id,
@@ -50,7 +50,7 @@ def _run_context(run_id="run-1", session_id="session-1") -> RunContext:
         runnable_id="agent-1",
         runnable_type=RunnableType.AGENT,
         user_id=None,
-        tenant_id=None,
+        tenant_id=tenant_id,
         workspace=None,
     )
 
@@ -321,7 +321,11 @@ def _echo_model_fn(text_when_missing: str = "no-prompt-captured"):
 
 
 def _seed_memory(
-    store, memory_id: str, content: str, owner_id: str = "session-1"
+    store,
+    memory_id: str,
+    content: str,
+    owner_id: str = "session-1",
+    tenant_id: str = "t1",
 ) -> None:
     from linktools.ai.memory.models import MemoryRecord
 
@@ -330,6 +334,7 @@ def _seed_memory(
         store.remember(
             MemoryRecord(
                 id=memory_id,
+                tenant_id=tenant_id,
                 owner_id=owner_id,
                 content=content,
                 category=None,
@@ -386,20 +391,25 @@ def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
     runner = _make_runner_with_memory(tmp_path)
     _seed_session(runner._session_store, "session-1")
     # FileMemoryStore.search is keyword-substring based, so the content must
-    # contain the query ("hello") for the memory to match and be injected.
+    # contain the query ("hello") for the memory to match and be injected. The
+    # memory is seeded under tenant "t1"; the run context carries the same
+    # tenant so the DefaultMemoryPolicy's tenant-bound search finds it.
     _seed_memory(
         runner._memory_store,
         "mem-1",
         "hello: prefers terse answers (token user-secret-token-xyz)",
         owner_id="session-1",
+        tenant_id="t1",
     )
 
     async def _run():
-        return await runner.run(compiled, RunInput(prompt="hello"), _run_context())
+        return await runner.run(
+            compiled, RunInput(prompt="hello"), _run_context(tenant_id="t1")
+        )
 
     result = asyncio.run(_run())
-    # Owner resolves to session_id (user_id/tenant_id are None in _run_context),
-    # so the seeded memory matches and is injected as a `## Memory` section.
+    # Seeded under tenant "t1" with a matching run context, the memory matches
+    # and is injected as a `## Memory` section.
     assert "user-secret-token-xyz" in str(result.output)
     assert "## Memory" in str(result.output)
 
@@ -439,7 +449,7 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
     from linktools.ai.knowledge.document import Document
 
     class _StubRetriever:
-        async def search(self, query, *, filters=None, limit=10):
+        async def search(self, query, *, scope, limit=10):
             return (
                 Document(
                     id="doc-1",
@@ -481,7 +491,9 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
     _seed_session(runner._session_store, "session-1")
 
     async def _run():
-        return await runner.run(compiled, RunInput(prompt="question"), _run_context())
+        return await runner.run(
+            compiled, RunInput(prompt="question"), _run_context(tenant_id="t1")
+        )
 
     result = asyncio.run(_run())
     assert "known-fact-alpha" in str(result.output)

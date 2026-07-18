@@ -13,12 +13,12 @@ public async method delegates to a ``_*_sync`` private method via
 
 import asyncio
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ...run.models import NewRunCheckpoint, RunCheckpoint
+from ._util import _atomic_write
 
 
 def _validate_id_segment(value: str, *, kind: str) -> str:
@@ -71,16 +71,13 @@ class FileCheckpointStore:
             "created_at": created_at.isoformat(),
             "metadata": dict(new.metadata),
         }
-        # Write both files via .tmp + os.replace (atomic on POSIX) so a crash
-        # never leaves a half-written checkpoint visible: _load requires BOTH
-        # files, and _latest globs the .json sidecar, so a checkpoint appears
-        # only once its sidecar is in place.
-        payload_tmp = payload_path.with_suffix(".bin.tmp")
-        meta_tmp = meta_path.with_suffix(".json.tmp")
-        payload_tmp.write_bytes(new.payload)
-        meta_tmp.write_text(json.dumps(meta))
-        os.replace(payload_tmp, payload_path)
-        os.replace(meta_tmp, meta_path)
+        # Write both files via the crash-safe atomic helper (temp + fsync +
+        # os.replace + parent-dir fsync). Payload first, then the .json sidecar:
+        # _load requires BOTH files and _latest globs the sidecar, so a crash
+        # between the two leaves the payload written but no sidecar -> the
+        # checkpoint is not visible (no half-written checkpoint surfaces).
+        _atomic_write(payload_path, new.payload)
+        _atomic_write(meta_path, json.dumps(meta).encode("utf-8"))
         return RunCheckpoint(
             id=checkpoint_id,
             run_id=new.run_id,

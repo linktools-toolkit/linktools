@@ -14,13 +14,14 @@ import json
 from datetime import datetime, timezone
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import MemoryRow
 from ...errors import MemoryConflictError, MemoryNotFoundError
 from ...memory.models import MemoryRecord
+from ...memory.scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
 from ...memory.store import _UNSET
 
 
@@ -34,8 +35,11 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 
 def _row_to_record(row: MemoryRow) -> MemoryRecord:
+    # A NULL tenant_id is a legacy row (pre-tenant). It is read back under the
+    # reserved legacy tenant so it never matches a real tenant's search.
     return MemoryRecord(
         id=row.id,
+        tenant_id=row.tenant_id or LEGACY_TENANT_ID,
         owner_id=row.owner_id,
         content=row.content,
         category=row.category,
@@ -44,6 +48,9 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
         metadata=json.loads(row.metadata_json),
+        user_id=row.user_id,
+        workspace_id=row.workspace_id,
+        session_id=row.session_id,
     )
 
 
@@ -95,14 +102,48 @@ class SqlAlchemyMemoryStore:
         self,
         query: str,
         *,
-        owner_id: "str | None" = None,
-        category: "str | None" = None,
+        scope: MemoryScope,
         limit: int = 10,
+        category: "str | None" = None,
     ) -> "tuple[MemoryRecord, ...]":
         async def _do(session):
             stmt = select(MemoryRow).where(MemoryRow.content.like(f"%{query}%"))
-            if owner_id is not None:
-                stmt = stmt.where(MemoryRow.owner_id == owner_id)
+            # Hard tenant isolation. A real tenant matches only its own rows;
+            # the legacy scope additionally sees pre-tenant NULL-tenant rows
+            # (the migration quarantine). A NULL row tenant never matches a
+            # real tenant, so legacy data is never exposed.
+            if is_legacy_tenant(scope.tenant_id):
+                stmt = stmt.where(
+                    or_(
+                        MemoryRow.tenant_id == LEGACY_TENANT_ID,
+                        MemoryRow.tenant_id.is_(None),
+                    )
+                )
+            else:
+                stmt = stmt.where(MemoryRow.tenant_id == scope.tenant_id)
+            # Sub-scopes: a NULL record field = "shared at tenant level", so the
+            # filter is (record IS NULL OR record == scope value).
+            if scope.user_id is not None:
+                stmt = stmt.where(
+                    or_(
+                        MemoryRow.user_id.is_(None),
+                        MemoryRow.user_id == scope.user_id,
+                    )
+                )
+            if scope.workspace_id is not None:
+                stmt = stmt.where(
+                    or_(
+                        MemoryRow.workspace_id.is_(None),
+                        MemoryRow.workspace_id == scope.workspace_id,
+                    )
+                )
+            if scope.session_id is not None:
+                stmt = stmt.where(
+                    or_(
+                        MemoryRow.session_id.is_(None),
+                        MemoryRow.session_id == scope.session_id,
+                    )
+                )
             if category is not None:
                 stmt = stmt.where(MemoryRow.category == category)
             stmt = stmt.order_by(MemoryRow.created_at).limit(limit)
@@ -118,6 +159,7 @@ class SqlAlchemyMemoryStore:
             session.add(
                 MemoryRow(
                     id=record.id,
+                    tenant_id=record.tenant_id,
                     owner_id=record.owner_id,
                     content=record.content,
                     category=record.category,
@@ -126,6 +168,9 @@ class SqlAlchemyMemoryStore:
                     created_at=record.created_at,
                     updated_at=record.updated_at,
                     metadata_json=json.dumps(dict(record.metadata)),
+                    user_id=record.user_id,
+                    workspace_id=record.workspace_id,
+                    session_id=record.session_id,
                 )
             )
 

@@ -3,11 +3,16 @@
 """MemoryStore Protocol: persistence + search contract for MemoryRecord.
 Method signatures resolve the spec's `(...)` ellipses, mirroring
 the optimistic-concurrency shape of RunStore/SwarmStore. update/forget take
-expected_version because both backends advertise optimistic_concurrency=True."""
+expected_version because both backends advertise optimistic_concurrency=True.
+
+``search`` is tenant-scoped: it takes a required :class:`MemoryScope` and no
+``scope=None`` global-search path exists. ``category`` is retained as an
+optional orthogonal content filter (it carries no authorization weight)."""
 
 from typing import Protocol, runtime_checkable
 
 from .models import MemoryRecord
+from .scope import MemoryScope
 
 _UNSET = (
     object()
@@ -22,9 +27,9 @@ class MemoryStore(Protocol):
         self,
         query: str,
         *,
-        owner_id: "str | None" = None,
-        category: "str | None" = None,
+        scope: MemoryScope,
         limit: int = 10,
+        category: "str | None" = None,
     ) -> "tuple[MemoryRecord, ...]": ...
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord: ...

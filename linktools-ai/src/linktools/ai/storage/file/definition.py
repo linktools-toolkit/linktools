@@ -47,6 +47,7 @@ class FileRunDefinitionStore:
             "manifest": _json.loads(canonical_json(snapshot.manifest))
             if snapshot.manifest
             else {},
+            "resumability": snapshot.resumability,
         }
         await asyncio.to_thread(
             self._path(snapshot.run_id).write_text, json.dumps(payload)
@@ -71,4 +72,5 @@ class FileRunDefinitionStore:
             provider_revision=data["provider_revision"],
             created_at=datetime.fromisoformat(data["created_at"]),
             manifest=data.get("manifest") or {},
+            resumability=data.get("resumability", "resumable"),
         )

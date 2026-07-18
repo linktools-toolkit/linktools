@@ -31,6 +31,7 @@ def _make_record(**overrides):
     now = _now()
     defaults = dict(
         id="m-1",
+        tenant_id="t-1",
         owner_id="user-1",
         content="remember to deploy",
         category=None,
@@ -48,6 +49,7 @@ def test_memory_record_construct():
     now = _now()
     record = MemoryRecord(
         id="m-1",
+        tenant_id="t-1",
         owner_id="user-1",
         content="remember to deploy",
         category=None,
@@ -58,6 +60,7 @@ def test_memory_record_construct():
         metadata={"k": "v"},
     )
     assert record.id == "m-1"
+    assert record.tenant_id == "t-1"
     assert record.owner_id == "user-1"
     assert record.content == "remember to deploy"
     assert record.category is None
@@ -72,6 +75,7 @@ def test_memory_record_construct_with_optionals():
     now = _now()
     record = MemoryRecord(
         id="m-2",
+        tenant_id="t-1",
         owner_id="user-2",
         content="fact",
         category="preference",
@@ -80,10 +84,16 @@ def test_memory_record_construct_with_optionals():
         created_at=now,
         updated_at=now,
         metadata={},
+        user_id="user-2",
+        workspace_id="ws-1",
+        session_id="sess-1",
     )
     assert record.category == "preference"
     assert record.confidence == 0.9
     assert record.version == 3
+    assert record.user_id == "user-2"
+    assert record.workspace_id == "ws-1"
+    assert record.session_id == "sess-1"
 
 
 def test_memory_record_frozen():
@@ -154,7 +164,7 @@ def test_memory_conflict_raises_as_memory_error():
 class _StubStore:
     async def get(self, memory_id): ...
 
-    async def search(self, query, *, owner_id=None, category=None, limit=10): ...
+    async def search(self, query, *, scope, limit=10, category=None): ...
 
     async def remember(self, record): ...
 
@@ -191,7 +201,7 @@ class _StubIndex:
 
     async def remove(self, memory_id): ...
 
-    async def search(self, query, *, limit=10): ...
+    async def search(self, query, *, scope, limit=10): ...
 
 
 def test_memory_index_is_runtime_checkable():

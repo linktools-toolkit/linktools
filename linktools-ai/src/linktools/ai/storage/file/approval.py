@@ -60,7 +60,8 @@ def _request_to_json(request: ApprovalRequest) -> dict:
         "tool_call_id": request.tool_call_id,
         "tool_name": request.tool_name,
         "reason": request.reason,
-        "arguments": dict(request.arguments),
+        "redacted_arguments": dict(request.redacted_arguments),
+        "arguments_hash": request.arguments_hash,
         "status": request.status.value,
         "version": request.version,
         "created_at": request.created_at.isoformat(),
@@ -69,17 +70,42 @@ def _request_to_json(request: ApprovalRequest) -> dict:
         else request.resolved_at.isoformat(),
         "resolved_by": request.resolved_by,
         "metadata": dict(request.metadata),
+        "tenant_id": request.tenant_id,
+        "descriptor_fingerprint": request.descriptor_fingerprint,
+        "handler_revision": request.handler_revision,
+        "provider_revision": request.provider_revision,
+        "policy_revision": request.policy_revision,
+        "capability_revision": request.capability_revision,
+        "schema_version": request.schema_version,
     }
 
 
 def _request_from_json(raw: dict) -> ApprovalRequest:
+    from ...agent.approval import compute_arguments_hash
+    from ...security.redact import redact_for_audit
+
+    # Reader tolerates the pre-redaction format: an older record persisted the
+    # RAW ``arguments`` (no redacted copy, no hash). On read, treat the legacy
+    # payload as the redacted audit copy (run it through the redactor so a
+    # secret under an obvious key is not re-surfaced in memory) and synthesize
+    # the identity hash from it so dedupe still works.
+    if "redacted_arguments" in raw:
+        redacted = raw["redacted_arguments"]
+    else:
+        redacted = redact_for_audit(raw.get("arguments", {}))
+    arguments_hash = raw.get("arguments_hash")
+    if not arguments_hash:
+        arguments_hash = compute_arguments_hash(
+            raw["tool_name"], raw.get("arguments", redacted)
+        )
     return ApprovalRequest(
         id=raw["id"],
         run_id=raw["run_id"],
         tool_call_id=raw["tool_call_id"],
         tool_name=raw["tool_name"],
         reason=raw["reason"],
-        arguments=raw["arguments"],
+        redacted_arguments=redacted,
+        arguments_hash=arguments_hash,
         status=ApprovalStatus(raw["status"]),
         version=raw["version"],
         created_at=datetime.fromisoformat(raw["created_at"]),
@@ -88,6 +114,13 @@ def _request_from_json(raw: dict) -> ApprovalRequest:
         else datetime.fromisoformat(raw["resolved_at"]),
         resolved_by=raw["resolved_by"],
         metadata=raw["metadata"],
+        tenant_id=raw.get("tenant_id"),
+        descriptor_fingerprint=raw.get("descriptor_fingerprint"),
+        handler_revision=raw.get("handler_revision"),
+        provider_revision=raw.get("provider_revision"),
+        policy_revision=raw.get("policy_revision"),
+        capability_revision=raw.get("capability_revision"),
+        schema_version=int(raw.get("schema_version", 0)),
     )
 
 
@@ -288,7 +321,8 @@ class FileApprovalStore:
             tool_call_id=current.tool_call_id,
             tool_name=current.tool_name,
             reason=current.reason,
-            arguments=current.arguments,
+            redacted_arguments=current.redacted_arguments,
+            arguments_hash=current.arguments_hash,
             status=target,
             version=current.version + 1,
             created_at=current.created_at,

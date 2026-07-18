@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryManager: domain facade over MemoryStore (+ optional MemoryIndex).
-recall/remember/forget; mints id (uuid4)/version/timestamps on remember."""
+recall/remember/forget; mints id (uuid4)/version/timestamps on remember. Every
+read/write carries a :class:`MemoryScope` so the tenant boundary is enforced
+end to end -- there is no unscoped path."""
 
 import uuid
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ from typing import TYPE_CHECKING, Mapping
 
 from .._typing import JSONValue
 from .models import MemoryRecord
+from .scope import MemoryScope
 
 if TYPE_CHECKING:
     from .index import MemoryIndex
@@ -22,15 +25,16 @@ class MemoryManager:
     index: "MemoryIndex | None" = None
 
     async def recall(
-        self, owner_id: str, query: str, *, limit: int = 10
+        self, scope: MemoryScope, query: str, *, limit: int = 10
     ) -> "tuple[MemoryRecord, ...]":
-        return await self.store.search(query, owner_id=owner_id, limit=limit)
+        return await self.store.search(query, scope=scope, limit=limit)
 
     async def remember(
         self,
-        owner_id: str,
+        scope: MemoryScope,
         content: str,
         *,
+        owner_id: "str | None" = None,
         category: "str | None" = None,
         confidence: "float | None" = None,
         metadata: "Mapping[str, JSONValue] | None" = None,
@@ -38,7 +42,8 @@ class MemoryManager:
         now = datetime.now(timezone.utc)
         record = MemoryRecord(
             id=str(uuid.uuid4()),
-            owner_id=owner_id,
+            tenant_id=scope.tenant_id,
+            owner_id=owner_id if owner_id is not None else scope.user_id or scope.tenant_id,
             content=content,
             category=category,
             confidence=confidence,
@@ -46,6 +51,9 @@ class MemoryManager:
             created_at=now,
             updated_at=now,
             metadata=dict(metadata) if metadata is not None else {},
+            user_id=scope.user_id,
+            workspace_id=scope.workspace_id,
+            session_id=scope.session_id,
         )
         persisted = await self.store.remember(record)
         if self.index is not None:

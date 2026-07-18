@@ -25,6 +25,7 @@ def _make_record(**overrides):
     now = datetime.now(timezone.utc)
     defaults = dict(
         id="m-1",
+        tenant_id="t1",
         owner_id="u1",
         content="remembered fact",
         category=None,

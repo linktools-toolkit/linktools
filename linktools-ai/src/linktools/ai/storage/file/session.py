@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ...errors import SessionError
+from ...errors import SessionCorruptionError, SessionError
 from ...session.models import (
     MessageRole,
     NewSessionMessage,
@@ -21,12 +21,31 @@ from ...session.models import (
     SessionRecord,
     SessionStatus,
 )
+from ._util import _atomic_write
 
 
 def _validate_id_segment(value: str, *, kind: str) -> str:
     if not value or "/" in value or "\\" in value or value in (".", ".."):
         raise ValueError(f"invalid {kind}: {value!r}")
     return value
+
+
+def _load_json(path: Path) -> "Any":
+    """Read + parse ``path`` as JSON. A present-but-unparseable file is
+    corruption (not a missing session): raise SessionCorruptionError naming the
+    path so a repair tool can target it, rather than silently masking it.
+
+    Scope: this catches JSON *parse* failures (the "file unreadable as JSON"
+    case). A file that parses but carries a bad schema (unknown enum, missing
+    field, bad datetime) surfaces as the raw ValueError/KeyError from the
+    record constructor -- not masked, and out of scope for this
+    reader-tolerance layer."""
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SessionCorruptionError(
+            f"corrupt session file (not valid JSON, left in place for repair): {path}"
+        ) from exc
 
 
 def _record_to_json(record: SessionRecord) -> dict:
@@ -115,7 +134,10 @@ class FileSessionStore:
         return self._session_dir(session_id) / "record.json"
 
     def _create_sync(self, session: SessionRecord) -> SessionRecord:
-        self._record_path(session.id).write_text(json.dumps(_record_to_json(session)))
+        _atomic_write(
+            self._record_path(session.id),
+            json.dumps(_record_to_json(session)).encode("utf-8"),
+        )
         return session
 
     async def create(self, session: SessionRecord) -> SessionRecord:
@@ -129,7 +151,7 @@ class FileSessionStore:
         )
         if not path.exists():
             return None
-        return _record_from_json(json.loads(path.read_text()))
+        return _record_from_json(_load_json(path))
 
     async def get(self, session_id: str) -> "SessionRecord | None":
         return await asyncio.to_thread(self._get_sync, session_id)
@@ -144,6 +166,11 @@ class FileSessionStore:
         session_id: str,
         messages: "tuple[NewSessionMessage, ...]",
     ) -> "tuple[SessionMessage, ...]":
+        # Each message is written individually via the crash-safe atomic helper,
+        # so a crash mid-batch leaves a consistent ordered PREFIX (each file is
+        # fully durable before the next starts; an orphan temp is invisible to
+        # the *.json glob). A full all-or-nothing batch journal (commit marker +
+        # recovery) is a larger build, tracked separately.
         messages_dir = self._session_dir(session_id) / "messages"
         next_seq = self._next_sequence_sync(session_id)
         persisted = []
@@ -159,8 +186,9 @@ class FileSessionStore:
                 created_at=datetime.now(timezone.utc),
                 metadata=message.metadata,
             )
-            (messages_dir / f"{sequence:010d}.json").write_text(
-                json.dumps(_message_to_json(full))
+            _atomic_write(
+                messages_dir / f"{sequence:010d}.json",
+                json.dumps(_message_to_json(full)).encode("utf-8"),
             )
             persisted.append(full)
         return tuple(persisted)
@@ -188,7 +216,7 @@ class FileSessionStore:
             return ()
         result = []
         for path in sorted(messages_dir.glob("*.json")):
-            message = _message_from_json(json.loads(path.read_text()))
+            message = _message_from_json(_load_json(path))
             if message.sequence <= after_sequence:
                 continue
             result.append(message)
@@ -225,7 +253,10 @@ class FileSessionStore:
             updated_at=datetime.now(timezone.utc),
             metadata=metadata if metadata is not None else current.metadata,
         )
-        self._record_path(session_id).write_text(json.dumps(_record_to_json(updated)))
+        _atomic_write(
+            self._record_path(session_id),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
+        )
         return updated
 
     async def update(

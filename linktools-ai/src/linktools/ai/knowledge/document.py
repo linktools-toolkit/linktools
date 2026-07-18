@@ -15,3 +15,4 @@ class Document:
     score: "float | None"
     source: "str | None"
     metadata: "Mapping[str, JSONValue]"
+    trust_level: str = "trusted"

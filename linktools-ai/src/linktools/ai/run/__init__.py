@@ -6,3 +6,6 @@ from .context import RunContext
 from .models import RunInput, RunRecord, RunResult, RunStatus
 
 __all__ = ["RunContext", "RunInput", "RunResult", "RunRecord", "RunStatus"]
+from .schema_registry import OutputSchemaRegistry
+
+__all__ = ["OutputSchemaRegistry"]

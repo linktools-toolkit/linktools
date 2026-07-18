@@ -18,6 +18,7 @@ The ``asyncio.Lock`` is held in the async wrapper and spans the
 ``to_thread`` call (not the other way around)."""
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from datetime import datetime, timezone
@@ -53,6 +54,7 @@ def _record_to_json(record: IdempotencyRecord) -> dict:
         "generation": record.generation,
         "claimed_at": _dt_iso(record.claimed_at),
         "lease_expires_at": _dt_iso(record.lease_expires_at),
+        "receipt_artifact_id": record.receipt_artifact_id,
     }
 
 
@@ -77,6 +79,7 @@ def _record_from_json(raw: dict) -> IdempotencyRecord:
         lease_expires_at=None
         if raw.get("lease_expires_at") is None
         else datetime.fromisoformat(raw["lease_expires_at"]),
+        receipt_artifact_id=raw.get("receipt_artifact_id"),
     )
 
 
@@ -140,6 +143,16 @@ class FileIdempotencyStore:
             return ClaimResult(disposition=ClaimDisposition.CONFLICT)
         if existing.status is IdempotencyStatus.COMPLETED:
             return ClaimResult(disposition=ClaimDisposition.REPLAY, record=existing)
+        if existing.status is IdempotencyStatus.EXECUTED:
+            # The Handler already ran; its result is held on the record. Safe
+            # to replay (the side effect happened); only the final commit is
+            # outstanding, which a recoverer can land separately.
+            return ClaimResult(disposition=ClaimDisposition.REPLAY, record=existing)
+        if existing.status is IdempotencyStatus.UNKNOWN:
+            # The side effect happened but its outcome is unknowable. Never
+            # silently re-drive -- surface as a conflict so the caller decides
+            # escalation rather than retrying the Handler.
+            return ClaimResult(disposition=ClaimDisposition.CONFLICT)
         if existing.status is IdempotencyStatus.RESERVED:
             lease_valid = (
                 existing.lease_expires_at is not None
@@ -235,9 +248,13 @@ class FileIdempotencyStore:
 
     def _complete_sync(self, claim: IdempotencyClaim, result: Any) -> None:
         current = self._read(claim.scope, claim.key)
-        if current is None or not _fence_matches(current, claim):
-            # Stale owner/generation or missing record: reject (parity with the
-            # SQL backend's rowcount check) -- never silently succeed.
+        # complete resolves the EXECUTED receipt (or the RESERVED fast path) to
+        # COMPLETED; both are valid commit sources.
+        if current is None or not _fence_matches(
+            current,
+            claim,
+            {IdempotencyStatus.RESERVED, IdempotencyStatus.EXECUTED},
+        ):
             from ...errors import LostIdempotencyClaimError
 
             raise LostIdempotencyClaimError(
@@ -269,9 +286,63 @@ class FileIdempotencyStore:
         async with self._lock:
             await asyncio.to_thread(self._complete_sync, claim, result)
 
+    def _mark_executed_sync(self, claim: IdempotencyClaim, result: Any, receipt_artifact_id=None) -> None:
+        current = self._read(claim.scope, claim.key)
+        if current is None or not _fence_matches(
+            current, claim, {IdempotencyStatus.RESERVED}
+        ):
+            from ...errors import LostIdempotencyClaimError
+
+            raise LostIdempotencyClaimError(
+                f"mark_executed lost the claim for ({claim.scope}, {claim.key})"
+            )
+        updated = dataclasses.replace(
+            current,
+            status=IdempotencyStatus.EXECUTED,
+            result=result,
+            error=None,
+            receipt_artifact_id=receipt_artifact_id,
+        )
+        _atomic_write(
+            self._path(claim.scope, claim.key),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
+        )
+
+    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._mark_executed_sync, claim, result, receipt_artifact_id)
+
+    def _mark_unknown_sync(self, claim: IdempotencyClaim) -> None:
+        current = self._read(claim.scope, claim.key)
+        # RESERVED only: an EXECUTED record already holds a recoverable receipt
+        # and must not be downgraded to UNKNOWN (a later claim would CONFLICT
+        # instead of replaying it). mark_unknown is for the case where
+        # mark_executed could not be confirmed at all.
+        if current is None or not _fence_matches(
+            current,
+            claim,
+            {IdempotencyStatus.RESERVED},
+        ):
+            from ...errors import LostIdempotencyClaimError
+
+            raise LostIdempotencyClaimError(
+                f"mark_unknown lost the claim for ({claim.scope}, {claim.key})"
+            )
+        updated = dataclasses.replace(current, status=IdempotencyStatus.UNKNOWN)
+        _atomic_write(
+            self._path(claim.scope, claim.key),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
+        )
+
+    async def mark_unknown(self, claim: IdempotencyClaim) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._mark_unknown_sync, claim)
+
     def _fail_sync(self, claim: IdempotencyClaim, error: str) -> None:
         current = self._read(claim.scope, claim.key)
-        if current is None or not _fence_matches(current, claim):
+        if current is None or not _fence_matches(
+            current, claim, {IdempotencyStatus.RESERVED}
+        ):
             from ...errors import LostIdempotencyClaimError
 
             raise LostIdempotencyClaimError(
@@ -307,6 +378,50 @@ class FileIdempotencyStore:
         async with self._lock:
             return await asyncio.to_thread(self._read, scope, key)
 
+    def _renew_sync(
+        self,
+        claim: IdempotencyClaim,
+        *,
+        now: datetime,
+        lease_seconds: float,
+    ) -> IdempotencyRecord:
+        current = self._read(claim.scope, claim.key)
+        # RESERVED only: the heartbeat runs while the Handler is in flight
+        # (before mark_executed). A claim that was stolen / superseded (other
+        # owner, newer generation) or already moved to a terminal/receipt
+        # state is rejected -- never silently renewed.
+        if current is None or not _fence_matches(
+            current, claim, {IdempotencyStatus.RESERVED}
+        ):
+            from ...errors import LostIdempotencyClaimError
+
+            raise LostIdempotencyClaimError(
+                f"renew lost the claim for ({claim.scope}, {claim.key})"
+            )
+        new_lease = datetime.fromtimestamp(
+            now.timestamp() + lease_seconds, tz=timezone.utc
+        )
+        updated = dataclasses.replace(
+            current, lease_expires_at=new_lease, claimed_at=now
+        )
+        _atomic_write(
+            self._path(claim.scope, claim.key),
+            json.dumps(_record_to_json(updated)).encode("utf-8"),
+        )
+        return updated
+
+    async def renew(
+        self,
+        claim: IdempotencyClaim,
+        *,
+        now: datetime,
+        lease_seconds: float,
+    ) -> IdempotencyRecord:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._renew_sync, claim, now=now, lease_seconds=lease_seconds
+            )
+
 
 def _claim_from_record(record: IdempotencyRecord) -> IdempotencyClaim:
     return IdempotencyClaim(
@@ -320,12 +435,13 @@ def _claim_from_record(record: IdempotencyRecord) -> IdempotencyClaim:
     )
 
 
-def _fence_matches(record: IdempotencyRecord, claim: IdempotencyClaim) -> bool:
-    """A complete/fail is valid only if the record is still RESERVED and the
-    owner_id + generation match -- a stale worker (older generation, or a
-    lease that was stolen) cannot overwrite a newer owner's record."""
+def _fence_matches(record, claim, valid_statuses):
+    """A fenced transition is valid only if the record's status is one of
+    ``valid_statuses`` and the owner_id + generation match -- a stale worker
+    (older generation, or a lease that was stolen) cannot overwrite a newer
+    owner's record."""
     return (
-        record.status is IdempotencyStatus.RESERVED
+        record.status in valid_statuses
         and record.owner_id == claim.owner_id
         and record.generation == claim.generation
     )

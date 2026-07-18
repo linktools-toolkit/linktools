@@ -48,3 +48,40 @@ def test_input_not_mutated_and_none_safe():
     assert src == {"api_key": "secret"}  # input untouched
     assert redact_for_audit(None) == {}
     assert redact_for_audit({}) == {}
+
+
+def test_all_default_sensitive_keys_are_masked():
+    # The default sensitive-key set: every name in it must mask a plain
+    # value under that exact key. A bare value (not an inline ``key=value``
+    # assignment) can only be caught by key-name matching, so this is the
+    # guard that the marker list stays complete. ``client_secret`` is covered
+    # by the ``secret`` substring.
+    out = redact_for_audit(
+        {
+            "authorization": "Bearer x",
+            "token": "abc",
+            "api_key": "sk-x",
+            "apikey": "sk-y",
+            "password": "hunter2",
+            "passwd": "hunter3",
+            "secret": "s",
+            "cookie": "c=val",
+            "private_key": "MIIEvQIBADANB",
+            "client_secret": "cs",
+            "access_key": "AKIAIOSFODNN7EXAMPLE",
+        }
+    )
+    for key in (
+        "authorization",
+        "token",
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "cookie",
+        "private_key",
+        "client_secret",
+        "access_key",
+    ):
+        assert out[key] == "***REDACTED***", key

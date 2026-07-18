@@ -48,6 +48,7 @@ and ``histogram("agent.run.duration_ms")``. Both default to None, so the
 default-None path is a no-op -- no spans opened, no metrics recorded."""
 
 import asyncio
+import uuid
 import contextlib
 import dataclasses
 import logging
@@ -345,6 +346,38 @@ class AgentRunner:
             current = await self._run_store.get(context.run_id)
             running_version = current.version
 
+        # Fence this execution in persistent storage when the backend supports
+        # it. Older/custom stores remain compatible, but production stores must
+        # claim before any model or Tool side effect begins.
+        execution_token = uuid.uuid4().hex
+        claim_execution = getattr(self._run_store, "claim_execution", None)
+        if claim_execution is not None:
+            worker_id = f"agent-worker:{uuid.uuid4().hex}"
+            await claim_execution(
+                context.run_id,
+                worker_id=worker_id,
+                execution_token=execution_token,
+            )
+        heartbeat_task = None
+        heartbeat_execution = getattr(self._run_store, "heartbeat_execution", None)
+        if heartbeat_execution is not None and claim_execution is not None:
+            async def _heartbeat():
+                while True:
+                    await asyncio.sleep(10.0)
+                    try:
+                        await heartbeat_execution(
+                            context.run_id,
+                            worker_id=worker_id,
+                            execution_token=execution_token,
+                        )
+                    except Exception:
+                        # Lost fencing is fail-closed: stop renewing; the
+                        # owner can no longer safely commit side effects.
+                        if token is not None:
+                            token.cancel()
+                        return
+            heartbeat_task = asyncio.create_task(_heartbeat())
+
         # Real cancellation. When a RunController is wired,
         # register the driving asyncio.Task + a fresh CancellationToken so
         # Runtime.cancel(run_id) can actually stop this run: the token is
@@ -472,6 +505,7 @@ class AgentRunner:
                     run_id=context.run_id,
                     session_id=context.session_id,
                     tool_call_id=None,
+                    tenant_id=context.tenant_id,
                 )
                 # The builtin file/terminal toolset is
                 # constructed HERE, at execution time, from the per-Runtime
@@ -494,7 +528,12 @@ class AgentRunner:
                 # tools=None + execution -> default builtin via assembler (no raw bypass).
                 # tools=() -> no tools. tools explicit -> only declared.
                 has_assembler = self._capability_assembler is not None
-                needs_default = agent.spec.tools is None and deps.execution is not None
+                builtin_flag = getattr(self._capability_options, "enable_builtin_tools", None)
+                needs_default = (
+                    agent.spec.tools is None
+                    and deps.execution is not None
+                    and builtin_flag is not False
+                )
                 # Eager fail-fast: a spec that needs tools -- default builtin
                 # when an execution backend is present, or explicitly declared
                 # tools -- must have BOTH an assembler and a managed executor
@@ -503,7 +542,8 @@ class AgentRunner:
                 from ..capability.models import requires_capability_assembler
 
                 requires_tools = requires_capability_assembler(
-                    tools=agent.spec.tools, execution=deps.execution
+                    tools=(agent.spec.tools if not needs_default else ("builtin",)),
+                    execution=deps.execution,
                 )
                 if requires_tools and not has_assembler:
                     from ..errors import RuntimeInitializationError
@@ -1243,6 +1283,12 @@ class AgentRunner:
                     )
             raise
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             # drop the in-flight registration so the controller does
             # not retain a reference to the (now-finished) asyncio.Task. The
             # unregister is in ``finally`` so it runs on every exit path --

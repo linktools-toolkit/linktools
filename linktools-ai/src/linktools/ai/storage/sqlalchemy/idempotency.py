@@ -58,6 +58,7 @@ def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
         generation=row.generation or 0,
         claimed_at=_as_utc(row.claimed_at),
         lease_expires_at=_as_utc(row.lease_expires_at),
+        receipt_artifact_id=row.receipt_artifact_id,
     )
 
 
@@ -105,6 +106,52 @@ class SqlAlchemyIdempotencyStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
+
+        return await self._execute_in_session(_do)
+
+    async def renew(
+        self,
+        claim: IdempotencyClaim,
+        *,
+        now: "datetime",
+        lease_seconds: float,
+    ) -> IdempotencyRecord:
+        """CAS-extend the lease on a RESERVED claim the caller owns. A stolen /
+        superseded claim (rowcount != 1) is rejected, never silently renewed."""
+        new_lease_naive = (
+            now.timestamp() + lease_seconds
+        )
+        new_lease = datetime.fromtimestamp(new_lease_naive, tz=timezone.utc)
+
+        async def _do(session):
+            proxy = await session.execute(
+                update(ToolIdempotencyRow)
+                .where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                    ToolIdempotencyRow.request_hash == claim.request_hash,
+                    ToolIdempotencyRow.owner_id == claim.owner_id,
+                    ToolIdempotencyRow.generation == claim.generation,
+                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                )
+                .values(
+                    lease_expires_at=new_lease.replace(tzinfo=None),
+                    claimed_at=now.replace(tzinfo=None),
+                )
+            )
+            if proxy.rowcount != 1:
+                from ...errors import LostIdempotencyClaimError
+
+                raise LostIdempotencyClaimError(
+                    f"renew lost the claim for ({claim.scope}, {claim.key})"
+                )
+            result = await session.execute(
+                select(ToolIdempotencyRow).where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                )
+            )
+            return _row_to_record(result.scalar_one())
 
         return await self._execute_in_session(_do)
 
@@ -165,6 +212,16 @@ class SqlAlchemyIdempotencyStore:
                     disposition=ClaimDisposition.REPLAY,
                     record=_row_to_record(row),
                 )
+            if row.status == IdempotencyStatus.EXECUTED.value:
+                # Handler already ran; result held on the record. Safe to replay
+                # (the side effect happened); only the final commit is outstanding.
+                return ClaimResult(
+                    disposition=ClaimDisposition.REPLAY,
+                    record=_row_to_record(row),
+                )
+            if row.status == IdempotencyStatus.UNKNOWN.value:
+                # Unknowable outcome -- never silently re-drive the Handler.
+                return ClaimResult(disposition=ClaimDisposition.CONFLICT)
             if row.status == IdempotencyStatus.RESERVED.value:
                 lease_valid = (
                     row.lease_expires_at is not None
@@ -280,7 +337,14 @@ class SqlAlchemyIdempotencyStore:
                     ToolIdempotencyRow.request_hash == claim.request_hash,
                     ToolIdempotencyRow.owner_id == claim.owner_id,
                     ToolIdempotencyRow.generation == claim.generation,
-                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                    # complete resolves either the EXECUTED receipt or the
+                    # RESERVED fast path to COMPLETED.
+                    ToolIdempotencyRow.status.in_(
+                        [
+                            IdempotencyStatus.RESERVED.value,
+                            IdempotencyStatus.EXECUTED.value,
+                        ]
+                    ),
                 )
                 .values(
                     status=IdempotencyStatus.COMPLETED.value,
@@ -295,6 +359,69 @@ class SqlAlchemyIdempotencyStore:
                 raise LostIdempotencyClaimError(
                     f"complete lost the claim for ({claim.scope}, {claim.key}): "
                     f"owner/generation no longer match"
+                )
+
+        await self._execute_in_session(_do)
+
+    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None) -> None:
+        """CAS RESERVED -> EXECUTED, storing the result as the execution receipt.
+        rowcount != 1 raises LostIdempotencyClaimError."""
+        now = datetime.now(timezone.utc)
+
+        async def _do(session):
+            proxy = await session.execute(
+                update(ToolIdempotencyRow)
+                .where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                    ToolIdempotencyRow.request_hash == claim.request_hash,
+                    ToolIdempotencyRow.owner_id == claim.owner_id,
+                    ToolIdempotencyRow.generation == claim.generation,
+                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                )
+                .values(
+                    status=IdempotencyStatus.EXECUTED.value,
+                    result_json=canonical_json(result),
+                    error_text=None,
+                    receipt_artifact_id=receipt_artifact_id,
+                )
+            )
+            if proxy.rowcount != 1:
+                from ...errors import LostIdempotencyClaimError
+
+                raise LostIdempotencyClaimError(
+                    f"mark_executed lost the claim for ({claim.scope}, {claim.key})"
+                )
+
+        await self._execute_in_session(_do)
+
+    async def mark_unknown(self, claim: IdempotencyClaim) -> None:
+        """CAS RESERVED -> UNKNOWN: mark_executed could not be confirmed, so the
+        outcome is unknowable. RESERVED only -- an EXECUTED receipt is
+        recoverable and must not be downgraded. Never resolves to a re-run."""
+        now = datetime.now(timezone.utc)
+
+        async def _do(session):
+            proxy = await session.execute(
+                update(ToolIdempotencyRow)
+                .where(
+                    ToolIdempotencyRow.scope == claim.scope,
+                    ToolIdempotencyRow.key == claim.key,
+                    ToolIdempotencyRow.request_hash == claim.request_hash,
+                    ToolIdempotencyRow.owner_id == claim.owner_id,
+                    ToolIdempotencyRow.generation == claim.generation,
+                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
+                )
+                .values(
+                    status=IdempotencyStatus.UNKNOWN.value,
+                    completed_at=now,
+                )
+            )
+            if proxy.rowcount != 1:
+                from ...errors import LostIdempotencyClaimError
+
+                raise LostIdempotencyClaimError(
+                    f"mark_unknown lost the claim for ({claim.scope}, {claim.key})"
                 )
 
         await self._execute_in_session(_do)

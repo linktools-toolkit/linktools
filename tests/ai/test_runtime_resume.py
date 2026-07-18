@@ -145,6 +145,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FileStorage]":
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
         providers=ProviderBundle(capabilities=(_RiskyProvider(),)),
+        local_trusted_mode=True,
     )
     return runtime, storage
 
@@ -321,6 +322,145 @@ def test_resume_no_checkpoint_raises(tmp_path):
     assert asyncio.run(_seed_and_resume()) is True
 
 
+def test_resume_refused_when_snapshot_marked_non_resumable(tmp_path):
+    """A run whose persisted snapshot is marked NON_RESUMABLE (§13.7) is refused
+    at resume entry -- the guard fires right after the snapshot is read, before
+    the checkpoint/approval checks."""
+    from linktools.ai.errors import RunNotResumableError
+    from linktools.ai.run.definition import (
+        RunDefinitionSnapshot,
+        serialize_agent_spec,
+        spec_fingerprint,
+    )
+
+    runtime, storage = _build_runtime(tmp_path)
+
+    async def _seed_and_resume():
+        now = datetime.now(timezone.utc)
+        await storage.runs.create(
+            RunRecord(
+                id="run-nonresumable",
+                root_run_id="run-nonresumable",
+                parent_run_id=None,
+                session_id="session-nr",
+                runnable_id="agent-resume",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.WAITING_APPROVAL,
+                input=RunInput(prompt=""),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        spec = _spec()
+        await storage.run_definitions.create(
+            RunDefinitionSnapshot(
+                run_id="run-nonresumable",
+                runnable_type="agent",
+                runnable_id="agent-resume",
+                serialized_spec=serialize_agent_spec(spec),
+                spec_fingerprint=spec_fingerprint(spec),
+                user_id=None,
+                tenant_id=None,
+                workspace=None,
+                provider_revision=None,
+                created_at=now,
+                manifest={},
+                resumability="non_resumable",
+            )
+        )
+        try:
+            async for _ in runtime.resume("run-nonresumable"):
+                pass
+            return None
+        except RunNotResumableError:
+            return True
+
+    assert asyncio.run(_seed_and_resume()) is True
+
+
+def test_resume_refused_when_provider_revision_drifted(tmp_path):
+    """§13.6: if the resolved model provider's revision changed between prepare
+    and resume, resume refuses (ManifestDriftError) instead of silently
+    re-resolving against the drifted environment. The snapshot is seeded with a
+    manifest that pins a STALE provider revision; the runtime's current
+    test-model resolves to a different revision."""
+    from linktools.ai.errors import ManifestDriftError
+    from linktools.ai.run.definition import (
+        RunDefinitionSnapshot,
+        serialize_agent_spec,
+        spec_fingerprint,
+    )
+    from linktools.ai.run.manifest import (
+        build_execution_manifest,
+        manifest_to_dict,
+    )
+
+    runtime, storage = _build_runtime(tmp_path)
+
+    async def _seed_and_resume():
+        now = datetime.now(timezone.utc)
+        await storage.runs.create(
+            RunRecord(
+                id="run-drift",
+                root_run_id="run-drift",
+                parent_run_id=None,
+                session_id="session-drift",
+                runnable_id="agent-resume",
+                runnable_type=RunnableType.AGENT,
+                status=RunStatus.WAITING_APPROVAL,
+                input=RunInput(prompt=""),
+                result=None,
+                error=None,
+                version=1,
+                created_at=now,
+                started_at=now,
+                finished_at=None,
+            )
+        )
+        spec = _spec()
+
+        class _StaleProvider:
+            # A revision that cannot match the real test-model's config-hash.
+            revision = "stale-revision-that-does-not-match-anything"
+
+        stale_manifest = manifest_to_dict(
+            build_execution_manifest(
+                spec,
+                runnable_type="agent",
+                runnable_fingerprint=spec_fingerprint(spec),
+                model_provider=_StaleProvider(),
+            )
+        )
+        await storage.run_definitions.create(
+            RunDefinitionSnapshot(
+                run_id="run-drift",
+                runnable_type="agent",
+                runnable_id="agent-resume",
+                serialized_spec=serialize_agent_spec(spec),
+                spec_fingerprint=spec_fingerprint(spec),
+                user_id=None,
+                tenant_id=None,
+                workspace=None,
+                provider_revision=None,
+                created_at=now,
+                manifest=stale_manifest,
+                resumability="resumable",
+            )
+        )
+        try:
+            async for _ in runtime.resume("run-drift"):
+                pass
+            return None
+        except ManifestDriftError:
+            return True
+
+    assert asyncio.run(_seed_and_resume()) is True
+
+
 def test_resume_refused_when_approval_still_pending(tmp_path):
     """WP-08 §12.6: a run whose approval is still PENDING must not resume -- the
     run stays WAITING_APPROVAL (resume is fail-closed until explicitly approved)."""
@@ -473,6 +613,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
             model_router=ModelRouter(registry=_registry()),
             tool_executor=executor,
             providers=ProviderBundle(capabilities=(_PromptedRiskyProvider(),)),
+            local_trusted_mode=True,
         )
         spec = _spec()
         now = datetime.now(timezone.utc)

@@ -22,6 +22,13 @@ class RunStore(Protocol):
         expected_version: int,
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
+        cancel_requested_at: "datetime | None" = None,
+        cancel_requested_by: "str | None" = None,
+        cancel_reason: "str | None" = None,
     ) -> RunRecord: ...
 
     async def list_children(self, run_id: str) -> "tuple[RunRecord, ...]": ...
+
+    async def claim_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord: ...
+
+    async def heartbeat_execution(self, run_id: str, *, worker_id: str, execution_token: str) -> RunRecord: ...

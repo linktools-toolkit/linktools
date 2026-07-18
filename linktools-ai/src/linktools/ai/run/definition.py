@@ -22,24 +22,31 @@ def _serialize_output_schema(output_schema: Any) -> "str | None":
     if output_schema is str:
         return "str"
     if isinstance(output_schema, type):
+        schema_id = getattr(output_schema, "schema_id", None)
+        revision = getattr(output_schema, "schema_revision", None)
+        if isinstance(schema_id, str) and isinstance(revision, str):
+            return f"{schema_id}@{revision}"
         return f"{output_schema.__module__}:{output_schema.__qualname__}"
     return str(output_schema)
 
 
-def _deserialize_output_schema(value: "str | None") -> Any:
+def _deserialize_output_schema(value: "str | None", *, registry: Any = None) -> Any:
     if value is None or value == "":
         return None
     if value == "str":
         return str
+    if "@" in value and registry is not None:
+        schema_id, _, revision = value.rpartition("@")
+        return registry.resolve(schema_id, revision)
     if ":" in value:
-        import importlib
+        if registry is None:
+            from ..errors import ManifestDriftError
 
-        module_path, _, qualname = value.rpartition(":")
-        mod = importlib.import_module(module_path)
-        obj = mod
-        for part in qualname.split("."):
-            obj = getattr(obj, part)
-        return obj
+            raise ManifestDriftError(
+                "dynamic output schema import is disabled; register the schema explicitly"
+            )
+        schema_id, _, revision = value.rpartition("@")
+        return registry.resolve(schema_id, revision)
     return None
 
 
@@ -77,7 +84,7 @@ def serialize_agent_spec(spec: Any) -> "dict[str, Any]":
     }
 
 
-def deserialize_agent_spec(data: "dict[str, Any]") -> Any:
+def deserialize_agent_spec(data: "dict[str, Any]", *, schema_registry: Any = None) -> Any:
     """Reconstruct an AgentSpec from its serialized form (the round-trip pair of
     serialize_agent_spec). Imports output_schema by its saved path."""
     from ..agent.spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
@@ -116,7 +123,9 @@ def deserialize_agent_spec(data: "dict[str, Any]") -> Any:
         instructions=instructions,
         tools=tools,
         middleware=middleware,
-        output_schema=_deserialize_output_schema(data.get("output_schema")),
+        output_schema=_deserialize_output_schema(
+            data.get("output_schema"), registry=schema_registry
+        ),
         metadata=data.get("metadata", {}),
     )
 
@@ -145,6 +154,13 @@ class RunDefinitionSnapshot:
     # was prepared against, so resume can detect environment drift. Deep-frozen
     # at preparation time; defaults to an empty frozen mapping.
     manifest: "Mapping[str, Any]" = field(default_factory=dict)
+    # Resumability verdict: whether this run may be resumed. Set at
+    # preparation time so an unversionable run is rejected up-front rather than
+    # discovered at resume. Defaults to RESUMABLE; the resume path refuses a
+    # NON_RESUMABLE snapshot. The verdict is derived from the manifest once it
+    # carries compiled revisions (post-compile population lands in a follow-up);
+    # until then preparation records RESUMABLE.
+    resumability: str = "resumable"
 
 
 @runtime_checkable

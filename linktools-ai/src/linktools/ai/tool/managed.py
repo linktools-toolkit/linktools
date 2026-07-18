@@ -338,6 +338,7 @@ class ManagedToolAdapter:
                 run_id=run_id or "",
                 approval_id=str(uuid.uuid4()),
                 tool_call_id=call_id,
+                tenant_id=getattr(ctx, "tenant_id", None) if ctx else None,
                 tool_name=self._descriptor.name,
                 reason=f"policy requires approval for {self._descriptor.name!r}",
                 arguments=redact_for_audit(arguments),

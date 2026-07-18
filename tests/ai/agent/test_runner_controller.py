@@ -217,7 +217,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     from linktools.ai.storage.facade import FileStorage
 
     storage = FileStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)
+    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     # Runtime.build always wires a RunController -- but the runner's actual
     # driving Task is only registered once execute() starts. To exercise the
     # in-flight path we drive a real run and cancel it mid-flight.
@@ -246,6 +246,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         middleware_pipeline=MiddlewarePipeline(middlewares=(_BlockingMiddleware(),)),
+        local_trusted_mode=True,
     )
 
     spec = AgentSpec(
