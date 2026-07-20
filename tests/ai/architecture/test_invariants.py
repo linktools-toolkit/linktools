@@ -21,7 +21,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 
 
@@ -50,7 +50,7 @@ def test_invariant_runtime_has_no_assemble():
 
 # --- Runtime exposes no public capability_assembler -----------------------------
 def test_invariant_runtime_has_no_public_capability_assembler(tmp_path):
-    runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
+    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
     assert not hasattr(runtime, "capability_assembler")
     assert not hasattr(runtime, "assembler")
 
@@ -67,11 +67,11 @@ def test_invariant_tool_contribution_has_only_tools_field():
     assert field_names == ["tools"]
 
 
-# --- AgentRunner requires an Assembler when tools are needed --------------------
+# --- AgentEngine requires an Assembler when tools are needed --------------------
 def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
     from linktools.ai.errors import RuntimeInitializationError
 
-    runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
+    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
     spec = AgentSpec(
         id="needs-tools",
         name="needs-tools",
@@ -84,7 +84,7 @@ def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
 
 
 def test_invariant_runner_empty_tools_does_not_require_assembler(tmp_path):
-    runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
+    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
     spec = AgentSpec(
         id="no-tools",
         name="no-tools",
@@ -106,7 +106,7 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
         MCPProvider,
         MCPToolInfo,
     )
-    from linktools.ai.registry.mcp import MCPServerSpec
+    from linktools.ai.mcp.spec import MCPServerSpec
 
     class _FakeSpecProvider:
         async def list_ids(self):
@@ -145,7 +145,7 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
 
 # --- Runtime.inspect returns no handler ----------------------------------------
 def test_invariant_inspect_returns_no_handler(tmp_path):
-    runtime = Runtime.build(storage=FileStorage(root=tmp_path), model_router=_router())
+    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
     spec = AgentSpec(
         id="a",
         name="a",
@@ -159,7 +159,7 @@ def test_invariant_inspect_returns_no_handler(tmp_path):
     assert not hasattr(inspection, "handler")
 
 
-# --- ManagedToolAdapter delegates to ToolExecutor.execute ----------------------
+# --- ManagedToolAdapter delegates to GovernedToolInvoker.execute ----------------------
 def test_invariant_managed_adapter_delegates_to_executor_execute():
     from linktools.ai.tool.models import ToolDescriptor
     from linktools.ai.tool.managed import ManagedToolAdapter

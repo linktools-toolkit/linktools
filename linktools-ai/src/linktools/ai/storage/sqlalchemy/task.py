@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemyTaskStore: DB-backed TaskStore.
+"""SqlAlchemyTaskStore: DB-backed JobStore.
 
 Mirrors the other SQLAlchemy stores: a ``session_factory`` constructor and
 read-check-mutate-commit transactions. The reliable-task semantics live in SQL:
@@ -30,7 +30,7 @@ from typing import Callable
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...task.models import (
+from ...jobs.models import (
     AttemptStatus,
     CLAIMABLE_JOB_STATUSES,
     JobRecord,
@@ -57,7 +57,7 @@ from ...task.models import (
     from_jsonable,
     to_jsonable,
 )
-from ...task.protocols import (
+from ...jobs.protocols import (
     CancelJob,
     CancelTask,
     Clock,
@@ -68,7 +68,7 @@ from ...task.protocols import (
     TaskSuccess,
     WaitSignal,
 )
-from ...task.store import (
+from ...jobs.store import (
     ClaimedTask,
     InvalidTaskCommandError,
     JobNotFoundError,
@@ -379,10 +379,10 @@ class SqlAlchemyTaskStore:
 
     async def create_job(self, job: JobRecord, root_task: TaskRecord) -> JobRecord:
         async def do(session: AsyncSession) -> JobRecord:
-            from ...task.validation import validate_job_budget
+            from ...jobs.validation import validate_job_budget
 
             # The store re-validates the budget so the domain invariant holds
-            # even for callers that bypass TaskRuntime.
+            # even for callers that bypass JobRuntime.
             validate_job_budget(job.budget)
             existing = await session.get(TaskJobRow, job.id)
             if existing is not None:
@@ -408,7 +408,7 @@ class SqlAlchemyTaskStore:
             # chain at creation (None = unrestricted, single meaning).
             from dataclasses import replace
 
-            from ...task.models import resolve_effective_scopes
+            from ...jobs.models import resolve_effective_scopes
 
             root = replace(
                 root,
@@ -609,7 +609,7 @@ class SqlAlchemyTaskStore:
     async def commit_success(
         self, claim: TaskClaim, outcome: TaskSuccess
     ) -> TaskRecord:
-        from ...task.validation import (
+        from ...jobs.validation import (
             validate_child_tasks,
             validate_commands,
             validate_output_payload,
@@ -945,7 +945,7 @@ class SqlAlchemyTaskStore:
         return await self._in_session(do)
 
     async def submit_signal(self, signal) -> object:
-        from ...task.validation import validate_metadata
+        from ...jobs.validation import validate_metadata
 
         validate_metadata(dict(signal.metadata))
 
@@ -1872,8 +1872,8 @@ class SqlAlchemyTaskStore:
     ) -> None:
         import uuid as _uuid
 
-        from ...task.models import narrow_child_principal
-        from ...task.validation import validate_create_task, validate_task_policies
+        from ...jobs.models import narrow_child_principal
+        from ...jobs.validation import validate_create_task, validate_task_policies
 
         #  enforce the same per-command input limits as the file store;
         #  a NON_IDEMPOTENT child must cap retries at 1.

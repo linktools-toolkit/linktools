@@ -11,9 +11,9 @@ import pytest
 
 from linktools.ai.agent.spec import AgentSpec
 from linktools.ai.errors import RegistryNotFoundError
-from linktools.ai.package.entrypoint import EntrypointRef
-from linktools.ai.package.resource import ResourceRef
-from linktools.ai.package.scope import PackageScope
+from linktools.ai.extension.entrypoint import EntrypointRef
+from linktools.ai.extension.resource import ResourceRef
+from linktools.ai.extension.scope import ExtensionScope
 
 
 async def assert_spec_provider_contract(
@@ -40,7 +40,7 @@ async def assert_spec_provider_contract(
 async def assert_tool_policy_provider_contract(provider, *, sample_name):
     """get_metadata_map returns a Mapping of tool name -> ToolPolicyMetadata with
     the required fields populated."""
-    from linktools.ai.policy.rule import ToolPolicyMetadata
+    from linktools.ai.governance.policy.rule import ToolPolicyMetadata
 
     meta_map = await provider.get_metadata_map()
     assert isinstance(meta_map, Mapping)
@@ -51,12 +51,12 @@ async def assert_tool_policy_provider_contract(provider, *, sample_name):
         assert hasattr(meta, field), f"ToolPolicyMetadata missing {field}"
 
 
-async def assert_package_resource_provider_contract(
-    provider, *, package_id, sample_path
+async def assert_extension_resource_provider_contract(
+    provider, *, extension_id, sample_path
 ):
     """list_resources paginates (limit/cursor); read_resource honors max_bytes;
     parent-traversal is rejected."""
-    scope = PackageScope(package_id)
+    scope = ExtensionScope(extension_id)
     page = await provider.list_resources(scope, "", limit=1)
     assert hasattr(page, "next_cursor")
     content = await provider.read_resource(
@@ -67,16 +67,16 @@ async def assert_package_resource_provider_contract(
         await provider.read_resource(ResourceRef(scope, "../escape"))
 
 
-async def assert_entrypoint_resolver_contract(resolver, *, package_id, agent_name):
+async def assert_entrypoint_resolver_contract(resolver, *, extension_id, agent_name):
     """list_entrypoints honors kind filter + pagination; resolve_agent returns a
-    scoped AgentSpec; same-named entrypoints in two packages stay distinct."""
-    scope = PackageScope(package_id)
+    scoped AgentSpec; same-named entrypoints in two extensions stay distinct."""
+    scope = ExtensionScope(extension_id)
     listed = await resolver.list_entrypoints(scope, kind="agent")
     assert any(
-        i.name == agent_name and i.package_id == package_id for i in listed.items
+        i.name == agent_name and i.extension_id == extension_id for i in listed.items
     )
     paged = await resolver.list_entrypoints(scope, kind="agent", limit=1)
     assert len(paged.items) <= 1
     agent = await resolver.resolve_agent(EntrypointRef("agent", agent_name, scope))
     assert isinstance(agent, AgentSpec)
-    assert agent.id == f"package:{package_id}:agent:{agent_name}"
+    assert agent.id == f"extension:{extension_id}:agent:{agent_name}"

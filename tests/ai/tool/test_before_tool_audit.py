@@ -13,13 +13,13 @@ import pytest
 
 from linktools.ai.errors import ToolDeniedError
 from linktools.ai.events.payloads import SecurityDegraded, ToolPipelineDecision
-from linktools.ai.security.emitter import CollectingSecurityEventEmitter
-from linktools.ai.security.emitter import DefaultSecurityEventSanitizer
+from linktools.ai.governance.security.emitter import CollectingSecurityEventEmitter
+from linktools.ai.governance.security.emitter import DefaultSecurityEventSanitizer
 from linktools.ai.tool.models import ToolDescriptor
-from linktools.ai.security.pipeline import PipelineAction, PipelineDecision
+from linktools.ai.governance.security.pipeline import PipelineAction, PipelineDecision
 from linktools.ai.tool.managed import ManagedToolAdapter
-from linktools.ai.tool.executor import ToolExecutor
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.policy import ResolvedToolPolicy
 
 
@@ -38,7 +38,7 @@ def _adapter(
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         policy_provider=None,
         security_pipeline=pipeline,
         baseline_policy=ResolvedToolPolicy(),

@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext, ToolRequest
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
 
@@ -18,7 +18,7 @@ _POLICY = EffectiveToolPolicy()
 def test_execute_timeout_raises_asyncio_timeout_error_when_handler_exceeds_timeout():
     """Case 1: handler sleeps longer than ``timeout`` -> asyncio.TimeoutError
     propagates after retries are exhausted."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler(seconds: float) -> str:
         await asyncio.sleep(seconds)
@@ -43,7 +43,7 @@ def test_execute_max_retries_succeeds_after_failures():
     result is returned. Only TransientToolError is retried."""
     from linktools.ai.errors import TransientToolError
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -69,7 +69,7 @@ def test_execute_max_retries_succeeds_after_failures():
 def test_execute_does_not_retry_permanent_error():
     """A permanent error (RuntimeError) is NOT retried -- the handler runs once
     even with max_retries set."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -96,7 +96,7 @@ def test_execute_max_retries_raises_after_all_attempts_fail():
     after ``max_retries + 1`` total attempts."""
     from linktools.ai.errors import TransientToolError
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -121,7 +121,7 @@ def test_execute_max_retries_raises_after_all_attempts_fail():
 def test_execute_default_no_timeout_no_retry_runs_handler_once():
     """Case 4 (regression): default timeout=None / max_retries=0 -> handler
     invoked exactly once and its result returned (current behavior)."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:

@@ -25,6 +25,25 @@ HARDENING_METRICS = (
     "memory_index_pending_total",
     "memory_index_failed_total",
     "context_injection_flagged_total",
+    # Production-hardening observability floor (audit gap C1). Each name is a
+    # category the hardening plan requires the runtime to count. Names stay
+    # flat (no labels); attributes carry the bounded low-cardinality dimensions
+    # (which capability fell short, which codec phase failed, etc.).
+    "runtime_build_failure_total",
+    "storage_capability_validation_failure_total",
+    "event_codec_failure_total",
+    "critical_event_persist_failure_total",
+    "asset_cas_conflict_total",
+    "artifact_digest_mismatch_total",
+    "artifact_orphan_total",
+    "job_lease_expiry_total",
+    "job_stale_fence_total",
+    "job_recovery_total",
+    "approval_replay_reject_total",
+    "catalog_revision_refresh_total",
+    "external_adapter_conformance_failure_total",
+    "artifact_blob_upload_failure_total",
+    "artifact_orphan_cleanup_failure_total",
 )
 
 

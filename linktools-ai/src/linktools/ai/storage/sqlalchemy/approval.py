@@ -103,12 +103,19 @@ class SqlAlchemyApprovalStore:
         *,
         session_factory: "Callable[[], AsyncSession]",
         session: "AsyncSession | None" = None,
+        metrics: "Any | None" = None,
     ) -> None:
         self._session_factory = session_factory
         # UoW mode: when set, every method uses this shared session directly and
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+        # Optional ObservabilityMetrics sink. When wired, an attempted replay
+        # of an existing (run_id, tool_call_id) approval with different
+        # tool_name/arguments is rejected and increments
+        # ``approval_replay_reject_total``. Default None keeps existing callers
+        # no-op.
+        self._metrics = metrics
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the
@@ -151,7 +158,7 @@ class SqlAlchemyApprovalStore:
     async def list_for_run(self, run_id: str) -> "tuple[ApprovalRequest, ...]":
         # Status-agnostic counterpart to ``list_pending``: returns EVERY
         # request for the run regardless of status, ordered by created_at.
-        # The resume gate (ToolExecutor._already_approved) consults this to
+        # The resume gate (GovernedToolInvoker._already_approved) consults this to
         # recognize a call that was approved externally without re-persisting
         # a PENDING duplicate.
         async def _do(session):
@@ -195,7 +202,7 @@ class SqlAlchemyApprovalStore:
         try:
             await self._execute_in_session(_do)
         except IntegrityError as exc:
-            # Duplicate primary key -> conflict, matching FileApprovalStore's
+            # Duplicate primary key -> conflict, matching FilesystemApprovalStore's
             # "approval already exists" semantics. In UoW mode the IntegrityError
             # has already poisoned the shared transaction (it will roll back);
             # we still translate so callers see the domain error type.
@@ -252,8 +259,13 @@ class SqlAlchemyApprovalStore:
             raise ApprovalConflictError("approval execution binding is incomplete")
         existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
         if existing is not None:
-            check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments,
-                arguments_hash=binding.get("arguments_hash") if binding else None)
+            try:
+                check_dedupe_conflict(existing, tool_name=tool_name, arguments=arguments,
+                    arguments_hash=binding.get("arguments_hash") if binding else None)
+            except ApprovalConflictError:
+                if self._metrics is not None:
+                    self._metrics.counter("approval_replay_reject_total")
+                raise
             return existing
 
         request = build_approval_request(
@@ -279,7 +291,7 @@ class SqlAlchemyApprovalStore:
         # pysqlite "implicit transaction" quirk SQLAlchemy normally papers
         # over with a connect/begin event-listener workaround, which this
         # library cannot install on a caller-supplied engine. Since
-        # AgentRunner's pause path depends on the approval write ACTUALLY
+        # AgentEngine's pause path depends on the approval write ACTUALLY
         # rolling back when a later checkpoint/event write in the same UoW
         # fails (see tests/ai/agent/test_runner_pause_atomic.py's rollback
         # test), that guarantee matters more than isolating the (rare --
@@ -287,7 +299,7 @@ class SqlAlchemyApprovalStore:
         # concurrent same-(run_id, tool_call_id) race architecturally
         # unreachable in practice) conflict path. A real conflict here
         # therefore still fails the whole enclosing transaction (propagates
-        # to AgentRunner's generic except-Exception handler -> Run FAILED)
+        # to AgentEngine's generic except-Exception handler -> Run FAILED)
         # rather than gracefully continuing within it -- the
         # uq_approval_run_tool_call UNIQUE constraint remains the actual
         # data-integrity backstop regardless.
@@ -308,9 +320,14 @@ class SqlAlchemyApprovalStore:
             # why UoW mode does not attempt to recover from this here).
             existing = await self._find_by_run_and_tool_call(run_id, tool_call_id)
             if existing is not None:
-                check_dedupe_conflict(
-                    existing, tool_name=tool_name, arguments=arguments
-                )
+                try:
+                    check_dedupe_conflict(
+                        existing, tool_name=tool_name, arguments=arguments
+                    )
+                except ApprovalConflictError:
+                    if self._metrics is not None:
+                        self._metrics.counter("approval_replay_reject_total")
+                    raise
                 return existing
             raise
 

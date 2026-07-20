@@ -6,7 +6,7 @@ with depth/concurrency/timeout limits read from the ref config (defaults
 max_depth=3, max_concurrency=1, timeout=120).
 
 Subagents are NOT a global default tool -- the tool only exists when an agent
-declares a subagent ref. Package-scoped subagents resolve through the
+declares a subagent ref. Extension-scoped subagents resolve through the
 EntrypointResolver; global ones through the SubagentSpecProvider."""
 
 from dataclasses import dataclass, field
@@ -15,8 +15,8 @@ from typing import Any, Callable, ClassVar
 from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.models import CapabilityRef
-from ..package.resolver import EntrypointResolver
-from ..providers.subagent import SubagentSpecProvider
+from ..extension.resolver import EntrypointResolver
+from .models import SubagentSpecProvider
 from ..run.identity import ParentRunIdentity
 from .runner import (
     DEFAULT_MAX_CONCURRENCY,
@@ -31,7 +31,7 @@ from .toolset import build_subagent_toolset
 @dataclass
 class SubagentProvider:
     """CapabilityProvider for delegated subagents. ``subagent_provider`` backs
-    global agents, ``entrypoint_resolver`` backs package-scoped agents, and
+    global agents, ``entrypoint_resolver`` backs extension-scoped agents, and
     ``executor`` runs the resolved child spec (all injectable for testing)."""
 
     subagent_provider: "SubagentSpecProvider | None" = None
@@ -72,8 +72,8 @@ class SubagentProvider:
         explicit = set(cfg.get("allowed_names") or [])
         if explicit:
             allowed = allowed & explicit
-        # Scoped calls are confined to packages explicitly declared on this ref.
-        allowed_packages = set(cfg.get("allowed_packages") or [])
+        # Scoped calls are confined to extensions explicitly declared on this ref.
+        allowed_extensions = set(cfg.get("allowed_extensions") or [])
 
         # Assembly can happen outside a live run (e.g. static inspection) --
         # only build an identity when the context actually carries one.
@@ -92,7 +92,7 @@ class SubagentProvider:
         # parent lacks (the permission intersection). Only when an explicit set
         # was not configured and we can read the parent spec. On ANY failure to
         # read the parent (unknown id, e.g. a skill-private multi-hop id not in
-        # the AgentRegistry, or a transient store error) FAIL CLOSED with an
+        # the AgentCatalog, or a transient store error) FAIL CLOSED with an
         # empty set -- the child keeps no tools -- never "no constraint".
         parent_delegated = self.parent_delegated_tools
         if (
@@ -117,7 +117,7 @@ class SubagentProvider:
             max_depth=max_depth,
             timeout_seconds=float(timeout) if timeout is not None else None,
             max_concurrency=max_concurrency,
-            allowed_packages=allowed_packages,
+            allowed_extensions=allowed_extensions,
             parent=parent,
             skill_resolver=self.skill_resolver,
             active_skill_provider=self.active_skill_provider,

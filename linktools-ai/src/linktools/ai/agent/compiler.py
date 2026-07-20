@@ -6,7 +6,8 @@ or the filesystem. The compiler accepts no working-directory
 or ExecutionBackend parameter and never constructs ``LocalExecutionBackend``:
 builtin file/terminal tools are constructed at EXECUTION TIME from
 ``AgentDependencies.execution`` and passed to ``agent.iter(prompt, toolsets=)``.
-The compiled Agent carries model + capabilities (policy + middleware) only.
+The compiled Agent carries model + capabilities (policy + middleware) + the
+spec's static instructions (``PromptSpec.instructions``) only.
 
 The compiler never bakes in a default command denylist. The default
 SecurityBaseline (including its CommandRule) is resolved exactly once, by
@@ -20,7 +21,7 @@ from ..middleware.capability import build_middleware_capability
 from ..middleware.pipeline import MiddlewarePipeline
 from ..model.router import ModelRouter
 from ..tool.pydantic import build_policy_capability
-from ..tool.executor import ToolExecutor
+from ..tool.executor import GovernedToolInvoker
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
 from .spec import AgentSpec
@@ -33,12 +34,12 @@ class AgentCompiler:
         self,
         *,
         model_router: ModelRouter,
-        tool_executor: ToolExecutor,
+        tool_executor: GovernedToolInvoker,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
     ) -> None:
         if tool_executor is None:
             raise RuntimeInitializationError(
-                "AgentCompiler requires a ToolExecutor; Runtime.build is the "
+                "AgentCompiler requires a GovernedToolInvoker; Runtime.build is the "
                 "single source of the baseline-governed executor"
             )
         self._model_router = model_router
@@ -61,6 +62,7 @@ class AgentCompiler:
             output_type=spec.output_schema or str,
             capabilities=capabilities,
             deps_type=AgentDependencies,
+            instructions=spec.instructions.instructions,
         )
         return CompiledAgent(
             spec=spec,

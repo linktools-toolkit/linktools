@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ArtifactStore: immutable artifacts over ResourceStore, with content blobs
-separated from per-write lineage records.
+"""ArtifactStore: the artifact domain facade over content-addressed blobs and
+per-write lineage records.
 
-The blob store, versioning, conditional writes and idempotency already live in
-:class:`ResourceStore`; this layer adds the artifact domain rules -- content
-deduplication by sha256 (identical bytes share one blob via ``if_none_match``),
-a fresh UUID :class:`ArtifactRecord` per put (so each production event keeps its
-own provenance, even for identical content), tenant scoping, and read-time
-integrity verification. No new file or database backend.
+The facade depends on the stable :class:`ArtifactBlobStore` and
+:class:`ArtifactRecordStore` Protocols -- NOT on :class:`AssetStore`. That
+decouples the artifact domain from the asset domain entirely (this module
+imports no asset symbol). The asset-backed reference implementation of the
+Protocols lives in the storage infrastructure layer
+(:mod:`linktools.ai.storage.artifact_backends`); an external object store or
+DB can implement the same Protocols and be injected via the constructor.
 
-Every read is tenant-scoped and FAIL_CLOSED: a caller learns nothing about an
-artifact owned by another tenant (not its metadata, not its bytes) -- lineage
-in one record cannot be followed into a foreign artifact.
+Domain rules the facade owns: content deduplication by sha256 (identical bytes
+share one blob), a fresh UUID :class:`ArtifactRecord` per put (each production
+event keeps its own provenance), tenant scoping, and read-time integrity
+verification. Every read is tenant-scoped and FAIL_CLOSED.
 """
 
 import hashlib
-import json
 import uuid
 from datetime import datetime, timezone
+from typing import AsyncIterator
 
-from ..errors import ResourcePreconditionFailedError
-from ..storage.resource.models import WriteOptions
-from ..storage.resource.path import ResourcePath
-from ..storage.resource.store import ResourceStore
+from ..storage.protocols import ArtifactBlobStore, ArtifactRecordStore
 from .models import ArtifactIntegrityError, ArtifactRecord, ArtifactRef
 
 
@@ -32,14 +31,12 @@ def _utcnow() -> datetime:
 
 
 def _coerce_utc(moment: datetime) -> datetime:
-    # A naive datetime has no defined zone; assume the caller meant UTC rather
-    # than silently persisting a timestamp that breaks tz-aware comparisons.
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
     return moment
 
 
-def _record_to_jsonable(record: ArtifactRecord) -> dict:
+def record_to_jsonable(record: ArtifactRecord) -> dict:
     return {
         "ref": {
             "id": record.ref.id,
@@ -57,7 +54,7 @@ def _record_to_jsonable(record: ArtifactRecord) -> dict:
     }
 
 
-def _record_from_jsonable(data: dict) -> ArtifactRecord:
+def record_from_jsonable(data: dict) -> ArtifactRecord:
     ref = ArtifactRef(
         id=data["ref"]["id"],
         sha256=data["ref"]["sha256"],
@@ -76,31 +73,35 @@ def _record_from_jsonable(data: dict) -> ArtifactRecord:
     )
 
 
+async def _bytes_to_async_iter(content: bytes) -> AsyncIterator[bytes]:
+    yield content
+
+
 class ArtifactStore:
-    """Content-addressed blobs with per-write lineage records.
+    """Content-addressed blobs with per-write lineage records, over the
+    :class:`ArtifactBlobStore` and :class:`ArtifactRecordStore` Protocols.
 
-    The CONTENT is deduplicated by sha256 (identical bytes share one blob). The
-    RECORD is minted fresh on every put (a UUID id), so each production event --
-    even of identical content -- keeps its own provenance (created_by_*,
-    parent_artifact_ids). Reads are tenant-scoped and integrity-verified: a
-    caller learns nothing about another tenant's artifact, and a tampered blob
-    is detected on read."""
+    CONTENT is deduplicated by sha256 (identical bytes share one blob). A
+    fresh RECORD is minted per put (a UUID id), so each production event --
+    even of identical content -- keeps its own provenance. Reads are
+    tenant-scoped and integrity-verified: a caller learns nothing about another
+    tenant's artifact, and a tampered blob is detected on read.
+    """
 
-    def __init__(self, resources: ResourceStore, *, root: str = "artifacts") -> None:
-        self._resources = resources
-        base = ResourcePath(f"/{root}")
-        self._blobs_root = base.child("blobs").child("sha256")
-        self._records_root = base.child("records")
-
-    def _blob_path(self, sha: str) -> ResourcePath:
-        return self._blobs_root.child(sha[:2]).child(sha)
-
-    def _record_path(self, tenant_id: str, artifact_id: str) -> ResourcePath:
-        # Records are tenant-scoped: identical content from different tenants
-        # shares the content blob but each tenant owns a private record, so a
-        # foreign caller cannot find (or be locked out of) another tenant's
-        # artifact by guessing a content hash.
-        return self._records_root.child(tenant_id).child(f"{artifact_id}.json")
+    def __init__(
+        self,
+        blob_store: ArtifactBlobStore,
+        record_store: ArtifactRecordStore,
+        *,
+        metrics: "Any | None" = None,
+    ) -> None:
+        self._blob = blob_store
+        self._records = record_store
+        # Optional ObservabilityMetrics sink. When wired, a digest mismatch on
+        # read increments ``artifact_digest_mismatch_total`` and a put failure
+        # (blob upload side) increments ``artifact_blob_upload_failure_total``.
+        # Default None keeps existing callers no-op.
+        self._metrics = metrics
 
     async def put(
         self,
@@ -116,33 +117,22 @@ class ArtifactStore:
         now: "datetime | None" = None,
     ) -> ArtifactRecord:
         sha = hashlib.sha256(content).hexdigest()
-        # Content is deduplicated by sha256: the same bytes land at one blob
-        # path. if_none_match fails if the blob is already present -- treat that
-        # as reuse, but VERIFY the stored blob actually hashes to ``sha``: a
-        # mismatch means the blob at this path is corrupt/tampered, and creating
-        # a new ArtifactRecord pointing at it would propagate corruption.
+        # Content dedup: put_if_absent is idempotent on digest and verifies the
+        # claimed digest matches the bytes.
         try:
-            await self._resources.put(
-                self._blob_path(sha),
-                content,
-                options=WriteOptions(if_none_match=True, content_type=media_type),
+            await self._blob.put_if_absent(
+                digest=sha, source=_bytes_to_async_iter(content), size=len(content)
             )
-        except ResourcePreconditionFailedError:
-            existing = await self._resources.get(self._blob_path(sha))
-            if existing is None:
-                raise ArtifactIntegrityError(
-                    f"blob for sha256 {sha[:12]} vanished during put"
+        except Exception:
+            # The blob-store-level mismatch already records itself when its
+            # own sink is wired; record at the facade too so a caller that
+            # only wires the facade still observes the failure.
+            if self._metrics is not None:
+                self._metrics.counter(
+                    "artifact_blob_upload_failure_total",
+                    attributes={"reason": "digest_or_store"},
                 )
-            actual = hashlib.sha256(existing.content).hexdigest()
-            if actual != sha:
-                raise ArtifactIntegrityError(
-                    f"blob at sha256 {sha[:12]} is corrupt (actual {actual[:12]}); "
-                    f"refusing to record a reference to it"
-                )
-
-        # A fresh record PER put: distinct id even for identical content, so the
-        # second producer keeps its own lineage (the bug was that identical
-        # content reused one record and lost the second job/task's provenance).
+            raise
         artifact_id = f"art-{uuid.uuid4().hex}"
         record = ArtifactRecord(
             ref=ArtifactRef(
@@ -156,37 +146,12 @@ class ArtifactStore:
             created_at=_coerce_utc(now) if now is not None else _utcnow(),
             metadata=dict(metadata) if metadata else {},
         )
-        payload = json.dumps(_record_to_jsonable(record)).encode("utf-8")
-        await self._resources.put(
-            self._record_path(tenant_id, artifact_id),
-            payload,
-            options=WriteOptions(
-                if_none_match=True, content_type="application/json"
-            ),
-        )
-        stored = await self._resources.get(
-            self._record_path(tenant_id, artifact_id)
-        )
-        if stored is None:  # pragma: no cover - invariant: records are never deleted
-            raise ArtifactIntegrityError(
-                f"artifact {artifact_id} record missing after write"
-            )
-        return _record_from_jsonable(json.loads(stored.content.decode("utf-8")))
+        return await self._records.put(record)
 
     async def stat(
         self, artifact_id: str, *, tenant_id: str
     ) -> "ArtifactRecord | None":
-        resource = await self._resources.get(
-            self._record_path(tenant_id, artifact_id)
-        )
-        if resource is None:
-            return None
-        record = _record_from_jsonable(json.loads(resource.content.decode("utf-8")))
-        # The record path is already tenant-scoped; this check is defense in
-        # depth (a record should never carry a foreign tenant_id).
-        if record.tenant_id != tenant_id:
-            return None
-        return record
+        return await self._records.get(artifact_id, tenant_id=tenant_id)
 
     async def get(self, artifact_id: str, *, tenant_id: str) -> "bytes | None":
         # Tenant gate runs before content fetch so a foreign caller learns
@@ -194,17 +159,17 @@ class ArtifactStore:
         record = await self.stat(artifact_id, tenant_id=tenant_id)
         if record is None:
             return None
-        resource = await self._resources.get(self._blob_path(record.ref.sha256))
-        if resource is None:
-            return None
+        content = b"".join([chunk async for chunk in self._blob.open(digest=record.ref.sha256)])
         # Integrity: the stored blob must hash back to the sha256 the record
         # pinned -- catches tampering or a stale address.
-        actual = hashlib.sha256(resource.content).hexdigest()
+        actual = hashlib.sha256(content).hexdigest()
         if actual != record.ref.sha256:
+            if self._metrics is not None:
+                self._metrics.counter("artifact_digest_mismatch_total")
             raise ArtifactIntegrityError(
                 f"artifact {artifact_id} blob sha256 mismatch: {actual}"
             )
-        return resource.content
+        return content
 
 
 __all__: "list[str]" = ["ArtifactStore"]

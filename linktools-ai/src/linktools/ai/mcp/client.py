@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from ..errors import MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError
 from ..json import canonical_json
-from ..registry.mcp import MCPServerSpec
+from .spec import MCPServerSpec
 
 _LOGGER = logging.getLogger(__name__)
 

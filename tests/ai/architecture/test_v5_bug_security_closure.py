@@ -18,10 +18,10 @@ from linktools.ai._runtime.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError
 from linktools.ai.execution.local import _run_file_tool_sync
 from linktools.ai.runtime import Runtime
-from linktools.ai.security.pipeline import validate_model_decision
-from linktools.ai.security.secured_model import SecuredModel
+from linktools.ai.governance.security.pipeline import validate_model_decision
+from linktools.ai.governance.security.secured_model import SecuredModel
 from linktools.ai.session.models import SessionRecord
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 # --- SEC-01: symlink reads confined to resolved roots -----------------------
@@ -52,7 +52,7 @@ def test_v5_secured_model_honors_modify_and_validates():
     assert "_replace_last_user_text" in src
     assert "_replace_model_response_output" in src
     # validate_model_decision rejects REQUIRE_APPROVAL at before_model.
-    from linktools.ai.security.pipeline import PipelineAction, PipelineDecision
+    from linktools.ai.governance.security.pipeline import PipelineAction, PipelineDecision
     from linktools.ai.errors import PipelineExecutionError
 
     with pytest.raises(PipelineExecutionError):
@@ -70,7 +70,7 @@ def test_v5_session_record_carries_owner_and_resolve_enforces(tmp_path):
 
     import asyncio
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = asyncio.run(resolve_session(storage, None, user_id="u-a", tenant_id="t-a"))
     with pytest.raises(SessionAccessDeniedError):
         asyncio.run(resolve_session(storage, sid, user_id="u-a", tenant_id="t-b"))
@@ -80,22 +80,25 @@ def test_v5_session_record_carries_owner_and_resolve_enforces(tmp_path):
 
 
 def test_v5_runtime_recovery_is_serialized():
-    assert hasattr(Runtime, "_ensure_recovered")
-    # The lock is created per-instance; the attribute must exist after build.
+    # The crash-recovery guard lives on RunCoordinator (Runtime delegates all
+    # run-lifecycle methods there); the lock is created per-instance.
+    from linktools.ai.run.coordinator import RunCoordinator
+
+    assert hasattr(RunCoordinator, "_ensure_recovered")
     import tempfile
 
-    rt = Runtime.build(storage=FileStorage(root=tempfile.mkdtemp()))
-    assert hasattr(rt, "_recovery_lock")
-    assert hasattr(rt, "_recovery_done")
+    rt = Runtime.build(storage=FilesystemStorage(root=tempfile.mkdtemp()))
+    assert hasattr(rt._coordinator, "_recovery_lock")
+    assert hasattr(rt._coordinator, "_recovery_done")
 
 
 # --- BUG-02: file session messages published only after commit -------------
 
 
 def test_v5_file_complete_publishes_messages_after_run_transition():
-    from linktools.ai.storage.file import commit as commit_mod
+    from linktools.ai.storage.filesystem import commit as commit_mod
 
-    src = inspect.getsource(commit_mod.FileRunCommitCoordinator.complete)
+    src = inspect.getsource(commit_mod.FilesystemRunCommitCoordinator.complete)
     # Session messages are appended AFTER the run transition (commit point).
     pos_transition = src.index("RUN_TRANSITIONED")
     pos_messages = src.index("_append_messages_once")
@@ -108,10 +111,10 @@ def test_v5_file_complete_publishes_messages_after_run_transition():
 
 
 def test_v5_file_critical_event_helper_does_not_swallow():
-    from linktools.ai.storage.file import commit as commit_mod
+    from linktools.ai.storage.filesystem import commit as commit_mod
 
     src = inspect.getsource(
-        commit_mod.FileRunCommitCoordinator._append_critical_event_once
+        commit_mod.FilesystemRunCommitCoordinator._append_critical_event_once
     )
     # The append must NOT be wrapped in a broad except (it must propagate so the
     # journal is retained).
@@ -125,9 +128,9 @@ def test_v5_file_critical_event_helper_does_not_swallow():
 
 
 def test_v5_runner_runs_after_run_before_complete():
-    from linktools.ai.agent.runner import AgentRunner
+    from linktools.ai.agent.runner import AgentEngine
 
-    src = inspect.getsource(AgentRunner.execute)
+    src = inspect.getsource(AgentEngine.execute)
     pos_after_run = src.index("run_after_run")
     pos_complete = src.index("_commit_coordinator.complete")
     assert pos_after_run < pos_complete, (
@@ -142,9 +145,41 @@ def test_v5_runner_runs_after_run_before_complete():
 def test_v5_runner_persists_original_prompt_not_model_prompt():
     from linktools.ai.agent import runner as runner_mod
 
-    src = inspect.getsource(runner_mod.AgentRunner.execute)
+    src = inspect.getsource(runner_mod.AgentEngine.execute)
     assert "user_content = prompt" not in src, (
         "the USER session message must be request.prompt, never the concatenated "
         "model prompt"
     )
-    assert "_format_session_history" in inspect.getsource(runner_mod)
+    # Session history is folded into the MODEL prompt with explicit role
+    # prefixes (so an assistant turn is never disguised as user content). The
+    # formatter moved to the prompt domain's PromptBuilder (Phase 8 op 3); the
+    # runner delegates composition to it. Lock the behavior directly rather
+    # than the old "function name in runner source" structural proxy.
+    from datetime import datetime, timezone
+
+    from linktools.ai.prompt.builder import PromptBuilder
+    from linktools.ai.session.models import MessageRole, SessionMessage
+
+    now = datetime.now(timezone.utc)
+
+    def _msg(role, content):
+        return SessionMessage(
+            id=f"{role.value}-{content}",
+            session_id="s",
+            sequence=0,
+            role=role,
+            content=content,
+            run_id=None,
+            created_at=now,
+        )
+
+    folded = PromptBuilder.format_session_history(
+        [_msg(MessageRole.ASSISTANT, "hi"), _msg(MessageRole.USER, "ok")]
+    )
+    assert "ASSISTANT: hi" in folded and "USER: ok" in folded, (
+        "session history must be folded with role prefixes so an assistant turn "
+        "is not disguised as user content"
+    )
+    # And the runner must still drive composition through PromptBuilder (not
+    # re-inline it): both call sites are present in execute()'s source.
+    assert "PromptBuilder.build_base_prompt" in src and "PromptBuilder.combine" in src

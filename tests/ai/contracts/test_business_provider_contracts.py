@@ -7,8 +7,8 @@ import pytest
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.registry.mcp import MCPServerSpec
-from linktools.ai.registry.skill import SkillSpec
+from linktools.ai.mcp.spec import MCPServerSpec
+from linktools.ai.skill.models import SkillSpec
 
 from ._assertions import assert_spec_provider_contract
 

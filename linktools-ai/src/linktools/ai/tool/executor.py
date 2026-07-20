@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolExecutor: consults PolicyEngine before a tool executes, translating
-its decision into the corresponding domain error.
+"""GovernedToolInvoker: consults PolicyEngine before a tool
+executes, translating its decision into the corresponding domain error, then
+owns the idempotency-claim lifecycle around the call. Raw invocation
+(timeout, lease-renew heartbeat, transient-error retry) is delegated to a
+``ToolInvoker`` (``tool.invoker``) it constructs internally -- "whether/under
+what governance a call may run" stays separate from "how a handler is safely
+called".
 
 Approval flow: the executor mints an ``approval_id`` and raises ``RunPaused``
-carrying every field needed to build the ApprovalRequest. AgentRunner's pause
+carrying every field needed to build the ApprovalRequest. AgentEngine's pause
 handler then persists the ApprovalRequest (deduping on
 ``(run_id, tool_call_id)``) alongside the checkpoint save + WAITING_APPROVAL
 transition + pause events -- on a cross-store-transactional Storage that
@@ -25,8 +30,9 @@ from ..errors import (
     RunPaused,
     ToolDeniedError,
 )
-from ..policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
+from ..governance.policy.engine import PolicyDecisionKind, PolicyEngine, ToolContext, ToolRequest
 from .idempotency import IdempotencyStore, compute_request_hash
+from .invoker import ToolInvoker
 
 if TYPE_CHECKING:
     from ..agent.approval import ApprovalStore
@@ -37,7 +43,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-class ToolExecutor:
+class GovernedToolInvoker:
     def __init__(
         self,
         *,
@@ -62,93 +68,15 @@ class ToolExecutor:
         self._receipt_store = receipt_store
         self._tenant_id_resolver = tenant_id_resolver
         self._metrics = metrics
-        # Retry is policy-driven: only clearly-transient errors, and never a
-        # mutating non-idempotent tool. DefaultRetryPolicy when none supplied.
-        from .retry import DefaultRetryPolicy
-
-        self._retry_policy = retry_policy or DefaultRetryPolicy()
-
-    async def _invoke_handler(self, handler, arguments, timeout, claim):
-        """Invoke the handler once with timeout and -- when idempotency options
-        are configured and a claim is held -- a background lease-renew
-        heartbeat. Returns the result or raises."""
-        if self._idempotency_options is not None and claim is not None:
-            return await self._run_with_heartbeat(
-                handler(**arguments), claim, timeout
-            )
-        if timeout is not None:
-            return await asyncio.wait_for(handler(**arguments), timeout=timeout)
-        return await handler(**arguments)
-
-    async def _run_with_heartbeat(self, coro, claim, timeout):
-        """Run ``coro`` as a task while a background loop renews the claim's
-        lease. If a renew fails the claim was stolen -- the handler task is
-        cancelled (it must not keep producing side effects under a lost claim)
-        and LostIdempotencyClaimError is raised."""
-        from datetime import datetime, timezone
-
-        from ..errors import LostIdempotencyClaimError
-
-        options = self._idempotency_options
-        handler_task = asyncio.ensure_future(coro)
-        lease_lost = []
-        # The claim's persisted expiry is the last point at which this worker
-        # is allowed to produce side effects. Transient renew failures cannot
-        # extend that deadline locally.
-        confirmed_deadline = getattr(claim, "lease_expires_at", None)
-
-        async def _heartbeat():
-            nonlocal confirmed_deadline
-            while True:
-                await asyncio.sleep(options.heartbeat_seconds)
-                try:
-                    renewed = await self._idempotency_store.renew(
-                        claim,
-                        now=datetime.now(timezone.utc),
-                        lease_seconds=options.lease_seconds,
-                    )
-                    confirmed_deadline = renewed.lease_expires_at
-                except LostIdempotencyClaimError as exc:
-                    if self._metrics is not None:
-                        self._metrics.counter("tool_idempotency_lease_lost_total")
-                    # Claim stolen / superseded: stop the handler so it does not
-                    # keep producing side effects under a lost claim.
-                    lease_lost.append(exc)
-                    handler_task.cancel()
-                    return
-                except Exception:
-                    # Transient store error: retry only while the last
-                    # confirmed lease is still valid. Once it expires, stop
-                    # the handler fail-closed; another worker may reclaim it.
-                    if confirmed_deadline is not None and datetime.now(timezone.utc) >= confirmed_deadline:
-                        exc = LostIdempotencyClaimError(
-                            f"idempotent claim ({claim.scope}, {claim.key}) lease expired"
-                        )
-                        lease_lost.append(exc)
-                        handler_task.cancel()
-                        return
-                    continue
-
-        heartbeat = asyncio.create_task(_heartbeat())
-        try:
-            if timeout is not None:
-                return await asyncio.wait_for(handler_task, timeout=timeout)
-            return await handler_task
-        except asyncio.CancelledError:
-            # Distinguish a lease-loss cancellation (heartbeat cancelled the
-            # handler) from an external cancellation.
-            if lease_lost:
-                raise LostIdempotencyClaimError(
-                    f"idempotent claim ({claim.scope}, {claim.key}) "
-                    f"was stolen mid-execution"
-                ) from lease_lost[0]
-            raise
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
+        # Raw handler invocation (timeout/heartbeat/retry) is ToolInvoker's
+        # job; this class owns only the governance wrapped around that call
+        # (policy check, approval gate, idempotency-claim lifecycle).
+        self._invoker = ToolInvoker(
+            idempotency_store=idempotency_store,
+            idempotency_options=idempotency_options,
+            retry_policy=retry_policy,
+            metrics=metrics,
+        )
 
     async def check(self, request: ToolRequest, context: ToolContext) -> None:
         decision = await self._policy.evaluate(request, context)
@@ -170,7 +98,7 @@ class ToolExecutor:
                 else context.run_id
             )
             # The executor only emits the domain signal (RunPaused); it does
-            # NOT persist approval state. AgentRunner's pause handler persists
+            # NOT persist approval state. AgentEngine's pause handler persists
             # the ApprovalRequest atomically with the checkpoint/transition/
             # event writes, so there is a single approval path.
             tool_call_id = context.tool_call_id or str(uuid.uuid4())
@@ -447,55 +375,38 @@ class ToolExecutor:
                 )
             claim = claim_result.claim
         arguments = dict(request.arguments)
-        from .retry import backoff_delay
-        from ..errors import LostIdempotencyClaimError  # noqa: F401 (isinstance below)
+        from ..errors import LostIdempotencyClaimError
 
         # --- Handler phase: retry transient HANDLER errors only. A failure
         # caught here means the side effect may NOT have happened yet, so
         # retrying the Handler is safe. The fenced idempotency commit is
         # intentionally OUT of this loop so a commit failure can never resolve
         # by re-invoking the Handler (the forbidden commit-failure-retries-handler pattern).
-        last_error: "Exception | None" = None
-        result: "Any" = None
-        succeeded = False
-        attempt = 0
-        while True:
-            try:
-                result = await self._invoke_handler(handler, arguments, timeout, claim)
-                succeeded = True
-                break
-            except Exception as exc:  # noqa: BLE001 - decide via retry policy
-                if isinstance(exc, LostIdempotencyClaimError):
-                    # Claim was stolen mid-execution: do not retry and do not
-                    # fail the (already-lost) claim -- propagate to the caller.
-                    raise
-                last_error = exc
-                if attempt >= max_retries:
-                    break
-                if not self._retry_policy.should_retry(
-                    error=exc,
-                    attempt=attempt,
-                    policy=effective_policy,
-                    descriptor=descriptor,
-                ):
-                    break
-                # Transient: back off (cancellable) and retry.
-                await asyncio.sleep(backoff_delay(attempt + 1))
-                attempt += 1
-
-        if not succeeded:
+        # ToolInvoker owns the actual invoke/timeout/heartbeat/retry mechanics;
+        # this method owns only what happens to the CLAIM around that attempt.
+        try:
+            result = await self._invoker.run_with_retry(
+                handler,
+                arguments,
+                timeout=timeout,
+                claim=claim,
+                max_retries=max_retries,
+                effective_policy=effective_policy,
+                descriptor=descriptor,
+            )
+        except LostIdempotencyClaimError:
+            # Claim was stolen mid-execution: do not fail the (already-lost)
+            # claim -- propagate to the caller.
+            raise
+        except Exception as last_error:  # noqa: BLE001 - handler/retry exhausted
             # Handler never returned: no confirmed side effect, so failing the
             # claim is safe.
             if use_idempotency:
-                from ..security.redact import redact_exception
+                from ..governance.security.redact import redact_exception
 
-                safe_error = (
-                    redact_exception(last_error)
-                    if last_error is not None
-                    else "unknown error"
-                )
+                safe_error = redact_exception(last_error)
                 await self._idempotency_store.fail(claim, safe_error)
-            raise last_error  # type: ignore[misc]
+            raise
 
         # --- Commit phase: the Handler succeeded (its side effect happened).
         # Record the execution receipt, then land the fenced commit. A failure

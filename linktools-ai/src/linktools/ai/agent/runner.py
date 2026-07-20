@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentRunner: owns the per-invocation lifecycle -- Run state transitions,
+"""AgentEngine: owns the per-invocation lifecycle -- Run state transitions,
 Session history load/append, runner-driven Middleware hooks (before_run/after_run/
 on_error), Event publication, Checkpoint save. The 4 pydantic-ai-intercepted hooks
 fire via MiddlewareCapability, enabled by passing deps=AgentDependencies(...) to
@@ -33,12 +33,15 @@ Message-history adaptation is a text-join MVP (SessionMessage.content values
 prepended to the prompt). Checkpoint payload uses pydantic-ai's
 ModelMessagesTypeAdapter via serialize_messages().
 
-Optional Memory + Knowledge injection: when ``memory_store`` and/or
-``retriever`` are wired, ``execute()`` queries them with the user prompt and
-prepends ``## Memory`` / ``## Knowledge`` sections to the prompt sent to the
-model. Both default to None, so existing callers see no change. Final prompt
-order (when both are set and non-empty): ``## Knowledge`` on top, then
-``## Memory``, then session history, then the user prompt.
+Prompt template composition itself is owned by
+:class:`~linktools.ai.prompt.builder.PromptBuilder` (the prompt domain, per
+plan §4.2): ``execute()`` fetches the memory + knowledge sections via their
+async policies and hands user_prompt / prior_messages / those sections to
+``PromptBuilder.build_base_prompt()``, then folds the capability-resolved
+prompt sections in via ``PromptBuilder.combine()``. Final model prompt order
+(when all are set and non-empty): capability catalog, ``## Knowledge``,
+``## Memory``, session history, user prompt. Both memory + knowledge default
+to None, so existing callers see no change.
 
 Optional Observability: when ``observability`` is wired, ``execute()``
 wraps the lifecycle in an outer ``agent.run`` span and the iter() drive in a
@@ -72,8 +75,9 @@ from ..events.context import EventContext, append_event
 from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
-from ..policy.engine import ToolContext
-from ..security.redact import redact_exception
+from ..prompt.builder import PromptBuilder
+from ..governance.policy.engine import ToolContext
+from ..governance.security.redact import redact_exception
 from ..run.cancellation import CancellationToken
 from ..run.checkpoint import CheckpointStore
 from ..run.commit import CompleteRunCommand, PauseRunCommand
@@ -103,11 +107,11 @@ if TYPE_CHECKING:
     from ..capability.assembler import CapabilityAssembler
     from ..capability.models import CapabilityRuntimeOptions
     from ..execution.protocols import ExecutionBackend
-    from ..knowledge.retriever import Retriever
-    from ..session.models import SessionMessage
+    from ..retrieval.retriever import Retriever
     from ..memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
+    from ..run.dispatch import RunDispatchRequest
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -116,27 +120,12 @@ _LOGGER = logging.getLogger(__name__)
 @contextlib.asynccontextmanager
 async def _noop_span():
     """Async context manager that yields ``None`` and does nothing -- the
-    fallback for :meth:`AgentRunner._span` when observability is not wired,
+    fallback for :meth:`AgentEngine._span` when observability is not wired,
     so the lifecycle body has a single ``async with`` shape regardless."""
     yield None
 
 
-def _format_session_history(messages: "Sequence[SessionMessage]") -> str:
-    """Render prior session messages into the MODEL prompt with role prefixes,
-    so an assistant turn is not disguised as user content. This is injected
-    into the model prompt only -- the persisted USER session message is always
-    the caller's original prompt, never this rendering."""
-    lines: "list[str]" = []
-    for message in messages:
-        role = message.role.value.upper()
-        content = message.content
-        if not isinstance(content, str):
-            content = repr(content)
-        lines.append(f"{role}: {content}")
-    return "\n".join(lines)
-
-
-class AgentRunner:
+class AgentEngine:
     def __init__(
         self,
         *,
@@ -197,7 +186,7 @@ class AgentRunner:
         self._security_pipeline = security_pipeline
         self._baseline_policy = baseline_policy
         self._tool_policy_provider = tool_policy_provider
-        # The ToolExecutor every managed tool delegates to. Constructor-injected
+        # The GovernedToolInvoker every managed tool delegates to. Constructor-injected
         # (Runtime.build passes the compiler's executor) so the runner is fully
         # wired at construction -- no post-build private-field mutation.
         self._tool_executor_for_managed = managed_tool_executor
@@ -464,37 +453,39 @@ class AgentRunner:
                 # concatenated ``prompt`` below is the MODEL prompt (history +
                 # memory + knowledge + user) -- never persisted verbatim, so
                 # internal runtime context cannot leak into session history.
+                # Template composition itself lives in PromptBuilder
+                # (linktools.ai.prompt); this block only fetches the memory and
+                # knowledge sections via their (async) policies, then hands the
+                # parts to the builder.
                 user_prompt = request.prompt
                 prompt: "str | None" = None
                 if message_history is None:
-                    history_text = _format_session_history(prior_messages)
-                    prompt = (
-                        f"{history_text}\n{user_prompt}"
-                        if history_text
-                        else user_prompt
-                    )
-
                     # Memory + Knowledge injection via substitutable policies.
                     # Each fires only when its policy is wired (explicit on
                     # options, or the runner's default built from a wired store/
-                    # retriever) AND yields a non-empty section. Memory is
-                    # injected first, then knowledge -- both prepend, so the
-                    # final top-to-bottom order is: Knowledge, Memory, history,
-                    # user prompt.
+                    # retriever) AND yields a non-empty section.
+                    memory_section = ""
                     memory_policy = self._effective_memory_policy()
                     if memory_policy is not None:
                         memories = await memory_policy.select_memories(
                             context, user_prompt
                         )
-                        section = self._prompt_formatter().format_memory(memories)
-                        if section:
-                            prompt = f"{section}\n{prompt}"
+                        memory_section = (
+                            self._prompt_formatter().format_memory(memories) or ""
+                        )
+                    knowledge_section = ""
                     retrieval_policy = self._effective_retrieval_policy()
                     if retrieval_policy is not None:
                         items = await retrieval_policy.retrieve(context, user_prompt)
-                        section = self._prompt_formatter().format_knowledge(items)
-                        if section:
-                            prompt = f"{section}\n{prompt}"
+                        knowledge_section = (
+                            self._prompt_formatter().format_knowledge(items) or ""
+                        )
+                    prompt = PromptBuilder.build_base_prompt(
+                        user_prompt=user_prompt,
+                        prior_messages=prior_messages,
+                        memory_section=memory_section,
+                        knowledge_section=knowledge_section,
+                    )
 
                 # -- Model call: agent.pydantic_agent.iter() drives the graph.
                 # The per-Run ToolContext travels to capabilities via pydantic-ai
@@ -522,7 +513,6 @@ class AgentRunner:
                     execution=self._execution,
                 )
                 toolsets: "list[AbstractToolset]" = []
-                capability_prompt = ""
                 cap_bundle = None
                 # All tools go through the capability assembler + ManagedToolAdapter.
                 # tools=None + execution -> default builtin via assembler (no raw bypass).
@@ -549,13 +539,13 @@ class AgentRunner:
                     from ..errors import RuntimeInitializationError
 
                     raise RuntimeInitializationError(
-                        "AgentRunner requires a CapabilityAssembler to resolve tools"
+                        "AgentEngine requires a CapabilityAssembler to resolve tools"
                     )
                 if requires_tools and self._tool_executor_for_managed is None:
                     from ..errors import RuntimeInitializationError
 
                     raise RuntimeInitializationError(
-                        "AgentRunner requires a ToolExecutor for managed tool execution"
+                        "AgentEngine requires a GovernedToolInvoker for managed tool execution"
                     )
                 if requires_tools:
                     from ..capability.exposure import CapabilityToolExposurePolicy
@@ -566,7 +556,7 @@ class AgentRunner:
                         if self._capability_options is not None
                         else CapabilityToolExposurePolicy()
                     )
-                    from ..security.emitter import EventStoreSecurityEventEmitter
+                    from ..governance.security.emitter import EventStoreSecurityEventEmitter
 
                     cap_ctx = CapabilityContext(
                         agent_id=agent.spec.id,
@@ -628,7 +618,7 @@ class AgentRunner:
                         )
                     # Every ToolContribution ALWAYS goes through
                     # ManagedToolsetWrapper -> ManagedToolAdapter ->
-                    # ToolExecutor.execute, whether or not a security object is
+                    # GovernedToolInvoker.execute, whether or not a security object is
                     # configured. The managed path owns more than security --
                     # timeout, retry, idempotency, stable errors, events, call
                     # id -- so disabling the baseline must NOT route tools back
@@ -685,9 +675,6 @@ class AgentRunner:
                         ToolExposureApplied(agent_id=agent.spec.id, total_tools=total),
                     )
                     if cap_bundle.prompt_sections:
-                        capability_prompt = "\n\n".join(
-                            cap_bundle.prompt_sections.values()
-                        )
                         for section in cap_bundle.prompt_sections:
                             await append_event(
                                 self._event_store,
@@ -712,16 +699,18 @@ class AgentRunner:
                 # is observationally invisible on the default path.
                 if token is not None:
                     await token.raise_if_cancelled()
-                # On resume, prompt is None (the prompt is baked into the
-                # checkpointed message_history) and capability_prompt must NOT
-                # be re-concatenated (it already lives in the history). Building
-                # ``capability_prompt + "\n\n" + prompt`` here would be str+None.
-                if message_history is not None:
-                    effective_prompt = None
-                elif capability_prompt:
-                    effective_prompt = f"{capability_prompt}\n\n{prompt}"
-                else:
-                    effective_prompt = prompt
+                # PromptBuilder.combine folds the capability-resolved prompt
+                # sections (if any) in front of the base prompt. On resume it
+                # returns None -- the prompt is baked into the checkpointed
+                # message_history and must not be re-fed alongside it.
+                effective_prompt = PromptBuilder.combine(
+                    base_prompt=prompt,
+                    capability_sections=(
+                        cap_bundle.prompt_sections if cap_bundle is not None else {}
+                    ),
+                    static_sections=agent.spec.instructions.sections,
+                    resuming=message_history is not None,
+                )
                 # WP-13: wrap the model so the security pipeline fires
                 # before_model/after_model around EVERY model request (a tool
                 # loop drives several), not just once around the whole run.
@@ -729,7 +718,7 @@ class AgentRunner:
                 # agent is never mutated.
                 iter_model = None
                 if self._security_pipeline is not None:
-                    from ..security.secured_model import SecuredModel
+                    from ..governance.security.secured_model import SecuredModel
 
                     iter_model = SecuredModel(
                         agent.pydantic_agent.model,
@@ -901,7 +890,7 @@ class AgentRunner:
                                 # generator without triggering a cross-task
                                 # cancel-scope exit.
                                 #
-                                # ToolExecutor
+                                # GovernedToolInvoker
                                 # no longer persists the ApprovalRequest itself
                                 # -- ``paused`` carries every field needed to
                                 # build it, and THIS handler is the one that
@@ -927,7 +916,7 @@ class AgentRunner:
                                 # create_or_get_pending may return an
                                 # EXISTING approval (dedup on tool_call_id)
                                 # whose id differs from the fresh
-                                # ``paused.approval_id`` ToolExecutor minted.
+                                # ``paused.approval_id`` GovernedToolInvoker minted.
                                 # Resolve the id FIRST, then build the
                                 # checkpoint/event payloads from the resolved
                                 # id -- otherwise a dedup hit would leave the
@@ -1356,6 +1345,12 @@ class AgentRunner:
         raise RunInvariantError(
             f"run {context.run_id} completed without a persisted result"
         )
+
+    async def dispatch(self, request: "RunDispatchRequest") -> RunResult:
+        """RunDispatcher adapter: lets Swarm/Subagent execution depend on the
+        narrow RunDispatcher Protocol instead of importing AgentEngine
+        directly."""
+        return await self.run(request.agent, request.input, request.context)
 
     async def run_stream(
         self,

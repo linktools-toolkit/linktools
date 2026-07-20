@@ -3,7 +3,7 @@
 """EvalRunner: drive a suite of cases through an executor + evaluators.
 
 Direct mode: the executor runs the target inline (not through
-TaskRuntime). For each case: execute → collect evaluator scores → produce an
+JobRuntime). For each case: execute → collect evaluator scores → produce an
 EvalResult. One failing case does not abort the suite.
 """
 

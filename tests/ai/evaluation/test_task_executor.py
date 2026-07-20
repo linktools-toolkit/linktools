@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""TaskEvalExecutor tests: routes a case through TaskRuntime and captures
+"""TaskEvalExecutor tests: routes a case through JobRuntime and captures
 retry_count + the sealed output (section 23.4 task mode)."""
 
 import asyncio
 
-from linktools.ai.artifact import ArtifactStore
+from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
 from linktools.ai.evaluation.executors import TaskEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
-from linktools.ai.storage.facade import FileStorage
-from linktools.ai.task.handlers import CallableTaskHandler
-from linktools.ai.task.runtime import TaskRuntime, TaskRuntimeOptions
+from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.jobs.handlers import CallableTaskHandler
+from linktools.ai.jobs.runtime import JobRuntime, JobRuntimeOptions
 
-FAST = TaskRuntimeOptions(
+FAST = JobRuntimeOptions(
     poll_interval_seconds=0.01, lease_seconds=2.0, heartbeat_seconds=0.1
 )
 
@@ -32,15 +32,15 @@ def test_task_eval_executor_captures_output_and_retry_count_zero(tmp_path) -> No
         rec = await artifacts.put(  # type: ignore[union-attr]
             _envelope_bytes("done"), media_type="application/json", tenant_id="t1"
         )
-        from linktools.ai.task.protocols import TaskSuccess
+        from linktools.ai.jobs.protocols import TaskSuccess
 
         return TaskSuccess(output_artifact=rec.ref)
 
     async def run():
         nonlocal artifacts
-        storage = FileStorage(root=tmp_path)
-        artifacts = ArtifactStore(storage.resources)
-        runtime = TaskRuntime(
+        storage = FilesystemStorage(root=tmp_path)
+        artifacts = build_artifact_store_from_assets(storage.assets)
+        runtime = JobRuntime(
             storage=storage, handlers={"eval": CallableTaskHandler(handler)}, options=FAST
         )
         executor = TaskEvalExecutor(
@@ -60,7 +60,7 @@ def test_task_eval_executor_captures_output_and_retry_count_zero(tmp_path) -> No
 def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
     """A handler that fails once (transient) then succeeds yields retry_count=1,
     when the one-shot task is given a retry policy that allows a second attempt."""
-    from linktools.ai.task.models import RetryPolicy
+    from linktools.ai.jobs.models import RetryPolicy
 
     artifacts: "object | None" = None
     calls = {"n": 0}
@@ -68,8 +68,8 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
     async def flaky(request, context):
         calls["n"] += 1
         if calls["n"] == 1:
-            from linktools.ai.task.models import TaskFailureKind
-            from linktools.ai.task.protocols import TaskFailure
+            from linktools.ai.jobs.models import TaskFailureKind
+            from linktools.ai.jobs.protocols import TaskFailure
 
             return TaskFailure(
                 kind=TaskFailureKind.TRANSIENT, error_type="Flaky", message="retry"
@@ -77,15 +77,15 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
         rec = await artifacts.put(  # type: ignore[union-attr]
             _envelope_bytes("ok"), media_type="application/json", tenant_id="t1"
         )
-        from linktools.ai.task.protocols import TaskSuccess
+        from linktools.ai.jobs.protocols import TaskSuccess
 
         return TaskSuccess(output_artifact=rec.ref)
 
     async def run():
         nonlocal artifacts
-        storage = FileStorage(root=tmp_path)
-        artifacts = ArtifactStore(storage.resources)
-        runtime = TaskRuntime(
+        storage = FilesystemStorage(root=tmp_path)
+        artifacts = build_artifact_store_from_assets(storage.assets)
+        runtime = JobRuntime(
             storage=storage, handlers={"eval": CallableTaskHandler(flaky)}, options=FAST
         )
         executor = TaskEvalExecutor(
@@ -110,8 +110,8 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
 def test_task_eval_executor_captures_safety_refusal_on_policy_denial(tmp_path) -> None:
     """A handler that the security pipeline denies (POLICY_DENIED) surfaces as a
     safety refusal so the safety_refusal_rate metric is populated."""
-    from linktools.ai.task.models import TaskFailureKind
-    from linktools.ai.task.protocols import TaskFailure
+    from linktools.ai.jobs.models import TaskFailureKind
+    from linktools.ai.jobs.protocols import TaskFailure
 
     async def denied(request, context):
         return TaskFailure(
@@ -121,9 +121,9 @@ def test_task_eval_executor_captures_safety_refusal_on_policy_denial(tmp_path) -
         )
 
     async def run():
-        storage = FileStorage(root=tmp_path)
-        artifacts = ArtifactStore(storage.resources)
-        runtime = TaskRuntime(
+        storage = FilesystemStorage(root=tmp_path)
+        artifacts = build_artifact_store_from_assets(storage.assets)
+        runtime = JobRuntime(
             storage=storage,
             handlers={"eval": CallableTaskHandler(denied)},
             options=FAST,

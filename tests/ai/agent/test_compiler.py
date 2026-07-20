@@ -12,8 +12,8 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _config(model_type: str) -> RuntimeModelConfig:
@@ -35,7 +35,7 @@ async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     registry.register("test-model", config=_config("test-model"))
     router = ModelRouter(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
 
     spec = AgentSpec(
@@ -60,12 +60,40 @@ async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
 
 
 @pytest.mark.asyncio
+async def test_compile_wires_spec_instructions_into_pydantic_agent():
+    # PromptSpec.instructions is the agent's declared system prompt; it must
+    # actually reach the underlying pydantic-ai Agent, not just round-trip
+    # through AgentSpec/RunDefinitionSnapshot serialization. pydantic-ai has
+    # no public getter for the configured static instructions, so this reads
+    # the private `_instructions` list -- the only way to observe what was
+    # passed to the constructor.
+    registry = ModelRegistry()
+    registry.register("test-model", config=_config("test-model"))
+    router = ModelRouter(registry=registry)
+    compiler = AgentCompiler(
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
+    )
+
+    spec = AgentSpec(
+        id="agent-1",
+        name="test-agent",
+        model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="You are a very specific test agent."),
+    )
+    compiled = await compiler.compile(spec)
+
+    assert compiled.pydantic_agent._instructions == [
+        "You are a very specific test agent."
+    ]
+
+
+@pytest.mark.asyncio
 async def test_compile_reuses_model_router_fallback():
     registry = ModelRegistry()
     registry.register("fallback-model", config=_config("fallback-model"))
     router = ModelRouter(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
 
     spec = AgentSpec(
@@ -88,7 +116,7 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
     router = ModelRouter(registry=registry)
     pipeline = MiddlewarePipeline(middlewares=())
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=router,
         middleware_pipeline=pipeline,
     )
@@ -116,7 +144,7 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     registry.register("test-model", config=_config("test-model"))
     router = ModelRouter(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
     spec = AgentSpec(
         id="agent-nomw",
@@ -129,7 +157,7 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
 
 
 def test_compiler_requires_tool_executor():
-    """WP-03 §8.4: AgentCompiler without an explicit ToolExecutor fails loudly
+    """WP-03 §8.4: AgentCompiler without an explicit GovernedToolInvoker fails loudly
     (no silent ALLOW-all fallback)."""
     from linktools.ai.errors import RuntimeInitializationError
 

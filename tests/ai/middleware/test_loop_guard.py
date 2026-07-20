@@ -6,7 +6,7 @@ import pytest
 
 from linktools.ai.errors import ToolDeniedError
 from linktools.ai.middleware.loop_guard import LoopGuardMiddleware
-from linktools.ai.policy.engine import ToolRequest
+from linktools.ai.governance.policy.engine import ToolRequest
 
 
 @pytest.mark.asyncio

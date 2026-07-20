@@ -7,8 +7,8 @@
 - skill:<id>-> expose list_skills/read_skill authorized for that one skill only;
                no full content is injected into the prompt.
 
-Package skills surface their package_id in summaries; deeper package-resource
-access is a separate ``package-resource`` capability, not auto-enabled here."""
+Extension skills surface their extension_id in summaries; deeper extension-resource
+access is a separate ``extension-resource`` capability, not auto-enabled here."""
 
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -16,7 +16,7 @@ from typing import Any, ClassVar
 from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext, make_event_emitter
 from ..capability.models import CapabilityRef
-from ..providers.skill import SkillSpecProvider
+from .models import SkillSpecProvider
 from ..tool.models import ToolDescriptor
 from ..tool.models import ToolContribution, declared_tool_definitions
 from .prompt import render_skill_catalog
@@ -26,7 +26,7 @@ from .toolset import _summary_from_spec, build_skill_toolset
 @dataclass
 class SkillProvider:
     """CapabilityProvider for skills. ``skill_provider`` is any SkillSpecProvider
-    (default SkillRegistry or a business backend)."""
+    (default SkillCatalog or a business backend)."""
 
     skill_provider: SkillSpecProvider
     # When set, read_skill activates the skill in the current task context so a

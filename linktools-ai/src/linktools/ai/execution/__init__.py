@@ -4,7 +4,7 @@
 backend that supplies builtin file/terminal tools."""
 
 from .local import LocalExecutionBackend
-from .container import ContainerExecutionBackend
+from .sandbox.container import ContainerExecutionBackend
 from .protocols import ExecutionBackend, ExecutionIsolationLevel
 
 __all__ = ["ContainerExecutionBackend", "ExecutionBackend", "ExecutionIsolationLevel", "LocalExecutionBackend"]

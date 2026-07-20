@@ -11,7 +11,6 @@ and the whole append retried (re-reading MAX under a fresh transaction)."""
 import asyncio
 import json
 import uuid
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -21,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import EventRow
 from ...errors import EventSequenceConflictError
-from ...events import payloads as _payloads_module
 from ...events.envelope import EventEnvelope
 from ...events.payloads import EventPayload
+from ...events.registry import EventCodec, default_codec
 from ...events.store import EventPage
 
 
@@ -42,12 +41,16 @@ class SqlAlchemyEventStore:
         *,
         session_factory: "Callable[[], AsyncSession]",
         session: "AsyncSession | None" = None,
+        codec: "EventCodec | None" = None,
     ) -> None:
         self._session_factory = session_factory
         # UoW mode: when set, every method uses this shared session directly and
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+        # Event wire contract: encode/decode by stable event_type, shared with
+        # the Filesystem store.
+        self._codec: EventCodec = codec or default_codec
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the
@@ -81,6 +84,7 @@ class SqlAlchemyEventStore:
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc)
         meta = dict(metadata) if metadata else None
+        event_type, schema_version, payload_data = self._codec.encode(payload)
         row = EventRow(
             event_id=event_id,
             stream_id=stream_id,
@@ -91,8 +95,9 @@ class SqlAlchemyEventStore:
             parent_run_id=parent_run_id,
             session_id=session_id,
             runnable_id=runnable_id,
-            payload_type=type(payload).__name__,
-            payload_json=json.dumps(asdict(payload)),
+            event_type=event_type,
+            schema_version=schema_version,
+            payload_json=json.dumps(payload_data),
             metadata_json=json.dumps(meta) if meta else None,
         )
         session.add(row)
@@ -183,8 +188,11 @@ class SqlAlchemyEventStore:
         ) from last_exc
 
     def _row_to_envelope(self, row: EventRow) -> EventEnvelope:
-        payload_cls = getattr(_payloads_module, row.payload_type)
-        payload = payload_cls(**json.loads(row.payload_json))
+        # Decode by stable event_type via the shared codec. If a row somehow
+        # lacks a schema_version, the codec treats None as the current version.
+        payload = self._codec.decode(
+            row.event_type, row.schema_version, json.loads(row.payload_json)
+        )
         return EventEnvelope(
             event_id=row.event_id,
             stream_id=row.stream_id,

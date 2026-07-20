@@ -10,7 +10,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -34,7 +34,7 @@ def _registry():
 def test_runtime_build_hides_internal_components(tmp_path):
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_registry())
     )
@@ -49,7 +49,7 @@ def test_runtime_build_no_longer_accepts_workdir(tmp_path):
     ExecutionBackend and passes it via `execution=`."""
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     with pytest.raises(TypeError):
         Runtime.build(
             storage=storage,
@@ -65,7 +65,7 @@ def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
     from linktools.ai.execution.local import LocalExecutionBackend
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     backend = LocalExecutionBackend(runtime_dir=tmp_path / "workdir")
     runtime = Runtime.build(
         storage=storage,
@@ -78,7 +78,7 @@ def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
 def test_runtime_run_creates_session_when_none_given_and_returns_result(tmp_path):
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_registry())
     )
@@ -110,7 +110,7 @@ def test_runtime_run_with_explicit_session_reuses_it(tmp_path):
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_registry())
     )
@@ -172,7 +172,7 @@ def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_p
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_worker_fn))
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=registry)
     )
@@ -243,7 +243,7 @@ def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
         SwarmStrategySpec,
     )
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_registry())
     )
@@ -310,14 +310,14 @@ def _echo_registry():
 
 def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
     from linktools.ai.model.router import ModelRouter
-    from linktools.ai.storage.file.memory import FileMemoryStore
+    from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_echo_registry())
     )
     # Memory is on-by-default: the runner's memory_store is the facade's memories.
-    assert isinstance(runtime._components.runner._memory_store, FileMemoryStore)
+    assert isinstance(runtime._components.runner._memory_store, FilesystemMemoryStore)
     assert runtime._components.runner._memory_store is storage.memories
 
 
@@ -326,7 +326,7 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=_echo_registry())
     )
@@ -350,7 +350,7 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
         # Memory is tenant-scoped: seed it under the same tenant the run will
         # carry, so the DefaultMemoryPolicy's tenant-bound search finds it.
         # Content includes the query keyword ("hello") because
-        # FileMemoryStore.search is keyword-substring based.
+        # FilesystemMemoryStore.search is keyword-substring based.
         await storage.memories.remember(
             MemoryRecord(
                 id="mem-rt-1",
@@ -402,7 +402,7 @@ def test_runtime_applies_session_window_policy(tmp_path):
             seen["count"] = len(messages)
             return list(messages)
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=_registry()),

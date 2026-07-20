@@ -9,14 +9,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.errors import StorageCapabilityError
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.capabilities import (
-    FILE_STORAGE_CAPABILITIES,
-    SQLALCHEMY_STORAGE_CAPABILITIES,
+from linktools.ai.storage.features import (
+    FILE_STORAGE_FEATURES,
+    SQLALCHEMY_STORAGE_FEATURES,
 )
 from linktools.ai.storage import SqlAlchemyStorage
-from linktools.ai.storage.facade import FileStorage, Storage
-from linktools.ai.storage.resource.models import WriteOptions
-from linktools.ai.storage.resource.path import ResourcePath
+from linktools.ai.storage.facade import FilesystemStorage, Storage
+from linktools.ai.asset.models import WriteOptions
+from linktools.ai.asset.path import AssetPath
 from linktools.ai.storage.sqlalchemy.models import Base
 
 
@@ -52,30 +52,51 @@ def _run_record(run_id="run-1") -> RunRecord:
     )
 
 
+def _can_acquire_a_lease(coordinator) -> bool:
+    """The coordination field must be a wired, working LeaseCoordinator -- not
+    None. Prove it by acquiring (and releasing) one lease through the public
+    Protocol surface."""
+    from datetime import timedelta
+
+    async def _check() -> bool:
+        token = await coordinator.acquire(
+            key="wiring-check", owner_id="test", ttl=timedelta(seconds=30)
+        )
+        if token is None:
+            return False
+        await coordinator.release(token=token)
+        return True
+
+    return asyncio.run(_check())
+
+
 def test_file_storage_constructs_full_facade_with_file_capabilities(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     assert isinstance(storage, Storage)
-    assert storage.capabilities is FILE_STORAGE_CAPABILITIES
-    assert storage.resources is not None
+    assert storage.features is FILE_STORAGE_FEATURES
+    assert storage.assets is not None
     assert storage.sessions is not None
     assert storage.runs is not None
     assert storage.events is not None
     assert storage.checkpoints is not None
+    assert _can_acquire_a_lease(storage.coordination), (
+        "FilesystemStorage must ship a wired, working LeaseCoordinator"
+    )
 
 
 def test_file_storage_runs_end_to_end(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
 
     async def _run():
         await storage.sessions.create(_session_record())
         await storage.runs.create(_run_record())
         fetched = await storage.sessions.get("session-1")
         run = await storage.runs.get("run-1")
-        path = ResourcePath("/artifacts/tenant-1/run-1/draft.txt")
-        await storage.resources.put(
+        path = AssetPath("/artifacts/tenant-1/run-1/draft.txt")
+        await storage.assets.put(
             path, b"hello", options=WriteOptions(content_type="text/plain", metadata={})
         )
-        resource = await storage.resources.get(path)
+        resource = await storage.assets.get(path)
         return fetched, run, resource
 
     fetched, run, resource = asyncio.run(_run())
@@ -85,7 +106,7 @@ def test_file_storage_runs_end_to_end(tmp_path):
 
 
 def test_file_storage_transaction_raises_storage_capability_error(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
 
     async def _run():
         async with storage.transaction():
@@ -112,12 +133,15 @@ def _sqlalchemy_storage(tmp_path):
 def test_sqlalchemy_storage_constructs_full_facade_with_sql_capabilities(tmp_path):
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage, Storage)
-    assert storage.capabilities is SQLALCHEMY_STORAGE_CAPABILITIES
-    assert storage.resources is not None
+    assert storage.features is SQLALCHEMY_STORAGE_FEATURES
+    assert storage.assets is not None
     assert storage.sessions is not None
     assert storage.runs is not None
     assert storage.events is not None
     assert storage.checkpoints is not None
+    assert _can_acquire_a_lease(storage.coordination), (
+        "SqlAlchemyStorage must ship a wired, working LeaseCoordinator"
+    )
 
 
 def test_sqlalchemy_storage_runs_end_to_end(tmp_path):
@@ -336,10 +360,10 @@ def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_pa
 
 
 def test_file_storage_exposes_file_swarm_store(tmp_path):
-    from linktools.ai.storage.file.swarm import FileSwarmStore
+    from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
 
-    storage = FileStorage(root=tmp_path)
-    assert isinstance(storage.swarms, FileSwarmStore)
+    storage = FilesystemStorage(root=tmp_path)
+    assert isinstance(storage.swarms, FilesystemSwarmStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_swarm_store(tmp_path):
@@ -354,7 +378,7 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
 
     from linktools.ai.swarm.models import SwarmRun, SwarmStatus, TokenUsage
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
     swarm_run = SwarmRun(
         id="swarm-1",
@@ -380,10 +404,10 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
 
 
 def test_file_storage_exposes_file_memory_store(tmp_path):
-    from linktools.ai.storage.file.memory import FileMemoryStore
+    from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
 
-    storage = FileStorage(root=tmp_path)
-    assert isinstance(storage.memories, FileMemoryStore)
+    storage = FilesystemStorage(root=tmp_path)
+    assert isinstance(storage.memories, FilesystemMemoryStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
@@ -396,7 +420,7 @@ def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
 def test_file_storage_memories_round_trips_a_record(tmp_path):
     from linktools.ai.memory.models import MemoryRecord
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     now = datetime.now(timezone.utc)
     record = MemoryRecord(
         id="mem-1",
@@ -424,10 +448,10 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
 
 def test_file_storage_exposes_file_approval_store(tmp_path):
     from linktools.ai.agent.approval import ApprovalStore
-    from linktools.ai.storage.file.approval import FileApprovalStore
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
 
-    storage = FileStorage(root=tmp_path)
-    assert isinstance(storage.approvals, FileApprovalStore)
+    storage = FilesystemStorage(root=tmp_path)
+    assert isinstance(storage.approvals, FilesystemApprovalStore)
     assert isinstance(storage.approvals, ApprovalStore)
 
 
@@ -446,7 +470,7 @@ def test_file_storage_approvals_round_trips_a_request(tmp_path):
         build_approval_request,
     )
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     request = build_approval_request(
         run_id="run-1",
         tool_call_id="call-1",

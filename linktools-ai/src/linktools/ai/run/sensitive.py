@@ -62,8 +62,8 @@ async def authorize_sensitive_operation(
         bound_attempt = run.metadata.get("task_attempt_id") if run is not None else None
         if bound_attempt != principal.actor.id:
             raise PrincipalAccessDeniedError("task attempt is not bound to this run")
-    from ..security.authorization import AuthorizationResource
-    from ..security.actions import SecurityAction
+    from ..governance.security.authorization import AuthorizationResource
+    from ..governance.security.actions import SecurityAction
 
     authorization_action = {"cancel": SecurityAction.RUN_CANCEL,
                             "resume": SecurityAction.RUN_RESUME}.get(action, action)

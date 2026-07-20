@@ -19,8 +19,8 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.retry import DefaultRetryPolicy
 
 
@@ -129,10 +129,10 @@ def test_retry_policy_permanent_error_not_retried():
 @pytest.mark.asyncio
 async def test_inspect_returns_immutable_capability_inspection(tmp_path):
     from linktools.ai.runtime import Runtime
-    from linktools.ai.storage.facade import FileStorage
+    from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.capability.models import CapabilityInspection
 
-    rt = Runtime.build(storage=FileStorage(root=tmp_path))
+    rt = Runtime.build(storage=FilesystemStorage(root=tmp_path))
     spec = AgentSpec(
         id="a",
         name="a",
@@ -165,7 +165,7 @@ async def test_schema_validation_raises_dedicated_error():
             name="t", source="t", category="file-read", risk="low", mutating=False
         ),
         handler=handler,
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
     )
     with pytest.raises(ToolSchemaValidationError):
         # Pass an argument violating the schema before any pipeline runs.
@@ -175,19 +175,19 @@ async def test_schema_validation_raises_dedicated_error():
 @pytest.mark.asyncio
 async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     """contract acceptance: a managed builtin tool's PolicyEngine rules run EXACTLY
-    once per call (ManagedToolAdapter -> ToolExecutor.execute), not twice.
+    once per call (ManagedToolAdapter -> GovernedToolInvoker.execute), not twice.
     PolicyCapability must skip managed tools (they're in the descriptor lookup)
     so the rule isn't re-evaluated."""
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
-    from linktools.ai.policy.command import CommandRule
-    from linktools.ai.policy.engine import PolicyEngine
-    from linktools.ai.policy.rule import PolicyDecision, PolicyDecisionKind
+    from linktools.ai.governance.policy.command import CommandRule
+    from linktools.ai.governance.policy.engine import PolicyEngine
+    from linktools.ai.governance.policy.rule import PolicyDecision, PolicyDecisionKind
     from linktools.ai.runtime import Runtime
-    from linktools.ai.storage.facade import FileStorage
+    from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.model.router import ModelRouter
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.tool.executor import ToolExecutor
+    from linktools.ai.tool.executor import GovernedToolInvoker
     from linktools.ai.execution.local import LocalExecutionBackend
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
@@ -216,11 +216,11 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
 
     reg = ModelRegistry()
     reg.register("m", model=FunctionModel(model_fn))
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=reg),
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=(_CountingRule(),))),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=(_CountingRule(),))),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
@@ -243,7 +243,7 @@ async def test_mcp_descriptor_carries_raw_name_for_audit():
     name is carried in metadata for audit (the MCP call itself uses raw_name)."""
     from linktools.ai.mcp.client import MCPConnectionRef
     from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
-    from linktools.ai.registry.mcp import parse_mcp_spec
+    from linktools.ai.mcp.codec import parse_mcp_spec
 
     class _Src:
         async def list_ids(self):
@@ -285,16 +285,16 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     import json
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
-    from linktools.ai.policy.rule import (
+    from linktools.ai.governance.policy.rule import (
         ApprovalMode,
         Permission,
         RiskLevel,
         SideEffectKind,
         ToolPolicyMetadata,
     )
-    from linktools.ai.providers.bundle import ProviderBundle
+    from linktools.ai.runtime import RuntimeDependencies
     from linktools.ai.runtime import Runtime
-    from linktools.ai.storage.facade import FileStorage
+    from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.execution.local import LocalExecutionBackend
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
@@ -333,12 +333,12 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
 
     reg = ModelRegistry()
     reg.register("m", model=FunctionModel(model_fn))
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=reg),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
-        providers=ProviderBundle(tool_policies=_IdemPolicySrc()),
+        providers=RuntimeDependencies(tool_policies=_IdemPolicySrc()),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),

@@ -20,7 +20,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.run.controller import RunController
 from linktools.ai.model.registry import ModelRegistry
@@ -44,14 +44,14 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-from linktools.ai.storage.file.definition import FileRunDefinitionStore
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.storage.file.swarm import FileSwarmStore
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
 from linktools.ai.swarm.aggregation import AggregationPolicy
 from linktools.ai.swarm.limits import SwarmLimits
 from linktools.ai.swarm.models import (
@@ -68,8 +68,8 @@ from linktools.ai.swarm.spec import (
     SwarmSpec,
     SwarmStrategySpec,
 )
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 _NOW = datetime.now(timezone.utc)
@@ -90,7 +90,7 @@ def _make_model_with_usage(
 ) -> FunctionModel:
     """Variant of _make_model that also reports token usage on each response --
     needed for max_total_tokens enforcement (the swarm accumulates
-    RunResult.token_usage which AgentRunner populates from run_result.usage)."""
+    RunResult.token_usage which AgentEngine populates from run_result.usage)."""
     from pydantic_ai.usage import RunUsage
 
     usage = RunUsage(input_tokens=input_tokens, output_tokens=output_tokens)
@@ -109,7 +109,7 @@ def _build_compiler(*outputs: str) -> AgentCompiler:
     for i, out in enumerate(outputs):
         registry.register(f"model-{i}", model=_make_model(out))
     return AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
 
@@ -161,26 +161,26 @@ def _spec(
 
 class _Stores:
     """Wires the five file-backed stores under tmp_path subdirs, plus one
-    Runtime-style AgentRunner + RunController -- SwarmRunner no longer builds
-    its own AgentRunner (scenario: it must reuse the one Runtime.build()
+    Runtime-style AgentEngine + RunController -- SwarmRunner no longer builds
+    its own AgentEngine (scenario: it must reuse the one Runtime.build()
     assembles), so tests build it here exactly like Runtime.build() does."""
 
     def __init__(self, tmp_path: Path) -> None:
-        self.run_store = FileRunStore(root=tmp_path / "runs")
-        self.session_store = FileSessionStore(root=tmp_path / "sessions")
-        self.event_store = FileEventStore(root=tmp_path / "events")
-        self.checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-        self.swarm_store = FileSwarmStore(root=tmp_path / "swarm")
-        self.run_definitions = FileRunDefinitionStore(root=tmp_path / "definitions")
+        self.run_store = FilesystemRunStore(root=tmp_path / "runs")
+        self.session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+        self.event_store = FilesystemEventStore(root=tmp_path / "events")
+        self.checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+        self.swarm_store = FilesystemSwarmStore(root=tmp_path / "swarm")
+        self.run_definitions = FilesystemRunDefinitionStore(root=tmp_path / "definitions")
         self.run_controller = RunController()
-        self.agent_runner = AgentRunner(
+        self.agent_runner = AgentEngine(
             run_store=self.run_store,
             session_store=self.session_store,
             event_store=self.event_store,
             checkpoint_store=self.checkpoint_store,
             run_controller=self.run_controller,
-            commit_coordinator=FileRunCommitCoordinator(
-                approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            commit_coordinator=FilesystemRunCommitCoordinator(
+                approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
                 checkpoint_store=self.checkpoint_store,
                 run_store=self.run_store,
                 session_store=self.session_store,
@@ -236,7 +236,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -311,7 +311,7 @@ def test_swarm_run_persists_driving_and_worker_run_definition_snapshots(tmp_path
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
     spec = _spec(
@@ -452,7 +452,7 @@ def test_cancel_marks_swarm_and_in_flight_children_cancelled(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -482,7 +482,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
     BOTH -- proving it's signaling the controller, not just flipping store
     status. Uses real (but idle) asyncio.Tasks as the "in-flight" registration
     so run_controller.get_token(...) returns non-None, matching what
-    AgentRunner.execute()/SwarmRunner.run() do for real in-flight runs."""
+    AgentEngine.execute()/SwarmRunner.run() do for real in-flight runs."""
     from linktools.ai.swarm.runner import SwarmRunner
     from linktools.ai.run.cancellation import CancellationToken
 
@@ -562,7 +562,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
         )
         # Register both the driving run and the active child as "in-flight"
         # with the SAME RunController -- exactly what Runtime.build()-wired
-        # SwarmRunner.run()/AgentRunner.execute() do for real runs.
+        # SwarmRunner.run()/AgentEngine.execute() do for real runs.
         driving_task = asyncio.ensure_future(asyncio.sleep(100))
         child_task = asyncio.ensure_future(asyncio.sleep(100))
         await stores.run_controller.register(
@@ -581,7 +581,7 @@ def test_cancel_propagates_through_run_controller_to_active_child(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
@@ -668,7 +668,7 @@ def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
@@ -687,7 +687,7 @@ def test_cancel_is_idempotent_on_terminal_swarm_run(tmp_path):
 
 def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
     """scenario (actionable-fix-contract): SwarmRunner must not construct its
-    own AgentRunner -- it stores exactly the instance it was given, so Swarm
+    own AgentEngine -- it stores exactly the instance it was given, so Swarm
     worker Runs inherit the SAME Tool/Policy/Middleware/UoW/Cancellation
     wiring as top-level Agent runs."""
     from linktools.ai.swarm.runner import SwarmRunner
@@ -699,11 +699,11 @@ def test_swarm_runner_reuses_injected_agent_runner(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         compiler=_build_compiler("coord-out"),
     )
-    assert runner._agent_runner is stores.agent_runner
+    assert runner._dispatcher is stores.agent_runner
     assert runner._run_controller is stores.run_controller
 
 
@@ -717,7 +717,7 @@ def test_cancel_unknown_swarm_run_raises(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -744,7 +744,7 @@ def test_run_surfaces_strategy_limit_exceed_as_failed_run(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -856,7 +856,7 @@ def test_resume_after_partial_failure_completes(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -938,7 +938,7 @@ def test_resume_unknown_swarm_run_raises(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=_build_compiler("coord-out"),
     )
 
@@ -968,7 +968,7 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -1029,7 +1029,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         compiler=compiler,
     )
@@ -1055,7 +1055,7 @@ def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path
             runner.run(spec, RunInput(prompt="do the work"), context, agents=agents)
         )
         # Give run() a chance to create the driving RunRecord and register
-        # with run_controller (mirrors AgentRunner.execute()'s own startup).
+        # with run_controller (mirrors AgentEngine.execute()'s own startup).
         for _ in range(50):
             if stores.run_controller.get_token(context.run_id) is not None:
                 break
@@ -1106,7 +1106,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
         model=_make_model_with_usage("worker-out", input_tokens=100, output_tokens=100),
     )
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
 
@@ -1119,7 +1119,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -1163,7 +1163,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
         model=_make_model_with_usage("worker-out", input_tokens=50, output_tokens=50),
     )
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
 
@@ -1176,7 +1176,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -1207,11 +1207,11 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     assert driving.status is RunStatus.SUCCEEDED
 
 
-# --- 7. End-to-end active_run_id decoupling (real FileSwarmStore) ---
+# --- 7. End-to-end active_run_id decoupling (real FilesystemSwarmStore) ---
 
 
 def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
-    """End-to-end through the real FileSwarmStore: after runner.run() completes,
+    """End-to-end through the real FilesystemSwarmStore: after runner.run() completes,
     every SUCCEEDED task has active_run_id set, DIFFERENT from task.id, and
     matching a real child RunRecord id. This is the invariant the
     design note contract mandates (禁止 SwarmTask.id == child_run_id)."""
@@ -1227,7 +1227,7 @@ def test_run_decouples_task_id_from_child_run_id_via_active_run_id(tmp_path):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
     )
 
@@ -1380,7 +1380,7 @@ def _make_runner(stores: _Stores):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=_build_compiler("ok"),
     )
 
@@ -1511,7 +1511,7 @@ def test_recover_unknown_swarm_run_raises(tmp_path):
 def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_path):
     """On SqlAlchemySwarmStore a CLAIMED+expired task whose active_run_id is
     None gets re-queued to PENDING by the trailing reclaim_expired_tasks call
-    (the strategy crashed between claim_task and set_active_run). FileSwarmStore
+    (the strategy crashed between claim_task and set_active_run). FilesystemSwarmStore
     documents this as a no-op (single-process: nothing to reclaim at rest)."""
     from contextlib import asynccontextmanager
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -1577,7 +1577,7 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
                 run_store=stores.run_store,
                 session_store=stores.session_store,
                 event_store=stores.event_store,
-                agent_runner=stores.agent_runner,
+                dispatcher=stores.agent_runner,
                 compiler=_build_compiler("ok"),
                 run_definitions=stores.run_definitions,
             )
@@ -1642,7 +1642,7 @@ def test_resume_refused_for_terminal_swarm(tmp_path):
             session_store=stores.session_store,
             event_store=stores.event_store,
             compiler=compiler,
-            agent_runner=stores.agent_runner,
+            dispatcher=stores.agent_runner,
             run_controller=stores.run_controller,
             run_definitions=stores.run_definitions,
         )
@@ -1716,7 +1716,7 @@ def test_resume_refused_for_terminal_driving_run(tmp_path, driving_status):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
         run_controller=stores.run_controller,
         run_definitions=stores.run_definitions,
@@ -1752,7 +1752,7 @@ def test_swarm_snapshot_failure_leaves_no_orphan_running(tmp_path):
         session_store=stores.session_store,
         event_store=stores.event_store,
         compiler=compiler,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         run_definitions=stores.run_definitions,
     )
@@ -1802,7 +1802,7 @@ def test_swarm_worker_runs_have_resumable_snapshots(tmp_path):
         session_store=stores.session_store,
         event_store=stores.event_store,
         compiler=compiler,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         run_controller=stores.run_controller,
         run_definitions=stores.run_definitions,
     )

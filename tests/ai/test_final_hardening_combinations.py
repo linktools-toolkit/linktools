@@ -13,19 +13,19 @@ from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.providers.mcp import MCPServerSpecProvider
-from linktools.ai.providers import ProviderBundle
-from linktools.ai.registry.mcp import parse_mcp_spec
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.mcp.spec import MCPServerSpecProvider
+from linktools.ai.runtime import RuntimeDependencies
+from linktools.ai.mcp.codec import parse_mcp_spec
 from linktools.ai.runtime import Runtime
 from linktools.ai.tool.models import ToolDescriptor
-from linktools.ai.security.emitter import (
+from linktools.ai.governance.security.emitter import (
     DefaultSecurityEventSanitizer,
     EventStoreSecurityEventEmitter,
 )
-from linktools.ai.storage.facade import FileStorage
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.tool.policy import IdempotencyStrategy, ResolvedToolPolicy
 
@@ -47,7 +47,7 @@ class _TinySanitizer(DefaultSecurityEventSanitizer):
 
 @pytest.mark.asyncio
 async def test_large_security_event_is_persisted_through_managed_adapter(tmp_path):
-    store = FileEventStore(root=tmp_path)
+    store = FilesystemEventStore(root=tmp_path)
     ctx = SimpleNamespace(run_id="r1")
     emitter = EventStoreSecurityEventEmitter(
         store, context=ctx, sanitizer=_TinySanitizer(), failure_mode="fail_closed"
@@ -59,7 +59,7 @@ async def test_large_security_event_is_persisted_through_managed_adapter(tmp_pat
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         security_event_emitter=emitter,
         run_context=ctx,
     )
@@ -121,9 +121,9 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
     provider = MCPProvider(_InfoSpecProvider(spec_mcp), _UnenumerableManager())
 
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(),
-        providers=ProviderBundle(capabilities=(provider,)),
+        providers=RuntimeDependencies(capabilities=(provider,)),
     )
 
     agent = AgentSpec(
@@ -162,7 +162,7 @@ async def test_dynamic_business_key_policy_fails_before_tool_execution():
     adapter = ManagedToolAdapter(
         descriptor=_descriptor(),
         handler=handler,
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         policy_provider=_BusinessKeyNoIdempotentProvider(),
         run_context=SimpleNamespace(run_id="r1"),
     )
@@ -219,7 +219,7 @@ async def test_mcp_tool_runs_through_managed_adapter_and_executor_to_call_tool(
     )
     definition = bundle.tool_contributions[0].tools[0]
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     adapter = ManagedToolAdapter(
         descriptor=definition.descriptor,
         handler=definition.handler,

@@ -106,13 +106,13 @@ def test_idempotency_status_values_snapshot() -> None:
 
 def test_atomic_write_helper_is_the_public_module() -> None:
     # §16.1 landed: the file-store's atomic-write helper is now the public
-    # ``atomic_write_bytes`` in storage/file/atomic.py (temp + fsync + os.replace
+    # ``atomic_write_bytes`` in storage/filesystem/atomic.py (temp + fsync + os.replace
     # + parent-directory fsync). The historical private ``_atomic_write`` in
     # _util.py remains as a thin delegate so every existing store import keeps
     # working.
-    from linktools.ai.storage.file import atomic, _util
+    from linktools.ai.storage.filesystem import atomic, _util
 
-    assert importlib.util.find_spec("linktools.ai.storage.file.atomic") is not None
+    assert importlib.util.find_spec("linktools.ai.storage.filesystem.atomic") is not None
     assert callable(atomic.atomic_write_bytes)
     # The private name still exists for back-compat and delegates to the public one.
     assert callable(_util._atomic_write)

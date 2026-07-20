@@ -5,7 +5,7 @@ agents (AgentRef), a coordinator agent, a strategy declaration, governance limit
 a context-sharing policy, and an aggregation policy."""
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from ..agent.spec import MiddlewareRef
 from .aggregation import AggregationPolicy
@@ -39,3 +39,12 @@ class SwarmSpec:
     aggregation: AggregationPolicy
     middleware: "tuple[MiddlewareRef, ...]" = ()
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@runtime_checkable
+class SwarmSpecProvider(Protocol):
+    """Provides SwarmSpec objects from any configuration source."""
+
+    async def list_ids(self) -> "tuple[str, ...]": ...
+
+    async def get(self, swarm_id: str) -> "SwarmSpec": ...

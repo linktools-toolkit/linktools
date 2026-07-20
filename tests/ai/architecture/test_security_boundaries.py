@@ -75,25 +75,27 @@ def test_runtime_resume_accepts_principal() -> None:
 
 
 def test_principal_context_is_defined_and_reuses_actor_types() -> None:
-    # §7.1 landed: PrincipalContext exists in security.principal and REUSES the
-    # canonical task.models ActorRef / ScopeSet -- no duplicate definition.
-    assert importlib.util.find_spec("linktools.ai.security.principal") is not None
-    from linktools.ai.security.principal import PrincipalContext
-    from linktools.ai.task.models import ActorRef, ScopeSet
+    # Phase 1: PrincipalContext/ActorRef/ScopeSet now own by the identity
+    # domain -- a standalone package that nothing downstream owns. jobs.models
+    # imports them from identity (single definition, no duplicate).
+    assert importlib.util.find_spec("linktools.ai.identity.principal") is not None
+    from linktools.ai.identity.principal import PrincipalContext
+    from linktools.ai.jobs.models import ActorRef, ScopeSet
 
     field_types = {f.name: str(f.type) for f in dataclasses.fields(PrincipalContext)}
     assert {"tenant_id", "user_id", "actor", "scopes"} <= set(field_types)
     assert "ActorRef" in field_types["actor"]
     assert "ScopeSet" in field_types["scopes"]
-    # The reused types are exactly the task.models value types.
-    assert ActorRef.__module__ == "linktools.ai.security.principal"
-    assert ScopeSet.__module__ == "linktools.ai.security.principal"
+    # identity.principal is the single owner; jobs.models reuses those exact
+    # types rather than redefining them.
+    assert ActorRef.__module__ == "linktools.ai.identity.principal"
+    assert ScopeSet.__module__ == "linktools.ai.identity.principal"
 
 
 def test_authorization_service_is_defined() -> None:
     # §7.2 landed: AuthorizationService Protocol + AllowOwner / DenyAll impls.
-    assert importlib.util.find_spec("linktools.ai.security.authorization") is not None
-    from linktools.ai.security.authorization import (
+    assert importlib.util.find_spec("linktools.ai.governance.security.authorization") is not None
+    from linktools.ai.governance.security.authorization import (
         AllowOwnerAuthorization,
         AuthorizationService,
         DenyAllAuthorization,

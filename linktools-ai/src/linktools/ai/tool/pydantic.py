@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """The single place in the tool domain that imports the pydantic-ai Tool API.
-PolicyCapability adapts ToolExecutor into a pydantic-ai
+PolicyCapability adapts GovernedToolInvoker into a pydantic-ai
 AbstractCapability; ManagedToolsetWrapper wraps any AbstractToolset so every
 call_tool passes through the ManagedToolAdapter governance chain. Keeping these
 here means ``from pydantic_ai`` appears in exactly one tool module."""
@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
 
 from ..errors import RunPaused, ToolDeniedError
-from .executor import ToolExecutor
+from .executor import GovernedToolInvoker
 from .managed import ManagedToolAdapter
 from .models import ManagedToolDefinition, ToolDescriptor
 
@@ -24,23 +24,23 @@ if TYPE_CHECKING:
     from pydantic_ai.tools import ToolDefinition
 
     from ..run.context import RunContext as _RunContext
-    from ..security.pipeline import SecurityPipeline
+    from ..governance.security.pipeline import SecurityPipeline
     from .policy import ResolvedToolPolicy, ToolPolicyProvider
 
 
 @dataclass
 class PolicyCapability(AbstractCapability[None]):
-    """Adapts ToolExecutor into a pydantic-ai AbstractCapability, converting
+    """Adapts GovernedToolInvoker into a pydantic-ai AbstractCapability, converting
     ToolDeniedError into SkipToolExecution so a denied call surfaces as a tool
     result the model can see. RunPaused (the approval signal) is a RunError, so
-    it is re-raised (not converted) and propagates to AgentRunner's pause
+    it is re-raised (not converted) and propagates to AgentEngine's pause
     handler.
 
     The per-Run ToolContext arrives via pydantic-ai dependency injection
     (``ctx.deps.tool_context``); no mutable per-Run field on the capability, so
     a single CompiledAgent/PolicyCapability is safe across concurrent Runs."""
 
-    executor: ToolExecutor
+    executor: GovernedToolInvoker
 
     async def before_tool_execute(
         self,
@@ -78,11 +78,11 @@ class PolicyCapability(AbstractCapability[None]):
     ) -> Any:
         # RunPaused is a run-level control-flow signal (approval/pause raised
         # from inside a managed tool handler), NOT a tool error. Re-raise it so
-        # it propagates out of pydantic-ai's tool loop to AgentRunner's pause
+        # it propagates out of pydantic-ai's tool loop to AgentEngine's pause
         # handler instead of surfacing a skip-result and continuing.
         if isinstance(error, RunPaused):
             raise error
-        from ..security.redact import redact_exception
+        from ..governance.security.redact import redact_exception
 
         safe_error = redact_exception(error)
         raise SkipToolExecution(
@@ -90,7 +90,7 @@ class PolicyCapability(AbstractCapability[None]):
         ) from error
 
 
-def build_policy_capability(executor: ToolExecutor) -> PolicyCapability:
+def build_policy_capability(executor: GovernedToolInvoker) -> PolicyCapability:
     return PolicyCapability(executor=executor)
 
 
@@ -122,7 +122,7 @@ def build_managed_toolset(definition: ManagedToolDefinition) -> AbstractToolset:
 class ManagedToolsetWrapper(WrapperToolset):
     """Wraps an AbstractToolset (e.g. MCPToolset) so every call_tool is
     dispatched through a per-tool ManagedToolAdapter -- descriptor resolution,
-    policy, pipeline, and ToolExecutor.execute are ManagedToolAdapter's job,
+    policy, pipeline, and GovernedToolInvoker.execute are ManagedToolAdapter's job,
     not this wrapper's. Pure dispatch: carries no governance logic of its own."""
 
     def __init__(
@@ -140,7 +140,7 @@ class ManagedToolsetWrapper(WrapperToolset):
         security_event_emitter: Any = None,
     ) -> None:
         if tool_executor is None:
-            raise ToolDeniedError("ManagedToolsetWrapper requires ToolExecutor")
+            raise ToolDeniedError("ManagedToolsetWrapper requires GovernedToolInvoker")
         super().__init__(wrapped)
         self._descriptors = dict(descriptors)
         self._pipeline = security_pipeline

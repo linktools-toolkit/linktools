@@ -132,9 +132,12 @@ async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(
 
 @pytest.mark.asyncio
 async def test_register_rejects_duplicate_kind():
+    # Registration lives on the CapabilityProviderRegistry (the runtime
+    # registry); the assembler exposes it via ``.registry``. A duplicate kind is
+    # rejected -- silently overwriting a wired provider is never the default.
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="already registered"):
-        asm.register(BuiltinProvider())
+        asm.registry.register(BuiltinProvider())
 
 
 @pytest.mark.asyncio
@@ -142,7 +145,7 @@ async def test_replace_intentionally_overrides_existing_kind():
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
     original = asm.providers["builtin"]
     replacement = BuiltinProvider()
-    asm.replace(replacement)
+    asm.registry.replace(replacement)
     assert asm.providers["builtin"] is replacement
     assert asm.providers["builtin"] is not original
 
@@ -150,7 +153,7 @@ async def test_replace_intentionally_overrides_existing_kind():
 @pytest.mark.asyncio
 async def test_register_accepts_a_new_kind():
     asm = CapabilityAssembler({"builtin": BuiltinProvider()})
-    asm.register(_PromptProvider())
+    asm.registry.register(_PromptProvider())
     assert "skill" in asm.providers
 
 
@@ -158,10 +161,10 @@ def test_provider_kinds_reads_supported_kinds():
     """A provider declaring supported_kinds is recognized for every kind it
     owns -- no manual alias registration needed (the contract multi-kind model)."""
     from linktools.ai.capability.provider import provider_kinds
-    from linktools.ai.package.capability_provider import PackageProvider
+    from linktools.ai.extension.capability_provider import ExtensionProvider
 
-    kinds = provider_kinds(PackageProvider())
-    assert kinds == frozenset({"package", "package-resource", "package-entrypoint"})
+    kinds = provider_kinds(ExtensionProvider())
+    assert kinds == frozenset({"extension", "extension-resource", "extension-entrypoint"})
 
 
 @pytest.mark.asyncio
@@ -174,7 +177,7 @@ async def test_register_multi_kind_provider_under_all_kinds():
             return CapabilityBundle()
 
     asm = CapabilityAssembler({})
-    asm.register(_Multi())
+    asm.registry.register(_Multi())
     assert {"alpha", "beta", "gamma"} <= set(asm.providers)
 
 

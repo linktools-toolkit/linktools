@@ -3,7 +3,7 @@
 """Middleware: a base class with no-op defaults for every lifecycle hook --
 a concrete Middleware overrides only what it needs.
 
-before_run/after_run/on_error are called directly by AgentRunner around its
+before_run/after_run/on_error are called directly by AgentEngine around its
 agent.run(...) call (pydantic-ai has no equivalent native hook). before_model/
 after_model/before_tool/after_tool get adapted into a real pydantic-ai
 AbstractCapability by build_middleware_capability() (tool/executor.py

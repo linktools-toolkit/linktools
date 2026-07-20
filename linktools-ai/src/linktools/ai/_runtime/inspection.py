@@ -84,8 +84,8 @@ async def inspect_capabilities(
     EventStore; those events are surfaced as warnings so inspection reflects
     the same degradation a real run would observe."""
     from ..capability.models import CapabilityInspection
-    from ..security.emitter import CollectingSecurityEventEmitter
-    from ..security.emitter import DefaultSecurityEventSanitizer
+    from ..governance.security.emitter import CollectingSecurityEventEmitter
+    from ..governance.security.emitter import DefaultSecurityEventSanitizer
 
     collector = CollectingSecurityEventEmitter(
         sanitizer=DefaultSecurityEventSanitizer()

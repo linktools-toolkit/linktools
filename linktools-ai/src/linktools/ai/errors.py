@@ -33,7 +33,7 @@ class PrincipalAccessDeniedError(SecurityError):
 
 
 class ResourceError(LinktoolsAIError):
-    """Base class for ResourceStore-related errors."""
+    """Base class for AssetStore-related errors."""
 
 
 class ResourceNotFoundError(ResourceError):
@@ -56,7 +56,7 @@ class ResourceUnsupportedError(ResourceError):
     pass
 
 
-class InvalidResourcePathError(ResourceError):
+class InvalidAssetPathError(ResourceError):
     pass
 
 
@@ -79,13 +79,22 @@ class StorageError(LinktoolsAIError):
 
 
 class StorageCapabilityError(StorageError):
-    """Raised when an operation requires a StorageCapabilities flag the active
-    Storage does not have (e.g. cross_store_transactions on FileStorage)."""
+    """Raised when an operation requires a StorageFeatures capability the
+    active Storage does not expose (e.g. database-scoped transactions on
+    FilesystemStorage, which is process-local)."""
+
+
+class StorageRequirementsNotMetError(StorageCapabilityError):
+    """Raised at build time by the RuntimeBuilder capability gate when the
+    active Storage's StorageFeatures fall below a declared RuntimeRequirements
+    minimum (e.g. process-local coordination configured for a topology that
+    declared it needs distributed). Fail-fast, never a silent degradation."""
 
 
 class StorageTransactionNotSupportedError(StorageCapabilityError):
-    """cross_store_transactions is False on this Storage but a caller requested
-    an atomic cross-store write."""
+    """features.transactions is TransactionScope.NONE or PROCESS_LOCAL on this
+    Storage (no cross-store UoW available) but a caller requested an atomic
+    cross-store write."""
 
 
 class StorageConcurrencyNotSupportedError(StorageCapabilityError):
@@ -152,8 +161,8 @@ class RunInvariantError(RunError):
 
 
 class RunPaused(RunError):
-    """Raised by ToolExecutor when a tool requires approval, and propagated
-    through pydantic-ai's tool-execution stack out to AgentRunner, which
+    """Raised by GovernedToolInvoker when a tool requires approval, and propagated
+    through pydantic-ai's tool-execution stack out to AgentEngine, which
     persists the ApprovalRequest, checkpoints state, transitions the Run to
     WAITING_APPROVAL, and appends the pause events -- all atomically in one
     UnitOfWork on SqlAlchemy storage. This is the single approval path: the
@@ -162,15 +171,15 @@ class RunPaused(RunError):
     This is a control-flow signal, NOT an error condition -- it's a RunError
     (not a ToolError) precisely so PolicyCapability.before_tool_execute (which
     only catches ToolDeniedError/ToolApprovalRequiredError -> SkipToolExecution)
-    lets it propagate. AgentRunner catches it; nothing else should.
+    lets it propagate. AgentEngine catches it; nothing else should.
 
     ``approval_id`` is a fresh id minted here and then persisted by the
-    ToolExecutor no longer writes the ApprovalRequest itself; it only mints
-    the id so the id it reports is the same one AgentRunner's suspension
+    GovernedToolInvoker no longer writes the ApprovalRequest itself; it only mints
+    the id so the id it reports is the same one AgentEngine's suspension
     handler will actually persist. ``run_id`` is already resolved through
-    ToolExecutor.run_id_resolver. The remaining fields carry everything the
+    GovernedToolInvoker.run_id_resolver. The remaining fields carry everything the
     suspension handler needs to construct and persist the ApprovalRequest
-    without ToolExecutor touching the ApprovalStore. Only primitive types are
+    without GovernedToolInvoker touching the ApprovalStore. Only primitive types are
     used here (no domain dataclass import) to keep this module dependency-free."""
 
     def __init__(
@@ -301,7 +310,7 @@ class ToolIdempotencyConflictError(ToolError):
 
 
 class IdempotencyInProgressError(ToolError):
-    """Raised by ToolExecutor when an idempotent call hits a RESERVED record
+    """Raised by GovernedToolInvoker when an idempotent call hits a RESERVED record
     (another in-flight call owns the reservation). "wait / return
     in-progress / reject duplicate" are policy choices; for now the executor
     rejects -- the caller can retry once the in-flight call completes and the
@@ -477,23 +486,23 @@ class ToolSecurityAuditError(ToolError):
     """A security-critical audit event could not be persisted."""
 
 
-class PackageNotFoundError(CapabilityNotFoundError):
+class ExtensionNotFoundError(CapabilityNotFoundError):
     pass
 
 
-class PackageResourceNotFoundError(CapabilityNotFoundError):
+class ExtensionResourceNotFoundError(CapabilityNotFoundError):
     pass
 
 
-class PackageResourceAccessDeniedError(PolicyError):
-    """A package resource path was outside the allowed scope/extension set."""
+class ExtensionResourceAccessDeniedError(PolicyError):
+    """An extension resource path was outside the allowed scope/extension set."""
 
 
-class PackageEntrypointNotFoundError(CapabilityNotFoundError):
+class ExtensionEntrypointNotFoundError(CapabilityNotFoundError):
     pass
 
 
-class PackageEntrypointDeniedError(PolicyError):
+class ExtensionEntrypointDeniedError(PolicyError):
     """An entrypoint kind/name was not on the declared allowlist."""
 
 

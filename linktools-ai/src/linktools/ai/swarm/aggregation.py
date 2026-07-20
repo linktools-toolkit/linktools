@@ -26,7 +26,7 @@ class AggregationPolicy:
 def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmTask, ...]") -> RunResult:
     """Reduce the SUCCEEDED tasks' results per policy.mode. Returns RunResult
     whose ``token_usage`` carries the SUM of per-task input/output tokens (each
-    worker RunResult.token_usage is populated by AgentRunner from the model's
+    worker RunResult.token_usage is populated by AgentEngine from the model's
     usage) so SwarmRunner can enforce ``max_total_tokens`` , and a
     metadata dict carrying task_count."""
     succeeded = tuple(t for t in tasks if t.result is not None)

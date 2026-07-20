@@ -10,7 +10,7 @@ transactions through SqlAlchemyStorage.transaction().
 ``reserve`` handles the race via the unique (scope, key) constraint:
 INSERT a RESERVED row; on IntegrityError (concurrent insert from another
 process) SELECT the winner and hash-check it. This is the multi-process
-equivalent of FileIdempotencyStore's asyncio.Lock -- both backends enforce
+equivalent of FilesystemIdempotencyStore's asyncio.Lock -- both backends enforce
 "at most one RESERVED per (scope, key)" but the SQL backend does it via the
 schema rather than an in-process lock."""
 

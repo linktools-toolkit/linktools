@@ -14,8 +14,8 @@ import asyncio
 
 import pytest
 
-from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext, ToolRequest
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
 
@@ -28,7 +28,7 @@ _POLICY = EffectiveToolPolicy()
 def test_execute_propagates_cancelled_error():
     # A handler that raises asyncio.CancelledError must surface it unchanged
     # (not wrapped in a ToolError / swallowed by the retry loop).
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler():
         raise asyncio.CancelledError()
@@ -49,7 +49,7 @@ def test_execute_propagates_cancelled_error():
 def test_execute_propagates_keyboard_interrupt():
     # KeyboardInterrupt is a BaseException; the executor must not turn it into
     # a ToolError (the run should die, not be retried/normalized).
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler():
         raise KeyboardInterrupt()
@@ -72,7 +72,7 @@ def test_atomic_write_propagates_cancelled_error_and_cleans_temp(
 ):
     # §14.1: the atomic-write helper must (a) propagate CancelledError and
     # (b) still remove its temp file -- the try/finally does both.
-    from linktools.ai.storage.file._util import _atomic_write
+    from linktools.ai.storage.filesystem._util import _atomic_write
 
     target = tmp_path / "out.bin"
     real_replace = __import__("os").replace
@@ -83,7 +83,7 @@ def test_atomic_write_propagates_cancelled_error_and_cleans_temp(
             raise asyncio.CancelledError()
         return real_replace(src, dst)
 
-    monkeypatch.setattr("linktools.ai.storage.file.atomic.os.replace", _replacing_raise)
+    monkeypatch.setattr("linktools.ai.storage.filesystem.atomic.os.replace", _replacing_raise)
     with pytest.raises(asyncio.CancelledError):
         _atomic_write(target, b"payload")
     # Target was never written...
@@ -99,7 +99,7 @@ def test_execute_does_not_consult_retry_policy_for_cancelled_error():
     # ``except BaseException``), the retry policy's should_retry would be
     # consulted with error=CancelledError. A recording policy that rejects any
     # BaseException consult catches that regression.
-    from linktools.ai.tool.executor import ToolExecutor
+    from linktools.ai.tool.executor import GovernedToolInvoker
 
     seen: "list[BaseException]" = []
 
@@ -108,7 +108,7 @@ def test_execute_does_not_consult_retry_policy_for_cancelled_error():
             seen.append(error)
             return False
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), retry_policy=_RecordingPolicy())
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), retry_policy=_RecordingPolicy())
 
     async def _handler():
         raise asyncio.CancelledError()
@@ -130,7 +130,7 @@ def test_execute_does_not_consult_retry_policy_for_cancelled_error():
 
 
 def test_execute_does_not_consult_retry_policy_for_keyboard_interrupt():
-    from linktools.ai.tool.executor import ToolExecutor
+    from linktools.ai.tool.executor import GovernedToolInvoker
 
     seen: "list[BaseException]" = []
 
@@ -139,7 +139,7 @@ def test_execute_does_not_consult_retry_policy_for_keyboard_interrupt():
             seen.append(error)
             return False
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), retry_policy=_RecordingPolicy())
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), retry_policy=_RecordingPolicy())
 
     async def _handler():
         raise KeyboardInterrupt()

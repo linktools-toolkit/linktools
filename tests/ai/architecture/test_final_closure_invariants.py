@@ -14,16 +14,16 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import InvalidSpecError
-from linktools.ai.registry.parser import StrictConfigReader, parse_model_policy
+from linktools.ai.catalog.parsing import StrictConfigReader, parse_model_policy
 
 
 def test_tool_executor_requires_final_descriptor_and_policy():
-    """ToolExecutor.execute() must require the finalized descriptor and
+    """GovernedToolInvoker.execute() must require the finalized descriptor and
     effective_policy (no default) -- a default Descriptor/Policy could
     mis-classify a mutating tool as non-mutating and retry a write."""
-    from linktools.ai.tool.executor import ToolExecutor
+    from linktools.ai.tool.executor import GovernedToolInvoker
 
-    signature = inspect.signature(ToolExecutor.execute)
+    signature = inspect.signature(GovernedToolInvoker.execute)
     assert signature.parameters["descriptor"].default is inspect.Parameter.empty, (
         "descriptor must be a required argument (no default)"
     )
@@ -91,7 +91,7 @@ def test_model_policy_timeout_rejects_non_finite():
 def test_mcp_server_spec_has_post_init():
     """MCPServerSpec must enforce invariants at construction (not just via the
     registry parser), so a custom provider cannot build an ungovernable server."""
-    from linktools.ai.registry.mcp import MCPServerSpec
+    from linktools.ai.mcp.spec import MCPServerSpec
 
     assert hasattr(MCPServerSpec, "__post_init__"), (
         "MCPServerSpec must define __post_init__"
@@ -112,8 +112,8 @@ _PARSER = (
     / "src"
     / "linktools"
     / "ai"
-    / "registry"
-    / "parser.py"
+    / "catalog"
+    / "parsing.py"
 )
 
 
@@ -147,27 +147,27 @@ def test_filesystem_revision_uses_nanosecond_mtime():
 
 @pytest.mark.asyncio
 async def test_resource_backed_registry_refreshes_after_change():
-    """A resource-backed AgentRegistry re-reads after its underlying resource
+    """A resource-backed AgentCatalog re-reads after its underlying resource
     is modified (the cache invalidates on revision change) -- the
     resource-refresh gain must hold through a real registry."""
-    from linktools.ai.registry.agent import AgentRegistry
-    from linktools.ai.registry.parser import SpecLoader
-    from linktools.ai.storage.resource.memory import MemoryResourceBackend
-    from linktools.ai.storage.resource.models import WriteOptions
-    from linktools.ai.storage.resource.path import ResourcePath
-    from linktools.ai.storage.resource.store import ResourceStore
+    from linktools.ai.agent.catalog import AgentCatalog
+    from linktools.ai.catalog.parsing import SpecLoader
+    from linktools.ai.asset.memory import MemoryAssetBackend
+    from linktools.ai.asset.models import WriteOptions
+    from linktools.ai.asset.path import AssetPath
+    from linktools.ai.asset.store import AssetStore
 
-    store = ResourceStore(primary=MemoryResourceBackend())
+    store = AssetStore(primary=MemoryAssetBackend())
     await store.put(
-        ResourcePath("/specs/agents/a.md"),
+        AssetPath("/specs/agents/a.md"),
         b"---\nname: a\nmodel:\n  primary: gpt\n---\nv1",
         options=WriteOptions(content_type="text/markdown"),
     )
-    registry = AgentRegistry(SpecLoader.from_resources(store, prefix="specs/agents"))
+    registry = AgentCatalog.from_specloader(SpecLoader.from_resources(store, prefix="specs/agents"))
     assert "v1" in (await registry.get("a")).instructions.instructions
 
     await store.put(
-        ResourcePath("/specs/agents/a.md"),
+        AssetPath("/specs/agents/a.md"),
         b"---\nname: a\nmodel:\n  primary: gpt\n---\nv2",
         options=WriteOptions(content_type="text/markdown"),
     )
@@ -179,8 +179,8 @@ async def test_resource_backed_registry_refreshes_after_change():
 def test_nested_declaration_unknown_field_rejected():
     """A nested declaration with an unknown field is rejected (ToolRef and
     AgentRef) -- the strict-nesting gain must hold in the central fence."""
-    from linktools.ai.registry.parser import parse_tool_refs
-    from linktools.ai.registry.swarm import _parse_agent_ref
+    from linktools.ai.tool.codec import parse_tool_refs
+    from linktools.ai.swarm.codec import _parse_agent_ref
 
     with pytest.raises(InvalidSpecError, match="unknown fields"):
         parse_tool_refs([{"kind": "k", "name": "n", "extra": 1}])
@@ -190,7 +190,7 @@ def test_nested_declaration_unknown_field_rejected():
 
 def test_mcp_command_blank_part_rejected():
     """An MCP command with a whitespace-only part is rejected."""
-    from linktools.ai.registry.mcp import parse_mcp_spec
+    from linktools.ai.mcp.codec import parse_mcp_spec
 
     with pytest.raises(InvalidSpecError, match="must not be blank"):
         parse_mcp_spec("s", {"transport": "stdio", "command": ["python", "   "]})
@@ -198,17 +198,17 @@ def test_mcp_command_blank_part_rejected():
 
 @pytest.mark.asyncio
 async def test_filesystem_registry_refreshes_within_same_second(tmp_path):
-    """A filesystem-backed AgentRegistry sees a same-second modify and a same
+    """A filesystem-backed AgentCatalog sees a same-second modify and a same
     -second add -- the high-resolution revision gain must hold end-to-end."""
-    from linktools.ai.registry.agent import AgentRegistry
-    from linktools.ai.registry.parser import SpecLoader
+    from linktools.ai.agent.catalog import AgentCatalog
+    from linktools.ai.catalog.parsing import SpecLoader
 
     root = tmp_path / "agents"
     root.mkdir()
     (root / "a.md").write_text(
         "---\nname: a\nmodel:\n  primary: gpt\n---\nv1\n", encoding="utf-8"
     )
-    registry = AgentRegistry(SpecLoader.from_filesystem(root), suffix=".md")
+    registry = AgentCatalog.from_specloader(SpecLoader.from_filesystem(root), suffix=".md")
     assert "v1" in (await registry.get("a")).instructions.instructions
 
     (root / "a.md").write_text(

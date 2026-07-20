@@ -13,7 +13,6 @@ dev-dependencies:
   - pytest-asyncio
   - sqlalchemy[asyncio]>=2.0,<3
   - aiosqlite>=0.20,<1
-  - fakeredis>=2,<3
   - lupa>=2,<3
 
 release-dependencies: []
@@ -30,13 +29,16 @@ optional-dependencies:
   mysql:
     - sqlalchemy[asyncio]>=2.0,<3
     - asyncmy>=0.2,<1
-  redis:
-    - redis>=5,<6
   tui:
     - textual
+  # test extra: lets a downstream party install the built wheel + the public
+  # storage testing testkit + pytest, then run the external-adapter conformance
+  # suite WITHOUT the source tree (plan §7.2 line 1852).
+  test:
+    - pytest
+    - pytest-asyncio
   all:
     - sqlalchemy[asyncio]>=2.0,<3
     - aiosqlite>=0.20,<1
     - asyncpg>=0.29,<1
     - asyncmy>=0.2,<1
-    - redis>=5,<6

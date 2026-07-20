@@ -3,11 +3,11 @@
 """tests/ai/e2e/test_file_runtime_complete.py — File-backed Runtime end-to-end
 run-completion contract (WP-01/WP-02).
 
-Drives the real path: FileStorage -> Runtime.build -> Runtime.run -> agent
+Drives the real path: FilesystemStorage -> Runtime.build -> Runtime.run -> agent
 returns. Asserts the cross-store commit leaves exactly one of each artifact
 (no duplicate session messages, no duplicate checkpoint, no duplicate
 RunCompleted event, no RunFailed) -- the invariants that broke before the
-AgentRunner delegated completion to the FileRunCommitCoordinator."""
+AgentEngine delegated completion to the FilesystemRunCommitCoordinator."""
 
 import asyncio
 
@@ -19,7 +19,7 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunStatus
 from linktools.ai.session.models import MessageRole
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -36,7 +36,7 @@ def _registry():
 
 
 def test_file_runtime_complete_has_one_of_each_artifact(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, model_router=_registry())
     spec = AgentSpec(
         id="agent-1",

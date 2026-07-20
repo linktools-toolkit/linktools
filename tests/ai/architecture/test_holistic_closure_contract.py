@@ -32,7 +32,7 @@ def _src_text() -> str:
 
 def test_checkpoint_callers_do_not_hardcode_sequence():
     """Checkpoint construction is owned by the RunCommitCoordinators (Store
-    assigns the sequence); the AgentRunner delegates and never constructs a
+    assigns the sequence); the AgentEngine delegates and never constructs a
     checkpoint itself, and no caller builds the persisted RunCheckpoint with a
     caller-owned sequence. The Store implementations legitimately assign the
     first sequence; this contract targets callers."""
@@ -40,11 +40,11 @@ def test_checkpoint_callers_do_not_hardcode_sequence():
 
     runner = (_AI_SRC / "agent" / "runner.py").read_text(encoding="utf-8")
     assert "NewRunCheckpoint(" not in runner, (
-        "AgentRunner must not construct checkpoints directly -- the "
+        "AgentEngine must not construct checkpoints directly -- the "
         "RunCommitCoordinator owns checkpoint creation"
     )
     commit_files = [
-        (_AI_SRC / "storage" / "file" / "commit.py"),
+        (_AI_SRC / "storage" / "filesystem" / "commit.py"),
         (_AI_SRC / "storage" / "sqlalchemy" / "commit.py"),
     ]
     for commit_file in commit_files:
@@ -75,26 +75,26 @@ def test_runtime_build_has_no_pause_on_approval():
 
 
 def test_agent_runner_requires_commit_coordinator():
-    """AgentRunner.commit_coordinator has no default -- the cross-store commit
+    """AgentEngine.commit_coordinator has no default -- the cross-store commit
     is coordinator-owned and Runtime.build always wires one. There is no inline
     fallback path."""
-    from linktools.ai.agent.runner import AgentRunner
+    from linktools.ai.agent.runner import AgentEngine
 
-    param = inspect.signature(AgentRunner.__init__).parameters["commit_coordinator"]
+    param = inspect.signature(AgentEngine.__init__).parameters["commit_coordinator"]
     assert param.default is inspect.Parameter.empty, (
-        "AgentRunner.commit_coordinator must be required (no inline commit fallback)"
+        "AgentEngine.commit_coordinator must be required (no inline commit fallback)"
     )
 
 
 def test_agent_runner_has_no_inline_commit_params():
     """The runner no longer accepts the old inline-commit knobs (uow_factory,
     approval_store) -- a single RunCommitCoordinator owns pause/complete."""
-    from linktools.ai.agent.runner import AgentRunner
+    from linktools.ai.agent.runner import AgentEngine
 
-    params = inspect.signature(AgentRunner.__init__).parameters
+    params = inspect.signature(AgentEngine.__init__).parameters
     forbidden = {"uow_factory", "approval_store"}
     assert not (forbidden & set(params)), (
-        f"AgentRunner must not accept inline-commit params, "
+        f"AgentEngine must not accept inline-commit params, "
         f"got {sorted(forbidden & set(params))}"
     )
 
@@ -178,12 +178,12 @@ def test_runner_invokes_model_security_hooks():
     the runner passes to Agent.iter(model=...) -- not just once around the run.
     The runner wires the wrapper; the wrapper holds the before_model/after_model
     calls."""
-    from linktools.ai.agent.runner import AgentRunner
-    from linktools.ai.security.secured_model import SecuredModel
+    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.governance.security.secured_model import SecuredModel
 
-    runner_src = inspect.getsource(AgentRunner)
+    runner_src = inspect.getsource(AgentEngine)
     assert "SecuredModel" in runner_src, (
-        "AgentRunner must wrap the model with SecuredModel for per-request hooks"
+        "AgentEngine must wrap the model with SecuredModel for per-request hooks"
     )
     wrapper_src = inspect.getsource(SecuredModel)
     assert "before_model(" in wrapper_src and "after_model(" in wrapper_src, (
@@ -221,6 +221,6 @@ def test_streaming_does_not_swallow_exceptions():
     ).read_text(encoding="utf-8")
     swallow = re.findall(r"except Exception:\s*\n(?:\s*#[^\n]*\n)*\s*pass\b", src)
     assert not swallow, (
-        f"AgentRunner still swallows exceptions via 'except Exception: pass' "
+        f"AgentEngine still swallows exceptions via 'except Exception: pass' "
         f"({len(swallow)} site(s))"
     )

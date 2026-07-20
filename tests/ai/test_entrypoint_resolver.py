@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """DirectoryEntrypointResolver (contract/contract/contract): list entrypoints,
-resolve scoped agents, and namespace isolation across packages."""
+resolve scoped agents, and namespace isolation across extensions."""
 
 import pytest
 
-from linktools.ai.errors import PackageEntrypointNotFoundError
-from linktools.ai.package.entrypoint import EntrypointRef
-from linktools.ai.package.resolver import DirectoryEntrypointResolver
-from linktools.ai.package.scope import PackageScope
+from linktools.ai.errors import ExtensionEntrypointNotFoundError
+from linktools.ai.extension.entrypoint import EntrypointRef
+from linktools.ai.extension.resolver import DirectoryEntrypointResolver
+from linktools.ai.extension.scope import ExtensionScope
 
 
 def _make_pkg(base, pkg_id, agents=("grader",)):
@@ -38,17 +38,17 @@ def resolver(tmp_path):
 
 @pytest.mark.asyncio
 async def test_list_entrypoints_kind_filter(resolver):
-    scope = PackageScope("skill-creator", "skill")
+    scope = ExtensionScope("skill-creator", "skill")
     result = await resolver.list_entrypoints(scope, kind="agent")
     names = sorted(i.name for i in result.items)
     assert names == ["comparator", "grader"]
     assert all(i.kind == "agent" for i in result.items)
-    assert all(i.package_id == "skill-creator" for i in result.items)
+    assert all(i.extension_id == "skill-creator" for i in result.items)
 
 
 @pytest.mark.asyncio
 async def test_list_entrypoints_pagination(resolver):
-    scope = PackageScope("skill-creator", "skill")
+    scope = ExtensionScope("skill-creator", "skill")
     page1 = await resolver.list_entrypoints(scope, kind="agent", limit=1)
     assert len(page1.items) == 1
     assert page1.next_cursor is not None
@@ -61,18 +61,18 @@ async def test_list_entrypoints_pagination(resolver):
 
 @pytest.mark.asyncio
 async def test_resolve_scoped_agent_has_namespaced_id(resolver):
-    scope = PackageScope("skill-creator", "skill")
+    scope = ExtensionScope("skill-creator", "skill")
     agent = await resolver.resolve_agent(
         EntrypointRef(kind="agent", name="grader", scope=scope)
     )
-    assert agent.id == "package:skill-creator:agent:grader"
+    assert agent.id == "extension:skill-creator:agent:grader"
     assert agent.model.primary == "gpt-4o"
 
 
 @pytest.mark.asyncio
-async def test_namespace_isolation_same_name_different_packages(resolver):
-    s1 = PackageScope("skill-creator", "skill")
-    s2 = PackageScope("another-skill", "skill")
+async def test_namespace_isolation_same_name_different_extensions(resolver):
+    s1 = ExtensionScope("skill-creator", "skill")
+    s2 = ExtensionScope("another-skill", "skill")
     a1 = await resolver.resolve_agent(
         EntrypointRef(kind="agent", name="grader", scope=s1)
     )
@@ -81,14 +81,14 @@ async def test_namespace_isolation_same_name_different_packages(resolver):
     )
     # Same entrypoint name, distinct scoped ids -> no global namespace clash.
     assert a1.id != a2.id
-    assert a1.id == "package:skill-creator:agent:grader"
-    assert a2.id == "package:another-skill:agent:grader"
+    assert a1.id == "extension:skill-creator:agent:grader"
+    assert a2.id == "extension:another-skill:agent:grader"
 
 
 @pytest.mark.asyncio
 async def test_resolve_missing_entrypoint_raises(resolver):
-    scope = PackageScope("skill-creator", "skill")
-    with pytest.raises(PackageEntrypointNotFoundError):
+    scope = ExtensionScope("skill-creator", "skill")
+    with pytest.raises(ExtensionEntrypointNotFoundError):
         await resolver.resolve_agent(
             EntrypointRef(kind="agent", name="ghost", scope=scope)
         )

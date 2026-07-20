@@ -7,7 +7,7 @@ Both the thin console commands and the Textual TUI operate the Runtime + Storage
 exclusively through :class:`RuntimeClient`. :class:`LocalRuntimeClient` is the
 in-process implementation that owns the project bundle (Runtime + Storage +
 registries) and translates Runtime dict-events into the protocol surface; the
-TUI never touches ``FileStorage`` / registries directly.
+TUI never touches ``FilesystemStorage`` / registries directly.
 :class:`FakeRuntimeClient` is the shared double both console and TUI tests drive.
 
 Local vs. Remote share the same interface; a remote (HTTP) client is not wired
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from linktools.ai.agent.approval import ApprovalStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 from linktools.cli import CommandError
 from linktools.system import get_user
 
@@ -123,7 +123,7 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
-async def ensure_session(storage: FileStorage, session_id: str) -> None:
+async def ensure_session(storage: FilesystemStorage, session_id: str) -> None:
     """Get-or-create a session record.
 
     ``Runtime.run`` / ``Runtime.run_stream`` require a pre-existing session when
@@ -149,7 +149,7 @@ async def ensure_session(storage: FileStorage, session_id: str) -> None:
 
 
 async def resolve_approval(
-    storage: FileStorage,
+    storage: FilesystemStorage,
     approval_id: str,
     *,
     approved: bool,
@@ -183,7 +183,7 @@ async def resolve_approval(
     return 0
 
 
-async def list_sessions(storage: FileStorage) -> list:
+async def list_sessions(storage: FilesystemStorage) -> list:
     """Enumerate every session record by scanning the sessions directory.
 
     ``SessionStore`` exposes no ``list()``, so we glob the on-disk layout
@@ -199,7 +199,7 @@ async def list_sessions(storage: FileStorage) -> list:
     return records
 
 
-async def list_runs(storage: FileStorage) -> list:
+async def list_runs(storage: FilesystemStorage) -> list:
     """Enumerate every run record by scanning the runs directory.
 
     ``RunStore`` exposes no whole-store ``list()`` (only ``list_children`` of a
@@ -214,7 +214,7 @@ async def list_runs(storage: FileStorage) -> list:
     return records
 
 
-async def list_pending_approvals(storage: FileStorage) -> list:
+async def list_pending_approvals(storage: FilesystemStorage) -> list:
     """Enumerate pending approval requests across all runs.
 
     ``ApprovalStore`` has no whole-store listing API; we glob

@@ -17,11 +17,11 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.dependencies import AgentDependencies
-from linktools.ai.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
-from linktools.ai.policy.engine import PolicyEngine, ToolContext
+from linktools.ai.governance.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext
 from linktools.ai.errors import ToolDeniedError
 from linktools.ai.tool.pydantic import build_policy_capability
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _tool_returns(result) -> list:
@@ -60,7 +60,7 @@ def _deps(run_id: str = "run-1", session_id: str = "session-1") -> AgentDependen
 
 @pytest.mark.asyncio
 async def test_denied_tool_call_surfaces_as_skip_not_exception():
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(
             rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)
         )
@@ -74,7 +74,7 @@ async def test_denied_tool_call_surfaces_as_skip_not_exception():
 
 @pytest.mark.asyncio
 async def test_allowed_tool_call_executes_normally():
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(
             rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)
         )
@@ -93,7 +93,7 @@ async def test_capability_has_no_current_context_field():
     # injection (ctx.deps.tool_context), so a fresh capability has no such
     # attribute and is identical before/after a run -- the concurrency-safety
     # invariant this refactor delivers.
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(
             rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)
         )

@@ -15,7 +15,7 @@ def test_defaults_are_conservative():
     assert p.max_tools_per_capability == 16
     assert p.max_resources_per_list == 50
     assert p.max_read_bytes == 65536
-    assert p.max_entrypoints_per_package == 20
+    assert p.max_entrypoints_per_extension == 20
     assert p.allowed_entrypoint_kinds == ("agent",)
     assert p.require_explicit_entrypoint_allowlist is True
 
@@ -69,7 +69,7 @@ def test_mutating_tool_gated_by_expose_execution_tools_regardless_of_category():
         "file-write",
         "subagent",
         "mcp-write",
-        "package-execute",
+        "extension-execute",
     ):
         d = _descriptor(category, mutating=True)
         assert is_descriptor_exposable(d, off) is False, category

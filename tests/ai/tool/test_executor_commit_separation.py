@@ -14,9 +14,9 @@ import asyncio
 import pytest
 
 from linktools.ai.errors import ToolCommitError
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.storage.file.idempotency import FileIdempotencyStore
-from linktools.ai.tool.executor import ToolExecutor, ToolRequest, ToolContext
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.executor import GovernedToolInvoker, ToolRequest, ToolContext
 from linktools.ai.tool.idempotency import IdempotencyStatus
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
@@ -29,7 +29,7 @@ _POLICY = EffectiveToolPolicy()
 
 
 class _FailingStore:
-    """Wraps a real FileIdempotencyStore. ``fail_complete`` / ``fail_mark``
+    """Wraps a real FilesystemIdempotencyStore. ``fail_complete`` / ``fail_mark``
     inject a commit-phase failure to prove the Handler is not re-run."""
 
     def __init__(self, inner, *, fail_complete=False, fail_mark=False):
@@ -70,7 +70,7 @@ class _FailingStore:
 
 
 def _executor(store):
-    return ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    return GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
 
 
 def _execute(executor, store, run_id, key, handler):
@@ -94,7 +94,7 @@ def test_handler_runs_once_when_complete_fails(tmp_path):
         calls["n"] += 1
         return {"charged": True}
 
-    inner = FileIdempotencyStore(root=tmp_path)
+    inner = FilesystemIdempotencyStore(root=tmp_path)
     store = _FailingStore(inner, fail_complete=True)
     executor = _executor(store)
 
@@ -112,7 +112,7 @@ def test_handler_runs_once_when_mark_executed_fails(tmp_path):
         calls["n"] += 1
         return {"charged": True}
 
-    inner = FileIdempotencyStore(root=tmp_path)
+    inner = FilesystemIdempotencyStore(root=tmp_path)
     store = _FailingStore(inner, fail_mark=True)
     executor = _executor(store)
 
@@ -128,7 +128,7 @@ def test_successful_execution_marked_executed_then_completed(tmp_path):
     async def handler(**kwargs):
         return {"ok": 1}
 
-    store = _FailingStore(FileIdempotencyStore(root=tmp_path))
+    store = _FailingStore(FilesystemIdempotencyStore(root=tmp_path))
     executor = _executor(store)
 
     result = _execute(executor, store, "r3", "k3", handler)
@@ -143,7 +143,7 @@ def test_handler_failure_marks_failed_without_receipt(tmp_path):
     async def handler(**kwargs):
         raise RuntimeError("boom")
 
-    store = _FailingStore(FileIdempotencyStore(root=tmp_path))
+    store = _FailingStore(FilesystemIdempotencyStore(root=tmp_path))
     executor = _executor(store)
 
     with pytest.raises(RuntimeError):
@@ -160,7 +160,7 @@ def test_executed_record_replays_without_re_running_handler(tmp_path):
     # invoked again; the stored receipt is returned.
     from linktools.ai.tool.idempotency import compute_request_hash
 
-    inner = FileIdempotencyStore(root=tmp_path)
+    inner = FilesystemIdempotencyStore(root=tmp_path)
     real_hash = compute_request_hash("charge", {}, "r5")
     cr = asyncio.run(
         inner.claim(scope="r5", key="k5", request_hash=real_hash, owner_id="w1")
@@ -197,7 +197,7 @@ def test_mark_unknown_rejected_on_executed_preserves_receipt(tmp_path):
     # (a later claim CONFLICTs instead of replaying). The receipt must survive.
     from linktools.ai.errors import LostIdempotencyClaimError
 
-    inner = FileIdempotencyStore(root=tmp_path)
+    inner = FilesystemIdempotencyStore(root=tmp_path)
     cr = asyncio.run(
         inner.claim(scope="r6", key="k6", request_hash="h", owner_id="w1")
     )

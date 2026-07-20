@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resume gate for ToolExecutor: when policy says REQUIRE_APPROVAL but the
+"""Resume gate for GovernedToolInvoker: when policy says REQUIRE_APPROVAL but the
 approval_store already holds an APPROVED request matching
 ``(run_id, tool_call_id)``, ``check()`` MUST let the call through (return
 without raising) instead of re-persisting a PENDING request and re-raising.
@@ -26,14 +26,14 @@ from linktools.ai.agent.approval import (
     build_approval_request,
 )
 from linktools.ai.errors import RunPaused
-from linktools.ai.policy.engine import (
+from linktools.ai.governance.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
     PolicyEngine,
     ToolContext,
     ToolRequest,
 )
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 class _Require:
@@ -146,7 +146,7 @@ def test_check_allows_through_when_already_approved():
     store = _Store()
     approved = _approved_request(run_id="run-123", tool_call_id="tcid-XYZ")
     store._by_id[approved.id] = approved
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )
@@ -170,7 +170,7 @@ def test_check_raises_when_no_matching_approval():
     """Branch 2: no matching approval at all -> ``check()`` raises RunPaused.
     The executor only emits the signal; it does not persist (the caller does)."""
     store = _Store()
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )
@@ -197,7 +197,7 @@ def test_check_raises_when_matching_request_is_pending():
         reason="needs approval",
     )
     store._by_id[pending.id] = pending
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )
@@ -218,7 +218,7 @@ def test_check_raises_when_no_tool_call_id_in_context():
     The uuid fallback mints a tool_call_id on the RunPaused signal; resume
     cannot apply because there was no stable id to match."""
     store = _Store()
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )
@@ -238,7 +238,7 @@ def test_check_without_approval_store_raises_normally():
     False early; ``check()`` raises ``RunPaused`` exactly like
     the default-None path always has (no possible resume gate without a
     store)."""
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
     )
 

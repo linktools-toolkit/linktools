@@ -30,7 +30,7 @@ except (
 
 if TYPE_CHECKING:
     from ...evaluation.store import EvalStore
-    from ...task.store import TaskStore
+    from ...jobs.store import JobStore
 
 from ...agent.approval import ApprovalStore
 from ...events.store import EventStore
@@ -40,9 +40,9 @@ from ...run.store import RunStore
 from ...session.store import SessionStore
 from ...swarm.store import SwarmStore
 from ...tool.idempotency import IdempotencyStore
-from ..capabilities import SQLALCHEMY_STORAGE_CAPABILITIES
+from ..features import SQLALCHEMY_STORAGE_FEATURES
 from ..facade import Storage
-from ..resource.store import ResourceStore
+from ...asset.store import AssetStore
 from .approval import SqlAlchemyApprovalStore
 from .checkpoint import SqlAlchemyCheckpointStore
 from .definition import SqlAlchemyRunDefinitionStore
@@ -50,7 +50,7 @@ from .event import SqlAlchemyEventStore
 from .evaluation import SqlAlchemyEvalStore
 from .idempotency import SqlAlchemyIdempotencyStore
 from .memory import SqlAlchemyMemoryStore
-from .resource import SqlAlchemyResourceBackend
+from .asset import SqlAlchemyAssetBackend
 from .run import SqlAlchemyRunStore
 from .session import SqlAlchemySessionStore
 from .swarm import SqlAlchemySwarmStore
@@ -77,7 +77,7 @@ class _UnitOfWork:
     swarms: SwarmStore
     memories: MemoryStore
     idempotency: IdempotencyStore
-    tasks: "TaskStore"
+    tasks: "JobStore"
     evaluations: "EvalStore"
 
 
@@ -92,10 +92,14 @@ class SqlAlchemyStorage(Storage):
         session_factory: "Callable[[], AsyncSession]",
         resource_coordinator: "object | None" = None,
     ) -> None:
+        from ..artifact_backends import build_artifact_store_from_assets
+        from ..coordination.process_local import ProcessLocalLeaseCoordinator
+
+        assets = AssetStore(
+            primary=SqlAlchemyAssetBackend(session_factory=session_factory)
+        )
         super().__init__(
-            resources=ResourceStore(
-                primary=SqlAlchemyResourceBackend(session_factory=session_factory)
-            ),
+            assets=assets,
             sessions=SqlAlchemySessionStore(session_factory=session_factory),
             runs=SqlAlchemyRunStore(session_factory=session_factory),
             events=SqlAlchemyEventStore(session_factory=session_factory),
@@ -109,20 +113,31 @@ class SqlAlchemyStorage(Storage):
             ),
             tasks=SqlAlchemyTaskStore(session_factory=session_factory),
             evaluations=SqlAlchemyEvalStore(session_factory=session_factory),
-            capabilities=SQLALCHEMY_STORAGE_CAPABILITIES,
+            features=SQLALCHEMY_STORAGE_FEATURES,
+            coordination=ProcessLocalLeaseCoordinator(),
+            transactions=_SqlAlchemyTransactionManager(session_factory),
+            artifacts=build_artifact_store_from_assets(assets),
         )
-        # Frozen dataclass: bypass __setattr__ to stash the factory for transaction().
-        object.__setattr__(self, "_session_factory", session_factory)
+
+
+class _SqlAlchemyTransactionManager:
+    """The StorageTransactionManager for SqlAlchemyStorage: yields a UoW whose
+    stores all share one AsyncSession + one transaction. ``async with
+    session.begin()`` auto-commits on clean exit and auto-rollbacks on
+    exception, giving true atomicity across stores: either every tx.* write
+    persists, or none of them do. Lives here (next to _UnitOfWork) so the
+    manager, the UoW, and the bound-store construction stay in one place; the
+    Storage.transactions field holds an instance and Storage.transaction()
+    delegates to it."""
+
+    def __init__(self, session_factory: "Callable[[], AsyncSession]") -> None:
+        self._session_factory = session_factory
 
     @asynccontextmanager
     async def transaction(self) -> "AsyncIterator[_UnitOfWork]":
-        """Yield a UnitOfWork whose stores all share one AsyncSession + one
-        transaction. ``async with session.begin()`` auto-commits on clean exit
-        and auto-rollbacks on exception, giving true atomicity across all
-        stores: either every tx.* write persists, or none of them do."""
         async with self._session_factory() as session:
             async with session.begin():
-                tx = _UnitOfWork(
+                yield _UnitOfWork(
                     session=session,
                     runs=SqlAlchemyRunStore(
                         session_factory=self._session_factory, session=session
@@ -155,4 +170,3 @@ class SqlAlchemyStorage(Storage):
                         session_factory=self._session_factory, session=session
                     ),
                 )
-                yield tx

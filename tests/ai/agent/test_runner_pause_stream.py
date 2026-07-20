@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for AgentRunner.run_stream pause path (scenario).
+"""Tests for AgentEngine.run_stream pause path (scenario).
 
-When ``ToolExecutor.pause_on_approval=True`` and policy returns
+When ``GovernedToolInvoker.pause_on_approval=True`` and policy returns
 REQUIRE_APPROVAL, the executor raises ``RunPaused``. PolicyCapability lets it
 propagate (it's a ``RunError``, not a ``ToolError``) out of pydantic-ai's
-tool-execution stack to ``AgentRunner.run_stream``, which must:
+tool-execution stack to ``AgentEngine.run_stream``, which must:
 
   1. Catch ``RunPaused`` INSIDE the ``async with agent.iter(prompt) as run:``
      block (so ``run`` is bound and ``run.all_messages()`` works).
@@ -30,7 +30,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from linktools.ai.agent.checkpoint import deserialize_messages
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.assembler import CapabilityAssembler
 from linktools.ai.capability.models import CapabilityBundle
@@ -38,17 +38,17 @@ from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.approval import ApprovalRule
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.governance.policy.approval import ApprovalRule
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import (
     ManagedToolDefinition,
     ToolContribution,
@@ -136,23 +136,23 @@ def _seed_session(store, session_id) -> None:
     )
 
 
-def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentRunner:
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentEngine:
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
     if approval_store is None:
-        approval_store = FileApprovalStore(root=tmp_path / "approvals")
-    return AgentRunner(
+        approval_store = FilesystemApprovalStore(root=tmp_path / "approvals")
+    return AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
         managed_tool_executor=tool_executor,
-        commit_coordinator=FileRunCommitCoordinator(
+        commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=approval_store,
             checkpoint_store=checkpoint_store,
             run_store=run_store,
@@ -164,9 +164,9 @@ def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentR
 
 def _compile(
     tmp_path, *, agent_id="agent-1"
-) -> "tuple[AgentRunner, CompiledAgent, FileApprovalStore]":
-    approval_store = FileApprovalStore(root=tmp_path / "approvals")
-    executor = ToolExecutor(
+) -> "tuple[AgentEngine, CompiledAgent, FilesystemApprovalStore]":
+    approval_store = FilesystemApprovalStore(root=tmp_path / "approvals")
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=approval_store,
     )

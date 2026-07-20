@@ -9,7 +9,7 @@ discovers those directories, parses each ``SKILL.md`` into a ``SkillSpec``, and
 exposes the skill's root path + a content revision so an ``ActiveSkillContext``
 can be minted and later validated.
 
-The flat ``SkillRegistry`` reads ``{id}.md`` files and cannot represent a skill
+The flat ``SkillCatalog`` reads ``{id}.md`` files and cannot represent a skill
 directory or its ``agents/`` tree; this index is the directory-aware complement
 used by :func:`linktools.ai_cli.runtime.build_cli_runtime` to back the
 skill-private subagent provider."""
@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from linktools.ai.registry.parser import parse_markdown_text
-from linktools.ai.registry.skill import SkillSpec, parse_skill_spec
+from linktools.ai.catalog.parsing import parse_markdown_text
+from linktools.ai.skill.codec import parse_skill_spec
+from linktools.ai.skill.models import SkillSpec
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,14 +23,41 @@ _CATEGORY_RISK: "dict[str, str]" = {
     "terminal": "high",
     "network-write": "high",
     "mcp-write": "high",
-    "package-execute": "high",
-    "package-read": "low",
+    "extension-execute": "high",
+    "extension-read": "low",
 }
 
 
 def default_risk_for_category(category: str) -> str:
     """Conservative risk for a category. Unknown -> high."""
     return _CATEGORY_RISK.get(category, "high")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRef:
+    """A reference to a tool from a declaration: a capability ``kind`` + ``name``
+    + optional ``config``. This is the tool-domain reference type (previously
+    defined in agent/spec.py); it lives here because it is a TOOL concept
+    referenced by agent / skill / swarm / capability declarations, not an
+    agent-specific one. agent.spec re-exports it for back-comat.
+
+    It is the SINGLE reference type: ``linktools.ai.capability.models.CapabilityRef``
+    is an alias of this class (plan §4.2 保留唯一模型), so a spec declaration and
+    a resolved capability ref are the same object, not two identical shapes."""
+
+    kind: str
+    name: str
+    config: "Mapping[str, Any]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind.strip():
+            raise ValueError("ToolRef.kind must be a non-empty string")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("ToolRef.name must be a non-empty string")
+        object.__setattr__(self, "config", freeze_value(dict(self.config)))
+
+    def __str__(self) -> str:
+        return f"{self.kind}:{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +68,7 @@ class ToolDescriptor:
     decisions based on category/risk, not name patterns."""
 
     name: str
-    source: str  # "builtin" | "mcp" | "skill" | "subagent" | "package"
+    source: str  # "builtin" | "mcp" | "skill" | "subagent" | "extension"
     category: str  # stable security classification
     risk: str  # "low" | "medium" | "high" | "critical"
     mutating: bool

@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from linktools.ai.registry.mcp import MCPServerSpec
+from linktools.ai.mcp.spec import MCPServerSpec
 
 
 def _valid(**overrides) -> MCPServerSpec:

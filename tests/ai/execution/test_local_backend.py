@@ -38,13 +38,21 @@ def test_run_bash_executes_in_runtime_dir(backend, tmp_path):
 
 
 def test_run_bash_timeout(backend):
-    result = asyncio.run(backend.run_bash("sleep 5", timeout_ms=300))
+    # The command only needs to outlive the 300ms timeout. The subprocess is
+    # SIGKILLed on timeout, but a shell-spawned child holds the pipes until it
+    # exits, so the command's own duration is the floor -- keep it just over the
+    # timeout rather than multi-second.
+    result = asyncio.run(backend.run_bash("sleep 1", timeout_ms=300))
     assert "error" in result and "timeout" in result["error"]
 
 
 def test_terminate_kills_in_flight_subprocess(backend):
     async def main():
-        task = asyncio.ensure_future(backend.run_bash("sleep 30"))
+        # The command only needs to stay alive long enough to be detected in the
+        # registry before terminate() reaps it. A shell-spawned child holds the
+        # pipes after the parent is SIGKILLed, so the command's duration is the
+        # wait floor -- keep it ~1s, not 30s.
+        task = asyncio.ensure_future(backend.run_bash("sleep 1"))
         # Poll until the subprocess is tracked, so terminate() has a live proc
         # to kill rather than racing the spawn.
         for _ in range(200):

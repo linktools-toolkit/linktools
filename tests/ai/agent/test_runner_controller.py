@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentRunner + RunController integration. When a
-RunController is wired into AgentRunner, cancelling a run via the controller
+"""AgentEngine + RunController integration. When a
+RunController is wired into AgentEngine, cancelling a run via the controller
 (token set + task.cancel()) must drive the lifecycle through CANCELLING then
 CANCELLED -- the CANCELLING state is the observable signal that "cancel
 requested" is distinct from "actually cancelled".
 
-These tests wrap the FileRunStore with a recorder so the sequence of
+These tests wrap the FilesystemRunStore with a recorder so the sequence of
 ``transition()`` target statuses is observable, then assert both CANCELLING
 and CANCELLED appear in order."""
 
@@ -18,7 +18,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
@@ -29,12 +29,12 @@ from linktools.ai.run.context import RunContext
 from linktools.ai.run.controller import RunController
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -66,7 +66,7 @@ class _RecordingRunStore:
     target status in order. Used to assert the runner visits CANCELLING before
     CANCELLED. Forwards every other method to the wrapped store."""
 
-    def __init__(self, inner: FileRunStore) -> None:
+    def __init__(self, inner: FilesystemRunStore) -> None:
         self._inner = inner
         self.transitions: "list[RunStatus]" = []
 
@@ -80,24 +80,24 @@ class _RecordingRunStore:
 
 def _make_runner(
     tmp_path, controller, pipeline=None
-) -> "tuple[AgentRunner, _RecordingRunStore]":
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+) -> "tuple[AgentEngine, _RecordingRunStore]":
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    inner_store = FileRunStore(root=tmp_path / "runs")
+    inner_store = FilesystemRunStore(root=tmp_path / "runs")
     recording = _RecordingRunStore(inner_store)
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    runner = AgentRunner(
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    runner = AgentEngine(
         run_store=recording,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         run_controller=controller,
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=recording,
             session_store=session_store,
@@ -152,7 +152,7 @@ async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
     await _seed_session(runner._session_store, "session-ctrl-1")
 
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry()),
     )
     compiled = await compiler.compile(
@@ -214,9 +214,9 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     which seeds a RUNNING run WITHOUT an in-flight task and expects a direct
     -> CANCELLED transition."""
     from linktools.ai.runtime import Runtime
-    from linktools.ai.storage.facade import FileStorage
+    from linktools.ai.storage.facade import FilesystemStorage
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     # Runtime.build always wires a RunController -- but the runner's actual
     # driving Task is only registered once execute() starts. To exercise the
@@ -297,22 +297,22 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
 
     pipeline = MiddlewarePipeline(middlewares=(_BlockingMiddleware(),))
     # Default runner: no run_controller argument.
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    inner_store = FileRunStore(root=tmp_path / "runs")
+    inner_store = FilesystemRunStore(root=tmp_path / "runs")
     recording = _RecordingRunStore(inner_store)
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    runner = AgentRunner(
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    runner = AgentEngine(
         run_store=recording,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=recording,
             session_store=session_store,
@@ -322,7 +322,7 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
     await _seed_session(runner._session_store, "session-noctrl")
 
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry()),
     )
     compiled = await compiler.compile(

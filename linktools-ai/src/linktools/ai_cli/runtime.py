@@ -4,8 +4,8 @@
 """Runtime assembly for a discovered project.
 
 Wires ``.linktools/{agents,skills,mcp}`` into ``Runtime.build`` via a real
-``ProviderBundle`` (AgentRegistry / SkillRegistry / MCPRegistry built from the
-project directories), a project-scoped ``FileStorage`` (state isolation), an
+``RuntimeDependencies`` (AgentCatalog / SkillCatalog / MCPCatalog built from the
+project directories), a project-scoped ``FilesystemStorage`` (state isolation), an
 ``MCPConnectionManager`` (so ``aclose`` can release connections), and
 ``CapabilityRuntimeOptions``. Also builds the directory skill index +
 skill-private subagent resolver for the CLI's own use (inspect/list/doctor and
@@ -25,14 +25,15 @@ from linktools.ai.capability.models import CapabilityRuntimeOptions
 from linktools.ai.execution.local import LocalExecutionBackend
 from linktools.ai.mcp.client import MCPConnectionManager
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.providers.bundle import ProviderBundle
-from linktools.ai.registry.agent import AgentRegistry
-from linktools.ai.registry.mcp import MCPRegistry
-from linktools.ai.registry.parser import SpecLoader
-from linktools.ai.registry.skill import SkillRegistry
+from linktools.ai.runtime import RuntimeDependencies
+from linktools.ai.agent.catalog import AgentCatalog
+from linktools.ai.catalog.parsing import SpecLoader
+from linktools.ai.mcp.catalog import MCPCatalog
+from linktools.ai.skill.catalog import SkillCatalog
 from linktools.ai.runtime import Runtime
 from linktools.ai.skill.private import ActiveSkillContext, get_active_skill
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.subagent.config import SkillPrivateSubagentConfig
 from linktools.ai.subagent.skill_resolver import (
     SkillSubagentProvider,
     UnifiedSubagentResolver,
@@ -57,7 +58,7 @@ def skill_spec_loader(skills_root: Path) -> SpecLoader:
     """A SpecLoader that reads self-contained ``skills/<id>/SKILL.md``
     directories instead of flat ``<id>.md`` files.
 
-    ``SkillRegistry`` calls ``read(f"{id}{suffix}")`` and ``list_ids(suffix)``;
+    ``SkillCatalog`` calls ``read(f"{id}{suffix}")`` and ``list_ids(suffix)``;
     with an empty suffix this becomes ``read(id)`` (mapped to ``<id>/SKILL.md``)
     and ``list_ids`` returning the directory names. The revision covers every
     skill's ``SKILL.md`` + ``agents/*.md`` tree so a change anywhere refreshes
@@ -117,10 +118,10 @@ def skill_spec_loader(skills_root: Path) -> SpecLoader:
 class CliRuntimeBundle:
     project: CliProject
     runtime: Runtime
-    storage: FileStorage
-    agents: AgentRegistry
-    skills: SkillRegistry
-    mcp: MCPRegistry
+    storage: FilesystemStorage
+    agents: AgentCatalog
+    skills: SkillCatalog
+    mcp: MCPCatalog
     skill_index: DirectorySkillIndex
     subagents: UnifiedSubagentResolver
 
@@ -157,9 +158,9 @@ async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None"):
 
 def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
     """Assemble a ``Runtime`` from a project's ``.linktools/``."""
-    agents = AgentRegistry(SpecLoader.from_filesystem(project.agents_root))
-    skills = SkillRegistry(skill_spec_loader(project.skills_root), suffix="")
-    mcp = MCPRegistry(SpecLoader.from_filesystem(project.mcp_root))
+    agents = AgentCatalog.from_specloader(SpecLoader.from_filesystem(project.agents_root))
+    skills = SkillCatalog.from_specloader(skill_spec_loader(project.skills_root), suffix="")
+    mcp = MCPCatalog.from_specloader(SpecLoader.from_filesystem(project.mcp_root))
 
     skill_index = DirectorySkillIndex(project.skills_root)
     skill_subagents = SkillSubagentProvider(
@@ -171,33 +172,35 @@ def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
         skill_agents=skill_subagents,
     )
 
-    providers = ProviderBundle(
+    providers = RuntimeDependencies(
         agents=agents,
         skills=skills,
         mcp_servers=mcp,
-        # AgentRegistry structurally satisfies SubagentSpecProvider (async
+        # AgentCatalog structurally satisfies SubagentSpecProvider (async
         # get/list_ids), so project agents are callable via call_subagent(name).
         subagents=agents,
-        # Skill-private subagent wiring: read_skill activates the skill
-        # (active_skill_lookup); call_subagent(instruction_path=...) resolves it
-        # through the UnifiedSubagentResolver against the active skill.
+    )
+    # Skill-private subagent wiring (typed config, injected straight into the
+    # SubagentProvider/SkillProvider -- no longer carried as Any fields on
+    # RuntimeDependencies). read_skill activates the skill (active_skill_lookup);
+    # call_subagent(instruction_path=...) resolves it through the
+    # UnifiedSubagentResolver against the active skill. parent_delegated_tools
+    # is left None on purpose: the live SubagentProvider.resolve derives it
+    # per-resolution from the parent agent's own declared tools.
+    skill_subagent = SkillPrivateSubagentConfig(
         skill_resolver=subagents,
         active_skill_provider=get_active_skill,
         active_skill_lookup=lambda sid: _activate_skill(skill_index, sid),
         child_model_policy=ModelPolicy(primary="standard"),
-        # parent_delegated_tools is left None here on purpose: the live
-        # SubagentProvider.resolve derives it per-resolution from the parent
-        # agent's own declared tools (via context.agent_id), so the permission
-        # intersection IS enforced at runtime without a static value here.
-        parent_delegated_tools=None,
     )
 
-    storage = FileStorage(root=project.state_root)
+    storage = FilesystemStorage(root=project.state_root)
     runtime = Runtime.build(
         storage=storage,
         model_router=model_router,
         execution=LocalExecutionBackend(runtime_dir=project.root),
         providers=providers,
+        skill_subagent=skill_subagent,
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(
                 expose_prompt_catalog=True,

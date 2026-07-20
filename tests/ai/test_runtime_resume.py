@@ -4,8 +4,8 @@
 
 Runtime.resume(run_id, spec) loads a paused run, deserializes its checkpoint's
 message history, transitions WAITING_APPROVAL -> RUNNING, and re-enters
-AgentRunner.run_stream with message_history=<deserialized messages>. The
-ToolExecutor's resume gate (_already_approved) recognizes the now-APPROVED
+AgentEngine.run_stream with message_history=<deserialized messages>. The
+GovernedToolInvoker's resume gate (_already_approved) recognizes the now-APPROVED
 request and lets the tool execute instead of re-raising RunPaused.
 
 The full round trip at the Runtime level:
@@ -21,7 +21,7 @@ The full round trip at the Runtime level:
      (resume gate lets it through), the model emits "done", and the run
      SUCCEEDS.
 
-All three phases run inside one ``asyncio.run`` so the FileApprovalStore's
+All three phases run inside one ``asyncio.run`` so the FilesystemApprovalStore's
 ``asyncio.Lock`` stays bound to one event loop (the lock is acquired during
 both the pause create and the approve resolve)."""
 
@@ -40,18 +40,18 @@ from linktools.ai.tool.models import (
     ToolContribution,
     ToolDescriptor,
 )
-from linktools.ai.providers.bundle import ProviderBundle
+from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import InvalidRunTransitionError, RunNotFoundError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.approval import ApprovalRule
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.governance.policy.approval import ApprovalRule
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FileStorage
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 TOOL_NAME = "risky"
 
@@ -134,9 +134,9 @@ def _spec() -> AgentSpec:
     )
 
 
-def _build_runtime(tmp_path) -> "tuple[Runtime, FileStorage]":
-    storage = FileStorage(root=tmp_path)
-    executor = ToolExecutor(
+def _build_runtime(tmp_path) -> "tuple[Runtime, FilesystemStorage]":
+    storage = FilesystemStorage(root=tmp_path)
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=storage.approvals,
     )
@@ -144,7 +144,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FileStorage]":
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         tool_executor=executor,
-        providers=ProviderBundle(capabilities=(_RiskyProvider(),)),
+        providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
     )
     return runtime, storage
@@ -163,7 +163,7 @@ async def _collect(gen) -> "list[dict]":
 def test_resume_round_trip_pause_approve_resume_succeeds(tmp_path):
     """Full pause -> approve -> resume -> SUCCEEDED round trip at the Runtime
     level. All three phases run inside one event loop so the
-    FileApprovalStore's asyncio.Lock stays bound to one loop."""
+    FilesystemApprovalStore's asyncio.Lock stays bound to one loop."""
 
     async def _drive():
         runtime, storage = _build_runtime(tmp_path)
@@ -601,8 +601,8 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
     approval and then resumes must not TypeError on ``capability_prompt + None``."""
 
     async def _drive():
-        storage = FileStorage(root=tmp_path)
-        executor = ToolExecutor(
+        storage = FilesystemStorage(root=tmp_path)
+        executor = GovernedToolInvoker(
             policy=PolicyEngine(
                 rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
             ),
@@ -612,7 +612,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
             storage=storage,
             model_router=ModelRouter(registry=_registry()),
             tool_executor=executor,
-            providers=ProviderBundle(capabilities=(_PromptedRiskyProvider(),)),
+            providers=RuntimeDependencies(capabilities=(_PromptedRiskyProvider(),)),
             local_trusted_mode=True,
         )
         spec = _spec()

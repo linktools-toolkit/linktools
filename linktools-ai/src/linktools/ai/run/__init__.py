@@ -3,9 +3,17 @@
 """linktools.ai.run: run lifecycle records + the RunContext handed to runners."""
 
 from .context import RunContext
+from .dispatch import RunDispatcher, RunDispatchRequest
 from .models import RunInput, RunRecord, RunResult, RunStatus
-
-__all__ = ["RunContext", "RunInput", "RunResult", "RunRecord", "RunStatus"]
 from .schema_registry import OutputSchemaRegistry
 
-__all__ = ["OutputSchemaRegistry"]
+__all__ = [
+    "RunContext",
+    "RunDispatcher",
+    "RunDispatchRequest",
+    "RunInput",
+    "RunResult",
+    "RunRecord",
+    "RunStatus",
+    "OutputSchemaRegistry",
+]

@@ -6,11 +6,11 @@ Runtime, and wraps the result (or a target error) in an EvalExecution."""
 import asyncio
 from types import SimpleNamespace
 
-from linktools.ai.artifact import ArtifactStore
+from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
 from linktools.ai.evaluation.executors import DirectEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
-from linktools.ai.storage.resource.memory import MemoryResourceBackend
-from linktools.ai.storage.resource.store import ResourceStore
+from linktools.ai.asset.memory import MemoryAssetBackend
+from linktools.ai.asset.store import AssetStore
 
 
 class _Resolver:
@@ -31,7 +31,7 @@ class _FakeRuntime:
 
 
 def test_direct_executor_reads_input_and_runs() -> None:
-    artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
     rt = _FakeRuntime()
     executor = DirectEvalExecutor(rt, _Resolver(), artifacts, tenant_id="t1")
 
@@ -55,7 +55,7 @@ def test_direct_executor_reads_input_and_runs() -> None:
 
 
 def test_direct_executor_captures_target_error() -> None:
-    artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
 
     class _BoomRuntime:
         async def run(self, spec, prompt, **kw):
@@ -83,7 +83,7 @@ def test_direct_executor_captures_full_runsnapshot() -> None:
     from linktools.ai.evaluation.snapshot import RunSnapshot
     from linktools.ai.events.store import EventPage
 
-    artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
 
     class _FakeRunStore:
         def __init__(self):
@@ -161,7 +161,7 @@ def test_direct_executor_captures_full_runsnapshot() -> None:
 def test_direct_executor_normalizes_total_tokens_from_runtime_usage() -> None:
     """The real Runtime reports input_tokens + output_tokens (not total_tokens);
     the executor derives total_tokens so the eval avg-tokens metric populates."""
-    artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
 
     class _RuntimeUsage:
         async def run(self, spec, prompt, *, run_id=None, user_id=None, tenant_id=None, **kw):
@@ -189,7 +189,7 @@ def test_direct_executor_captures_safety_refusal_on_policy_error() -> None:
     """When the Runtime's security pipeline refuses (raises a PolicyError), the
     direct executor records a safety refusal so the rate is populated in direct
     mode too (not only task mode)."""
-    artifacts = ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
 
     class PolicyError(Exception):
         pass

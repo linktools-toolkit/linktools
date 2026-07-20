@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from linktools.ai.errors import InvalidSpecError
-from linktools.ai.registry.parser import SpecLoader
-from linktools.ai.registry.tool import ToolRegistry
+from linktools.ai.catalog.parsing import SpecLoader
+from linktools.ai.tool.catalog import ToolCatalog
 from linktools.ai.tool.policy import (
     EffectiveToolPolicy,
     IdempotencyStrategy,
@@ -156,7 +156,7 @@ def _load_tool_spec(tmp_path, body: str):
     tools = tmp_path / "tools"
     tools.mkdir()
     (tools / "decl.yaml").write_text(body, encoding="utf-8")
-    registry = ToolRegistry(SpecLoader.from_filesystem(tools))
+    registry = ToolCatalog.from_specloader(SpecLoader.from_filesystem(tools))
 
     async def run():
         return await registry.get("decl")

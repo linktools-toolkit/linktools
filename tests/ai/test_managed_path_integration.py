@@ -13,13 +13,13 @@ from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.builtin import BuiltinProvider
 from linktools.ai.errors import ToolDeniedError
 from linktools.ai.execution.local import LocalExecutionBackend
-from linktools.ai.security.pipeline import (
+from linktools.ai.governance.security.pipeline import (
     PipelineAction,
     PipelineDecision,
 )
 from linktools.ai.tool.managed import ManagedToolAdapter
-from linktools.ai.tool.executor import ToolExecutor
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.model.policy import ModelPolicy
 
 
@@ -102,7 +102,7 @@ async def test_managed_adapter_from_assembler_output_deny(tmp_path):
             adapter = ManagedToolAdapter(
                 descriptor=md.descriptor,
                 handler=md.handler,
-                tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+                tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
                 security_pipeline=pipeline,
             )
             with pytest.raises(ToolDeniedError, match="blocked by test pipeline"):

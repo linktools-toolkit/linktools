@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pluggable context-injection strategies, kept out of AgentRunner so the runner
+"""Pluggable context-injection strategies, kept out of AgentEngine so the runner
 does not hardcode memory limits, owner-resolution semantics, or prompt section
 titles. Default implementations provide the built-in semantics; downstream
 systems can substitute any of these Protocols.
@@ -16,7 +16,7 @@ searching globally. There is no unscoped / cross-tenant retrieval path."""
 from typing import TYPE_CHECKING, Any, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
-    from ..knowledge.context import KnowledgeItem
+    from ..retrieval.context import KnowledgeItem
     from ..memory.models import MemoryRecord
     from ..run.context import RunContext
     from ..run.models import RunResult
@@ -101,7 +101,7 @@ class DefaultRetrievalPolicy:
         self._limit = limit
 
     async def retrieve(self, context, query):
-        from ..knowledge.scope import RetrievalScope
+        from ..retrieval.scope import RetrievalScope
 
         if not context.tenant_id:
             return ()
@@ -119,12 +119,12 @@ class DefaultPromptContextFormatter:
     Substitute this to change titles or ordering."""
 
     def format_memory(self, records):
-        from ..knowledge.context import format_memory
+        from ..retrieval.context import format_memory
 
         return format_memory(records)
 
     def format_knowledge(self, items):
-        from ..knowledge.context import KnowledgeContext
+        from ..retrieval.context import KnowledgeContext
 
         return KnowledgeContext(documents=list(items)).format()
 

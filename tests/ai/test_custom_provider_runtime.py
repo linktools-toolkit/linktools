@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime capability wiring (contract/contract): ProviderBundle + options types,
+"""Runtime capability wiring (contract/contract): RuntimeDependencies + options types,
 provider/expanded-param mixing rejection, custom providers feed the assembler,
 and async-context close releases MCP connections."""
 
 import pytest
 
 from linktools.ai.capability import CapabilityRuntimeOptions
-from linktools.ai.providers import ProviderBundle
+from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _runtime(tmp_path, **kw):
     from linktools.ai.model.router import ModelRouter
 
     return Runtime.build(
-        storage=FileStorage(root=tmp_path), model_router=ModelRouter(), **kw
+        storage=FilesystemStorage(root=tmp_path), model_router=ModelRouter(), **kw
     )
 
 
-def test_provider_bundle_defaults_and_empty():
-    assert ProviderBundle().is_empty()
-    b = ProviderBundle(skills=object())
+def test_runtime_dependencies_defaults_and_empty():
+    assert RuntimeDependencies().is_empty()
+    b = RuntimeDependencies(skills=object())
     assert not b.is_empty()
     assert b.skills is not None
 
@@ -36,13 +36,13 @@ def test_capability_runtime_options_defaults():
 
 def test_build_rejects_expanded_provider_params(tmp_path):
     # Expanded provider params (agents/skills/mcp_servers/...) are gone;
-    # providers must come via a ProviderBundle. Passing one raises TypeError.
+    # providers must come via a RuntimeDependencies. Passing one raises TypeError.
     with pytest.raises(TypeError):
         _runtime(tmp_path, skills=object())
 
 
 def test_build_accepts_providers_bundle(tmp_path):
-    bundle = ProviderBundle()  # empty bundle is fine
+    bundle = RuntimeDependencies()  # empty bundle is fine
     rt = _runtime(tmp_path, providers=bundle)
     assert rt is not None
     # An empty provider bundle does not expose an MCP capability publicly.
@@ -66,13 +66,13 @@ async def test_assemble_empty_without_providers(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_package_resource_ref_resolves_through_runtime(tmp_path):
-    # Agent #2 defect #1: package-resource / package-entrypoint refs must resolve
-    # (PackageProvider registered under all three kinds).
+async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
+    # Agent #2 defect #1: extension-resource / extension-entrypoint refs must resolve
+    # (ExtensionProvider registered under all three kinds).
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.package.provider import DirectoryPackageResourceProvider
-    from linktools.ai.package.resolver import DirectoryEntrypointResolver
+    from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
+    from linktools.ai.extension.resolver import DirectoryEntrypointResolver
 
     root = tmp_path / "skill-creator"
     (root / "agents").mkdir(parents=True)
@@ -80,15 +80,15 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
     (root / "agents" / "grader.md").write_text(
         "---\nname: grader\nmodel:\n  primary: gpt-4o\n---\nGrade.\n", encoding="utf-8"
     )
-    rp = DirectoryPackageResourceProvider({"skill-creator": root})
+    rp = DirectoryExtensionResourceProvider({"skill-creator": root})
     er = DirectoryEntrypointResolver({"skill-creator": root})
     # entrypoints is bundle-only (contract has no expanded entrypoints param).
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
-        providers=ProviderBundle(package_resources=rp, entrypoints=er),
+        storage=FilesystemStorage(root=tmp_path),
+        providers=RuntimeDependencies(extension_resources=rp, entrypoints=er),
     )
 
-    for kind in ("package-resource", "package-entrypoint"):
+    for kind in ("extension-resource", "extension-entrypoint"):
         spec = AgentSpec(
             id="a",
             name="a",
@@ -98,8 +98,8 @@ async def test_package_resource_ref_resolves_through_runtime(tmp_path):
         )
         inspection = await rt.inspect(spec)
         # The ref resolved to a non-empty contribution (tools form for
-        # introspectable toolsets). package-entrypoint with no expose_call_tool
-        # contributes only a discovery tool; package-resource contributes read tools.
+        # introspectable toolsets). extension-entrypoint with no expose_call_tool
+        # contributes only a discovery tool; extension-resource contributes read tools.
         assert inspection.tools, f"{kind} ref did not resolve"
 
 
@@ -109,7 +109,7 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
     from linktools.ai.errors import CapabilityResolutionError
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.registry.mcp import MCPServerSpec
+    from linktools.ai.mcp.spec import MCPServerSpec
 
     class _McpSrc:
         async def list_ids(self):
@@ -130,8 +130,8 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
 
     # Off: the gate denies mcp:* at assemble time (before any connection).
     rt_off = Runtime.build(
-        storage=FileStorage(root=tmp_path),
-        providers=ProviderBundle(mcp_servers=_McpSrc()),
+        storage=FilesystemStorage(root=tmp_path),
+        providers=RuntimeDependencies(mcp_servers=_McpSrc()),
     )
     with pytest.raises(CapabilityResolutionError, match="allow_mcp_wildcard"):
         await rt_off.inspect(spec)
@@ -139,8 +139,8 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
     # On: the build flag is folded into options (live connection is exercised
     # separately via MCPProvider + a fake manager in test_mcp_provider.py).
     rt_on = Runtime.build(
-        storage=FileStorage(root=tmp_path / "on"),
-        providers=ProviderBundle(mcp_servers=_McpSrc()),
+        storage=FilesystemStorage(root=tmp_path / "on"),
+        providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         allow_mcp_wildcard=True,
     )
     assert not hasattr(rt_on, "options")
@@ -158,7 +158,7 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.router import ModelRouter
-    from linktools.ai.registry.mcp import MCPServerSpec
+    from linktools.ai.mcp.spec import MCPServerSpec
 
     class _McpSrc:
         async def list_ids(self):
@@ -209,9 +209,9 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     registry.register("m", model=FunctionModel(model_fn))
     manager = _Manager()
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
-        providers=ProviderBundle(mcp_servers=_McpSrc()),
+        providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         mcp_connection_manager=manager,
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
@@ -250,7 +250,7 @@ async def test_custom_skill_provider_wires_assembler(tmp_path):
             return _SkillSpec("sql", "sql", "SQL analysis", "FULL SQL")
 
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path), providers=ProviderBundle(skills=_SkillSrc())
+        storage=FilesystemStorage(root=tmp_path), providers=RuntimeDependencies(skills=_SkillSrc())
     )
     spec = AgentSpec(
         id="a",
@@ -283,8 +283,8 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
             closed["v"] = True
 
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
-        providers=ProviderBundle(mcp_servers=_McpSrc()),
+        storage=FilesystemStorage(root=tmp_path),
+        providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         mcp_connection_manager=_Manager(),
     )
     async with rt:
@@ -293,11 +293,11 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_bundle_from_resources_builds_registries(tmp_path):
-    # contract: ProviderBundle.from_resources constructs the default
+async def test_runtime_dependencies_from_resources_builds_registries(tmp_path):
+    # contract: RuntimeDependencies.from_resources constructs the default
     # Spec-backed registries from a resource store + prefixes.
-    from linktools.ai.providers import ProviderBundle
-    from linktools.ai.providers.bundle import ProviderPrefixes
+    from linktools.ai.runtime import RuntimeDependencies
+    from linktools.ai._runtime.dependencies import ProviderPrefixes
 
     class _Store:
         def __init__(self, files):
@@ -319,7 +319,7 @@ async def test_provider_bundle_from_resources_builds_registries(tmp_path):
             "specs/skills/sql.md": "---\nname: sql\n---\nx\n",
         }
     )
-    bundle = ProviderBundle.from_resources(store, prefixes=ProviderPrefixes())
+    bundle = RuntimeDependencies.from_resources(store, prefixes=ProviderPrefixes())
     assert bundle.agents is not None
     assert bundle.skills is not None
     assert bundle.mcp_servers is not None
@@ -331,7 +331,7 @@ async def test_runtime_resolve_agent_and_swarm_via_providers(tmp_path):
     # contract #4: bundle.agents / bundle.swarms are consumed by by-id lookups.
     from linktools.ai.agent.spec import AgentSpec, PromptSpec
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.providers import ProviderBundle
+    from linktools.ai.runtime import RuntimeDependencies
 
     class _AgentSrc:
         async def list_ids(self):
@@ -354,13 +354,13 @@ async def test_runtime_resolve_agent_and_swarm_via_providers(tmp_path):
         async def get(self, sid):
             raise KeyError(sid)
 
-    bundle = ProviderBundle(agents=_AgentSrc(), swarms=_SwarmSrc())
-    Runtime.build(storage=FileStorage(root=tmp_path), providers=bundle)
+    bundle = RuntimeDependencies(agents=_AgentSrc(), swarms=_SwarmSrc())
+    Runtime.build(storage=FilesystemStorage(root=tmp_path), providers=bundle)
     # By-id resolution is the caller's responsibility via the bundle directly
     # (Runtime no longer exposes resolve_agent/resolve_swarm).
     agent = await bundle.agents.get("reviewer")
     assert agent.id == "reviewer"
     # No swarm provider configured -> bundle.swarms is None (caller must guard).
-    bundle2 = ProviderBundle()
+    bundle2 = RuntimeDependencies()
     assert bundle2.swarms is None
     assert bundle2.agents is None

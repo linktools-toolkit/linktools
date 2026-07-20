@@ -59,7 +59,7 @@ def test_tool_ref_kind_and_config_defaults():
 
 
 def test_parse_tool_refs_handles_kind_name_strings_and_struct():
-    from linktools.ai.registry.parser import parse_tool_refs
+    from linktools.ai.tool.codec import parse_tool_refs
 
     import pytest
 
@@ -77,7 +77,7 @@ def test_parse_tool_refs_handles_kind_name_strings_and_struct():
 def test_parse_tool_refs_rejects_bad_shapes():
     import pytest
     from linktools.ai.errors import InvalidSpecError
-    from linktools.ai.registry.parser import parse_tool_refs
+    from linktools.ai.tool.codec import parse_tool_refs
 
     with pytest.raises(InvalidSpecError):
         parse_tool_refs([":file"])  # empty kind

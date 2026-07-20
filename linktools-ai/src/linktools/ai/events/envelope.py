@@ -26,7 +26,7 @@ class EventEnvelope(Generic[TEvent]):
     session_id: str
     runnable_id: str
     payload: TEvent
-    # Free-form per-event metadata. The FileRunCommitCoordinator tags the
+    # Free-form per-event metadata. The FilesystemRunCommitCoordinator tags the
     # critical pause/complete events with ``commit_id`` so it can dedup by
     # (run_id, commit_id, event_type) -- a run may legitimately pause more
     # than once (one event per approval), so deduping by event type alone

@@ -10,10 +10,10 @@ from linktools.ai.mcp.client import (
     MCPConnectionRef,
     MCPToolsetHandle,
 )
-from linktools.ai.registry.mcp import MCPServerSpec
+from linktools.ai.mcp.spec import MCPServerSpec
 from linktools.ai.tool.models import ToolDescriptor
-from linktools.ai.security.redact import redact_for_audit, redact_exception
-from linktools.ai.security.emitter import DefaultSecurityEventSanitizer
+from linktools.ai.governance.security.redact import redact_for_audit, redact_exception
+from linktools.ai.governance.security.emitter import DefaultSecurityEventSanitizer
 from linktools.ai.tool.idempotency import DefaultIdempotencyKeyBuilder
 from linktools.ai.tool.idempotency import encode_business_key
 from linktools.ai.tool.policy import (

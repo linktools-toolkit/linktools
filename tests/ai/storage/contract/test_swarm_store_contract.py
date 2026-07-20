@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_swarm_store_contract.py — runs the same
-SwarmStore contract against both FileSwarmStore and SqlAlchemySwarmStore (spec
+SwarmStore contract against both FilesystemSwarmStore and SqlAlchemySwarmStore (spec
 contract backend parity). The parametrized ``store_factory`` fixture is copied
 verbatim from ``test_run_store_contract.py`` (file + sqlalchemy branches,
 including the ``_run_in_new_loop`` helper that bootstraps the SQL engine off the
@@ -24,7 +24,7 @@ from linktools.ai.errors import (
     SwarmTaskNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
-from linktools.ai.storage.file.swarm import FileSwarmStore
+from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
 from linktools.ai.swarm.models import (
     SwarmRun,
     SwarmStatus,
@@ -110,7 +110,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileSwarmStore(root=tmp_path / f"swarm-{counter['n']}")
+            return FilesystemSwarmStore(root=tmp_path / f"swarm-{counter['n']}")
 
         return file_factory
 
@@ -448,7 +448,7 @@ def test_set_active_run_requires_claimed_status(store_factory):
 
 def test_set_active_run_roundtrips_through_persistence(store_factory):
     """active_run_id round-trips through the store's serialization layer (JSON
-    for FileSwarmStore, SQL column for SqlAlchemySwarmStore). Verified by
+    for FilesystemSwarmStore, SQL column for SqlAlchemySwarmStore). Verified by
     reading back via list_tasks on the same store instance after write."""
     store = store_factory()
 
@@ -541,13 +541,13 @@ def test_missing_run_and_task_raise_not_found(store_factory):
 # ---------------------------------------------------------------------------
 # 11. File-only: path-traversal in swarm_run_id / task_id -> ValueError.
 # (SQL ids are opaque primary-key strings, not path segments, so this guard is
-# FileSwarmStore-specific — mirrors the file-only path-traversal test in
+# FilesystemSwarmStore-specific — mirrors the file-only path-traversal test in
 # test_run_store_contract.py.)
 # ---------------------------------------------------------------------------
 
 
 def test_path_traversal_in_swarm_ids_is_rejected(tmp_path):
-    store = FileSwarmStore(root=tmp_path)
+    store = FilesystemSwarmStore(root=tmp_path)
 
     async def _run():
         with pytest.raises(ValueError):

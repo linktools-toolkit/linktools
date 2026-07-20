@@ -5,23 +5,32 @@ payload carries the minimum data meaningful for that event type -- the spec
 mandates which payload TYPES must exist, not their exact fields."""
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Union
+
+from typing import Any, ClassVar, Mapping, Union
+
+from .criticality import EventCriticality
 
 
 @dataclass(frozen=True, slots=True)
 class RunStarted:
+    event_type: ClassVar[str] = 'RunStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     run_id: str
     runnable_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class RunCompleted:
+    event_type: ClassVar[str] = 'RunCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     run_id: str
     result_summary: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class RunFailed:
+    event_type: ClassVar[str] = 'RunFailed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     run_id: str
     error_type: str
     message: str
@@ -29,46 +38,62 @@ class RunFailed:
 
 @dataclass(frozen=True, slots=True)
 class RunPaused:
+    event_type: ClassVar[str] = 'RunPaused'
+    criticality: ClassVar[EventCriticality] = EventCriticality.STATE_CRITICAL
     run_id: str
     reason: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class RunResumed:
+    event_type: ClassVar[str] = 'RunResumed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     run_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class RunCancelled:
+    event_type: ClassVar[str] = 'RunCancelled'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     run_id: str
     reason: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class ModelStarted:
+    event_type: ClassVar[str] = 'ModelStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     model_type: str
 
 
 @dataclass(frozen=True, slots=True)
 class ModelCompleted:
+    event_type: ClassVar[str] = 'ModelCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     model_type: str
     token_usage: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelFailed:
+    event_type: ClassVar[str] = 'ModelFailed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     model_type: str
     error_message: str
 
 
 @dataclass(frozen=True, slots=True)
 class ToolStarted:
+    event_type: ClassVar[str] = 'ToolStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     tool_name: str
     tool_call_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCompleted:
+    event_type: ClassVar[str] = 'ToolCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     tool_name: str
     tool_call_id: str
     success: bool
@@ -78,6 +103,8 @@ class ToolCompleted:
 
 @dataclass(frozen=True, slots=True)
 class ToolFailed:
+    event_type: ClassVar[str] = 'ToolFailed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     tool_name: str
     tool_call_id: str
     error_message: str
@@ -85,6 +112,8 @@ class ToolFailed:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalRequested:
+    event_type: ClassVar[str] = 'ApprovalRequested'
+    criticality: ClassVar[EventCriticality] = EventCriticality.STATE_CRITICAL
     approval_id: str
     tool_name: str
     reason: str
@@ -92,12 +121,16 @@ class ApprovalRequested:
 
 @dataclass(frozen=True, slots=True)
 class ApprovalApproved:
+    event_type: ClassVar[str] = 'ApprovalApproved'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     approval_id: str
     resolved_by: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalRejected:
+    event_type: ClassVar[str] = 'ApprovalRejected'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     approval_id: str
     resolved_by: "str | None" = None
     reason: "str | None" = None
@@ -105,24 +138,32 @@ class ApprovalRejected:
 
 @dataclass(frozen=True, slots=True)
 class SwarmStarted:
+    event_type: ClassVar[str] = 'SwarmStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     swarm_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmRoundStarted:
+    event_type: ClassVar[str] = 'SwarmRoundStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     round: int
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmRoundCompleted:
+    event_type: ClassVar[str] = 'SwarmRoundCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     round: int
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmTaskCreated:
+    event_type: ClassVar[str] = 'SwarmTaskCreated'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
     description: str
@@ -130,6 +171,8 @@ class SwarmTaskCreated:
 
 @dataclass(frozen=True, slots=True)
 class SwarmTaskClaimed:
+    event_type: ClassVar[str] = 'SwarmTaskClaimed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
     assigned_agent_id: str
@@ -137,12 +180,16 @@ class SwarmTaskClaimed:
 
 @dataclass(frozen=True, slots=True)
 class SwarmTaskCompleted:
+    event_type: ClassVar[str] = 'SwarmTaskCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmTaskFailed:
+    event_type: ClassVar[str] = 'SwarmTaskFailed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
     error_message: str
@@ -150,22 +197,30 @@ class SwarmTaskFailed:
 
 @dataclass(frozen=True, slots=True)
 class SwarmCompleted:
+    event_type: ClassVar[str] = 'SwarmCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmFailed:
+    event_type: ClassVar[str] = 'SwarmFailed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     error: str
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmCancelled:
+    event_type: ClassVar[str] = 'SwarmCancelled'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class ResourceChanged:
+    event_type: ClassVar[str] = 'ResourceChanged'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     path: str
     revision: int
 
@@ -177,12 +232,16 @@ class ResourceChanged:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityResolveStarted:
+    event_type: ClassVar[str] = 'CapabilityResolveStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str
     capability_ref: str
 
 
 @dataclass(frozen=True, slots=True)
 class CapabilityResolveCompleted:
+    event_type: ClassVar[str] = 'CapabilityResolveCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str
     capability_ref: str
     tool_count: int
@@ -190,6 +249,8 @@ class CapabilityResolveCompleted:
 
 @dataclass(frozen=True, slots=True)
 class SkillListed:
+    event_type: ClassVar[str] = 'SkillListed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: "str | None" = None
     query: "str | None" = None
     count: int = 0
@@ -197,58 +258,76 @@ class SkillListed:
 
 @dataclass(frozen=True, slots=True)
 class SkillRead:
+    event_type: ClassVar[str] = 'SkillRead'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: "str | None" = None
     skill_id: str = ""
     allowed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
-class PackageResourceListed:
-    package_id: str = ""
+class ExtensionResourceListed:
+    event_type: ClassVar[str] = 'ExtensionResourceListed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
+    extension_id: str = ""
     path: str = ""
     count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
-class PackageResourceRead:
-    package_id: str = ""
+class ExtensionResourceRead:
+    event_type: ClassVar[str] = 'ExtensionResourceRead'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
+    extension_id: str = ""
     path: str = ""
     truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class PackageEntrypointListed:
-    package_id: str = ""
+class ExtensionEntrypointListed:
+    event_type: ClassVar[str] = 'ExtensionEntrypointListed'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
+    extension_id: str = ""
     kind: "str | None" = None
     count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
-class PackageEntrypointResolved:
-    package_id: str = ""
+class ExtensionEntrypointResolved:
+    event_type: ClassVar[str] = 'ExtensionEntrypointResolved'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
+    extension_id: str = ""
     kind: str = ""
     name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class McpConnectStarted:
+    event_type: ClassVar[str] = 'McpConnectStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     server_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class McpConnectCompleted:
+    event_type: ClassVar[str] = 'McpConnectCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     server_id: str = ""
     tool_count: "int | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class McpToolCallStarted:
+    event_type: ClassVar[str] = 'McpToolCallStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     server_id: str = ""
     tool_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class McpToolCallCompleted:
+    event_type: ClassVar[str] = 'McpToolCallCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     server_id: str = ""
     tool_name: str = ""
     success: bool = True
@@ -256,6 +335,8 @@ class McpToolCallCompleted:
 
 @dataclass(frozen=True, slots=True)
 class SubagentStarted:
+    event_type: ClassVar[str] = 'SubagentStarted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str = ""
     parent_run_id: "str | None" = None
     scope: "str | None" = None
@@ -263,6 +344,8 @@ class SubagentStarted:
 
 @dataclass(frozen=True, slots=True)
 class SubagentCompleted:
+    event_type: ClassVar[str] = 'SubagentCompleted'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str = ""
     run_id: str = ""
     status: str = ""
@@ -270,18 +353,24 @@ class SubagentCompleted:
 
 @dataclass(frozen=True, slots=True)
 class SubagentErrored:
+    event_type: ClassVar[str] = 'SubagentErrored'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str = ""
     reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class PromptCatalogInjected:
+    event_type: ClassVar[str] = 'PromptCatalogInjected'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: "str | None" = None
     section: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class PromptWindowApplied:
+    event_type: ClassVar[str] = 'PromptWindowApplied'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     policy: str = ""
     before: int = 0
     after: int = 0
@@ -289,12 +378,16 @@ class PromptWindowApplied:
 
 @dataclass(frozen=True, slots=True)
 class ToolExposureApplied:
+    event_type: ClassVar[str] = 'ToolExposureApplied'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: "str | None" = None
     total_tools: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ToolExposureDenied:
+    event_type: ClassVar[str] = 'ToolExposureDenied'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
     agent_id: "str | None" = None
     reason: str = ""
 
@@ -304,6 +397,8 @@ class SecurityDegraded:
     """Emitted when a security-relevant component fails and the system falls
     back to a safer-but-degraded posture rather than failing open -- e.g. a
     ToolPolicyProvider error caught and replaced with a fail-closed policy."""
+    event_type: ClassVar[str] = 'SecurityDegraded'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
     run_id: "str | None" = None
     component: str = ""
@@ -316,10 +411,12 @@ class SecurityDegraded:
 @dataclass(frozen=True, slots=True)
 class TruncatedSecurityEvent:
     """Replaces an oversized security event so the audit store still receives a
-    valid dataclass payload (FileEventStore persists via dataclasses.asdict and
+    valid dataclass payload (FilesystemEventStore persists via dataclasses.asdict and
     reconstructs by class name -- a plain dict would TypeError there). Carries
     only the original type name and the measured size; the original payload is
     deliberately dropped so a too-large event can never re-bloat the store."""
+    event_type: ClassVar[str] = 'TruncatedSecurityEvent'
+    criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
 
     original_event_type: str
     reason: str = "payload_too_large"
@@ -330,6 +427,8 @@ class TruncatedSecurityEvent:
 class ToolPolicyResolved:
     """tool.policy.resolved: the finalized policy that governs one tool call
     (enabled/timeout/retries/idempotent/approval/risk), for audit."""
+    event_type: ClassVar[str] = 'ToolPolicyResolved'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
     run_id: "str | None" = None
     tool_name: str = ""
@@ -345,6 +444,8 @@ class ToolPolicyResolved:
 class ToolPipelineBefore:
     """tool.pipeline.before: a SecurityPipeline's before_tool was consulted for
     a tool call."""
+    event_type: ClassVar[str] = 'ToolPipelineBefore'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
     run_id: "str | None" = None
     tool_name: str = ""
@@ -355,6 +456,8 @@ class ToolPipelineBefore:
 class ToolPipelineDecision:
     """tool.pipeline.decision: the decision a pipeline returned (allow/deny/
     require_approval/modify) for a tool call."""
+    event_type: ClassVar[str] = 'ToolPipelineDecision'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
     run_id: "str | None" = None
     tool_name: str = ""
@@ -368,6 +471,8 @@ class ToolPipelineDecision:
 class ToolPipelineAfter:
     """tool.pipeline.after: a SecurityPipeline's after_tool was consulted for a
     completed tool call."""
+    event_type: ClassVar[str] = 'ToolPipelineAfter'
+    criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
     run_id: "str | None" = None
     tool_name: str = ""
@@ -407,10 +512,10 @@ EventPayload = Union[
     CapabilityResolveCompleted,
     SkillListed,
     SkillRead,
-    PackageResourceListed,
-    PackageResourceRead,
-    PackageEntrypointListed,
-    PackageEntrypointResolved,
+    ExtensionResourceListed,
+    ExtensionResourceRead,
+    ExtensionEntrypointListed,
+    ExtensionEntrypointResolved,
     McpConnectStarted,
     McpConnectCompleted,
     McpToolCallStarted,

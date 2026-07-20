@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill prompt catalog. Only id/name/description/tags/package_id
+"""Skill prompt catalog. Only id/name/description/tags/extension_id
 are injected -- never the full SKILL.md body, which the model must fetch via
 read_skill only when needed."""
 
@@ -13,9 +13,9 @@ _HEADER = (
     "Inspect available skills with list_skills(). "
     "Use read_skill(skill_id) to load full instructions only when needed; "
     "do not assume a skill's full content before reading it. "
-    "Some skills may be packages -- if package-resource tools are enabled, "
-    "inspect their references/assets with list_package_resources() and "
-    "read_package_resource().\n\nAvailable skill summaries:"
+    "Some skills may be extensions -- if extension-resource tools are enabled, "
+    "inspect their references/assets with list_extension_resources() and "
+    "read_extension_resource().\n\nAvailable skill summaries:"
 )
 
 
@@ -23,7 +23,7 @@ def render_skill_catalog(summaries: "Iterable[SkillSummary]") -> str:
     lines = [_HEADER]
     for s in summaries:
         tags = f" [{', '.join(s.tags)}]" if s.tags else ""
-        pkg = f" (package: {s.package_id})" if s.package_id else ""
+        ext = f" (extension: {s.extension_id})" if s.extension_id else ""
         desc = f": {s.description}" if s.description else ""
-        lines.append(f"- {s.id}{tags}{pkg}{desc}")
+        lines.append(f"- {s.id}{tags}{ext}{desc}")
     return "\n".join(lines)

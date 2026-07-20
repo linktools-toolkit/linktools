@@ -12,7 +12,7 @@ on_error) must be isolated from the run's terminal state.
 - a run that already reached a commit point (SUCCEEDED / WAITING_APPROVAL)
   never gets a contradictory second terminal transition or RunFailed event.
 
-Each test drives a real AgentRunner with a recording commit coordinator and
+Each test drives a real AgentEngine with a recording commit coordinator and
 scripted middleware/metrics. The after_run and on_error tests fail under the
 old order (after_run after complete; on_error replacing the original error)."""
 
@@ -24,21 +24,21 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _model_fn_ok():
@@ -114,20 +114,20 @@ class _FailingMetrics:
 
 
 def _build(tmp_path, *, pipeline=None, metrics=None):
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
     coordinator = _RecordingCoordinator(
-        FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
         )
     )
-    runner = AgentRunner(
+    runner = AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
@@ -157,7 +157,7 @@ def _seed(session_store, session_id="session-1") -> None:
 
 def _compiled(model_fn):
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(model_fn)),
     )
     return asyncio.run(

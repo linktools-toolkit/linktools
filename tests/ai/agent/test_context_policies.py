@@ -10,7 +10,7 @@ from linktools.ai.agent.context_policies import (
     DefaultMemoryPolicy,
     DefaultRetrievalPolicy,
 )
-from linktools.ai.knowledge.scope import RetrievalScope
+from linktools.ai.retrieval.scope import RetrievalScope
 from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunnableType

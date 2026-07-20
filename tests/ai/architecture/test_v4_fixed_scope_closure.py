@@ -34,7 +34,7 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.sqlalchemy.idempotency import SqlAlchemyIdempotencyStore
 from linktools.ai.storage.sqlalchemy.models import Base, ToolIdempotencyRow
 from linktools.ai.tool.idempotency import ClaimDisposition
@@ -121,12 +121,12 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
     from linktools.ai.errors import RuntimeInitializationError
     from linktools.ai.runtime import Runtime
 
-    fields = {f.name: f for f in dataclasses.fields(FileStorage)}
+    fields = {f.name: f for f in dataclasses.fields(FilesystemStorage)}
     assert fields["run_definitions"].default is dataclasses.MISSING, (
         "run_definitions must be a required field (no default)"
     )
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     object.__setattr__(storage, "run_definitions", None)
     with pytest.raises(RuntimeInitializationError):
         Runtime.build(storage=storage)
@@ -173,9 +173,9 @@ def _ctx(run_id, session_id):
 
 
 def _coordinator(storage, tmp_path):
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    return FileRunCommitCoordinator(
+    return FilesystemRunCommitCoordinator(
         approval_store=storage.approvals,
         checkpoint_store=storage.checkpoints,
         run_store=storage.runs,
@@ -195,7 +195,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
     (one per commit_id), and recovery does not duplicate RunCompleted."""
 
     async def _run():
-        storage = FileStorage(root=tmp_path)
+        storage = FilesystemStorage(root=tmp_path)
         now = datetime.now(timezone.utc)
         await storage.sessions.create(
             SessionRecord(
@@ -264,7 +264,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
         )
         assert await _count(storage, "run2", "RunCompleted") == 1
 
-        from linktools.ai.storage.file.journal import (
+        from linktools.ai.storage.filesystem.journal import (
             TransactionJournal,
             TransactionKind,
         )
@@ -307,17 +307,17 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
     strategy.resume runs (the swarm and driving Run are left untouched)."""
     from decimal import Decimal
 
-    from linktools.ai.agent.runner import AgentRunner
+    from linktools.ai.agent.runner import AgentEngine
     from linktools.ai.errors import InvalidRunTransitionError
     from linktools.ai.run.controller import RunController
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-    from linktools.ai.storage.file.definition import FileRunDefinitionStore
-    from linktools.ai.storage.file.event import FileEventStore
-    from linktools.ai.storage.file.run import FileRunStore
-    from linktools.ai.storage.file.session import FileSessionStore
-    from linktools.ai.storage.file.swarm import FileSwarmStore
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
+    from linktools.ai.storage.filesystem.event import FilesystemEventStore
+    from linktools.ai.storage.filesystem.run import FilesystemRunStore
+    from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+    from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
     from linktools.ai.swarm.models import SwarmRun, SwarmStatus, TokenUsage
     from linktools.ai.swarm.runner import SwarmRunner
 
@@ -325,21 +325,21 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
 
     class _Stores:
         def __init__(self, root):
-            self.run_store = FileRunStore(root=root / "runs")
-            self.session_store = FileSessionStore(root=root / "sessions")
-            self.event_store = FileEventStore(root=root / "events")
-            self.checkpoint_store = FileCheckpointStore(root=root / "checkpoints")
-            self.swarm_store = FileSwarmStore(root=root / "swarm")
-            self.run_definitions = FileRunDefinitionStore(root=root / "definitions")
+            self.run_store = FilesystemRunStore(root=root / "runs")
+            self.session_store = FilesystemSessionStore(root=root / "sessions")
+            self.event_store = FilesystemEventStore(root=root / "events")
+            self.checkpoint_store = FilesystemCheckpointStore(root=root / "checkpoints")
+            self.swarm_store = FilesystemSwarmStore(root=root / "swarm")
+            self.run_definitions = FilesystemRunDefinitionStore(root=root / "definitions")
             self.run_controller = RunController()
-            self.agent_runner = AgentRunner(
+            self.agent_runner = AgentEngine(
                 run_store=self.run_store,
                 session_store=self.session_store,
                 event_store=self.event_store,
                 checkpoint_store=self.checkpoint_store,
                 run_controller=self.run_controller,
-                commit_coordinator=FileRunCommitCoordinator(
-                    approval_store=FileApprovalStore(root=root / "approvals"),
+                commit_coordinator=FilesystemRunCommitCoordinator(
+                    approval_store=FilesystemApprovalStore(root=root / "approvals"),
                     checkpoint_store=self.checkpoint_store,
                     run_store=self.run_store,
                     session_store=self.session_store,
@@ -350,7 +350,7 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
     stores = _Stores(tmp_path)
     # The compiler is never reached -- the terminal driving Run is rejected
     # before snapshot/compile/strategy.resume -- so a dummy suffices and keeps
-    # this lock independent of AgentCompiler/ToolExecutor wiring.
+    # this lock independent of AgentCompiler/GovernedToolInvoker wiring.
     compiler = object()
 
     async def _seed():
@@ -392,7 +392,7 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
         run_store=stores.run_store,
         session_store=stores.session_store,
         event_store=stores.event_store,
-        agent_runner=stores.agent_runner,
+        dispatcher=stores.agent_runner,
         compiler=compiler,
         run_controller=stores.run_controller,
         run_definitions=stores.run_definitions,

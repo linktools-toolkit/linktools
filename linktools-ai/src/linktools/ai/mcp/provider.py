@@ -40,7 +40,7 @@ from ..errors import (
     MCPServerNotFoundError,
     RuntimeInitializationError,
 )
-from ..providers.mcp import MCPServerSpecProvider
+from .spec import MCPServerSpecProvider
 from .client import MCPConnectionManager
 from .client import MCPConnectionRef
 from .toolset import detect_mcp_conflicts, filter_tool_names, final_tool_name
@@ -117,7 +117,7 @@ class MCPDiscoveryResult:
 class MCPProvider:
     """CapabilityProvider for MCP servers. Both the spec provider and the
     connection manager are injectable so tests can supply fakes; production
-    wiring passes a real MCPRegistry + MCPConnectionManager.
+    wiring passes a real MCPCatalog + MCPConnectionManager.
 
     A connection manager is REQUIRED: without one the provider cannot enumerate
     live tools, so governance (filtering, conflict detection, max_tools,

@@ -18,12 +18,12 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import (
@@ -32,13 +32,13 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:  # noqa: ARG001
@@ -60,18 +60,18 @@ def _run_context():
 
 
 def _build(tmp_path):
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
     return (
-        AgentRunner(
+        AgentEngine(
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
             checkpoint_store=checkpoint_store,
-            commit_coordinator=FileRunCommitCoordinator(
-                approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+            commit_coordinator=FilesystemRunCommitCoordinator(
+                approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
                 checkpoint_store=checkpoint_store,
                 run_store=run_store,
                 session_store=session_store,
@@ -120,7 +120,7 @@ def test_user_message_is_original_prompt_not_history(tmp_path):
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(

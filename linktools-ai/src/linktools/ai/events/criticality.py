@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Event criticality classification (WP-17). Every event payload maps to one of
-three criticality levels that govern its failure policy: security/state-critical
-events fail closed (a persistence failure blocks the operation); observability
-events are best-effort (a failure is logged but does not block)."""
+"""Event criticality classification.
+
+Criticality is owned by the :class:`EventRegistry` -- each
+:class:`EventDescriptor` carries the level for its payload. ``classify_event``
+here is a thin convenience that looks the payload up in the default registry;
+it is no longer driven by the payload's Python class name, so renaming a
+payload class cannot change its criticality.
+
+Levels govern the persistence failure policy:
+
+* ``STATE_CRITICAL`` -- bound to run/approval state; a persistence failure
+  blocks the operation (fail closed).
+* ``SECURITY_CRITICAL`` -- security decisions (deny/expose/pipeline); must be
+  auditable, fail closed.
+* ``OBSERVABILITY`` -- lifecycle markers, metrics, spans; best-effort (a
+  persistence failure is logged but does not block).
+"""
 
 from enum import Enum
 from typing import Any
@@ -15,36 +28,17 @@ class EventCriticality(str, Enum):
     OBSERVABILITY = "observability"
 
 
-# Events whose persistence is bound to run/approval state -- a missing one
-# means the state itself is inconsistent.
-_STATE_CRITICAL: "frozenset[str]" = frozenset(
-    {
-        "ApprovalRequested",
-        "RunPaused",
-    }
-)
-
-# Security decisions (deny/expose/pipeline/degradation) -- must be auditable.
-_SECURITY_CRITICAL: "frozenset[str]" = frozenset(
-    {
-        "SecurityDegraded",
-        "ToolExposureDenied",
-        "ToolPolicyResolved",
-        "ToolPipelineBefore",
-        "ToolPipelineAfter",
-        "ToolPipelineDecision",
-    }
-)
-
-# Everything else is observability (lifecycle markers, metrics, spans).
-_DEFAULT = EventCriticality.OBSERVABILITY
-
-
 def classify_event(payload: Any) -> EventCriticality:
-    """Map an event payload (by its class name) to its criticality level."""
-    name = type(payload).__name__
-    if name in _STATE_CRITICAL:
-        return EventCriticality.STATE_CRITICAL
-    if name in _SECURITY_CRITICAL:
-        return EventCriticality.SECURITY_CRITICAL
-    return _DEFAULT
+    """Map an event payload to its criticality via the default registry.
+
+    The registry is the single source; the lookup is by the payload's
+    registered ``event_type``, never by ``type(payload).__name__``. An
+    unregistered payload defaults to observability (it cannot be state- or
+    security-critical without an explicit descriptor).
+    """
+    from .registry import default_codec
+
+    return default_codec.registry.criticality_of(payload)
+
+
+__all__: "list[str]" = ["EventCriticality", "classify_event"]

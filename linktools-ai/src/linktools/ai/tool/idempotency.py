@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """IdempotencyStore: persistent tool-call idempotency.
 
-ToolExecutor consults an IdempotencyStore when an ``idempotency_key`` is
+GovernedToolInvoker consults an IdempotencyStore when an ``idempotency_key`` is
 supplied to ``execute()``. The store persists reservations so tool idempotency
 survives process restart -- an in-process dict would not (and is forbidden).
 
@@ -122,7 +122,7 @@ class ClaimResult:
 
 @runtime_checkable
 class IdempotencyStore(Protocol):
-    """Persistent idempotency storage. Two backends: FileIdempotencyStore
+    """Persistent idempotency storage. Two backends: FilesystemIdempotencyStore
     (one JSON per (scope, key)) and SqlAlchemyIdempotencyStore (table
     ``ai_idempotency``). Both implement the same fenced-claim contract."""
 
@@ -195,7 +195,7 @@ class IdempotencyStore(Protocol):
         by owner_id + generation: a stolen / superseded claim is rejected
         (``LostIdempotencyClaimError``), never silently renewed. Returns the
         refreshed record with the new ``lease_expires_at``. Used by the
-        ToolExecutor heartbeat to keep a long Handler's claim from being
+        GovernedToolInvoker heartbeat to keep a long Handler's claim from being
         stolen mid-execution."""
         ...
 
@@ -308,7 +308,7 @@ class DefaultIdempotencyKeyBuilder:
 class ToolIdempotencyOptions:
     """Lease + heartbeat tuning for a long-running idempotent Handler.
 
-    The ToolExecutor runs a background renew loop while the Handler awaits:
+    The GovernedToolInvoker runs a background renew loop while the Handler awaits:
     every ``heartbeat_seconds`` it extends the claim's lease to
     ``lease_seconds``. If a renew fails (the claim was stolen -- another worker
     re-claimed an expired lease), the Handler is cancelled so it does not keep

@@ -33,7 +33,7 @@ _SUBPROCESS = textwrap.dedent(
     # 1-3: core imports must succeed without the optional deps.
     import linktools.ai              # noqa
     import linktools.ai.storage      # noqa
-    from linktools.ai.storage import Storage, FileStorage  # noqa
+    from linktools.ai.storage import Storage, FilesystemStorage  # noqa
 
     # 4: SqlAlchemyStorage access must raise ImportError carrying an install hint.
     try:

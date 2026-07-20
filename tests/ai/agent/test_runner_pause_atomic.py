@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Approval-pause atomicity.
 
-When ``AgentRunner`` is wired with a ``uow_factory`` (SqlAlchemy mode), the
+When ``AgentEngine`` is wired with a ``uow_factory`` (SqlAlchemy mode), the
 ``RunPaused`` handler wraps checkpoint-save + Run-transition(WAITING_APPROVAL)
 + event-append in ONE UnitOfWork so they commit/rollback together. File mode
 (``uow_factory=None``) keeps the non-atomic best-effort shape (contract).
@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.assembler import CapabilityAssembler
 from linktools.ai.capability.models import CapabilityBundle
@@ -36,21 +36,21 @@ from linktools.ai.events.payloads import RunPaused as RunPausedPayload
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.approval import ApprovalRule
-from linktools.ai.policy.engine import PolicyEngine
+from linktools.ai.governance.policy.approval import ApprovalRule
+from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage import SqlAlchemyStorage
 from linktools.ai.storage.sqlalchemy.event import SqlAlchemyEventStore
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import (
     ManagedToolDefinition,
     ToolContribution,
@@ -161,11 +161,11 @@ def _seed_session(storage, session_id) -> None:
     )
 
 
-def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
-    """Build a pause-enabled ToolExecutor + compiled agent bound to the given
+def _compile_with_storage(storage) -> "tuple[CompiledAgent, GovernedToolInvoker]":
+    """Build a pause-enabled GovernedToolInvoker + compiled agent bound to the given
     storage's approval store. The ApprovalRule forces REQUIRE_APPROVAL for the
     risky tool, so the executor raises RunPaused before the tool runs."""
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=storage.approvals,
     )
@@ -189,21 +189,21 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, ToolExecutor]":
     return compiled, executor
 
 
-def _sqla_runner(storage) -> AgentRunner:
-    """AgentRunner wired with SqlAlchemy stores + the atomic
+def _sqla_runner(storage) -> AgentEngine:
+    """AgentEngine wired with SqlAlchemy stores + the atomic
     SqlAlchemyRunCommitCoordinator -- pause/complete share one transaction."""
     from linktools.ai.storage.sqlalchemy.commit import (
         SqlAlchemyRunCommitCoordinator,
     )
 
-    return AgentRunner(
+    return AgentEngine(
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
         checkpoint_store=storage.checkpoints,
         commit_coordinator=SqlAlchemyRunCommitCoordinator(storage),
         capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
-        managed_tool_executor=ToolExecutor(
+        managed_tool_executor=GovernedToolInvoker(
             policy=PolicyEngine(
                 rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
             ),
@@ -259,7 +259,7 @@ def test_sqla_pause_writes_all_three_operations_atomically_on_success(tmp_path):
 
 def test_sqla_pause_persists_approval_request_atomically(tmp_path):
     """P0-6/G1 (review3 contract): the ApprovalRequest itself now commits through
-    the SAME UoW as checkpoint/transition/event -- ToolExecutor no longer
+    the SAME UoW as checkpoint/transition/event -- GovernedToolInvoker no longer
     persists it directly. Verifies the approval is actually queryable through
     storage.approvals after the pause completes."""
     storage = _sqlalchemy_storage(tmp_path)
@@ -495,7 +495,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     back, and no contradictory RunFailed event is written. This is the
     non-atomic shape the contract documents -- the inverse of the SqlAlchemy
     rollback test above."""
-    approval_store = FileApprovalStore(root=tmp_path / "approvals")
+    approval_store = FilesystemApprovalStore(root=tmp_path / "approvals")
 
     class _FailingOnRunPausedEvents:
         """File EventStore wrapper: passes every append through except the
@@ -513,7 +513,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         def __getattr__(self, name):
             return getattr(self._inner, name)
 
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=approval_store,
     )
@@ -534,11 +534,11 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         )
     )
 
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = _FailingOnRunPausedEvents(FileEventStore(root=tmp_path / "events"))
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    runner = AgentRunner(
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = _FailingOnRunPausedEvents(FilesystemEventStore(root=tmp_path / "events"))
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    runner = AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
@@ -547,7 +547,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         managed_tool_executor=executor,
         # File coordinator: event appends are best-effort, so a RunPaused event
         # failure does NOT roll back the checkpoint or the transition.
-        commit_coordinator=FileRunCommitCoordinator(
+        commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=approval_store,
             checkpoint_store=checkpoint_store,
             run_store=run_store,
@@ -618,10 +618,10 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         def __getattr__(self, name):
             return getattr(self._inner, name)
 
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=_FailingApprovalStore(
-            FileApprovalStore(root=tmp_path / "approvals")
+            FilesystemApprovalStore(root=tmp_path / "approvals")
         ),
     )
     compiler = AgentCompiler(
@@ -640,11 +640,11 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
             )
         )
     )
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    runner = AgentRunner(
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    runner = AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
@@ -653,9 +653,9 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         managed_tool_executor=executor,
         # The coordinator owns the approval write; a failure propagates so the
         # run ends FAILED (not WAITING_APPROVAL) with no orphan checkpoint.
-        commit_coordinator=FileRunCommitCoordinator(
+        commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=_FailingApprovalStore(
-                FileApprovalStore(root=tmp_path / "approvals")
+                FilesystemApprovalStore(root=tmp_path / "approvals")
             ),
             checkpoint_store=checkpoint_store,
             run_store=run_store,

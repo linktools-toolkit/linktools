@@ -9,8 +9,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.errors import ToolDeniedError
-from linktools.ai.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
-from linktools.ai.policy.engine import (
+from linktools.ai.governance.policy.command import CommandRule, DEFAULT_DENIED_COMMAND_PATTERNS
+from linktools.ai.governance.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
     PolicyEngine,
@@ -18,11 +18,11 @@ from linktools.ai.policy.engine import (
     ToolRequest,
 )
 from linktools.ai.tool.pydantic import build_policy_capability
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
 
-# ToolExecutor.execute now requires the finalized descriptor + policy (a
+# GovernedToolInvoker.execute now requires the finalized descriptor + policy (a
 # mutating non-idempotent tool must not be retried), so every direct test call
 # passes a concrete non-mutating descriptor + default policy.
 _DESC = ToolDescriptor(
@@ -32,7 +32,7 @@ _POLICY = EffectiveToolPolicy()
 
 
 def test_execute_runs_check_then_handler_and_returns_result():
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler(value: int) -> int:
         return value * 2
@@ -56,7 +56,7 @@ def test_execute_raises_before_handler_when_policy_denies():
                 kind=PolicyDecisionKind.DENY, rule_id="x", reason="no"
             )
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=(_Deny(),)))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=(_Deny(),)))
     ran = {"handler": False}
 
     async def _handler(value: int) -> int:
@@ -97,7 +97,7 @@ def _driven_agent(capability) -> Agent:
 
 
 def test_policy_capability_after_tool_execute_returns_result_unchanged():
-    capability = build_policy_capability(ToolExecutor(policy=PolicyEngine(rules=())))
+    capability = build_policy_capability(GovernedToolInvoker(policy=PolicyEngine(rules=())))
 
     async def _run():
         return await capability.after_tool_execute(
@@ -109,7 +109,7 @@ def test_policy_capability_after_tool_execute_returns_result_unchanged():
 
 def test_policy_capability_on_tool_execute_error_surfaces_as_skip():
     capability = build_policy_capability(
-        ToolExecutor(
+        GovernedToolInvoker(
             policy=PolicyEngine(
                 rules=(CommandRule(denied_patterns=DEFAULT_DENIED_COMMAND_PATTERNS),)
             )

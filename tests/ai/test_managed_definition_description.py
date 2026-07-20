@@ -5,8 +5,8 @@ from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.mcp.client import MCPConnectionManager
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
-from linktools.ai.providers.mcp import MCPServerSpecProvider
-from linktools.ai.registry.mcp import parse_mcp_spec
+from linktools.ai.mcp.spec import MCPServerSpecProvider
+from linktools.ai.mcp.codec import parse_mcp_spec
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.models import ManagedToolDefinition
 

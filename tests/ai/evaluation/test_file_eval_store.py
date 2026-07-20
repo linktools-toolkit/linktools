@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FileEvaluationStore persistence tests."""
+"""FilesystemEvaluationStore persistence tests."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -17,11 +17,11 @@ from linktools.ai.evaluation.store import (
     EvalResultConflictError,
     EvalRunNotFoundError,
 )
-from linktools.ai.storage.file.evaluation import FileEvaluationStore
+from linktools.ai.storage.filesystem.evaluation import FilesystemEvaluationStore
 
 
 def test_file_eval_store_round_trip(tmp_path) -> None:
-    store = FileEvaluationStore(tmp_path)
+    store = FilesystemEvaluationStore(tmp_path)
 
     async def run() -> None:
         now = datetime.now(timezone.utc)
@@ -61,12 +61,12 @@ def test_file_eval_store_round_trip(tmp_path) -> None:
 
 
 def test_file_eval_store_persists_across_instances(tmp_path) -> None:
-    """A fresh FileEvaluationStore over the same root sees prior writes (real
+    """A fresh FilesystemEvaluationStore over the same root sees prior writes (real
     on-disk persistence, not in-memory)."""
     now = datetime.now(timezone.utc)
 
     async def write() -> None:
-        s = FileEvaluationStore(tmp_path)
+        s = FilesystemEvaluationStore(tmp_path)
         await s.create_run(
             EvalRun(
                 id="er1",
@@ -80,7 +80,7 @@ def test_file_eval_store_persists_across_instances(tmp_path) -> None:
         )
 
     async def read() -> None:
-        s = FileEvaluationStore(tmp_path)
+        s = FilesystemEvaluationStore(tmp_path)
         fetched = await s.get_run("er1")
         assert fetched is not None
         assert fetched.target.id == "a1"

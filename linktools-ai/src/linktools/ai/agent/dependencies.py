@@ -21,7 +21,7 @@ from ``AgentCompiler`` keeps the compiler stateless (no filesystem surface)."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping
 
-from ..policy.rule import ToolContext
+from ..governance.policy.rule import ToolContext
 
 if TYPE_CHECKING:
     from ..execution.protocols import ExecutionBackend

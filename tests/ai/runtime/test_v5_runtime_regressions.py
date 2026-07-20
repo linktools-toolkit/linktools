@@ -14,11 +14,11 @@ import asyncio
 import pytest
 
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _runtime(tmp_path) -> Runtime:
-    return Runtime.build(storage=FileStorage(root=tmp_path))
+    return Runtime.build(storage=FilesystemStorage(root=tmp_path))
 
 
 @pytest.mark.asyncio
@@ -35,8 +35,8 @@ async def test_concurrent_recovery_runs_recover_exactly_once(tmp_path):
 
     rt._components.commit_coordinator.recover_incomplete_commits = recover
 
-    t1 = asyncio.create_task(rt._ensure_recovered())
-    t2 = asyncio.create_task(rt._ensure_recovered())
+    t1 = asyncio.create_task(rt._coordinator._ensure_recovered())
+    t2 = asyncio.create_task(rt._coordinator._ensure_recovered())
     await asyncio.wait_for(started.wait(), timeout=5)
 
     # The second caller must NOT have returned early while recovery is still in
@@ -48,7 +48,7 @@ async def test_concurrent_recovery_runs_recover_exactly_once(tmp_path):
     await asyncio.gather(t1, t2)
 
     assert calls["n"] == 1, "recover must run exactly once under concurrency"
-    assert rt._recovery_done is True
+    assert rt._coordinator._recovery_done is True
 
 
 @pytest.mark.asyncio
@@ -64,11 +64,11 @@ async def test_failed_recovery_stays_retryable(tmp_path):
     rt._components.commit_coordinator.recover_incomplete_commits = recover
 
     with pytest.raises(RuntimeError):
-        await rt._ensure_recovered()
+        await rt._coordinator._ensure_recovered()
 
     # The flag must NOT be set after a failure, so the next entry point retries.
-    assert rt._recovery_done is False
+    assert rt._coordinator._recovery_done is False
 
-    await rt._ensure_recovered()
-    assert rt._recovery_done is True
+    await rt._coordinator._ensure_recovered()
+    assert rt._coordinator._recovery_done is True
     assert calls["n"] == 2, "a failed recovery must be retried"

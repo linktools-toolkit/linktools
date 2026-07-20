@@ -13,14 +13,14 @@ import uuid
 import pytest
 
 from linktools.ai.errors import RunPaused
-from linktools.ai.policy.engine import (
+from linktools.ai.governance.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
     PolicyEngine,
     ToolContext,
     ToolRequest,
 )
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 class _Require:
@@ -58,7 +58,7 @@ def test_tool_context_carries_tool_call_id_field_with_default_none():
 
 
 def test_executor_uses_context_tool_call_id_when_present():
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)), approval_store=_Store()
     )
 
@@ -74,7 +74,7 @@ def test_executor_uses_context_tool_call_id_when_present():
 
 
 def test_executor_falls_back_to_uuid_when_tool_call_id_missing():
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)), approval_store=_Store()
     )
 

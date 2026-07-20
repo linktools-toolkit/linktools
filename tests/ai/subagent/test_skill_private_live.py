@@ -203,7 +203,7 @@ class TestReadSkillActivatesSkill(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_skill(tmp)
             index = DirectorySkillIndex(Path(tmp))
-            from linktools.ai.registry.skill import SkillSpec
+            from linktools.ai.skill.models import SkillSpec
 
             class _Prov:
                 async def list_ids(self):
@@ -313,7 +313,7 @@ class TestReadThenCallInSameTask(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_skill(tmp)
             index = DirectorySkillIndex(Path(tmp))
-            from linktools.ai.registry.skill import SkillSpec
+            from linktools.ai.skill.models import SkillSpec
 
             class _SkillProv:
                 async def list_ids(self):

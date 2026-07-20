@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_approval_store_contract.py — runs the same
-ApprovalStore contract against both FileApprovalStore and
+ApprovalStore contract against both FilesystemApprovalStore and
 SqlAlchemyApprovalStore (contract backend parity). The parametrized
 ``store_factory`` fixture is copied verbatim from
 ``test_memory_store_contract.py`` (file + sqlalchemy branches, including the
@@ -27,7 +27,7 @@ from linktools.ai.errors import (
     ApprovalNotFoundError,
     InvalidApprovalTransitionError,
 )
-from linktools.ai.storage.file.approval import FileApprovalStore
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileApprovalStore(root=tmp_path / f"approval-{counter['n']}")
+            return FilesystemApprovalStore(root=tmp_path / f"approval-{counter['n']}")
 
         return file_factory
 
@@ -154,7 +154,7 @@ def test_create_then_get_roundtrip(store_factory):
         # round-trip as an empty mapping (not None) on both backends.
         assert dict(fetched.metadata) == {}
         # created_at must remain tz-aware across both backends (SqlAlchemy
-        # reattaches UTC on read; FileApprovalStore preserves isoformat tz).
+        # reattaches UTC on read; FilesystemApprovalStore preserves isoformat tz).
         assert fetched.created_at.tzinfo is not None
         assert fetched.created_at == created.created_at
 
@@ -229,7 +229,7 @@ def test_reject_transitions_to_rejected(store_factory):
 # ---------------------------------------------------------------------------
 # 4. create duplicate id -> ApprovalConflictError. ``build_approval_request``
 #    mints a fresh uuid each call, so to collide we reuse the same request
-#    object (both backends enforce the uniqueness invariant — FileApprovalStore
+#    object (both backends enforce the uniqueness invariant — FilesystemApprovalStore
 #    via path.exists, SqlAlchemy via the primary-key constraint).
 # ---------------------------------------------------------------------------
 
@@ -342,13 +342,13 @@ def test_list_pending_filters_by_run_and_status(store_factory):
 # ---------------------------------------------------------------------------
 # 8. File-only: path-traversal in approval_id -> ValueError. (SQL ids are
 #    opaque primary-key strings, not path segments, so this guard is
-#    FileApprovalStore-specific — mirrors the file-only path-traversal test in
+#    FilesystemApprovalStore-specific — mirrors the file-only path-traversal test in
 #    test_memory_store_contract.py.)
 # ---------------------------------------------------------------------------
 
 
 def test_path_traversal_in_approval_id_is_rejected(tmp_path):
-    store = FileApprovalStore(root=tmp_path)
+    store = FilesystemApprovalStore(root=tmp_path)
 
     async def _run():
         with pytest.raises(ValueError):

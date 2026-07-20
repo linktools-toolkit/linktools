@@ -5,18 +5,20 @@ backends into one frozen dataclass so a caller gets a single object that can do
 everything.
 
 This module is deliberately SQLAlchemy-free: ``Storage`` and
-``FileStorage`` depend only on the standard library and core stores, so
+``FilesystemStorage`` depend only on the standard library and core stores, so
 ``import linktools.ai`` and ``import linktools.ai.storage`` succeed without the
 optional SQLAlchemy/aiosqlite dependencies. The SQLAlchemy-backed composition
 (``SqlAlchemyStorage``) lives in ``linktools.ai.storage.sqlalchemy`` and is
 loaded lazily via ``storage/__init__.__getattr__``.
 
 - Storage: frozen composition of the nine backends + capabilities; the base
-  ``transaction()`` raises StorageCapabilityError (only a Storage whose backends
-  genuinely share one transaction provider -- e.g. SqlAlchemyStorage -- honors
-  it).
-- FileStorage: nine independent file backends under a root dir. No cross-store
-  transactions are possible, so the inherited transaction() raises.
+  ``transaction()`` delegates to the ``transactions`` field. A backend whose
+  stores share a transaction provider (SqlAlchemyStorage) yields a real UoW; a
+  backend whose stores are independent (FilesystemStorage) raises
+  StorageTransactionNotSupportedError at the call.
+- FilesystemStorage: nine independent file backends under a root dir. No cross-store
+  transactions are possible, so the inherited transaction() raises
+  StorageTransactionNotSupportedError.
 
 Subclasses use object.__setattr__ to stash their own state (e.g. the session
 factory) because the dataclass is frozen -- hence frozen=True rather than
@@ -28,11 +30,12 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
     from ...evaluation.store import EvalStore
-    from ..task.store import TaskStore
+    from ..artifact.store import ArtifactStore
+    from ..jobs.store import JobStore
+    from .protocols import LeaseCoordinator, StorageTransactionManager
     from .sqlalchemy.facade import _UnitOfWork
 
 from ..agent.approval import ApprovalStore
-from ..errors import StorageCapabilityError
 from ..events.store import EventStore
 from ..memory.store import MemoryStore
 from ..run.checkpoint import CheckpointStore
@@ -41,28 +44,28 @@ from ..run.store import RunStore
 from ..session.store import SessionStore
 from ..swarm.store import SwarmStore
 from ..tool.idempotency import IdempotencyStore
-from .capabilities import FILE_STORAGE_CAPABILITIES, StorageCapabilities
-from .file.approval import FileApprovalStore
-from .file.checkpoint import FileCheckpointStore
-from .file.definition import FileRunDefinitionStore
-from .file.event import FileEventStore
-from .file.idempotency import FileIdempotencyStore
-from .file.memory import FileMemoryStore
-from .file.run import FileRunStore
-from .file.session import FileSessionStore
-from .file.swarm import FileSwarmStore
-from .resource.file import FileResourceBackend
-from .resource.store import ResourceStore
+from .features import FILE_STORAGE_FEATURES, StorageFeatures
+from .filesystem.approval import FilesystemApprovalStore
+from .filesystem.checkpoint import FilesystemCheckpointStore
+from .filesystem.definition import FilesystemRunDefinitionStore
+from .filesystem.event import FilesystemEventStore
+from .filesystem.idempotency import FilesystemIdempotencyStore
+from .filesystem.memory import FilesystemMemoryStore
+from .filesystem.run import FilesystemRunStore
+from .filesystem.session import FilesystemSessionStore
+from .filesystem.swarm import FilesystemSwarmStore
+from ..asset.file import FileAssetBackend
+from ..asset.store import AssetStore
 
 
 @dataclass(frozen=True)
 class Storage:
     """Frozen composition of the storage backends. Concrete subclasses
-    (FileStorage, SqlAlchemyStorage) are responsible for constructing the
+    (FilesystemStorage, SqlAlchemyStorage) are responsible for constructing the
     backends; this base only holds them and exposes the cross-cutting
     transaction() hook."""
 
-    resources: ResourceStore
+    assets: AssetStore
     sessions: SessionStore
     runs: RunStore
     events: EventStore
@@ -71,7 +74,26 @@ class Storage:
     memories: MemoryStore
     approvals: ApprovalStore
     idempotency: IdempotencyStore
-    capabilities: StorageCapabilities
+    features: StorageFeatures
+    # Lease coordination. The in-repo references ship a process-local
+    # LeaseCoordinator (ProcessLocalLeaseCoordinator); a deployment needing multi-worker
+    # Jobs or multi-process Swarms injects a distributed one and declares
+    # CoordinationScope.DISTRIBUTED on its StorageFeatures. The build-time
+    # capability gate that REJECTS a multi-worker/multi-process topology
+    # configured against process-local coordination is part of the later
+    # RuntimeRequirements work (not yet wired); until then Storage.coordination
+    # is an available, conformant capability without an enforcing consumer.
+    coordination: "LeaseCoordinator"
+    # Cross-store UnitOfWork manager. The canonical surface for an
+    # atomic cross-store scope: storage.transactions.transaction() yields a UoW
+    # whose stores share one transaction. A backend whose stores are independent
+    # (FilesystemStorage) supplies a NoCrossStoreTransactions manager that
+    # raises StorageTransactionNotSupportedError at the call -- the honest
+    # declaration for features.transactions = PROCESS_LOCAL (single-store
+    # durability only, no cross-store UoW). A backend with a shared transaction
+    # provider (SqlAlchemyStorage) supplies a real manager and declares
+    # TransactionScope.DATABASE.
+    transactions: "StorageTransactionManager"
     # Required, not optional: every run entry point (agent / subagent / swarm
     # worker) persists a RunDefinitionSnapshot so Runtime.resume(child_run_id)
     # can restore its spec + identity after an approval pause. A Storage built
@@ -79,63 +101,69 @@ class Storage:
     # opt-in capability.
     run_definitions: RunDefinitionStore
     # Reliable-task store. Optional + None for backward compatibility with
-    # existing Storage(...) constructions; TaskRuntime rejects a None tasks
-    # store at build time. Backends wire their own (FileStorage -> FileTaskStore).
-    tasks: "TaskStore | None" = None
+    # existing Storage(...) constructions; JobRuntime rejects a None tasks
+    # store at build time. Backends wire their own (FilesystemStorage -> FilesystemTaskStore).
+    tasks: "JobStore | None" = None
     # Evaluation store. Optional + None for backward compatibility; the eval
     # runner persists lifecycle + results when a caller wires one (e.g. an
     # InMemoryEvalStore or a backend-provided file/SQL store).
     evaluations: "EvalStore | None" = None
+    # Artifact store (content-addressed blobs + lineage records). Optional +
+    # None for backward compatibility; backends wire one and JobRuntime consumes
+    # it explicitly (no implicit getattr fallback on the asset store).
+    artifacts: "ArtifactStore | None" = None
 
     def transaction(self) -> "AsyncIterator[_UnitOfWork]":
-        """Cross-store transactional scope. The base implementation always
-        raises: only a Storage whose backends genuinely share one underlying
-        transaction provider (e.g. SqlAlchemyStorage) can honor this. Callers
-        should branch on capabilities.cross_store_transactions before relying
-        on it.
-
-        Intentionally a plain ``def`` (not ``async def``): raising here instead
-        of inside ``__aenter__`` means ``async with storage.transaction()``
-        fails at the call site with StorageCapabilityError, not with a
-        confusing ``TypeError`` about a coroutine not supporting the async
-        context-manager protocol."""
-        raise StorageCapabilityError(
-            f"{type(self).__name__} does not support cross-store transactions"
-        )
+        """Cross-store transactional scope, delegating to the ``transactions``
+        field (the canonical surface). A backend whose stores share a
+        transaction provider (SqlAlchemyStorage) yields a real UoW; a backend
+        whose stores are independent (FilesystemStorage) raises
+        StorageTransactionNotSupportedError at the call. Branch on
+        ``features.transactions is TransactionScope.DATABASE`` before relying on
+        it. Retained as a thin delegator so existing call sites (run commit
+        coordinators, tests) keep working; new code should call
+        ``storage.transactions.transaction()`` directly."""
+        return self.transactions.transaction()
 
 
-class FileStorage(Storage):
+class FilesystemStorage(Storage):
     """Storage backed by independent file-system backends. Each backend manages
     its own files, so cross-store transactions are NOT available -- transaction()
-    raises StorageCapabilityError. Branch on capabilities.cross_store_transactions
-    (False here) before calling it."""
+    raises StorageTransactionNotSupportedError. Branch on features.transactions
+    == TransactionScope.DATABASE (False here) before calling it."""
 
     def __init__(self, *, root: "str | Path" = "./data") -> None:
         # Lazy import keeps `import linktools.ai` / `import linktools.ai.storage`
-        # from pulling the task/evaluation domains; only constructing a
-        # FileStorage does.
-        from .file.evaluation import FileEvaluationStore
-        from .file.task import FileTaskStore
+        # from pulling the jobs/evaluation domains; only constructing a
+        # FilesystemStorage does.
+        from .filesystem.evaluation import FilesystemEvaluationStore
+        from .filesystem.task import FilesystemTaskStore
 
         root_path = Path(root)
+        from .artifact_backends import build_artifact_store_from_assets
+        from .coordination.process_local import ProcessLocalLeaseCoordinator
+        from .transaction import NoCrossStoreTransactions
+
+        assets = AssetStore(primary=FileAssetBackend(root=root_path / "resources"))
         super().__init__(
-            resources=ResourceStore(
-                primary=FileResourceBackend(root=root_path / "resources")
-            ),
-            sessions=FileSessionStore(root=root_path / "sessions"),
-            runs=FileRunStore(root=root_path / "runs"),
-            events=FileEventStore(root=root_path / "events"),
-            checkpoints=FileCheckpointStore(root=root_path / "checkpoints"),
-            swarms=FileSwarmStore(root=root_path / "swarms"),
-            memories=FileMemoryStore(root=root_path / "memories"),
-            approvals=FileApprovalStore(root=root_path / "approvals"),
-            idempotency=FileIdempotencyStore(root=root_path / "idempotency"),
-            run_definitions=FileRunDefinitionStore(root=root_path / "definitions"),
-            capabilities=FILE_STORAGE_CAPABILITIES,
-            tasks=FileTaskStore(root_path / "tasks"),
-            evaluations=FileEvaluationStore(root_path / "evaluations"),
+            assets=assets,
+            sessions=FilesystemSessionStore(root=root_path / "sessions"),
+            runs=FilesystemRunStore(root=root_path / "runs"),
+            events=FilesystemEventStore(root=root_path / "events"),
+            checkpoints=FilesystemCheckpointStore(root=root_path / "checkpoints"),
+            swarms=FilesystemSwarmStore(root=root_path / "swarms"),
+            memories=FilesystemMemoryStore(root=root_path / "memories"),
+            approvals=FilesystemApprovalStore(root=root_path / "approvals"),
+            idempotency=FilesystemIdempotencyStore(root=root_path / "idempotency"),
+            run_definitions=FilesystemRunDefinitionStore(root=root_path / "definitions"),
+            features=FILE_STORAGE_FEATURES,
+            coordination=ProcessLocalLeaseCoordinator(),
+            transactions=NoCrossStoreTransactions("FilesystemStorage"),
+            tasks=FilesystemTaskStore(root_path / "tasks"),
+            evaluations=FilesystemEvaluationStore(root=root_path / "evaluations"),
+            artifacts=build_artifact_store_from_assets(assets),
         )
-        # Stash the root so the FileRunCommitCoordinator can place its crash-
+        # Stash the root so the FilesystemRunCommitCoordinator can place its crash-
         # recovery journal under {root}/transactions (frozen dataclass -> bypass).
         object.__setattr__(self, "_root", root_path)
 

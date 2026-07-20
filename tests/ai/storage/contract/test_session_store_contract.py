@@ -12,7 +12,7 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
 
 
 def _record(session_id="session-1") -> SessionRecord:
@@ -40,7 +40,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileSessionStore(root=tmp_path / f"sessions-{counter['n']}")
+            return FilesystemSessionStore(root=tmp_path / f"sessions-{counter['n']}")
 
         return file_factory
 
@@ -217,6 +217,6 @@ async def test_sessions_are_isolated(store_factory):
 
 @pytest.mark.asyncio
 async def test_path_traversal_in_session_id_is_rejected(tmp_path):
-    store = FileSessionStore(root=tmp_path)
+    store = FilesystemSessionStore(root=tmp_path)
     with pytest.raises(ValueError):
         await store.get("../../etc/passwd")

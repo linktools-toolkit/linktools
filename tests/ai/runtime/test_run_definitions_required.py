@@ -21,13 +21,13 @@ from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunInput
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
     """§5.9: a Storage whose run_definitions is None must be rejected at build
     time with RuntimeInitializationError, before any run/resume is attempted."""
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     # run_definitions is a required field now, but a caller can still pass None
     # explicitly -- that must fail fast rather than silently disabling resume.
     object.__setattr__(storage, "run_definitions", None)
@@ -47,8 +47,8 @@ class _FakeCompiler:
 
 
 class _FakeRunner:
-    async def run(self, compiled, run_input, ctx):
-        assert isinstance(run_input, RunInput)
+    async def dispatch(self, request):
+        assert isinstance(request.input, RunInput)
         return _FakeResult(output="child-output")
 
 
@@ -57,11 +57,11 @@ def test_subagent_run_persists_child_run_definition_snapshot(tmp_path):
     Runtime.resume(child_run_id) can restore its spec + identity after an
     approval pause. The subagent executor must call prepare_agent_run for every
     child run -- this test fails if that call is re-gated behind an Optional."""
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     execute = _make_runtime_subagent_executor(
         storage=storage,
         compiler=_FakeCompiler(),
-        runner_provider=lambda: _FakeRunner(),
+        dispatcher=_FakeRunner(),
     )
     spec = AgentSpec(
         id="child-agent",

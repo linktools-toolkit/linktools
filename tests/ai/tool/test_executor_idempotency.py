@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tool-level idempotency tests for ToolExecutor.execute (design note contract).
+"""Tool-level idempotency tests for GovernedToolInvoker.execute (design note contract).
 
-ToolExecutor now consults a persistent IdempotencyStore instead of an
+GovernedToolInvoker now consults a persistent IdempotencyStore instead of an
 in-process dict. Same (scope, key) + same request hash -> handler runs
 once and the cached result is returned on subsequent calls; same (scope,
 key) + different request hash -> IdempotencyConflictError; no store
@@ -13,9 +13,9 @@ import asyncio
 import pytest
 
 from linktools.ai.errors import IdempotencyConflictError, IdempotencyInProgressError
-from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
-from linktools.ai.storage.file.idempotency import FileIdempotencyStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext, ToolRequest
+from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
 
@@ -25,8 +25,8 @@ _DESC = ToolDescriptor(
 _POLICY = EffectiveToolPolicy()
 
 
-def _file_store(tmp_path) -> FileIdempotencyStore:
-    return FileIdempotencyStore(root=tmp_path / "idem")
+def _file_store(tmp_path) -> FilesystemIdempotencyStore:
+    return FilesystemIdempotencyStore(root=tmp_path / "idem")
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ def _file_store(tmp_path) -> FileIdempotencyStore:
 
 def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -72,7 +72,7 @@ def test_same_idempotency_key_calls_handler_once_and_returns_cached_result(tmp_p
 
 def test_safe_result_is_identical_on_first_call_and_replay(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"handler": 0, "processor": 0}
 
     async def handler():
@@ -108,7 +108,7 @@ def test_safe_result_is_identical_on_first_call_and_replay(tmp_path):
 
 def test_same_key_with_different_args_raises_conflict(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -149,7 +149,7 @@ def test_same_key_with_different_args_raises_conflict(tmp_path):
 def test_no_idempotency_key_means_no_caching_handler_runs_each_call():
     """Without an idempotency_key (the normal non-idempotent case) there is no
     caching regardless of store -- the handler runs on every call."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -182,7 +182,7 @@ def test_idempotency_key_without_store_fails_closed():
     run non-idempotently (which would let a replayed call execute twice)."""
     from linktools.ai.errors import StorageCapabilityError
 
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler(value: int) -> int:
         return value
@@ -208,7 +208,7 @@ def test_idempotency_key_without_store_fails_closed():
 
 def test_different_idempotency_keys_do_not_collide(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -248,7 +248,7 @@ def test_different_idempotency_keys_do_not_collide(tmp_path):
 
 def test_same_key_under_different_run_id_does_not_collide(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -288,7 +288,7 @@ def test_same_key_under_different_run_id_does_not_collide(tmp_path):
 
 def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -344,7 +344,7 @@ def test_failed_then_succeed_re_invokes_handler_and_eventually_completes(tmp_pat
 
 def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -380,7 +380,7 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. IdempotencyStore survives "process restart": a fresh ToolExecutor wired
+# 8. IdempotencyStore survives "process restart": a fresh GovernedToolInvoker wired
 #    to the same on-disk store sees the previously-completed record. (contract:
 #    "禁止仅使用进程内字典" -- the whole point of persistence.)
 # ---------------------------------------------------------------------------
@@ -414,7 +414,7 @@ def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path
     would incorrectly replay the first call's cached result even though the
     tool's input contract changed shape."""
     store = _file_store(tmp_path)
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -450,7 +450,7 @@ def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path
 
 def test_completed_record_survives_executor_replacement(tmp_path):
     store = _file_store(tmp_path)
-    executor_a = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor_a = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler(value: int) -> int:
@@ -473,7 +473,7 @@ def test_completed_record_survives_executor_replacement(tmp_path):
 
     # New executor, same on-disk store: the second call is a cache hit -- the
     # handler is NOT invoked.
-    executor_b = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    executor_b = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
 
     async def _second_run():
         return await executor_b.execute(

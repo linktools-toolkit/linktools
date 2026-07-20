@@ -15,7 +15,7 @@ import pytest
 
 from linktools.ai._runtime.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError, SessionError
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _run(coro):
@@ -29,7 +29,7 @@ def _open(storage, session_id, *, user_id, tenant_id):
 
 
 def test_new_session_is_stamped_with_principal(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id="u-a", tenant_id="t-a")
     record = _run(storage.sessions.get(sid))
     assert record is not None
@@ -38,28 +38,28 @@ def test_new_session_is_stamped_with_principal(tmp_path):
 
 
 def test_same_identity_reopens_session(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id="u-a", tenant_id="t-a")
     # Same principal re-opens: ok, returns the same id.
     assert _open(storage, sid, user_id="u-a", tenant_id="t-a") == sid
 
 
 def test_different_tenant_is_rejected(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id="u-a", tenant_id="t-a")
     with pytest.raises(SessionAccessDeniedError):
         _open(storage, sid, user_id="u-a", tenant_id="t-b")
 
 
 def test_different_user_is_rejected(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id="u-a", tenant_id="t-a")
     with pytest.raises(SessionAccessDeniedError):
         _open(storage, sid, user_id="u-b", tenant_id="t-a")
 
 
 def test_omitted_identity_cannot_breach_owned_session(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id="u-a", tenant_id="t-a")
     # An unowned caller must not reach an owned session.
     with pytest.raises(SessionAccessDeniedError):
@@ -67,7 +67,7 @@ def test_omitted_identity_cannot_breach_owned_session(tmp_path):
 
 
 def test_unowned_session_rejects_principal(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     sid = _open(storage, None, user_id=None, tenant_id=None)
     # A principal must not claim an unowned session.
     with pytest.raises(SessionAccessDeniedError):
@@ -77,7 +77,7 @@ def test_unowned_session_rejects_principal(tmp_path):
 
 
 def test_missing_session_is_not_found_not_denied(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     # An unknown id surfaces as a plain SessionError, not an access denial --
     # the denial message must not leak whether the session belongs to someone.
     with pytest.raises(SessionError):

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""A from-scratch in-memory EXTERNAL storage adapter for the wheel-only
+conformance suite (plan §7.2 line 1852).
+
+This module is the proof that a THIRD-PARTY adapter can be built against the
+PUBLIC surface alone: it imports ONLY ``linktools.ai.storage.protocols`` and
+``linktools.ai.artifact.models`` -- nothing private, no in-repo reference
+backend, no source-tree relative import. A downstream package installs the
+built ``linktools-ai`` wheel + the ``test`` extra, copies this adapter, and
+runs the public testkit Contracts (``linktools.ai.storage.testing``) against
+it in its own CI."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timedelta, timezone
+from typing import AsyncIterator
+
+from linktools.ai.artifact.models import ArtifactIntegrityError, ArtifactRecord
+from linktools.ai.storage.protocols import BlobInfo, LeaseToken
+
+
+class InMemoryArtifactBlobStore:
+    """Content-addressed in-memory ArtifactBlobStore. ``put_if_absent`` verifies
+    the streamed bytes against the claimed digest (mismatch ->
+    ArtifactIntegrityError) and is idempotent on a matching digest."""
+
+    def __init__(self) -> None:
+        self._blobs: "dict[str, bytes]" = {}
+
+    async def put_if_absent(
+        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+    ) -> BlobInfo:
+        chunks: "list[bytes]" = []
+        async for chunk in source:
+            chunks.append(chunk)
+        actual = b"".join(chunks)
+        if hashlib.sha256(actual).hexdigest() != digest:
+            raise ArtifactIntegrityError(
+                f"digest mismatch: claimed sha256 {digest[:12]}..."
+            )
+        self._blobs.setdefault(digest, actual)
+        return BlobInfo(digest=digest, size=len(actual), content_type=None)
+
+    async def open(self, *, digest: str) -> AsyncIterator[bytes]:
+        existing = self._blobs.get(digest)
+        if existing is None:
+            raise ArtifactIntegrityError(f"blob for sha256 {digest[:12]} missing")
+        yield existing
+
+    async def stat(self, *, digest: str) -> "BlobInfo | None":
+        data = self._blobs.get(digest)
+        if data is None:
+            return None
+        return BlobInfo(digest=digest, size=len(data), content_type=None)
+
+    async def delete(self, *, digest: str) -> None:
+        self._blobs.pop(digest, None)
+
+
+class InMemoryArtifactRecordStore:
+    """Tenant-scoped in-memory ArtifactRecordStore. The record is opaque to the
+    store (keyed by ``(ref.id, tenant_id)``); a foreign tenant learns nothing."""
+
+    def __init__(self) -> None:
+        self._records: "dict[tuple[str, str], ArtifactRecord]" = {}
+
+    async def put(self, record: ArtifactRecord) -> ArtifactRecord:
+        self._records[(record.ref.id, record.tenant_id)] = record
+        return record
+
+    async def get(
+        self, artifact_id: str, *, tenant_id: str
+    ) -> "ArtifactRecord | None":
+        return self._records.get((artifact_id, tenant_id))
+
+    async def delete(self, artifact_id: str, *, tenant_id: str) -> bool:
+        return self._records.pop((artifact_id, tenant_id), None) is not None
+
+
+class InMemoryLeaseCoordinator:
+    """In-memory LeaseCoordinator with monotonic fencing: acquires are mutually
+    exclusive per key, the fencing token strictly increases on every
+    (re)acquisition, and renew preserves the token."""
+
+    def __init__(self) -> None:
+        self._holders: "dict[str, tuple[str, int, datetime]]" = {}
+        self._counter: "dict[str, int]" = {}
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    async def acquire(
+        self, *, key: str, owner_id: str, ttl: timedelta
+    ) -> "LeaseToken | None":
+        now = self._now()
+        held = self._holders.get(key)
+        if held is not None and held[2] > now:
+            return None
+        token = self._counter.get(key, 0) + 1
+        self._counter[key] = token
+        expires = now + ttl
+        self._holders[key] = (owner_id, token, expires)
+        return LeaseToken(
+            lease_id=f"{key}:{token}",
+            owner_id=owner_id,
+            fencing_token=token,
+            expires_at=expires,
+            key=key,
+        )
+
+    async def renew(self, *, token: LeaseToken, ttl: timedelta) -> LeaseToken:
+        held = self._holders.get(token.key)
+        if (
+            held is None
+            or held[0] != token.owner_id
+            or held[1] != token.fencing_token
+        ):
+            raise LookupError(
+                f"cannot renew a lease not currently held by {token.owner_id!r}"
+            )
+        expires = self._now() + ttl
+        self._holders[token.key] = (token.owner_id, token.fencing_token, expires)
+        return LeaseToken(
+            lease_id=token.lease_id,
+            owner_id=token.owner_id,
+            fencing_token=token.fencing_token,
+            expires_at=expires,
+            key=token.key,
+        )
+
+    async def release(self, *, token: LeaseToken) -> None:
+        held = self._holders.get(token.key)
+        if held is not None and held[0] == token.owner_id:
+            del self._holders[token.key]

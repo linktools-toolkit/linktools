@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """DirectEvalExecutor: run an EvalTarget inline through the existing Runtime.
 
-Direct mode does NOT go through TaskRuntime -- it resolves the target to a
+Direct mode does NOT go through JobRuntime -- it resolves the target to a
 spec, reads the case's input artifact as the prompt, calls ``Runtime.run``, and
 wraps the result in an :class:`EvalExecution`. When the run/definition/event
 stores are wired, it also captures a full :class:`RunSnapshot` (run record,
 definition, and event stream sealed to artifacts) so the case is replayable and
 evaluators can see the trajectory. The Evaluation core depends on the
-:class:`EvalExecutor` Protocol, not on TaskRuntime."""
+:class:`EvalExecutor` Protocol, not on JobRuntime."""
 
 import json
 import uuid

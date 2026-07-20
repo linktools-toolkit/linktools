@@ -3,7 +3,7 @@
 """Model cost pricing + budget enforcement.
 
 ModelPricing is the per-token cost for one model id; ModelPricingProvider looks
-it up. AgentRunner asks the provider for the model's pricing, multiplies by the
+it up. AgentEngine asks the provider for the model's pricing, multiplies by the
 RunUsage token counts, and -- when ModelPolicy.budget is set -- raises
 ModelPolicyExceededError once the cumulative cost crosses it. Decimal
 throughout (float would lose precision on small per-token costs).

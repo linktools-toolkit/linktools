@@ -11,7 +11,7 @@ from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.errors import CapabilityConflictError
 from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
-from linktools.ai.registry.mcp import MCPServerSpec
+from linktools.ai.mcp.spec import MCPServerSpec
 
 
 class _FakeMgr:

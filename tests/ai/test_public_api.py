@@ -25,7 +25,7 @@ def test_old_root_exports_are_gone():
         "ModelRouter",
         "RuntimeModelConfig",
         "Storage",
-        "FileStorage",
+        "FilesystemStorage",
         "SwarmSpec",
     ):
         assert not hasattr(ai, gone), f"linktools.ai should no longer export {gone}"
@@ -37,11 +37,11 @@ def test_domain_imports_succeed():
     from linktools.ai.capability import CapabilityRuntimeOptions
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.router import ModelRouter
-    from linktools.ai.storage import FileStorage, Storage
+    from linktools.ai.storage import FilesystemStorage, Storage
     from linktools.ai.swarm import SwarmSpec
 
     assert AgentSpec and CapabilityRuntimeOptions and ModelPolicy and ModelRouter
-    assert Storage and FileStorage and SwarmSpec
+    assert Storage and FilesystemStorage and SwarmSpec
 
 
 def test_root_does_not_re_export_sqlalchemy_storage():

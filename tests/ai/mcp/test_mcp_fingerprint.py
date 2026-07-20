@@ -6,7 +6,7 @@ empty allowlist, spaced-vs-split command parts, and a rotated secret must each
 produce a different fingerprint; the secret plaintext never appears in it."""
 
 from linktools.ai.mcp.client import _config_fingerprint
-from linktools.ai.registry.mcp import MCPServerSpec
+from linktools.ai.mcp.spec import MCPServerSpec
 
 
 def _stdio(**env) -> MCPServerSpec:

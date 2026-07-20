@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_run_store_contract.py — runs the same RunStore
-contract against both FileRunStore and SqlAlchemyRunStore."""
+contract against both FilesystemRunStore and SqlAlchemyRunStore."""
 
 from datetime import datetime, timezone
 
@@ -20,7 +20,7 @@ from linktools.ai.run.models import (
     RunResult,
     RunStatus,
 )
-from linktools.ai.storage.file.run import FileRunStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
 
 
 def _record(
@@ -52,7 +52,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileRunStore(root=tmp_path / f"runs-{counter['n']}")
+            return FilesystemRunStore(root=tmp_path / f"runs-{counter['n']}")
 
         return file_factory
 
@@ -250,6 +250,6 @@ async def test_concurrent_transitions_with_same_expected_version_only_one_succee
 
 @pytest.mark.asyncio
 async def test_path_traversal_in_run_id_is_rejected(tmp_path):
-    store = FileRunStore(root=tmp_path)
+    store = FilesystemRunStore(root=tmp_path)
     with pytest.raises(ValueError):
         await store.get("../../etc/passwd")

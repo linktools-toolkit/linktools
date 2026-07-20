@@ -4,11 +4,11 @@
 tool call must pass. Wraps a handler with the full governance chain:
 
     descriptor -> ToolPolicyProvider -> SecurityBaseline merge ->
-    SecurityPipeline.before_tool -> ToolExecutor.check (policy/approval) ->
+    SecurityPipeline.before_tool -> GovernedToolInvoker.check (policy/approval) ->
     handler (timeout + retry) -> SecurityPipeline.after_tool -> stable result
 
 Providers supply handlers and descriptors; execution and governance are owned by
-ToolExecutor."""
+GovernedToolInvoker."""
 
 import asyncio
 import logging
@@ -24,9 +24,9 @@ from ..errors import (
     RuntimeInitializationError,
 )
 from ..tool.models import ToolDescriptor
-from ..security.redact import redact_for_audit, redact_exception
+from ..governance.security.redact import redact_for_audit, redact_exception
 from ..tool.schema import validate_arguments
-from ..security.pipeline import (
+from ..governance.security.pipeline import (
     PipelineAction,
     SecurityPipeline,
     ToolInvocationEvent,
@@ -49,7 +49,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class ManagedToolAdapter:
     """Wraps a tool handler with unified security governance. When a
-    ToolExecutor is wired, delegates policy/approval/idempotency to it; the
+    GovernedToolInvoker is wired, delegates policy/approval/idempotency to it; the
     adapter adds pipeline before/after and policy resolution on top."""
 
     def __init__(
@@ -67,7 +67,7 @@ class ManagedToolAdapter:
         security_event_emitter: Any = None,
     ) -> None:
         if tool_executor is None:
-            raise RuntimeInitializationError("ManagedToolAdapter requires ToolExecutor")
+            raise RuntimeInitializationError("ManagedToolAdapter requires GovernedToolInvoker")
         self._descriptor = descriptor
         self._handler = handler
         self._tool_executor = tool_executor
@@ -80,7 +80,7 @@ class ManagedToolAdapter:
             security_audit_failure_mode, "value", security_audit_failure_mode
         )
         if security_event_emitter is None and event_store is not None:
-            from ..security.emitter import EventStoreSecurityEventEmitter
+            from ..governance.security.emitter import EventStoreSecurityEventEmitter
 
             security_event_emitter = EventStoreSecurityEventEmitter(
                 event_store,
@@ -249,7 +249,7 @@ class ManagedToolAdapter:
         )
         import hashlib
         from ..json import canonical_json
-        from ..task.models import to_jsonable
+        from ..jobs.models import to_jsonable
 
         descriptor_fingerprint = self._descriptor.fingerprint()
         binding_metadata = {
@@ -387,7 +387,7 @@ class ManagedToolAdapter:
                 )
 
         # 3. Require approval from the resolved policy. Checked regardless of
-        # whether a ToolExecutor is wired -- a ToolPolicyProvider/baseline
+        # whether a GovernedToolInvoker is wired -- a ToolPolicyProvider/baseline
         # declaring require_approval=True is a distinct signal from the
         # executor's own PolicyEngine decision and must not be silently
         # dropped just because an executor happens to be present. The
@@ -423,8 +423,8 @@ class ManagedToolAdapter:
             result_action_holder["value"] = action
             return safe_result
         try:
-            # ToolExecutor.execute is the single real execution entry point.
-            from ..policy.engine import ToolContext, ToolRequest
+            # GovernedToolInvoker.execute is the single real execution entry point.
+            from ..governance.policy.engine import ToolContext, ToolRequest
             tc = ToolContext(
                 run_id=run_id or "",
                 session_id=getattr(ctx, "session_id", None) if ctx else None,

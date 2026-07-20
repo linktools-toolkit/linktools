@@ -17,7 +17,7 @@ from linktools.ai_cli.skill_index import SkillInfo
 
 
 def _skill_info(skill_root: Path, revision: str = "r1") -> SkillInfo:
-    from linktools.ai.registry.skill import SkillSpec
+    from linktools.ai.skill.models import SkillSpec
 
     return SkillInfo(
         id="skill-creator",

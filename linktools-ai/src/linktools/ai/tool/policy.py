@@ -127,7 +127,7 @@ class ResolvedToolPolicy:
 @dataclass(frozen=True, slots=True)
 class EffectiveToolPolicy:
     """The merged tri-state ResolvedToolPolicy collapsed to concrete values --
-    what the execution chain (ManagedToolAdapter, ToolExecutor) actually acts
+    what the execution chain (ManagedToolAdapter, GovernedToolInvoker) actually acts
     on. Produced only by finalize_policy()."""
 
     enabled: bool = True
@@ -352,7 +352,7 @@ class MetadataBackedPolicyProvider:
         else:
             risk = "medium"
         approval = getattr(meta, "approval", None)
-        from ..policy.rule import ApprovalMode
+        from ..governance.policy.rule import ApprovalMode
 
         require_approval = approval not in (None, ApprovalMode.NEVER)
         side_effect = getattr(meta, "side_effect", None)

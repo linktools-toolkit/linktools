@@ -12,7 +12,7 @@ The SQL-specific behaviour lives in ``claim_task`` and ``reclaim_expired_tasks``
   optimistic claim that makes the loser of a concurrent race observe 0 rows.
 * ``reclaim_expired_tasks`` issues a real ``UPDATE ... SET status='pending' WHERE
   status='claimed' AND lease_expires_at < :now``, which the single-process
-  FileSwarmStore cannot do (it returns ``()`` unconditionally).
+  FilesystemSwarmStore cannot do (it returns ``()`` unconditionally).
 """
 
 import json

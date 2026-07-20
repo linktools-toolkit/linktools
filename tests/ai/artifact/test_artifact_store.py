@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ArtifactStore over ResourceStore -- content addressing, immutability,
+"""ArtifactStore over AssetStore -- content addressing, immutability,
 lineage, tenant scoping, integrity (plan section 18, phase-1 acceptance)."""
 
 import asyncio
@@ -8,12 +8,13 @@ import asyncio
 import pytest
 
 from linktools.ai.artifact import ArtifactIntegrityError, ArtifactStore
-from linktools.ai.storage.resource.memory import MemoryResourceBackend
-from linktools.ai.storage.resource.store import ResourceStore
+from linktools.ai.asset.memory import MemoryAssetBackend
+from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
 
 
 def _store() -> ArtifactStore:
-    return ArtifactStore(ResourceStore(primary=MemoryResourceBackend()))
+    return build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
 
 
 def test_identical_content_shares_blob_but_distinct_records() -> None:
@@ -75,8 +76,8 @@ def test_blob_corruption_is_detected() -> None:
     async def run() -> None:
         record = await store.put(b"payload", media_type="text/plain", tenant_id="t1")
         # Corrupt the stored blob (addressed by sha256, not the record id).
-        backend = store._resources._primary
-        path_key = store._blob_path(record.ref.sha256).value
+        backend = store._blob._assets._primary
+        path_key = store._blob._path(record.ref.sha256).value
         _content, info = backend._entries[path_key]
         backend._entries[path_key] = (b"TAMPERED", info)
         with pytest.raises(ArtifactIntegrityError):
@@ -96,8 +97,8 @@ def test_put_refuses_to_record_reference_to_corrupt_blob() -> None:
         record = await store.put(b"payload", media_type="text/plain", tenant_id="t1")
         # Corrupt the stored blob in place (content no longer hashes to its
         # sha256-keyed path).
-        backend = store._resources._primary
-        path_key = store._blob_path(record.ref.sha256).value
+        backend = store._blob._assets._primary
+        path_key = store._blob._path(record.ref.sha256).value
         _content, info = backend._entries[path_key]
         backend._entries[path_key] = (b"TAMPERED", info)
         with pytest.raises(ArtifactIntegrityError):
@@ -177,7 +178,7 @@ def test_same_content_dedupes_to_one_blob() -> None:
         await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="A")
         await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="B")
         await store.put(b"shared", media_type="text/plain", tenant_id="t1", created_by_task_id="C")
-        backend = store._resources._primary
+        backend = store._blob._assets._primary
         blob_keys = [k for k in backend._entries if "/blobs/sha256/" in k]
         record_keys = [k for k in backend._entries if "/records/" in k]
         assert len(blob_keys) == 1  # content deduplicated

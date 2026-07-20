@@ -33,7 +33,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.dependencies import AgentDependencies
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.assembler import CapabilityAssembler
 from linktools.ai.capability.models import CapabilityBundle
@@ -43,20 +43,20 @@ from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import PolicyEngine, ToolContext
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext
 from linktools.ai.run.context import RunContext as AiRunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
 from linktools.ai.tool.models import (
     ManagedToolDefinition,
     ToolContribution,
     ToolDescriptor,
 )
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.pydantic import build_managed_toolset
 
 
@@ -125,7 +125,7 @@ async def _compiled(pipeline: MiddlewarePipeline):
     """Compile a CompiledAgent whose middleware pipeline captures the per-Run
     ToolContext. The compiled agent carries an extra ``ping`` tool so the model
     has something to call (driving the ``before_tool`` hook)."""
-    compiler = AgentCompiler(tool_executor=ToolExecutor(policy=PolicyEngine(rules=())), 
+    compiler = AgentCompiler(tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), 
         model_router=ModelRouter(registry=_registry()),
         middleware_pipeline=pipeline,
     )
@@ -168,24 +168,24 @@ async def _seed_session(store, session_id) -> None:
     )
 
 
-def _make_runner(tmp_path, pipeline) -> AgentRunner:
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+def _make_runner(tmp_path, pipeline) -> AgentEngine:
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    return AgentRunner(
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    return AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         capability_assembler=CapabilityAssembler({"test": _PingProvider()}),
-        managed_tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=run_store,
             session_store=session_store,

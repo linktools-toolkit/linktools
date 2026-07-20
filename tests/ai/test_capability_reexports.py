@@ -18,10 +18,25 @@ def test_existing_capability_exports_still_work():
     from linktools.ai.capability import (
         CapabilityInspection,
         CapabilityProvider,
+        CapabilityProviderRegistry,
         CapabilityRef,
         CapabilityRuntimeOptions,
     )
     assert all(
         symbol is not None
-        for symbol in (CapabilityRef, CapabilityRuntimeOptions, CapabilityInspection, CapabilityProvider)
+        for symbol in (
+            CapabilityRef,
+            CapabilityRuntimeOptions,
+            CapabilityInspection,
+            CapabilityProvider,
+            CapabilityProviderRegistry,
+        )
     )
+
+
+def test_capability_provider_registry_reexport_identity():
+    """CapabilityProviderRegistry is the runtime registry surface; it must
+    re-export to the exact same object as the deep submodule import."""
+    from linktools.ai.capability import CapabilityProviderRegistry as Shallow
+    from linktools.ai.capability.registry import CapabilityProviderRegistry as Deep
+    assert Shallow is Deep

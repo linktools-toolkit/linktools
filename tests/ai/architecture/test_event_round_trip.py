@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Event payload round-trip through FileEventStore.
+"""Event payload round-trip through FilesystemEventStore.
 
-Every standard EventPayload must survive: dataclass -> FileEventStore.append
+Every standard EventPayload must survive: dataclass -> FilesystemEventStore.append
 -> JSON on disk -> list() -> reconstructed dataclass with identical type and
 fields. A payload that loses a field or reconstructs as the wrong type fails
 here. This locks the serialization contract before the simplification touches
@@ -15,7 +15,7 @@ from typing import Any, get_args
 
 from linktools.ai.events import payloads as _payloads
 from linktools.ai.events.payloads import EventPayload
-from linktools.ai.storage.file.event import FileEventStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
 
 
 def _value_for(field: "dataclasses.Field[Any]") -> Any:
@@ -65,7 +65,7 @@ def test_every_standard_payload_is_covered():
 
 
 def test_all_event_payloads_round_trip_through_file_store(tmp_path):
-    store = FileEventStore(root=tmp_path)
+    store = FilesystemEventStore(root=tmp_path)
     originals = [_make_payload(cls) for cls in PAYLOAD_CLASSES]
 
     async def _drive():
@@ -96,10 +96,10 @@ def test_all_event_payloads_round_trip_through_file_store(tmp_path):
 
 
 def test_payload_type_name_is_the_class_name(tmp_path):
-    """FileEventStore persists ``payload_type = type(payload).__name__`` and
+    """FilesystemEventStore persists ``payload_type = type(payload).__name__`` and
     reconstructs by that name -- a payload whose stored name drifts from the
     class would break reconstruction silently."""
-    store = FileEventStore(root=tmp_path)
+    store = FilesystemEventStore(root=tmp_path)
     payload = _payloads.RunStarted(run_id="r", runnable_id="a")
 
     async def _drive():

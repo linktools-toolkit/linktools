@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Capability-lifecycle event emission (contract Middleware/EventStore): the
 EventStore wired on a CapabilityContext receives capability.resolve + skill +
-package-resource + entrypoint events."""
+extension-resource + entrypoint events."""
 
 import pytest
 

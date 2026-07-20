@@ -24,7 +24,7 @@ async def test_get_token_returns_none_for_unregistered_run():
 @pytest.mark.asyncio
 async def test_register_exposes_token_via_get_token():
     """After register(), get_token() returns the same token object that was
-    passed in -- AgentRunner.execute() relies on this to look up the token
+    passed in -- AgentEngine.execute() relies on this to look up the token
     for the run when Runtime.cancel checks ``in_flight``."""
     controller = RunController()
 
@@ -99,7 +99,7 @@ async def test_cancel_is_idempotent_on_already_cancelled_task():
 @pytest.mark.asyncio
 async def test_unregister_removes_registration():
     """After unregister(), get_token() returns None and cancel() is a no-op.
-    AgentRunner.execute() calls this in a ``finally`` block so the controller
+    AgentEngine.execute() calls this in a ``finally`` block so the controller
     does not retain references to finished tasks (which would prevent GC of
     the run's frames)."""
     controller = RunController()

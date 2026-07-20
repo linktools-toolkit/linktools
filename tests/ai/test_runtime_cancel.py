@@ -3,7 +3,7 @@
 """Runtime.cancel(run_id) -- best-effort store-level cancel for single
 Agent runs. Mirrors SwarmRunner.cancel's store-only approach: flips the
 RunRecord to CANCELLED without cancelling any live asyncio.Task driving the run
-(the caller cancels that separately; AgentRunner catches CancelledError and
+(the caller cancels that separately; AgentEngine catches CancelledError and
 lands in the same CANCELLED state)."""
 
 import asyncio
@@ -21,7 +21,7 @@ from linktools.ai.run.models import (
     RunStatus,
 )
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 _NOW = datetime(2026, 7, 6, tzinfo=timezone.utc)
 
@@ -74,7 +74,7 @@ def _seed_run(store, run_id: str, status: RunStatus) -> None:
 
 
 def test_cancel_running_run_transitions_to_cancelled(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     _seed_run(storage, "run-running", RunStatus.RUNNING)
 
@@ -95,7 +95,7 @@ def test_cancel_running_run_transitions_to_cancelled(tmp_path):
 
 
 def test_cancel_succeeded_run_is_noop(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     _seed_run(storage, "run-done", RunStatus.SUCCEEDED)
 
@@ -117,7 +117,7 @@ def test_cancel_succeeded_run_is_noop(tmp_path):
 
 
 def test_cancel_already_cancelled_run_is_noop(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     _seed_run(storage, "run-cancelled", RunStatus.CANCELLED)
 
@@ -138,7 +138,7 @@ def test_cancel_already_cancelled_run_is_noop(tmp_path):
 
 
 def test_cancel_missing_run_raises_not_found(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
 
     async def _cancel():
@@ -157,7 +157,7 @@ def test_cancel_missing_run_raises_not_found(tmp_path):
 
 
 def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     _seed_run(storage, "run-1", RunStatus.RUNNING)
 
@@ -194,7 +194,7 @@ def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
 
 
 def test_cancel_handles_conflict_when_fresh_status_is_cancelling(tmp_path, monkeypatch):
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(storage=storage, local_trusted_mode=True)
     _seed_run(storage, "run-2", RunStatus.RUNNING)
 

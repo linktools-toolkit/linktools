@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared Run lifecycle helpers. Centralizes the run-state
-transitions both AgentRunner and SwarmRunner drive (mark_completed /
+transitions both AgentEngine and SwarmRunner drive (mark_completed /
 mark_failed / mark_cancelled) so the status enum + transition call live in one
 place. ``prepare_run`` also owns session and context setup for Runtime entry
 points."""

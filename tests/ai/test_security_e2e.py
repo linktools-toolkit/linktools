@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """End-to-end smoke tests for the managed security governance path. Verifies
-the full chain: Runtime.build(security=...) -> AgentRunner.execute ->
+the full chain: Runtime.build(security=...) -> AgentEngine.execute ->
 ManagedToolAdapter -> pipeline before/after_tool -> handler -> result."""
 
 import pytest
@@ -12,14 +12,14 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.errors import RunPaused
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
-from linktools.ai.security.baseline import SecurityBaseline
-from linktools.ai.security.pipeline import (
+from linktools.ai.governance.security.baseline import SecurityBaseline
+from linktools.ai.governance.security.pipeline import (
     PipelineAction,
     PipelineDecision,
     ToolInvocationEvent,
     ToolResultEvent,
 )
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 class _DenyAllPipeline:
@@ -81,7 +81,7 @@ async def test_runtime_with_default_baseline_runs(tmp_path):
     """Default SecurityBaseline does not break normal execution."""
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
@@ -95,7 +95,7 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
     """SecurityBaseline(enabled=False) falls back to legacy path."""
     from linktools.ai.model.router import ModelRouter
 
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
@@ -110,7 +110,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
     tmp_path,
 ):
     """Regression for the contract fix: Runtime.build's default SecurityBaseline
-    (enabled=True) must reach the compiler's ToolExecutor even when
+    (enabled=True) must reach the compiler's GovernedToolInvoker even when
     pause_on_approval=False (the default) -- previously AgentCompiler silently
     built its OWN default denylist in that case, independent of ``security=``.
     Verified end-to-end: a real model bash("rm -rf /") call is denied (the
@@ -135,7 +135,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
@@ -184,7 +184,7 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(enabled=False),
@@ -244,7 +244,7 @@ async def test_pipeline_attached_to_runtime(tmp_path):
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=pipeline),
@@ -325,7 +325,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     registry.register(
         "m", model=FunctionModel(_tool_calling_model_fn("read_file", {"path": "x"}))
     )
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=registry),
@@ -432,7 +432,7 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_ModifyPathPipeline("real.txt")),
@@ -471,7 +471,7 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
     )
     backend = LocalExecutionBackend(runtime_dir=tmp_path)
     rt = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(registry=registry),
         execution=backend,
         options=CapabilityRuntimeOptions(

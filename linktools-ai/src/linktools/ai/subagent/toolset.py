@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """call_subagent toolset. The tool delegates to a resolved child spec:
 
-* ``name``/``agent_id`` -- a declared project agent (SubagentSpecProvider) or a
-  package-scoped agent (EntrypointResolver), subject to the allowlist and
+* ``name``/``agent_id`` -- a declared project agent (SubagentSpecProvider) or an
+  extension-scoped agent (EntrypointResolver), subject to the allowlist and
   depth/timeout limits;
 * ``instruction_path`` -- a skill-private agent resolved relative to the active
   skill through a ``skill_resolver`` (UnifiedSubagentResolver), with the
@@ -19,33 +19,33 @@ from typing import Any, Callable, Mapping
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import SubagentExecutionError, SubagentNotFoundError
-from ..package.entrypoint import EntrypointRef
-from ..package.scope import PackageScope
+from ..extension.entrypoint import EntrypointRef
+from ..extension.scope import ExtensionScope
 from ..run.identity import ParentRunIdentity
 from .runner import SubagentExecutor, enforce_depth
 
 
-def _parse_scope(raw: "Mapping[str, Any] | None") -> "PackageScope | None":
+def _parse_scope(raw: "Mapping[str, Any] | None") -> "ExtensionScope | None":
     if not raw:
         return None
-    package_id = raw.get("package_id")
-    if not package_id:
+    extension_id = raw.get("extension_id")
+    if not extension_id:
         return None
-    return PackageScope(
-        package_id=str(package_id), package_kind=raw.get("package_kind")
+    return ExtensionScope(
+        extension_id=str(extension_id), extension_kind=raw.get("extension_kind")
     )
 
 
 async def _resolve_spec(
     agent_id: str,
-    scope: "PackageScope | None",
+    scope: "ExtensionScope | None",
     subagent_provider,
     entrypoint_resolver,
 ):
     if scope is not None:
         if entrypoint_resolver is None:
             raise SubagentExecutionError(
-                f"package-scoped subagent {agent_id!r} needs an entrypoint resolver"
+                f"extension-scoped subagent {agent_id!r} needs an entrypoint resolver"
             )
         return await entrypoint_resolver.resolve_agent(
             EntrypointRef(kind="agent", name=agent_id, scope=scope)
@@ -68,7 +68,7 @@ def build_subagent_toolset(
     max_depth: int,
     timeout_seconds: "float | None",
     max_concurrency: int = 1,
-    allowed_packages: "set[str] | None" = None,
+    allowed_extensions: "set[str] | None" = None,
     parent: "ParentRunIdentity | None" = None,
     skill_resolver=None,
     active_skill_provider: "Callable[[], Any] | None" = None,
@@ -82,7 +82,7 @@ def build_subagent_toolset(
     import asyncio
 
     toolset: FunctionToolset = FunctionToolset()
-    package_allowlist = allowed_packages or set()
+    extension_allowlist = allowed_extensions or set()
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
     async def call_subagent(
@@ -98,10 +98,10 @@ def build_subagent_toolset(
         if not task or not task.strip():
             raise SubagentExecutionError("call_subagent requires a non-empty 'task'")
         enforce_depth(depth_provider(), max_depth)
-        pkg_scope = _parse_scope(scope)
-        if pkg_scope is not None and pkg_scope.package_id not in package_allowlist:
+        ext_scope = _parse_scope(scope)
+        if ext_scope is not None and ext_scope.extension_id not in extension_allowlist:
             raise SubagentNotFoundError(
-                f"package scope not allowed: {pkg_scope.package_id!r}"
+                f"extension scope not allowed: {ext_scope.extension_id!r}"
             )
 
         if instruction_path is not None:
@@ -115,7 +115,7 @@ def build_subagent_toolset(
             if target not in allowed_names:
                 raise SubagentNotFoundError(f"subagent not allowed: {target}")
             spec = await _resolve_spec(
-                target, pkg_scope, subagent_provider, entrypoint_resolver
+                target, ext_scope, subagent_provider, entrypoint_resolver
             )
 
         if executor is None:
@@ -131,7 +131,7 @@ def build_subagent_toolset(
                 task=task,
                 context=context,
                 parent=parent,
-                scope=pkg_scope,
+                scope=ext_scope,
                 timeout_seconds=timeout_seconds,
             )
         return result.model_dump()

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
 
-from ..policy.engine import ToolRequest
+from ..governance.policy.engine import ToolRequest
 from .pipeline import MiddlewarePipeline
 
 if TYPE_CHECKING:

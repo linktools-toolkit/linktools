@@ -5,9 +5,9 @@ from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.events.payloads import SecurityDegraded
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.providers import ProviderBundle
+from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 _DEGRADE_KIND = "degrade"
 
@@ -47,9 +47,9 @@ class _DegradingProvider:
 
 def _runtime(tmp_path, *capabilities) -> Runtime:
     return Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=ModelRouter(),
-        providers=ProviderBundle(capabilities=tuple(capabilities)),
+        providers=RuntimeDependencies(capabilities=tuple(capabilities)),
     )
 
 

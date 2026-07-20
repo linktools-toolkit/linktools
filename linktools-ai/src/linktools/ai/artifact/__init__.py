@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Artifact domain: immutable, content-addressed run products over ResourceStore.
+"""Artifact domain: immutable, content-addressed run products over AssetStore.
 
 Public types for downstream and for the task / evaluation domains.
 """

@@ -33,7 +33,7 @@ async with Runtime.build(
 ```
 Runtime.build(storage, model_router, providers, options, ...)
   -> AgentCompiler (compiles AgentSpec into a pydantic-ai Agent)
-  -> AgentRunner (drives the agent: model calls, tool calls, governance)
+  -> AgentEngine (drives the agent: model calls, tool calls, governance)
   -> SwarmRunner (orchestrates multi-agent swarms)
   -> ManagedToolAdapter (single governance entry: policy + security pipeline)
   -> ToolExecutor (single execution entry: policy-check then handler)

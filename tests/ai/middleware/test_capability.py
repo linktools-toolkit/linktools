@@ -15,7 +15,7 @@ from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.capability import build_middleware_capability
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
-from linktools.ai.policy.engine import ToolContext
+from linktools.ai.governance.policy.engine import ToolContext
 
 
 class _RecordingMiddleware(Middleware):

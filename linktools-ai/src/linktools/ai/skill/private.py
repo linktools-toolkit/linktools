@@ -21,7 +21,8 @@ import contextvars
 
 from ..agent.spec import ToolRef
 from ..errors import SkillResourceAccessError, SubagentResolutionError
-from ..registry.parser import StrictConfigReader, parse_markdown_text, parse_tool_refs
+from ..catalog.parsing import StrictConfigReader, parse_markdown_text
+from ..tool.codec import parse_tool_refs
 
 # Default tools for a skill-private agent with no ``tools:`` key.
 _DEFAULT_TOOLS: tuple = (ToolRef(kind="builtin", name="file-read"),)

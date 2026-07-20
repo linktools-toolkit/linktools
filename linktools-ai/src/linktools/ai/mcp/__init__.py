@@ -10,7 +10,8 @@ lazy, with no native name filter), which is environment-gated. It is
 intentionally NOT part of the public surface until a live connection can yield
 the tool list -- advertising it would promise capability that is not wired in."""
 
-from ..registry.mcp import MCPServerSpec, parse_mcp_spec
+from .spec import MCPServerSpec
+from .codec import parse_mcp_spec
 from .client import (
     MCPConnectionManager,
     MCPConnectionRef,

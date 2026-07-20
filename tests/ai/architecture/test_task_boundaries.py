@@ -37,7 +37,7 @@ def test_importing_root_in_fresh_process_does_not_load_new_domains() -> None:
         "import sys\n"
         "import linktools.ai\n"
         "assert list(linktools.ai.__all__) == ['Runtime']\n"
-        "for mod in ('linktools.ai.task','linktools.ai.evaluation',"
+        "for mod in ('linktools.ai.jobs','linktools.ai.evaluation',"
         "'linktools.ai.artifact'):\n"
         "    assert mod not in sys.modules, mod\n"
     )
@@ -63,8 +63,12 @@ def test_storage_facade_field_set_snapshot() -> None:
     fields = {f.name for f in dataclasses.fields(Storage)}
     # The facade. Phase 3 added optional `tasks`; phase 8 added optional
     # `evaluations`. Both default to None for backward compatibility.
+    # StorageCapabilities was converged to StorageFeatures (the capability
+    # surface is now scoped enums + first-class streaming/fencing flags).
+    # `coordination` is the LeaseCoordinator field (process-local reference;
+    # downstream injects a distributed one and declares it on StorageFeatures).
     assert fields == {
-        "resources",
+        "assets",
         "sessions",
         "runs",
         "events",
@@ -73,30 +77,33 @@ def test_storage_facade_field_set_snapshot() -> None:
         "memories",
         "approvals",
         "idempotency",
-        "capabilities",
+        "features",
+        "coordination",
+        "transactions",
         "run_definitions",
         "tasks",
         "evaluations",
+        "artifacts",
     }
 
 
 def test_existing_storage_backends_remain_importable() -> None:
     # The extension reuses (does not replace) the existing storage backends.
-    from linktools.ai.storage import file as file_storage
+    from linktools.ai.storage import filesystem as file_storage
     from linktools.ai.storage import sqlalchemy as sa_storage
-    from linktools.ai.storage.resource.store import ResourceStore
+    from linktools.ai.asset.store import AssetStore
 
     assert file_storage is not None
     assert sa_storage is not None
-    assert ResourceStore is not None
+    assert AssetStore is not None
 
 
-def test_importing_task_does_not_load_sqlalchemy_or_langgraph() -> None:
-    # Plan section 30.6 (second block): importing the task domain keeps the
+def test_importing_jobs_does_not_load_sqlalchemy_or_langgraph() -> None:
+    # Plan section 30.6 (second block): importing the jobs domain keeps the
     # optional heavy deps out of sys.modules.
     code = (
         "import sys\n"
-        "import linktools.ai.task.models\n"
+        "import linktools.ai.jobs.models\n"
         "for mod in ('sqlalchemy', 'langgraph'):\n"
         "    assert mod not in sys.modules, mod\n"
     )
@@ -107,15 +114,15 @@ def test_importing_task_does_not_load_sqlalchemy_or_langgraph() -> None:
 
 
 def test_no_runtime_internals_or_pydantic_ai_in_new_domains() -> None:
-    # Plan section 30.7: task/ and evaluation/ must not reach into the runtime
-    # internals; task/ must not import pydantic_ai.
+    # Plan section 30.7: jobs/ and evaluation/ must not reach into the runtime
+    # internals; jobs/ must not import pydantic_ai.
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "linktools-ai" / "src" / "linktools" / "ai"
-    for sub in ("task", "evaluation"):
+    for sub in ("jobs", "evaluation"):
         for p in (root / sub).rglob("*.py"):
             text = p.read_text(encoding="utf-8")
             assert "linktools.ai._runtime" not in text, f"_runtime leak in {p}"
-    for p in (root / "task").rglob("*.py"):
+    for p in (root / "jobs").rglob("*.py"):
         text = p.read_text(encoding="utf-8")
         assert "pydantic_ai" not in text, f"pydantic_ai leak in {p}"

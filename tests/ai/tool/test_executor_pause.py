@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Approval contract for ToolExecutor: when policy says REQUIRE_APPROVAL,
-``check()`` raises ``RunPaused`` carrying every field AgentRunner's suspension
+"""Approval contract for GovernedToolInvoker: when policy says REQUIRE_APPROVAL,
+``check()`` raises ``RunPaused`` carrying every field AgentEngine's suspension
 handler needs to persist the ApprovalRequest itself -- the executor does not
-persist anything. Persistence is deferred entirely to AgentRunner's pause
+persist anything. Persistence is deferred entirely to AgentEngine's pause
 handler so it can share one UnitOfWork with the checkpoint save +
 WAITING_APPROVAL transition + pause events (see
 tests/ai/agent/test_runner_pause_atomic.py for the atomicity contract).
@@ -12,7 +12,7 @@ tests/ai/agent/test_runner_pause_atomic.py for the atomicity contract).
 ``PolicyCapability.before_tool_execute`` -- which only catches
 ``ToolDeniedError``/``ToolApprovalRequiredError`` -- does NOT translate it into
 ``SkipToolExecution``; it propagates out of pydantic-ai's tool-execution stack
-to ``AgentRunner``."""
+to ``AgentEngine``."""
 
 import asyncio
 
@@ -20,14 +20,14 @@ import pytest
 
 from linktools.ai.agent.approval import ApprovalRequest
 from linktools.ai.errors import RunPaused
-from linktools.ai.policy.engine import (
+from linktools.ai.governance.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
     PolicyEngine,
     ToolContext,
     ToolRequest,
 )
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 class _Require:
@@ -62,7 +62,7 @@ class _Store:
         arguments,
         approval_id,
     ) -> ApprovalRequest:
-        raise NotImplementedError  # not exercised by ToolExecutor
+        raise NotImplementedError  # not exercised by GovernedToolInvoker
 
     async def get(self, approval_id: str) -> "ApprovalRequest | None":
         return None
@@ -93,9 +93,9 @@ def test_check_raises_run_paused_without_persisting():
     """REQUIRE_APPROVAL raises RunPaused carrying every field the suspension
     handler needs (tool_call_id/tool_name/reason/arguments) -- but the executor
     itself does NOT touch the ApprovalStore. Persistence is the caller's
-    (AgentRunner's) responsibility."""
+    (AgentEngine's) responsibility."""
     store = _Store()
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )
@@ -116,15 +116,15 @@ def test_check_raises_run_paused_without_persisting():
     assert paused.tool_name == "rm"
     assert paused.reason == "x"
     assert paused.arguments == {"path": "/tmp/x"}
-    # The executor must NOT have persisted anything -- that's AgentRunner's job.
+    # The executor must NOT have persisted anything -- that's AgentEngine's job.
     assert store.created == []
 
 
 def test_check_with_run_id_resolver_uses_resolved_run_id():
-    """``RunPaused.run_id`` honors ``run_id_resolver`` -- so AgentRunner's
+    """``RunPaused.run_id`` honors ``run_id_resolver`` -- so AgentEngine's
     checkpoint and eventual ApprovalRequest both key on the resolved id."""
     store = _Store()
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
         run_id_resolver=lambda ctx: "resolved-run-99",
@@ -149,7 +149,7 @@ def test_check_mints_a_tool_call_id_when_context_carries_none():
     RunPaused.tool_call_id is never None -- the suspension handler needs a
     stable key to persist under."""
     store = _Store()
-    executor = ToolExecutor(
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=(_Require(),)),
         approval_store=store,
     )

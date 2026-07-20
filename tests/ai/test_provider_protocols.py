@@ -1,40 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Provider Protocols exist and are structurally satisfiable; the default
-registries conform to them; the format aliases point at the right classes."""
+Catalogs conform to them."""
 
 import pytest
 
-from linktools.ai.providers.agent import AgentSpecProvider
-from linktools.ai.providers.mcp import MCPServerSpecProvider
-from linktools.ai.providers.package import PackageResourceProvider, PackageSpecProvider
-from linktools.ai.providers.skill import SkillSpecProvider
-from linktools.ai.providers.subagent import (
+from linktools.ai.agent.spec import AgentSpecProvider
+from linktools.ai.mcp.spec import MCPServerSpecProvider
+from linktools.ai.extension.spec import ExtensionResourceProvider, ExtensionSpecProvider
+from linktools.ai.skill.models import SkillSpecProvider
+from linktools.ai.subagent.models import (
     AgentBackedSubagentSpecProvider,
     SubagentSpecProvider,
 )
-from linktools.ai.providers.swarm import SwarmSpecProvider
-from linktools.ai.providers.tool_policy import ToolPolicyMetadataSource
-from linktools.ai.registry import (
-    AgentRegistry,
-    MarkdownAgentRegistry,
-    MarkdownSkillRegistry,
-    MCPRegistry,
-    SkillRegistry,
-    SwarmRegistry,
-    ToolRegistry,
-    YamlMCPRegistry,
-    YamlSwarmRegistry,
-    YamlToolPolicyRegistry,
-)
-
-
-def test_format_aliases_are_the_canonical_registries():
-    assert MarkdownAgentRegistry is AgentRegistry
-    assert MarkdownSkillRegistry is SkillRegistry
-    assert YamlMCPRegistry is MCPRegistry
-    assert YamlToolPolicyRegistry is ToolRegistry
-    assert YamlSwarmRegistry is SwarmRegistry
+from linktools.ai.swarm.spec import SwarmSpecProvider
+from linktools.ai.governance.policy.rule import ToolPolicyMetadataSource
 
 
 def test_protocols_importable_and_distinct():
@@ -45,8 +25,8 @@ def test_protocols_importable_and_distinct():
         ToolPolicyMetadataSource,
         SwarmSpecProvider,
         SubagentSpecProvider,
-        PackageSpecProvider,
-        PackageResourceProvider,
+        ExtensionSpecProvider,
+        ExtensionResourceProvider,
     }
     assert len(protos) == 8
 
@@ -86,4 +66,4 @@ def test_runtime_checkable_protocols_match_duck_types():
     assert isinstance(_Stub(), MCPServerSpecProvider)
     assert isinstance(_Stub(), SwarmSpecProvider)
     assert isinstance(_Stub(), SubagentSpecProvider)
-    assert isinstance(_Stub(), PackageSpecProvider)
+    assert isinstance(_Stub(), ExtensionSpecProvider)

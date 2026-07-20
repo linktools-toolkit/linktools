@@ -3,7 +3,7 @@
 """Tests for Runtime.run_stream -- the streaming variant of Runtime.run().
 
 Compiles the spec, resolves (or creates) a Session, mints a RunContext, and
-delegates to AgentRunner.run_stream, yielding the same dict-event shape."""
+delegates to AgentEngine.run_stream, yielding the same dict-event shape."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -18,7 +18,7 @@ from linktools.ai.model.router import ModelRouter
 from linktools.ai.run.models import RunStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FileStorage
+from linktools.ai.storage.facade import FilesystemStorage
 
 
 def _text_pair(text: str = "hello from stream"):
@@ -35,7 +35,7 @@ def _build_runtime(tmp_path):
     fn, stream_fn = _text_pair()
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(fn, stream_function=stream_fn))
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage, model_router=ModelRouter(registry=registry)
     )

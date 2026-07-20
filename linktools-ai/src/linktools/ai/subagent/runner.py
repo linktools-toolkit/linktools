@@ -4,14 +4,14 @@
 session (parent_id = parent session) and a child run recording parent_run_id /
 root_run_id, then executes the resolved AgentSpec and returns a SubagentResult.
 
-The Runtime supplies the real executor (it owns the AgentRunner + Storage); the
+The Runtime supplies the real executor (it owns the AgentEngine + Storage); the
 SubagentProvider accepts any executor implementing this Protocol so the
 authorization + depth/concurrency/timeout gates are testable in isolation."""
 
 from typing import Any, Protocol, runtime_checkable
 
 from ..agent.spec import AgentSpec
-from ..package.scope import PackageScope
+from ..extension.scope import ExtensionScope
 from ..run.identity import ParentRunIdentity
 from .models import SubagentResult
 
@@ -42,7 +42,7 @@ class SubagentExecutor(Protocol):
     """Executes a resolved child AgentSpec under a parent run. Implementations
     create the child session + run, enforce timeout, and return the result.
     ``parent`` is the single ParentRunIdentity every spawner (subagent
-    toolset, package entrypoint toolset) builds identically -- a downstream
+    toolset, extension entrypoint toolset) builds identically -- a downstream
     implementation written strictly to this Protocol must not fail on a call
     it did not anticipate; there is exactly one call shape."""
 
@@ -53,7 +53,7 @@ class SubagentExecutor(Protocol):
         task: str,
         context: "dict[str, Any] | None",
         parent: ParentRunIdentity,
-        scope: "PackageScope | None",
+        scope: "ExtensionScope | None",
         timeout_seconds: "float | None",
     ) -> SubagentResult: ...
 

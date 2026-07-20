@@ -36,6 +36,17 @@ from linktools.ai.storage import SqlAlchemyStorage
 from linktools.ai.storage.sqlalchemy.models import Base
 
 
+_APPROVAL_BINDING = {
+    "descriptor_fingerprint": "fp-test",
+    "handler_revision": "h1",
+    "provider_revision": "p1",
+    "policy_revision": "pol1",
+    "capability_revision": "cap1",
+    "result_processor_revision": "rp1",
+    "arguments_hash": "ah1",
+}
+
+
 def _storage(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/commit.db")
 
@@ -169,6 +180,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
                     "tool_name": "shell",
                     "reason": "review",
                     "arguments": {"cmd": "ls"},
+                    **_APPROVAL_BINDING,
                 },
                 checkpoint_payload=b'{"messages": []}',
                 event_context=EventContext.from_run_context(_ctx("run-2", "sess-2")),
@@ -336,6 +348,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                         "tool_name": "shell",
                         "reason": "review",
                         "arguments": {"cmd": "ls"},
+                        **_APPROVAL_BINDING,
                     },
                     checkpoint_payload=b'{"messages": []}',
                     event_context=EventContext.from_run_context(

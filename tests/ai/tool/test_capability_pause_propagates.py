@@ -4,9 +4,9 @@
 
 Its catch list is ``ToolDeniedError`` + ``ToolApprovalRequiredError`` (both
 ``ToolError`` subclasses) -> ``SkipToolExecution``. ``RunPaused`` is a
-``RunError`` (not a ``ToolError``), so when ``ToolExecutor.check`` raises it
+``RunError`` (not a ``ToolError``), so when ``GovernedToolInvoker.check`` raises it
 (under ``pause_on_approval=True``) the capability MUST let it propagate
-unchanged out of pydantic-ai's tool-execution stack to ``AgentRunner`` --
+unchanged out of pydantic-ai's tool-execution stack to ``AgentEngine`` --
 which checkpoints state, transitions the Run to WAITING_APPROVAL, and stops.
 
 The cleanest proof is a stub executor whose ``.check`` raises ``RunPaused``
@@ -24,13 +24,13 @@ from pydantic_ai.messages import ToolCallPart
 
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.errors import RunPaused, ToolDeniedError
-from linktools.ai.policy.engine import ToolContext
+from linktools.ai.governance.policy.engine import ToolContext
 from linktools.ai.tool.pydantic import PolicyCapability
 
 
 class _ExecutorThatPauses:
     """Stub executor whose ``check`` raises ``RunPaused`` -- mimics
-    ToolExecutor under ``pause_on_approval=True`` encountering a REQUIRE_APPROVAL
+    GovernedToolInvoker under ``pause_on_approval=True`` encountering a REQUIRE_APPROVAL
     decision."""
 
     def __init__(self, *, run_id: str, approval_id: str):

@@ -20,11 +20,11 @@ from linktools.ai.errors import LinktoolsAIError
         E.MCPServerNotFoundError,
         E.MCPConnectionError,
         E.MCPToolError,
-        E.PackageNotFoundError,
-        E.PackageResourceNotFoundError,
-        E.PackageResourceAccessDeniedError,
-        E.PackageEntrypointNotFoundError,
-        E.PackageEntrypointDeniedError,
+        E.ExtensionNotFoundError,
+        E.ExtensionResourceNotFoundError,
+        E.ExtensionResourceAccessDeniedError,
+        E.ExtensionEntrypointNotFoundError,
+        E.ExtensionEntrypointDeniedError,
         E.SubagentNotFoundError,
         E.SubagentDepthExceededError,
         E.SubagentExecutionError,
@@ -45,9 +45,9 @@ def test_capability_tree():
     for leaf in (
         E.SkillNotFoundError,
         E.MCPServerNotFoundError,
-        E.PackageNotFoundError,
-        E.PackageResourceNotFoundError,
-        E.PackageEntrypointNotFoundError,
+        E.ExtensionNotFoundError,
+        E.ExtensionResourceNotFoundError,
+        E.ExtensionEntrypointNotFoundError,
         E.SubagentNotFoundError,
     ):
         assert issubclass(leaf, E.CapabilityNotFoundError)
@@ -56,8 +56,8 @@ def test_capability_tree():
 def test_policy_backed_errors():
     # Denied / depth-exceeded are policy decisions, not resolution misses.
     for leaf in (
-        E.PackageResourceAccessDeniedError,
-        E.PackageEntrypointDeniedError,
+        E.ExtensionResourceAccessDeniedError,
+        E.ExtensionEntrypointDeniedError,
         E.SubagentDepthExceededError,
     ):
         assert issubclass(leaf, E.PolicyError)

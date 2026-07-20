@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_idempotency_store_contract.py — runs the
-same fenced-claim IdempotencyStore contract against both FileIdempotencyStore
+same fenced-claim IdempotencyStore contract against both FilesystemIdempotencyStore
 and SqlAlchemyIdempotencyStore (backend parity).
 
 The contract covers (per the WP-10 claim/owner/generation/lease model):
@@ -19,7 +19,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.storage.file.idempotency import FileIdempotencyStore
+from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
 from linktools.ai.tool.idempotency import ClaimDisposition, IdempotencyStatus
 
 
@@ -30,7 +30,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileIdempotencyStore(root=tmp_path / f"idem-{counter['n']}")
+            return FilesystemIdempotencyStore(root=tmp_path / f"idem-{counter['n']}")
 
         return file_factory
 
@@ -225,7 +225,7 @@ def test_complete_and_fail_on_missing_or_stale_claim_are_rejected(store_factory)
 
 
 def test_path_traversal_in_scope_or_key_is_rejected(tmp_path):
-    store = FileIdempotencyStore(root=tmp_path)
+    store = FilesystemIdempotencyStore(root=tmp_path)
 
     async def _run():
         with pytest.raises(ValueError):

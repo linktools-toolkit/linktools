@@ -3,7 +3,7 @@ import pytest
 
 from linktools.ai.errors import ToolDeniedError, ToolSecurityAuditError
 from linktools.ai.tool.models import ToolDescriptor
-from linktools.ai.security.pipeline import (
+from linktools.ai.governance.security.pipeline import (
     PipelineAction,
     PipelineDecision,
     SecurityPipeline,

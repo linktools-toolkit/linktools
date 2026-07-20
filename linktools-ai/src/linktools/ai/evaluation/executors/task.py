@@ -3,14 +3,14 @@
 """TaskEvalExecutor: run an eval case as a reliable task (task mode).
 
 The counterpart to :class:`DirectEvalExecutor`: instead of running the target
-inline, it submits the case as a one-shot task through TaskRuntime (gaining
+inline, it submits the case as a one-shot task through JobRuntime (gaining
 retries / lease / recovery) and reads back the sealed output artifact plus the
 task's attempt history. ``retry_count`` (attempts beyond the first) is captured
 into ``EvalExecution.model_usage`` so the runner can thread it into the result
 metrics (retry rate).
 
 This executor is the bridge between the evaluation and task planes. It depends
-on TaskRuntime only through the duck-typed ``run_one_task`` surface and reads
+on JobRuntime only through the duck-typed ``run_one_task`` surface and reads
 the result via attributes + the ArtifactStore, so it imports NO task-domain
 module -- the evaluation package itself never reaches into task."""
 

@@ -10,7 +10,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import SkillNotFoundError
 from ..events.payloads import SkillListed, SkillRead
-from ..providers.skill import SkillSpecProvider
+from .models import SkillSpecProvider
 from .models import SkillContent, SkillSummary
 from .private import set_active_skill
 
@@ -25,7 +25,7 @@ def _summary_from_spec(skill_id: str, spec, *, authorized: bool = True) -> Skill
         name=getattr(spec, "name", skill_id),
         description=getattr(spec, "description", None) or None,
         tags=list(meta.get("tags", []) or []),
-        package_id=meta.get("package_id"),
+        extension_id=meta.get("extension_id"),
         metadata=meta,
     )
 
@@ -82,7 +82,7 @@ def build_skill_toolset(
             name=getattr(spec, "name", skill_id),
             description=getattr(spec, "description", None) or None,
             content=getattr(spec, "instructions", ""),
-            package_id=meta.get("package_id"),
+            extension_id=meta.get("extension_id"),
             metadata=meta,
         )
         if active_skill_lookup is not None:

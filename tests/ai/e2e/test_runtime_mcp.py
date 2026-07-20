@@ -16,14 +16,14 @@ from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolIn
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.router import ModelRouter
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.security.baseline import SecurityBaseline
-from linktools.ai.security.pipeline import PipelineAction, PipelineDecision
-from linktools.ai.providers.bundle import ProviderBundle
-from linktools.ai.registry.mcp import MCPServerSpec
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.governance.security.baseline import SecurityBaseline
+from linktools.ai.governance.security.pipeline import PipelineAction, PipelineDecision
+from linktools.ai.runtime import RuntimeDependencies
+from linktools.ai.mcp.spec import MCPServerSpec
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage.facade import FileStorage
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 class _CountingPolicy(PolicyEngine):
@@ -139,9 +139,9 @@ async def test_runtime_runs_mcp_through_managed_execution(tmp_path):
     manager = _Manager()
     provider = MCPProvider(_SpecProvider(), manager)
     runtime = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=_router(),
-        providers=ProviderBundle(capabilities=(provider,)),
+        providers=RuntimeDependencies(capabilities=(provider,)),
     )
     spec = AgentSpec(
         id="agent",
@@ -164,16 +164,16 @@ async def test_runtime_runs_mcp_through_managed_execution(tmp_path):
 async def test_runtime_mcp_governance_executes_exactly_once(tmp_path):
     manager = _Manager()
     provider = MCPProvider(_SpecProvider(), manager)
-    storage = FileStorage(root=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     policy = _CountingPolicy()
-    executor = _CountingExecutor(ToolExecutor(policy=policy))
+    executor = _CountingExecutor(GovernedToolInvoker(policy=policy))
     pipeline = _CountingPipeline()
     runtime = Runtime.build(
         storage=storage,
         model_router=_router(),
         tool_executor=executor,
         security=SecurityBaseline(pipeline=pipeline),
-        providers=ProviderBundle(capabilities=(provider,)),
+        providers=RuntimeDependencies(capabilities=(provider,)),
     )
     spec = AgentSpec(
         id="agent",
@@ -216,9 +216,9 @@ async def test_runtime_empty_mcp_allowlist_exposes_and_calls_no_tools(tmp_path):
     manager = _Manager()
     provider = MCPProvider(_SpecProvider(enabled_tools=()), manager)
     runtime = Runtime.build(
-        storage=FileStorage(root=tmp_path),
+        storage=FilesystemStorage(root=tmp_path),
         model_router=_text_router(),
-        providers=ProviderBundle(capabilities=(provider,)),
+        providers=RuntimeDependencies(capabilities=(provider,)),
     )
     spec = AgentSpec(
         id="agent",

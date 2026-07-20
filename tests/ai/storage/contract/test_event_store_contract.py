@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 from linktools.ai.events.payloads import RunStarted
-from linktools.ai.storage.file.event import FileEventStore
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
 
 
 async def _append(
@@ -44,7 +44,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileEventStore(root=tmp_path / f"events-{counter['n']}")
+            return FilesystemEventStore(root=tmp_path / f"events-{counter['n']}")
 
         return file_factory
 
@@ -288,20 +288,20 @@ async def test_event_sequence_unique_per_stream_not_per_run(store_factory):
 
 @pytest.mark.asyncio
 async def test_path_traversal_in_run_id_is_rejected(tmp_path):
-    store = FileEventStore(root=tmp_path)
+    store = FilesystemEventStore(root=tmp_path)
     with pytest.raises(ValueError):
         await store.list("../../etc/passwd")
 
 
 @pytest.mark.asyncio
 async def test_file_event_store_migrates_legacy_files_without_stream_id(tmp_path):
-    """G3/review3 contract: a FileEventStore event file written before stream_id
+    """G3/review3 contract: a FilesystemEventStore event file written before stream_id
     became a first-class field (no "stream_id" key in the JSON) must still
     load, with stream_id defaulting to run_id -- exact, not a guess, since
     every caller has always passed stream_id == run_id."""
     import json
 
-    store = FileEventStore(root=tmp_path)
+    store = FilesystemEventStore(root=tmp_path)
     await _append(store, run_id="run-legacy")
     # Simulate a pre-G3 file by rewriting it without the "stream_id" key.
     stream_dir = tmp_path / "run-legacy"

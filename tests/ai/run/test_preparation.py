@@ -16,7 +16,7 @@ from linktools.ai.run.manifest import (
 )
 from linktools.ai.run.models import RunnableType
 from linktools.ai.run.preparation import RunPreparationCoordinator
-from linktools.ai.storage.file.definition import FileRunDefinitionStore
+from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
 
 
 def _spec() -> AgentSpec:
@@ -44,7 +44,7 @@ def _context() -> RunContext:
 
 
 def test_prepare_persists_real_execution_manifest(tmp_path):
-    store = FileRunDefinitionStore(root=tmp_path)
+    store = FilesystemRunDefinitionStore(root=tmp_path)
     coordinator = RunPreparationCoordinator(store)
 
     async def _run():
@@ -78,7 +78,7 @@ def test_prepare_persists_real_execution_manifest(tmp_path):
 
 def test_prepare_manifest_descriptor_fingerprints_are_stable(tmp_path):
     # Re-preparing the same spec yields identical descriptor fingerprints.
-    store = FileRunDefinitionStore(root=tmp_path)
+    store = FilesystemRunDefinitionStore(root=tmp_path)
     coordinator = RunPreparationCoordinator(store)
 
     async def _prepare(rid):

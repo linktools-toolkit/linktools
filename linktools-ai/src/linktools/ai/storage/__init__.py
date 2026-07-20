@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Storage package. ``Storage`` and ``FileStorage`` are core (no optional deps);
+"""Storage package. ``Storage`` and ``FilesystemStorage`` are core (no optional deps);
 ``SqlAlchemyStorage`` is loaded lazily on first access so ``import
 linktools.ai.storage`` succeeds without SQLAlchemy installed."""
 
-from .capabilities import StorageCapabilities
-from .facade import FileStorage, Storage
+from .facade import FilesystemStorage, Storage
+from .features import StorageFeatures
 
-__all__ = ["Storage", "StorageCapabilities", "FileStorage", "SqlAlchemyStorage"]
+__all__ = ["Storage", "StorageFeatures", "FilesystemStorage", "SqlAlchemyStorage"]
 
 
 def __getattr__(name: str):

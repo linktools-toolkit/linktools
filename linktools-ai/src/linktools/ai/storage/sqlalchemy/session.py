@@ -14,7 +14,7 @@ assigns fresh ones inside the inserting transaction.
   re-reads MAX(sequence), which now reflects the winner's committed row.
 
 * **Explicit UnitOfWork mode** (``session=<shared session>``, e.g. inside
-  ``AgentRunner``'s pause-path transaction): a SINGLE attempt only. A
+  ``AgentEngine``'s pause-path transaction): a SINGLE attempt only. A
   sequence-conflict ``IntegrityError`` here cannot be retried (the shared
   transaction would need to roll back and restart from the caller's
   perspective, not just this store's), and -- per the same aiosqlite
@@ -25,7 +25,7 @@ assigns fresh ones inside the inserting transaction.
   UnitOfWork are therefore not supported** and will surface as an
   unhandled ``IntegrityError`` propagating out of the transaction. This is a
   deliberate scope boundary, not an oversight: every current caller
-  (AgentRunner, SwarmRunner) drives at most one UoW-mode session append per
+  (AgentEngine, SwarmRunner) drives at most one UoW-mode session append per
   transaction, so the scenario does not arise in practice. If a future
   caller needs multiple concurrent UoW-mode writers to the same session, the
   fix is a dedicated ``ai_session_counters(session_id, next_sequence)`` table

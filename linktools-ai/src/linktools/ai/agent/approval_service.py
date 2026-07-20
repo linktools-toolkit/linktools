@@ -3,7 +3,7 @@
 from typing import Any
 
 from ..errors import PrincipalAccessDeniedError
-from ..security.principal import PrincipalContext
+from ..identity.principal import PrincipalContext
 
 
 class ApprovalService:
@@ -16,8 +16,8 @@ class ApprovalService:
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")
         if self._authorization is not None:
-            from ..security.authorization import AuthorizationResource
-            from ..security.actions import SecurityAction
+            from ..governance.security.authorization import AuthorizationResource
+            from ..governance.security.actions import SecurityAction
             await self._authorization.authorize(
                 principal, SecurityAction.APPROVAL_APPROVE,
                 AuthorizationResource(kind="approval", id=request.id, tenant_id=request.tenant_id),
@@ -35,8 +35,8 @@ class ApprovalService:
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")
         if self._authorization is not None:
-            from ..security.authorization import AuthorizationResource
-            from ..security.actions import SecurityAction
+            from ..governance.security.authorization import AuthorizationResource
+            from ..governance.security.actions import SecurityAction
             await self._authorization.authorize(
                 principal, SecurityAction.APPROVAL_REJECT,
                 AuthorizationResource(kind="approval", id=request.id, tenant_id=request.tenant_id),

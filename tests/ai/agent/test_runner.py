@@ -8,7 +8,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentRunner
+from linktools.ai.agent.runner import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.middleware.base import Middleware
@@ -18,14 +18,14 @@ from linktools.ai.model.router import ModelRouter
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.file.approval import FileApprovalStore
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
-from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-from linktools.ai.storage.file.event import FileEventStore
-from linktools.ai.storage.file.run import FileRunStore
-from linktools.ai.storage.file.session import FileSessionStore
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 def _model_fn(text: str = '{"response": {"answer": 42}}'):
@@ -72,21 +72,21 @@ def _seed_session(store, session_id) -> None:
 
 
 def _make_runner(tmp_path, pipeline=None):
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    return AgentRunner(
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    return AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=run_store,
             session_store=session_store,
@@ -97,7 +97,7 @@ def _make_runner(tmp_path, pipeline=None):
 
 def test_run_succeeds_persists_session_run_events_and_checkpoint(tmp_path):
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
@@ -140,7 +140,7 @@ def test_run_transitions_to_failed_and_appends_run_failed_on_model_error(tmp_pat
         raise RuntimeError("model exploded")
 
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_boom)),
     )
     compiled = asyncio.run(
@@ -205,7 +205,7 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
     log: "list[str]" = []
     pipeline = MiddlewarePipeline(middlewares=(_RecordingMiddleware(log),))
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_model_fn())),
         middleware_pipeline=pipeline,
     )
@@ -249,7 +249,7 @@ def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
     # them via pydantic-ai DI (ctx.deps.tool_context). A run leaves the
     # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
@@ -349,22 +349,22 @@ def _seed_memory(
 
 
 def _make_runner_with_memory(tmp_path):
-    from linktools.ai.storage.file.approval import FileApprovalStore
-    from linktools.ai.storage.file.commit import FileRunCommitCoordinator
-    from linktools.ai.storage.file.memory import FileMemoryStore
+    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
 
-    run_store = FileRunStore(root=tmp_path / "runs")
-    session_store = FileSessionStore(root=tmp_path / "sessions")
-    event_store = FileEventStore(root=tmp_path / "events")
-    checkpoint_store = FileCheckpointStore(root=tmp_path / "checkpoints")
-    return AgentRunner(
+    run_store = FilesystemRunStore(root=tmp_path / "runs")
+    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
+    event_store = FilesystemEventStore(root=tmp_path / "events")
+    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    return AgentEngine(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        memory_store=FileMemoryStore(root=tmp_path / "memories"),
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
+        memory_store=FilesystemMemoryStore(root=tmp_path / "memories"),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
             run_store=run_store,
             session_store=session_store,
@@ -375,7 +375,7 @@ def _make_runner_with_memory(tmp_path):
 
 def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
@@ -390,7 +390,7 @@ def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
     )
     runner = _make_runner_with_memory(tmp_path)
     _seed_session(runner._session_store, "session-1")
-    # FileMemoryStore.search is keyword-substring based, so the content must
+    # FilesystemMemoryStore.search is keyword-substring based, so the content must
     # contain the query ("hello") for the memory to match and be injected. The
     # memory is seeded under tenant "t1"; the run context carries the same
     # tenant so the DefaultMemoryPolicy's tenant-bound search finds it.
@@ -418,7 +418,7 @@ def test_memory_store_none_default_leaves_prompt_unchanged(tmp_path):
     # Default runner (memory_store=None) must not inject anything: the echoed
     # prompt is exactly the user prompt (no history seeded -> no history text).
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
@@ -446,7 +446,7 @@ def test_memory_store_none_default_leaves_prompt_unchanged(tmp_path):
 
 
 def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
-    from linktools.ai.knowledge.document import Document
+    from linktools.ai.retrieval.document import Document
 
     class _StubRetriever:
         async def search(self, query, *, scope, limit=10):
@@ -460,22 +460,22 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
                 ),
             )
 
-    runner = AgentRunner(
-        run_store=FileRunStore(root=tmp_path / "runs"),
-        session_store=FileSessionStore(root=tmp_path / "sessions"),
-        event_store=FileEventStore(root=tmp_path / "events"),
-        checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
+    runner = AgentEngine(
+        run_store=FilesystemRunStore(root=tmp_path / "runs"),
+        session_store=FilesystemSessionStore(root=tmp_path / "sessions"),
+        event_store=FilesystemEventStore(root=tmp_path / "events"),
+        checkpoint_store=FilesystemCheckpointStore(root=tmp_path / "checkpoints"),
         retriever=_StubRetriever(),
-        commit_coordinator=FileRunCommitCoordinator(
-            approval_store=FileApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=FileCheckpointStore(root=tmp_path / "checkpoints"),
-            run_store=FileRunStore(root=tmp_path / "runs"),
-            session_store=FileSessionStore(root=tmp_path / "sessions"),
-            event_store=FileEventStore(root=tmp_path / "events"),
+        commit_coordinator=FilesystemRunCommitCoordinator(
+            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
+            checkpoint_store=FilesystemCheckpointStore(root=tmp_path / "checkpoints"),
+            run_store=FilesystemRunStore(root=tmp_path / "runs"),
+            session_store=FilesystemSessionStore(root=tmp_path / "sessions"),
+            event_store=FilesystemEventStore(root=tmp_path / "events"),
         ),
     )
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
@@ -505,7 +505,7 @@ def test_empty_memory_store_injects_no_memory_section(tmp_path):
     # "" -> no `## Memory` section added -> output unchanged from the no-memory
     # baseline.
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
@@ -540,13 +540,16 @@ def test_run_model_timeout_transitions_run_to_failed(tmp_path):
     message (the asyncio.TimeoutError is translated before the FAILED handler)."""
 
     async def _slow_fn(messages, info: AgentInfo) -> ModelResponse:
-        await asyncio.sleep(10)
+        # Only needs to outlive ModelPolicy.timeout_seconds (0.05s) to trigger
+        # the timeout path; the sleep duration is the wait floor when the model
+        # runs to completion, so keep it ~4x the timeout rather than 10s.
+        await asyncio.sleep(0.2)
         return ModelResponse(parts=[TextPart(content="done")])
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_slow_fn))
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(
@@ -603,7 +606,7 @@ def test_run_max_tokens_exceeded_transitions_run_to_failed(tmp_path):
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_heavy_fn))
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(
@@ -659,7 +662,7 @@ def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_light_fn))
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(
@@ -705,7 +708,7 @@ def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
     """Defaults (timeout_seconds=None, max_tokens=None) must reproduce the
     baseline lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
@@ -782,7 +785,7 @@ def test_cost_budget_exceeded_raises(tmp_path):
         instructions=PromptSpec(instructions="hi"),
     )
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(compiler.compile(spec))
@@ -814,7 +817,7 @@ def test_budget_without_pricing_fails_closed(tmp_path):
         instructions=PromptSpec(instructions="hi"),
     )
     compiler = AgentCompiler(
-        tool_executor=ToolExecutor(policy=PolicyEngine(rules=())),
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_router=ModelRouter(registry=registry),
     )
     compiled = asyncio.run(compiler.compile(spec))

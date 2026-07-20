@@ -17,15 +17,15 @@ CONFIG_DIR = Path(__file__).parent.parent / "fixtures" / "config"
 
 
 def _loader():
-    from linktools.ai.registry.parser import SpecLoader
+    from linktools.ai.catalog.parsing import SpecLoader
 
     return SpecLoader.from_filesystem(CONFIG_DIR)
 
 
 def test_agent_config_snapshot():
-    from linktools.ai.registry.agent import AgentRegistry
+    from linktools.ai.agent.catalog import AgentCatalog
 
-    registry = AgentRegistry(_loader())
+    registry = AgentCatalog.from_specloader(_loader())
     spec = asyncio.run(registry.get("agent"))
     assert spec.name == "writer"
     assert spec.model.primary == "gpt-4o"
@@ -34,9 +34,9 @@ def test_agent_config_snapshot():
 
 
 def test_skill_config_snapshot():
-    from linktools.ai.registry.skill import SkillRegistry
+    from linktools.ai.skill.catalog import SkillCatalog
 
-    registry = SkillRegistry(_loader())
+    registry = SkillCatalog.from_specloader(_loader())
     spec = asyncio.run(registry.get("skill"))
     assert spec.name == "greeter"
     assert spec.description == "says hello"
@@ -44,15 +44,15 @@ def test_skill_config_snapshot():
 
 
 def test_tool_config_snapshot():
-    from linktools.ai.policy.rule import (
+    from linktools.ai.governance.policy.rule import (
         ApprovalMode,
         Permission,
         RiskLevel,
         SideEffectKind,
     )
-    from linktools.ai.registry.tool import ToolRegistry
+    from linktools.ai.tool.catalog import ToolCatalog
 
-    spec = asyncio.run(ToolRegistry(_loader()).get("tool"))
+    spec = asyncio.run(ToolCatalog.from_specloader(_loader()).get("tool"))
     assert spec.name == "tool"
     assert spec.description == "shell"
     assert spec.permissions == frozenset({Permission.EXECUTE, Permission.WRITE})
@@ -62,9 +62,9 @@ def test_tool_config_snapshot():
 
 
 def test_mcp_config_snapshot():
-    from linktools.ai.registry.mcp import MCPRegistry
+    from linktools.ai.mcp.catalog import MCPCatalog
 
-    spec = asyncio.run(MCPRegistry(_loader()).get("mcp"))
+    spec = asyncio.run(MCPCatalog.from_specloader(_loader()).get("mcp"))
     assert spec.id == "mcp"
     assert spec.name == "search"
     assert spec.transport == "stdio"
@@ -73,10 +73,10 @@ def test_mcp_config_snapshot():
 
 
 def test_swarm_config_snapshot():
-    from linktools.ai.registry.swarm import SwarmRegistry
+    from linktools.ai.swarm.catalog import SwarmCatalog
     from linktools.ai.swarm.aggregation import AggregationMode
 
-    spec = asyncio.run(SwarmRegistry(_loader()).get("swarm"))
+    spec = asyncio.run(SwarmCatalog.from_specloader(_loader()).get("swarm"))
     assert spec.name == "research"
     assert [a.agent_id for a in spec.agents] == ["searcher", "writer"]
     assert spec.coordinator.agent_id == "planner"

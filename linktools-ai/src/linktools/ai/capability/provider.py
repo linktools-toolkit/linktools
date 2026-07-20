@@ -81,7 +81,7 @@ async def _noop_emit(payload: Any) -> None:
 def make_event_emitter(context: "CapabilityContext | None"):
     """Return an ``async emit(payload)`` bound to the context's EventStore + run
     ids, or a no-op when no store/run is wired. Capability toolset closures use
-    this to fire per-operation events (skill.list, package.resource.read, ...)."""
+    this to fire per-operation events (skill.list, extension.resource.read, ...)."""
     if context is None or context.event_store is None or context.run_id is None:
         return _noop_emit
     if context.security_event_emitter is not None:

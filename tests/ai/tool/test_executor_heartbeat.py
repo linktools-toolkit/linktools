@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolExecutor idempotency heartbeat (§10.2): a long-running Handler keeps its
+"""GovernedToolInvoker idempotency heartbeat (§10.2): a long-running Handler keeps its
 claim alive via periodic renew, and stops (Handler cancelled) the moment the
 claim can no longer be renewed (stolen / lost) so it never keeps producing
 side effects under a lost claim."""
@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import LostIdempotencyClaimError
-from linktools.ai.policy.engine import PolicyEngine
-from linktools.ai.storage.file.idempotency import FileIdempotencyStore
-from linktools.ai.tool.executor import ToolExecutor, ToolContext, ToolRequest
+from linktools.ai.governance.policy.engine import PolicyEngine
+from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.executor import GovernedToolInvoker, ToolContext, ToolRequest
 from linktools.ai.tool.idempotency import ToolIdempotencyOptions
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
@@ -26,7 +26,7 @@ _POLICY = EffectiveToolPolicy()
 
 
 class _RecordingStore:
-    """Delegates to a real FileIdempotencyStore; counts renew calls and can
+    """Delegates to a real FilesystemIdempotencyStore; counts renew calls and can
     inject a renew failure to simulate a stolen claim."""
 
     def __init__(self, inner, *, fail_renew=False):
@@ -47,7 +47,7 @@ class _RecordingStore:
 
 
 def _executor(store, *, lease=0.5, beat=0.1):
-    return ToolExecutor(
+    return GovernedToolInvoker(
         policy=PolicyEngine(rules=()),
         idempotency_store=store,
         idempotency_options=ToolIdempotencyOptions(
@@ -59,7 +59,7 @@ def _executor(store, *, lease=0.5, beat=0.1):
 def test_long_handler_lease_renewed_not_stolen(tmp_path):
     # Handler outlasts the initial lease; the heartbeat must keep extending it
     # so a concurrent worker cannot steal the claim mid-execution.
-    store = _RecordingStore(FileIdempotencyStore(root=tmp_path))
+    store = _RecordingStore(FilesystemIdempotencyStore(root=tmp_path))
 
     async def handler(**kw):
         await asyncio.sleep(0.35)  # longer than the 0.5s lease? no -- but >1 beat
@@ -85,7 +85,7 @@ def test_long_handler_lease_renewed_not_stolen(tmp_path):
 def test_lease_loss_cancels_handler(tmp_path):
     # When renew fails (claim stolen), the Handler is cancelled and
     # LostIdempotencyClaimError propagates -- no further side effects.
-    store = _RecordingStore(FileIdempotencyStore(root=tmp_path), fail_renew=True)
+    store = _RecordingStore(FilesystemIdempotencyStore(root=tmp_path), fail_renew=True)
     executor = _executor(store, lease=0.5, beat=0.1)
     cancelled = {"v": False}
 
@@ -125,8 +125,8 @@ def test_heartbeat_options_require_heartbeat_below_lease():
 def test_no_heartbeat_when_options_unset(tmp_path):
     # Default executor (no idempotency_options): a slow handler runs to
     # completion via the legacy path; renew is never called.
-    store = _RecordingStore(FileIdempotencyStore(root=tmp_path))
-    executor = ToolExecutor(
+    store = _RecordingStore(FilesystemIdempotencyStore(root=tmp_path))
+    executor = GovernedToolInvoker(
         policy=PolicyEngine(rules=()), idempotency_store=store
     )
 
@@ -176,7 +176,7 @@ def test_transient_renew_error_does_not_shadow_handler_or_redrive(tmp_path):
     # A transient renew failure (non-LostIdempotencyClaimError) must NOT kill
     # the heartbeat, shadow the handler's success, fail the claim, or cause a
     # handler re-drive on retry. The heartbeat tolerates it and retries.
-    store = _TransientRenewStore(FileIdempotencyStore(root=tmp_path), fail_n=2)
+    store = _TransientRenewStore(FilesystemIdempotencyStore(root=tmp_path), fail_n=2)
     executor = _executor(store, lease=0.5, beat=0.05)
     handler_calls = {"n": 0}
 

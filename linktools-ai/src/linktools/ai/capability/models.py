@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """The Capability domain model: the single place the capability
-data classes live. CapabilityRef / CapabilityRuntimeOptions / CapabilityBundle /
+data classes live. CapabilityRuntimeOptions / CapabilityBundle /
 CapabilityInspection. The exposure policy lives in :mod:`.exposure`, the
-CapabilityProvider Protocol in :mod:`.provider`."""
+CapabilityProvider Protocol in :mod:`.provider`.
+
+``CapabilityRef`` is an alias of :class:`~linktools.ai.tool.models.ToolRef`
+(plan §4.2 保留唯一模型 / 统一 CapabilityRef): a spec declaration ref and a
+resolved capability ref are the same object, not two identical shapes. The
+canonical type lives in the more primitive ``tool`` domain (capability already
+imports tool one-way); aliasing it here keeps the plan's preferred name
+importable from the capability domain without creating a tool<->capability
+cycle."""
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping
 
-from ..tool.models import ToolDescriptor
+from ..tool.models import ToolDescriptor, ToolRef
 from ..utils.freeze import freeze_value
 from .exposure import CapabilityToolExposurePolicy
+
+# The single capability/tool reference type. Defined in ..tool.models (the
+# primitive domain); re-exported here under the plan's preferred name.
+CapabilityRef = ToolRef
 
 
 def requires_capability_assembler(*, tools, execution) -> bool:
@@ -24,31 +36,10 @@ if TYPE_CHECKING:
     from ..prompt.window import SessionWindowPolicy
 
 
-@dataclass(frozen=True, slots=True)
-class CapabilityRef:
-    """A resolved (kind, name, config) triple targeting one CapabilityProvider.
-    ``kind`` selects the provider; ``name`` is interpreted by that provider
-    (e.g. builtin:file, skill:sql, mcp:risk-data)."""
-
-    kind: str
-    name: str
-    config: "Mapping[str, Any]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, str) or not self.kind.strip():
-            raise ValueError("CapabilityRef.kind must be a non-empty string")
-        if not isinstance(self.name, str) or not self.name.strip():
-            raise ValueError("CapabilityRef.name must be a non-empty string")
-        object.__setattr__(self, "config", freeze_value(dict(self.config)))
-
-    def __str__(self) -> str:
-        return f"{self.kind}:{self.name}"
-
-
 @dataclass(frozen=True)
 class CapabilityRuntimeOptions:
     """The runtime-policy bundle -- distinct from Storage (state) and
-    ProviderBundle (declarations). Holds the tool-exposure policy, optional
+    RuntimeDependencies (declarations). Holds the tool-exposure policy, optional
     prompt/memory/subagent policies, and the MCP wildcard gate."""
 
     tool_exposure: "CapabilityToolExposurePolicy | None" = None
@@ -61,7 +52,7 @@ class CapabilityRuntimeOptions:
     subagent_context_policy: Any = None
     allow_mcp_wildcard: bool = False
     # Builtins are opt-in. ``None`` is accepted only by legacy callers that
-    # construct AgentRunner directly; Runtime-built graphs default closed.
+    # construct AgentEngine directly; Runtime-built graphs default closed.
     enable_builtin_tools: bool = False
 
 

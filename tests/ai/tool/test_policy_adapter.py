@@ -7,7 +7,7 @@ clamped by a phantom concrete default (contract/contract)."""
 
 import pytest
 
-from linktools.ai.policy.rule import (
+from linktools.ai.governance.policy.rule import (
     ApprovalMode,
     Permission,
     RiskLevel,

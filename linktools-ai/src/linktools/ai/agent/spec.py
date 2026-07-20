@@ -4,11 +4,12 @@
 Holds no runtime state -- no Session, no Run, no Store, no working directory."""
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
 from ..model.policy import ModelPolicy
+from ..tool.models import ToolRef  # re-exported below; ToolRef is a tool-domain type
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,20 +25,10 @@ class PromptSpec:
         object.__setattr__(self, "sections", freeze_value(dict(self.sections)))
 
 
-@dataclass(frozen=True, slots=True)
-class ToolRef:
-    kind: str
-    name: str
-    config: "Mapping[str, Any]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, str) or not self.kind.strip():
-            raise ValueError("ToolRef.kind must be a non-empty string")
-        if not isinstance(self.name, str) or not self.name.strip():
-            raise ValueError("ToolRef.name must be a non-empty string")
-        from ..utils.freeze import freeze_value
-
-        object.__setattr__(self, "config", freeze_value(dict(self.config)))
+# ToolRef now lives in ..tool.models (its proper home -- a tool reference, not
+# an agent-specific type). The import above re-exports it, so existing
+# `from linktools.ai.agent.spec import ToolRef` call sites keep working; new
+# code should import it from linktools.ai.tool.models.
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,3 +79,14 @@ class AgentSpec:
         from ..utils.freeze import freeze_value
 
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
+
+
+@runtime_checkable
+class AgentSpecProvider(Protocol):
+    """Provides AgentSpec objects from any configuration source. Any backend
+    -- file registry, DB, config center, HTTP API -- can implement it; the
+    Runtime never imports a concrete registry."""
+
+    async def list_ids(self) -> "tuple[str, ...]": ...
+
+    async def get(self, agent_id: str) -> "AgentSpec": ...

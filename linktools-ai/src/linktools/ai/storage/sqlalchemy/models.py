@@ -228,7 +228,8 @@ class EventRow(Base):
     parent_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     session_id: Mapped[str] = mapped_column(String(128))
     runnable_id: Mapped[str] = mapped_column(String(255))
-    payload_type: Mapped[str] = mapped_column(String(64))
+    event_type: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
     payload_json: Mapped[str] = mapped_column(Text)
     # Free-form per-event metadata (e.g. commit_id for commit-scoped dedup of
     # critical events). Nullable: rows written before this column existed (and

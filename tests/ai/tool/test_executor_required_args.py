@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolExecutor.execute() requires the finalized descriptor and effective
+"""GovernedToolInvoker.execute() requires the finalized descriptor and effective
 policy. The signature itself rejects a call that omits either (no internal
 default Descriptor/Policy that could mis-classify a mutating tool), and the
 retry decision honors descriptor.mutating + policy.idempotent."""
@@ -10,9 +10,9 @@ import asyncio
 import pytest
 
 from linktools.ai.errors import TransientToolError
-from linktools.ai.policy.engine import PolicyEngine, ToolContext, ToolRequest
-from linktools.ai.storage.file.idempotency import FileIdempotencyStore
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext, ToolRequest
+from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy
 
@@ -32,7 +32,7 @@ _MUTATING = ToolDescriptor(
 def test_execute_missing_descriptor_raises_type_error():
     """Omitting descriptor is a programming error -- the signature rejects it
     rather than letting the executor invent a default non-mutating descriptor."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler() -> str:
         return "x"
@@ -52,7 +52,7 @@ def test_execute_missing_descriptor_raises_type_error():
 def test_execute_missing_effective_policy_raises_type_error():
     """Omitting effective_policy is a programming error -- the signature
     rejects it rather than letting the executor invent a default policy."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
 
     async def _handler() -> str:
         return "x"
@@ -79,7 +79,7 @@ def test_execute_missing_effective_policy_raises_type_error():
 def test_mutating_non_idempotent_tool_not_retried_on_transient_error():
     """A mutating, non-idempotent tool may have partially applied its effect --
     never retry it blind, even if the error is transient and max_retries > 0."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -104,7 +104,7 @@ def test_mutating_non_idempotent_tool_not_retried_on_transient_error():
 def test_non_mutating_transient_error_is_retried():
     """A non-mutating tool whose handler raises a transient error is retried
     up to max_retries (the mutating-safety gate does not apply)."""
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     calls = {"n": 0}
 
     async def _handler() -> str:
@@ -131,8 +131,8 @@ def test_mutating_idempotent_tool_with_store_can_retry(tmp_path):
     """A mutating tool declared idempotent (with an IdempotencyStore wired) is
     safe to retry: the store records the FAILED attempt and the retry
     overwrites it on success."""
-    store = FileIdempotencyStore(root=tmp_path / "idem")
-    executor = ToolExecutor(policy=PolicyEngine(rules=()), idempotency_store=store)
+    store = FilesystemIdempotencyStore(root=tmp_path / "idem")
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()), idempotency_store=store)
     calls = {"n": 0}
 
     async def _handler() -> str:

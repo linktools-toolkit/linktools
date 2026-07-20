@@ -18,7 +18,7 @@ _AI_SRC = (
 
 # Requirement-origin markers that must not appear in core comments/docstrings.
 # Match single-character packaging tags without embedding historical labels.
-# not legitimate prose like "Package skills".
+# not legitimate prose like "Extension skills".
 _MARKER_RE = re.compile(
     r"review3|" + r"review" + r"[- ]?doc|" + r"Package [A-Z0-9](?![a-z])|Task [0-9]+|"
     r"P[01]-[0-9]+|\bG[0-9]\b|GAP-[0-9]+|Decision D|Decision #[0-9]+|"
@@ -63,7 +63,7 @@ def test_runtime_build_has_no_default_command_rule():
 
 
 def test_entrypoint_resolver_public_surface_has_no_unimplemented_methods():
-    resolver = (_AI_SRC / "package" / "resolver.py").read_text(encoding="utf-8")
+    resolver = (_AI_SRC / "extension" / "resolver.py").read_text(encoding="utf-8")
     assert "def resolve_toolset" not in resolver
     assert "def resolve_workflow" not in resolver
     assert "reserved for a later phase" not in resolver
@@ -82,7 +82,7 @@ async def test_import_linktools_ai_without_sqlalchemy():
         "        if n.split('.')[0] in _B: raise ModuleNotFoundError(n,name=n)\n"
         "sys.meta_path.insert(0,_F())\n"
         "import linktools.ai, linktools.ai.storage\n"
-        "from linktools.ai.storage import Storage, FileStorage\n"
+        "from linktools.ai.storage import Storage, FilesystemStorage\n"
     )
     env = {
         "PYTHONPATH": str(_AI_SRC.parents[1])
@@ -100,7 +100,7 @@ def test_resolve_methods_removed_from_public_api():
     rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
     # No-compat simplification: resolve_agent / resolve_swarm / assemble are
     # removed. Runtime.inspect is the single assembly-inspection entry point;
-    # by-id resolution is the caller's job via the ProviderBundle directly.
+    # by-id resolution is the caller's job via the RuntimeDependencies directly.
     assert "def resolve_agent" not in rt
     assert "def resolve_swarm" not in rt
     assert "def assemble" not in rt
@@ -118,8 +118,8 @@ def test_tool_exposure_counting_uses_descriptors_not_introspection():
 
 
 def test_spec_loader_from_resources_uses_resourcestore_api():
-    parser = (_AI_SRC / "registry" / "parser.py").read_text(encoding="utf-8")
+    parser = (_AI_SRC / "catalog" / "parsing.py").read_text(encoding="utf-8")
     body = parser.split("def from_resources")[1].split("return cls")[0]
-    # Must not call the non-existent ResourceStore.list / global .revision.
+    # Must not call the non-existent AssetStore.list / global .revision.
     assert "resource_store.list" not in body
     assert "resource_store.revision" not in body

@@ -11,7 +11,7 @@ use FunctionModel workers -- no real model calls.
 Workers run against per-task SCRATCH sessions (spec invariant: only the final
 aggregate is written to the shared/parent session). ``_run_task`` builds a CHILD
 RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}:{child_run_id}"``
-and creates that SessionRecord before invoking AgentRunner.run. The
+and creates that SessionRecord before invoking AgentEngine.run. The
 ``child_run_id`` suffix keeps each retry attempt's scratch session distinct
 (see the retry identity note below) so a failed attempt's partial conversation
 can never leak into the next attempt's prompt.
@@ -32,7 +32,7 @@ its id for the scratch session, complete/fail calls, and the active-run lookup.
 This keeps every status transition consistent (PENDING -> CLAIMED -> SUCCEEDED|FAILED).
 
 Retry vs fencing conflict: only an exception from the worker call itself
-(``ctx.agent_runner.run``) counts as an attempt failure that can trigger a
+(``ctx.dispatcher.dispatch``) counts as an attempt failure that can trigger a
 retry / eventual ``fail_task()``. ``set_active_run``/``complete_task``/
 ``record_attempt`` can also raise, but those are persistence fencing
 conflicts -- another caller already reclaimed (lease expiry) or cancelled
@@ -58,11 +58,11 @@ from typing import (
 
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
-from ..agent.runner import AgentRunner
 from ..errors import SwarmConflictError, SwarmError, SwarmLimitExceededError
 from ..run.context import RunContext
+from ..run.dispatch import RunDispatcher, RunDispatchRequest
 from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
-from ..security.redact import redact_exception
+from ..governance.security.redact import redact_exception
 from ..session.models import SessionRecord, SessionStatus
 from .aggregation import aggregate
 from .limits import SwarmLimits
@@ -103,7 +103,7 @@ TaskFactory = Callable[[RunInput], "Tuple[TaskInput, ...]"]
 class SwarmExecutionContext:
     """The bundle a strategy consumes: the spec, the driving swarm run, the
     request that initiated it, the parent RunContext (shared session lives
-    here), the runner/compiler, the pre-compiled worker agents keyed by
+    here), the dispatcher/compiler, the pre-compiled worker agents keyed by
     AgentRef.agent_id, and the four stores.
 
     ContextPolicy: ``spec.context_policy`` is accessible to strategies. The
@@ -117,7 +117,7 @@ class SwarmExecutionContext:
     swarm_run: SwarmRun
     request: RunInput
     parent_context: RunContext
-    agent_runner: AgentRunner
+    dispatcher: RunDispatcher
     compiler: AgentCompiler
     agents: "Mapping[str, CompiledAgent]"
     swarm_store: SwarmStore
@@ -340,13 +340,13 @@ async def _run_task(
     for _attempt in range(max_task_retries + 1):
         # Each attempt mints a FRESH child RunRecord id + scratch
         # session, not just the first one. Reusing one child_run_id across
-        # attempts made AgentRunner.execute()'s run_store.create() collide on
+        # attempts made AgentEngine.execute()'s run_store.create() collide on
         # the same primary key from attempt #2 onward -- a real
         # UNIQUE-constraint failure under SqlAlchemy storage that silently
         # turned every retry into a failure (masked under FileStore, which
         # overwrites on create() instead of rejecting the duplicate id).
         # Reusing one scratch session would also leak a failed attempt's
-        # partial conversation into the retry's prompt, since AgentRunner
+        # partial conversation into the retry's prompt, since AgentEngine
         # always prepends list_messages(session_id) for a fresh, non-resume
         # run. set_active_run records the fresh id on the task (bumping its
         # version) so SwarmRunner.cancel can locate the in-flight child Run.
@@ -444,10 +444,12 @@ async def _run_task(
             await _Prep(ctx.run_definitions).prepare_agent_run(
                 spec=compiled.spec, context=child_context
             )
-            result = await ctx.agent_runner.run(
-                compiled,
-                RunInput(prompt=claimed.input.prompt),
-                child_context,
+            result = await ctx.dispatcher.dispatch(
+                RunDispatchRequest(
+                    agent=compiled,
+                    input=RunInput(prompt=claimed.input.prompt),
+                    context=child_context,
+                )
             )
         except asyncio.CancelledError:
             raise

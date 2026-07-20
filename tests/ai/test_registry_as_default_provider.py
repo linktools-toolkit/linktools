@@ -6,18 +6,16 @@ accepts a Provider. A business stub Provider satisfies the same Protocol too."""
 
 import pytest
 
-from linktools.ai.providers.agent import AgentSpecProvider
-from linktools.ai.providers.mcp import MCPServerSpecProvider
-from linktools.ai.providers.skill import SkillSpecProvider
-from linktools.ai.providers.swarm import SwarmSpecProvider
-from linktools.ai.providers.tool_policy import ToolPolicyMetadataSource
-from linktools.ai.registry import (
-    AgentRegistry,
-    MCPRegistry,
-    SkillRegistry,
-    SwarmRegistry,
-    ToolRegistry,
-)
+from linktools.ai.agent.catalog import AgentCatalog
+from linktools.ai.mcp.catalog import MCPCatalog
+from linktools.ai.agent.spec import AgentSpecProvider
+from linktools.ai.mcp.spec import MCPServerSpecProvider
+from linktools.ai.skill.models import SkillSpecProvider
+from linktools.ai.swarm.spec import SwarmSpecProvider
+from linktools.ai.governance.policy.rule import ToolPolicyMetadataSource
+from linktools.ai.skill.catalog import SkillCatalog
+from linktools.ai.swarm.catalog import SwarmCatalog
+from linktools.ai.tool.catalog import ToolCatalog
 
 
 class _DummyLoader:
@@ -36,31 +34,31 @@ class _DummyLoader:
 
 def _registries():
     return (
-        AgentRegistry(_DummyLoader()),
-        SkillRegistry(_DummyLoader()),
-        MCPRegistry(_DummyLoader()),
-        SwarmRegistry(_DummyLoader()),
-        ToolRegistry(_DummyLoader()),
+        AgentCatalog.from_specloader(_DummyLoader()),
+        SkillCatalog.from_specloader(_DummyLoader()),
+        MCPCatalog.from_specloader(_DummyLoader()),
+        SwarmCatalog.from_specloader(_DummyLoader()),
+        ToolCatalog.from_specloader(_DummyLoader()),
     )
 
 
 @pytest.mark.parametrize("registry", _registries())
 def test_default_registries_satisfy_protocols(registry):
-    if isinstance(registry, AgentRegistry):
+    if isinstance(registry, AgentCatalog):
         assert isinstance(registry, AgentSpecProvider)
-    if isinstance(registry, SkillRegistry):
+    if isinstance(registry, SkillCatalog):
         assert isinstance(registry, SkillSpecProvider)
-    if isinstance(registry, MCPRegistry):
+    if isinstance(registry, MCPCatalog):
         assert isinstance(registry, MCPServerSpecProvider)
-    if isinstance(registry, SwarmRegistry):
+    if isinstance(registry, SwarmCatalog):
         assert isinstance(registry, SwarmSpecProvider)
-    if isinstance(registry, ToolRegistry):
+    if isinstance(registry, ToolCatalog):
         assert isinstance(registry, ToolPolicyMetadataSource)
 
 
 def test_tool_registry_exposes_protocol_method_name():
     # ToolPolicyMetadataSource.get_metadata_map -- the canonical Protocol name.
-    tr = ToolRegistry(_DummyLoader())
+    tr = ToolCatalog.from_specloader(_DummyLoader())
     assert callable(getattr(tr, "get_metadata_map", None))
 
 

@@ -5,6 +5,6 @@ is an optional dependency -- prefer ``from linktools.ai.storage import
 SqlAlchemyStorage`` (lazy) unless you specifically want eager import."""
 
 from .facade import SqlAlchemyStorage
-from .resource import SqlAlchemyResourceBackend
+from .asset import SqlAlchemyAssetBackend
 
-__all__ = ["SqlAlchemyStorage", "SqlAlchemyResourceBackend"]
+__all__ = ["SqlAlchemyStorage", "SqlAlchemyAssetBackend"]

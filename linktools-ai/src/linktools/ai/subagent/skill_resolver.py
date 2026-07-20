@@ -5,7 +5,7 @@
 
 A single ``call_subagent`` tool serves two resolution modes:
 
-* ``name`` -- a project-level agent (resolved through the project AgentRegistry);
+* ``name`` -- a project-level agent (resolved through the project AgentCatalog);
 * ``instruction_path`` -- a skill-private agent (resolved relative to the active
   skill through :class:`SkillSubagentProvider`).
 
@@ -50,7 +50,7 @@ class CallSubagentInput:
 
 
 class _ProjectAgentSource(Protocol):
-    """Anything that returns an AgentSpec by name (the project AgentRegistry
+    """Anything that returns an AgentSpec by name (the project AgentCatalog
     satisfies this). Used for the ``name`` resolution branch."""
 
     async def get(self, agent_id: str) -> Any: ...

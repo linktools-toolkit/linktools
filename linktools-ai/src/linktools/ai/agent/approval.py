@@ -107,11 +107,11 @@ def build_approval_request(
     fingerprint (``arguments_hash``) over the real arguments is stored so the
     call can be identified for dedupe / drift detection without persisting
     the secrets. ``approval_id`` lets a caller that already minted an id --
-    ToolExecutor mints one for ``RunPaused.approval_id`` before this request
+    GovernedToolInvoker mints one for ``RunPaused.approval_id`` before this request
     is ever persisted -- pass it through so the id reported to the caller
     matches the id actually stored. Defaults to a fresh uuid4 when omitted.
     """
-    from ..security.redact import redact_for_audit
+    from ..governance.security.redact import redact_for_audit
 
     now = datetime.now(timezone.utc)
     raw_args = dict(arguments) if arguments is not None else {}
@@ -191,7 +191,7 @@ class ApprovalStore(Protocol):
     ``list_pending(run_id)`` filters status==PENDING (the pause UI's queue).
     ``list_for_run(run_id)`` is status-agnostic -- it returns every request
     for the run regardless of status, ordered by created_at. The resume gate
-    (``ToolExecutor._already_approved``) consults it to recognize a call that
+    (``GovernedToolInvoker._already_approved``) consults it to recognize a call that
     was approved externally without re-persisting a PENDING duplicate.
 
     ``create_or_get_pending`` is the

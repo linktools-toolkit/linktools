@@ -5,14 +5,14 @@
 import pytest
 
 from linktools.ai.errors import RunPaused, ToolDeniedError
-from linktools.ai.policy.engine import (
+from linktools.ai.governance.policy.engine import (
     PolicyDecision,
     PolicyDecisionKind,
     PolicyEngine,
     ToolContext,
     ToolRequest,
 )
-from linktools.ai.tool.executor import ToolExecutor
+from linktools.ai.tool.executor import GovernedToolInvoker
 
 
 class _AlwaysDenyRule:
@@ -29,7 +29,7 @@ class _AlwaysApprovalRule:
 
 @pytest.mark.asyncio
 async def test_check_allows_when_policy_allows():
-    executor = ToolExecutor(policy=PolicyEngine(rules=()))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=()))
     await executor.check(
         ToolRequest(tool_name="file", arguments={}),
         ToolContext(run_id="r1", session_id="s1"),
@@ -38,7 +38,7 @@ async def test_check_allows_when_policy_allows():
 
 @pytest.mark.asyncio
 async def test_check_raises_tool_denied_on_deny():
-    executor = ToolExecutor(policy=PolicyEngine(rules=(_AlwaysDenyRule(),)))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=(_AlwaysDenyRule(),)))
     with pytest.raises(ToolDeniedError):
         await executor.check(
             ToolRequest(tool_name="terminal", arguments={}),
@@ -48,7 +48,7 @@ async def test_check_raises_tool_denied_on_deny():
 
 @pytest.mark.asyncio
 async def test_check_raises_approval_required_on_require_approval():
-    executor = ToolExecutor(policy=PolicyEngine(rules=(_AlwaysApprovalRule(),)))
+    executor = GovernedToolInvoker(policy=PolicyEngine(rules=(_AlwaysApprovalRule(),)))
     with pytest.raises(RunPaused):
         await executor.check(
             ToolRequest(tool_name="terminal", arguments={}),

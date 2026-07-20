@@ -8,7 +8,7 @@ aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions
 Search uses ``content LIKE`` with optional ``owner_id`` / ``category`` filters
 (category is indexed for selectivity). The `_UNSET` sentinel distinguishes
 "omit this field" from `category=None` meaning "explicitly clear" (same
-semantics as FileMemoryStore)."""
+semantics as FilesystemMemoryStore)."""
 
 import json
 from datetime import datetime, timezone
@@ -177,7 +177,7 @@ class SqlAlchemyMemoryStore:
         try:
             await self._execute_in_session(_do)
         except IntegrityError as exc:
-            # Duplicate primary key -> conflict, matching FileMemoryStore's
+            # Duplicate primary key -> conflict, matching FilesystemMemoryStore's
             # "memory already exists" semantics. In UoW mode the IntegrityError
             # has already poisoned the shared transaction (it will roll back);
             # we still translate so callers see the domain error type.

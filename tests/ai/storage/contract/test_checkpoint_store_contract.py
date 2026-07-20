@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from linktools.ai.run.models import NewRunCheckpoint
-from linktools.ai.storage.file.checkpoint import FileCheckpointStore
+from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
 
 
 def _new(run_id="run-1") -> NewRunCheckpoint:
@@ -30,7 +30,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileCheckpointStore(root=tmp_path / f"checkpoints-{counter['n']}")
+            return FilesystemCheckpointStore(root=tmp_path / f"checkpoints-{counter['n']}")
 
         return file_factory
 
@@ -181,6 +181,6 @@ async def test_multiple_pause_resume_does_not_overwrite(store_factory):
 
 @pytest.mark.asyncio
 async def test_path_traversal_in_run_id_is_rejected(tmp_path):
-    store = FileCheckpointStore(root=tmp_path)
+    store = FilesystemCheckpointStore(root=tmp_path)
     with pytest.raises(ValueError):
         await store.latest("../../etc/passwd")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_memory_store_contract.py — runs the same
-MemoryStore contract against both FileMemoryStore and SqlAlchemyMemoryStore
+MemoryStore contract against both FilesystemMemoryStore and SqlAlchemyMemoryStore
 (contract backend parity). The parametrized ``store_factory`` fixture is
 copied verbatim from ``test_swarm_store_contract.py`` (file + sqlalchemy
 branches, including the ``_run_in_new_loop`` helper that bootstraps the SQL
@@ -19,7 +19,7 @@ import pytest
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.storage.file.memory import FileMemoryStore
+from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FileMemoryStore(root=tmp_path / f"mem-{counter['n']}")
+            return FilesystemMemoryStore(root=tmp_path / f"mem-{counter['n']}")
 
         return file_factory
 
@@ -357,13 +357,13 @@ def test_forget_then_get_none_and_missing_raises(store_factory):
 # ---------------------------------------------------------------------------
 # 7. File-only: path-traversal in memory_id -> ValueError. (SQL ids are opaque
 #    primary-key strings, not path segments, so this guard is
-#    FileMemoryStore-specific — mirrors the file-only path-traversal test in
+#    FilesystemMemoryStore-specific — mirrors the file-only path-traversal test in
 #    test_swarm_store_contract.py.)
 # ---------------------------------------------------------------------------
 
 
 def test_path_traversal_in_memory_id_is_rejected(tmp_path):
-    store = FileMemoryStore(root=tmp_path)
+    store = FilesystemMemoryStore(root=tmp_path)
 
     async def _run():
         with pytest.raises(ValueError):

@@ -20,10 +20,10 @@ def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
     import importlib.util
 
     from linktools.ai.runtime import Runtime
-    from linktools.ai.storage.facade import FileStorage
+    from linktools.ai.storage.facade import FilesystemStorage
 
     assert not hasattr(Runtime, "assemble")
-    runtime = Runtime.build(storage=FileStorage(root=tmp_path))
+    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path))
     assert not hasattr(runtime, "runner")
     assert not hasattr(runtime, "compiler")
     assert not hasattr(runtime, "capability_assembler")
@@ -54,13 +54,13 @@ def test_capability_domain_imports():
 
 
 def test_providers_domain_imports():
-    from linktools.ai.providers import ProviderBundle
+    from linktools.ai.runtime import RuntimeDependencies
 
-    assert ProviderBundle is not None
+    assert RuntimeDependencies is not None
 
 
 def test_security_domain_imports():
-    from linktools.ai.security import SecurityBaseline
+    from linktools.ai.governance.security import SecurityBaseline
 
     assert SecurityBaseline is not None
 
@@ -97,7 +97,7 @@ def test_storage_optional_dependency_is_lazy():
     import linktools.ai.storage as storage_pkg
 
     assert hasattr(storage_pkg, "Storage")
-    assert hasattr(storage_pkg, "FileStorage")
+    assert hasattr(storage_pkg, "FilesystemStorage")
 
 
 def test_importing_root_does_not_pull_sqlalchemy():

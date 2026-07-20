@@ -16,7 +16,6 @@ Resolution rules:
 
 from typing import TYPE_CHECKING, Any, Mapping
 
-from ..agent.spec import ToolRef
 from ..errors import CapabilityConflictError, CapabilityResolutionError
 from ..events.payloads import (
     CapabilityResolveCompleted,
@@ -26,7 +25,7 @@ from ..events.payloads import (
 from .models import CapabilityBundle
 from .exposure import is_descriptor_exposable
 from .provider import CapabilityContext, CapabilityProvider
-from .models import CapabilityRef
+from .registry import CapabilityProviderRegistry
 
 if TYPE_CHECKING:
     from ..agent.spec import AgentSpec
@@ -56,51 +55,43 @@ async def _emit(context: CapabilityContext, payload) -> None:
 
 
 class CapabilityAssembler:
-    """Holds a kind -> CapabilityProvider map and resolves an AgentSpec's tools
-    into a single merged bundle. What counts as a valid capability kind is
-    entirely determined by which providers are registered -- there is no
-    separate hardcoded allowlist to keep in sync with the actual provider set."""
+    """Resolves an AgentSpec's tool refs into one merged CapabilityBundle by
+    dispatching each ref to its CapabilityProvider via the runtime
+    :class:`CapabilityProviderRegistry`.
 
-    def __init__(self, providers: "Mapping[str, CapabilityProvider]") -> None:
-        self._providers: "dict[str, CapabilityProvider]" = dict(providers)
+    The provider store (kind -> provider, plus register/replace) lives on the
+    registry -- the single runtime registry (plan §4.3: "只保留
+    CapabilityProviderRegistry 作为运行时 Registry"). The assembler holds a
+    registry reference and owns per-spec resolution only. Constructed from either
+    an existing registry or a raw kind -> provider mapping (convenience: the
+    mapping is wrapped in a registry). What counts as a valid capability kind is
+    entirely determined by which providers the registry holds -- there is no
+    separate hardcoded allowlist to keep in sync with the provider set."""
+
+    def __init__(
+        self, providers: "CapabilityProviderRegistry | Mapping[str, CapabilityProvider]"
+    ) -> None:
+        if isinstance(providers, CapabilityProviderRegistry):
+            self._registry = providers
+        else:
+            self._registry = CapabilityProviderRegistry(providers)
+
+    @property
+    def registry(self) -> CapabilityProviderRegistry:
+        return self._registry
 
     @property
     def providers(self) -> "Mapping[str, CapabilityProvider]":
-        return dict(self._providers)
-
-    def register(self, provider: CapabilityProvider) -> None:
-        """Register a provider for every kind it supports. Raises
-        CapabilityConflictError if ANY of its kinds is already registered --
-        silently overwriting a wired provider is never the right default. Call
-        replace() to override intentionally. A provider with multiple
-        supported_kinds (e.g. PackageProvider) is registered under all of them
-        from this one call."""
-        from .provider import provider_kinds
-
-        kinds = provider_kinds(provider)
-        for k in kinds:
-            if k in self._providers:
-                raise CapabilityConflictError(
-                    f"capability provider already registered for kind {k!r}; "
-                    f"use replace() to intentionally override it"
-                )
-        for k in kinds:
-            self._providers[k] = provider
-
-    def replace(self, provider: CapabilityProvider) -> None:
-        """Register a provider for every kind it supports, intentionally
-        overriding any provider already registered for those kinds."""
-        from .provider import provider_kinds
-
-        for k in provider_kinds(provider):
-            self._providers[k] = provider
+        # Read-only view over the registry's store (mutation goes through the
+        # registry's register/replace).
+        return self._registry.providers
 
     async def assemble(
         self,
         spec: "AgentSpec",
         context: CapabilityContext,
     ) -> CapabilityBundle:
-        refs = [_to_capability_ref(spec.id, t) for t in (spec.tools or ())]
+        refs = list(spec.tools or ())
         # detect duplicate identical refs early -- a spec listing the same
         # capability twice is almost always a mistake.
         seen_refs: "set[tuple[str, str]]" = set()
@@ -119,7 +110,7 @@ class CapabilityAssembler:
         cap = context.exposure_policy
 
         for ref in refs:
-            provider = self._providers.get(ref.kind)
+            provider = self._registry.get(ref.kind)
             if provider is None:
                 raise CapabilityResolutionError(
                     f"agent {spec.id}: no capability provider registered for kind "
@@ -216,12 +207,6 @@ class CapabilityAssembler:
             prompt_sections=merged_prompt,
             tool_contributions=tuple(merged_contributions),
         )
-
-
-def _to_capability_ref(agent_id: str, tool_ref: ToolRef) -> CapabilityRef:
-    return CapabilityRef(
-        kind=tool_ref.kind, name=tool_ref.name, config=dict(tool_ref.config)
-    )
 
 
 def _contribution_descriptors(contrib) -> "tuple":
