@@ -15,10 +15,15 @@ import pytest
 
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 def _runtime(tmp_path) -> Runtime:
-    return Runtime.build(storage=FilesystemStorage(root=tmp_path))
+    storage = FilesystemStorage(root=tmp_path)
+    return Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
 
 
 @pytest.mark.asyncio

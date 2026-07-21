@@ -30,6 +30,7 @@ from linktools.ai.run.controller import RunController
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.storage.filesystem.event import FilesystemEventStore
 from linktools.ai.storage.filesystem.run import FilesystemRunStore
 from linktools.ai.storage.filesystem.session import FilesystemSessionStore
@@ -217,7 +218,11 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     from linktools.ai.storage.facade import FilesystemStorage
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     # Runtime.build always wires a RunController -- but the runner's actual
     # driving Task is only registered once execute() starts. To exercise the
     # in-flight path we drive a real run and cancel it mid-flight.
@@ -247,6 +252,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
         model_router=ModelRouter(registry=_registry()),
         middleware_pipeline=MiddlewarePipeline(middlewares=(_BlockingMiddleware(),)),
         local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
 
     spec = AgentSpec(

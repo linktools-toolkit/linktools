@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Run the public storage testkit Contracts against the from-scratch external
-adapter in this package. This is the wheel-only conformance suite: it imports
-ONLY the installed ``linktools.ai.storage.testing`` Contracts + this package's
-own adapter (a sibling module) -- no source-tree, no in-repo relative path.
+adapter in this package. This is the wheel-only conformance suite for adapter
+CODE: ``adapter.py`` imports ONLY the installed ``linktools.ai.*`` public
+surface -- no source-tree, no in-repo relative path. The testkit itself
+(``testing``, resolved via ``conftest.py``) is test-support code that ships
+alongside this package rather than inside the wheel.
 
 A downstream adapter package replaces ``adapter.py`` with its own backend and
 re-runs this same suite in its CI."""
 
-from linktools.ai.storage.testing import (  # installed wheel public surface
+from testing import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
     LeaseCoordinatorContract,

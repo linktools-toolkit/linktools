@@ -15,8 +15,11 @@ from linktools.ai.storage.features import (
 
 
 def test_file_storage_features_match_spec():
+    # transactions=NONE: each file store is independently durable, but there is
+    # NO general cross-store transaction (Storage.transaction() raises). Claiming
+    # PROCESS_LOCAL would over-state the capability (plan §4.5 Filesystem decision).
     assert FILE_STORAGE_FEATURES == StorageFeatures(
-        transactions=TransactionScope.PROCESS_LOCAL,
+        transactions=TransactionScope.NONE,
         coordination=CoordinationScope.PROCESS_LOCAL,
         optimistic_concurrency=True,
         append_only_events=True,
@@ -26,17 +29,15 @@ def test_file_storage_features_match_spec():
         streaming_blobs=True,
         full_text_search=False,
         semantic_search=False,
-        multi_process_swarm=False,
     )
 
 
 def test_sqlalchemy_storage_features_match_spec():
     # The in-repo SqlAlchemyStorage reference ships the process-local
     # LocalLeaseCoordinator (no Redis/etcd in core), so it declares PROCESS_LOCAL
-    # coordination and cannot host a multi-process swarm. A downstream that
-    # injects a real distributed LeaseCoordinator declares DISTRIBUTED +
-    # multi_process_swarm=True on its own StorageFeatures; the RuntimeBuilder
-    # gate then admits multi-worker/multi-process topologies (plan §4.4, §4.11).
+    # coordination. A downstream that injects a real distributed
+    # LeaseCoordinator declares DISTRIBUTED on its own StorageFeatures; the
+    # RuntimeBuilder gate then admits multi-worker topologies.
     assert SQLALCHEMY_STORAGE_FEATURES == StorageFeatures(
         transactions=TransactionScope.DATABASE,
         coordination=CoordinationScope.PROCESS_LOCAL,
@@ -48,7 +49,6 @@ def test_sqlalchemy_storage_features_match_spec():
         streaming_blobs=True,
         full_text_search=True,
         semantic_search=False,
-        multi_process_swarm=False,
     )
 
 

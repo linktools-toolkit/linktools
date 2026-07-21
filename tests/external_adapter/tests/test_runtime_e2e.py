@@ -13,7 +13,8 @@ Six properties are pinned here:
    adapter module and asserts every ``linktools.ai.*`` import resolves
    against a fixed public allowlist. The forbidden modules -- the private
    runtime kernel (``_runtime``) and the in-repo reference backends
-   (``storage.filesystem`` / ``storage.sqlalchemy`` / ``storage.coordination``)
+   (``storage.filesystem`` / ``storage.sqlite`` / ``storage.sqlalchemy`` /
+   ``storage.coordination``)
    -- would defeat the proof: the adapter exists to show the PUBLIC surface
    suffices. Mirrors the import guard in
    ``test_external_adapter_conformance.py:48``.
@@ -53,7 +54,7 @@ Six properties are pinned here:
    from ``RuntimeTaskHandler._seal_run_result`` and the user-handler pattern
    in ``tests/ai/evaluation/test_task_executor.py``). After resume
    completes, the test asserts the artifact is genuinely retrievable through
-   ``storage.artifacts.get(artifact_id, tenant_id=...)`` with the original
+   ``storage.artifacts.get(artifact_id=artifact_id, tenant_id=...)`` with the original
    content. Proves ONLY the run -> approval -> resume -> artifact slice.
 
 6. ``test_external_adapter_drives_job_create_claim_commit`` -- drives a
@@ -84,6 +85,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.agent.approval import ApprovalStore, ApprovalStatus
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.events.store import EventStore
@@ -125,7 +127,9 @@ from linktools.ai.tool.models import (
     ToolDescriptor,
 )
 
-from .example_external_adapter_full import (
+from external_adapter import storage as _external_storage_module
+from external_adapter.commit import InMemoryRunCommitCoordinator
+from external_adapter.storage import (
     InMemoryApprovalStore,
     InMemoryCheckpointStore,
     InMemoryEventStore,
@@ -162,11 +166,15 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
         "linktools.ai.run.store",
         "linktools.ai.run.models",
         "linktools.ai.run.definition",
+        "linktools.ai.run.commit",
+        "linktools.ai.run.lifecycle",
         "linktools.ai.session.store",
         "linktools.ai.session.models",
         "linktools.ai.events.store",
         "linktools.ai.events.payloads",
         "linktools.ai.events.envelope",
+        "linktools.ai.events.context",
+        "linktools.ai.events.registry",
         "linktools.ai.agent.approval",
         "linktools.ai.errors",
         "linktools.ai.tool.idempotency",
@@ -196,6 +204,7 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
 _FORBIDDEN_PREFIXES = (
     "linktools.ai._runtime",
     "linktools.ai.storage.filesystem",
+    "linktools.ai.storage.sqlite",
     "linktools.ai.storage.sqlalchemy",
     "linktools.ai.storage.coordination",
 )
@@ -209,7 +218,7 @@ _FORBIDDEN_MARKERS = ("Phase ", "§", "spec ", "op ")
 
 def _module_imports(path: pathlib.Path) -> "set[str]":
     """Every absolute ``linktools.*`` import in ``path``. Relative imports
-    (``from .example_external_adapter import ...``) are intentionally NOT
+    (``from external_adapter.conformance_adapter import ...``) are intentionally NOT
     counted: a sibling-test-module import is internal to the test package,
     not a ``linktools.ai`` surface import, and the allowlist exists to pin
     the public-surface contract."""
@@ -227,27 +236,52 @@ def _module_imports(path: pathlib.Path) -> "set[str]":
 
 
 def test_external_adapter_imports_only_public_paths() -> None:
-    src_path = pathlib.Path(__file__).with_name("example_external_adapter_full.py")
-    imports = _module_imports(src_path)
-    non_public = imports - _PUBLIC_ADAPTER_IMPORTS
-    assert not non_public, (
-        "external adapter must import only public Protocol/store surface; "
-        f"found non-public linktools imports: {sorted(non_public)}"
-    )
+    # Scan every module in the adapter package (not just storage.py) -- the
+    # commit coordinator and conformance adapter live alongside it and must
+    # uphold the same public-surface contract.
+    pkg_dir = pathlib.Path(_external_storage_module.__file__).parent
+    for src_path in sorted(pkg_dir.glob("*.py")):
+        imports = _module_imports(src_path)
+        non_public = imports - _PUBLIC_ADAPTER_IMPORTS
+        assert not non_public, (
+            f"{src_path.name}: external adapter must import only public "
+            f"Protocol/store surface; found non-public linktools imports: "
+            f"{sorted(non_public)}"
+        )
+        forbidden_hits = sorted(
+            mod for mod in imports if any(mod.startswith(p) for p in _FORBIDDEN_PREFIXES)
+        )
+        assert not forbidden_hits, (
+            f"{src_path.name}: external adapter must not import private "
+            f"runtime / reference-backend modules: {forbidden_hits}"
+        )
+        # No transient plan/phase/op markers: the adapter stands on its
+        # public contract alone. A comment/docstring referencing internal
+        # process scaffolding leaks the wrong altitude into a public-surface
+        # proof.
+        src = src_path.read_text(encoding="utf-8")
+        leaked = [marker for marker in _FORBIDDEN_MARKERS if marker in src]
+        assert not leaked, (
+            f"{src_path.name}: adapter leaked transient process markers into "
+            f"comments/docstrings: {leaked}"
+        )
+
+
+def test_e2e_harness_itself_imports_no_reference_backend() -> None:
+    # The above scans the ADAPTER package; this scans the harness file that
+    # actually drives the E2E chain (this very file). A test file could
+    # import a reference backend directly (e.g. FilesystemRunCommitCoordinator)
+    # to wire the run without the adapter package ever seeing it -- the
+    # adapter-package scan would stay green while the functional proof was
+    # hollow. Guard the harness file itself against exactly that.
+    harness_path = pathlib.Path(__file__)
+    imports = _module_imports(harness_path)
     forbidden_hits = sorted(
         mod for mod in imports if any(mod.startswith(p) for p in _FORBIDDEN_PREFIXES)
     )
     assert not forbidden_hits, (
-        "external adapter must not import private runtime / reference-backend "
-        f"modules: {forbidden_hits}"
-    )
-    # No transient plan/phase/op markers: the adapter stands on its public
-    # contract alone. A comment/docstring referencing internal process
-    # scaffolding leaks the wrong altitude into a public-surface proof.
-    src = src_path.read_text(encoding="utf-8")
-    leaked = [marker for marker in _FORBIDDEN_MARKERS if marker in src]
-    assert not leaked, (
-        f"adapter leaked transient process markers into comments/docstrings: {leaked}"
+        "the E2E harness must not import private runtime / reference-backend "
+        f"modules to drive the chain: {forbidden_hits}"
     )
 
 
@@ -384,7 +418,11 @@ def test_external_adapter_drives_run_to_completion(tmp_path: pathlib.Path) -> No
     assert storage.features is FILE_STORAGE_FEATURES
     assert isinstance(storage.transactions, NoCrossStoreTransactions)
 
-    runtime = Runtime.build(storage=storage, model_router=_router())
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_router(),
+        commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="agent-1",
         name="e2e-agent",
@@ -472,6 +510,7 @@ def test_external_adapter_drives_approval_resume(tmp_path: pathlib.Path) -> None
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
+        commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
     )
     spec = _approval_spec()
 
@@ -623,10 +662,10 @@ def test_external_adapter_drives_approval_resume_produces_artifact(
                 # content; the call returns a content-addressed record.
                 content = f'{{"doubled": {x * 2}}}'.encode("utf-8")
                 record = await storage.artifacts.put(
-                    content,
+                    content=content,
                     media_type="application/json",
-                    tenant_id=_TENANT_ID,
-                )
+                    tenant_id=_TENANT_ID, provenance=ANONYMOUS_PROVENANCE,
+    )
                 captured["artifact_id"] = record.ref.id
                 captured["content"] = content
                 return {"artifact_id": record.ref.id, "doubled": x * 2}
@@ -662,6 +701,7 @@ def test_external_adapter_drives_approval_resume_produces_artifact(
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_ArtifactProvider(),)),
         local_trusted_mode=True,
+        commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
     )
     spec = _approval_spec()
 
@@ -702,7 +742,7 @@ def test_external_adapter_drives_approval_resume_produces_artifact(
         artifact_id = captured["artifact_id"]
         assert artifact_id is not None, "tool handler did not produce an artifact"
         retrieved = await storage.artifacts.get(
-            artifact_id,  # type: ignore[arg-type]
+            artifact_id=artifact_id,  # type: ignore[arg-type]
             tenant_id=_TENANT_ID,
         )
         assert retrieved is not None, (
@@ -787,19 +827,19 @@ def test_external_adapter_drives_job_create_claim_commit(
     and the job converges from PENDING -> RUNNING -> SUCCEEDED.
 
     Mirrors ``tests/ai/jobs/test_file_task_store.py::test_create_claim_complete_completes_job``
-    but swaps ``FilesystemTaskStore`` for ``storage.tasks`` from
+    but swaps ``FilesystemJobStore`` for ``storage.jobs`` from
     ``build_in_memory_external_storage``. Also exercises the fencing-token
     contract: a stale claim (older fencing_token) is rejected with
     ``TaskClaimLostError`` -- the contract a real worker relies on so its
     superseded result cannot overwrite a newer owner's. Proves ONLY the job
-    slice through the adapter's public ``tasks`` store."""
+    slice through the adapter's public ``jobs`` store."""
     storage = build_in_memory_external_storage(root=tmp_path)
-    # storage.tasks is wired by build_in_memory_external_storage -- this is
+    # storage.jobs is wired by build_in_memory_external_storage -- this is
     # the assertion that the adapter's Storage carries a real JobStore (not
     # None), which JobRuntime's build-time check would enforce in production.
-    assert isinstance(storage.tasks, InMemoryJobStore)
-    assert isinstance(storage.tasks, JobStore)
-    task_store = storage.tasks
+    assert isinstance(storage.jobs, InMemoryJobStore)
+    assert isinstance(storage.jobs, JobStore)
+    task_store = storage.jobs
     clock_now = datetime.now(timezone.utc)
 
     async def _drive():
@@ -873,4 +913,196 @@ def test_external_adapter_drives_job_create_claim_commit(
         )
 
     assert asyncio.run(_no_more_work()) is None
+
+
+def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§4.11 ONE connected chain through the external adapter's public surface:
+    run -> pause (WAITING_APPROVAL) -> approve -> resume -> SUCCEEDED (the
+    approved tool produces a content-addressed artifact) -> a Job created with
+    that artifact as its input_artifact_id -> claimed -> committed SUCCEEDED.
+
+    The plan §4.11 explicitly forbids substituting 'several disconnected unit
+    tests' for the connected chain (each of the four slice tests above proves
+    ONE segment in isolation; this test proves the segments COMPOSE -- the
+    artifact the approved tool produced during resume is the SAME artifact the
+    Job references as input, and the run/approval/artifact/job state all lands
+    through the adapter's public Protocol stores in one flow)."""
+    storage = build_in_memory_external_storage(root=tmp_path)
+    captured: "dict[str, object]" = {"artifact_id": None, "content": None}
+
+    class _ArtifactProvider(CapabilityProvider):
+        supported_kinds = ("test",)
+
+        async def resolve(self, ref, context):
+            async def risky(x: int) -> dict:
+                content = f'{{"doubled": {x * 2}}}'.encode("utf-8")
+                record = await storage.artifacts.put(
+                    content=content,
+                    media_type="application/json",
+                    tenant_id=_TENANT_ID, provenance=ANONYMOUS_PROVENANCE,
+    )
+                captured["artifact_id"] = record.ref.id
+                captured["content"] = content
+                return {"artifact_id": record.ref.id, "doubled": x * 2}
+
+            return CapabilityBundle(
+                tool_contributions=(
+                    ToolContribution(
+                        tools=(
+                            ManagedToolDefinition(
+                                descriptor=ToolDescriptor(
+                                    name=_APPROVAL_TOOL,
+                                    source="test",
+                                    category="discovery",
+                                    risk="high",
+                                    mutating=True,
+                                ),
+                                handler=risky,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+    executor = GovernedToolInvoker(
+        policy=PolicyEngine(
+            rules=(ApprovalRule(require_for=frozenset({_APPROVAL_TOOL})),)
+        ),
+        approval_store=storage.approvals,
+    )
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_approval_router(),
+        tool_executor=executor,
+        providers=RuntimeDependencies(capabilities=(_ArtifactProvider(),)),
+        local_trusted_mode=True,
+        commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
+    )
+    spec = _approval_spec()
+
+    async def _chain() -> None:
+        # 1-3. run -> pause -> approve -> resume -> SUCCEEDED + artifact.
+        pause_events: "list[dict]" = []
+        async for event in runtime.run_stream(
+            spec,
+            "call risky",
+            run_id="run-chain",
+            tenant_id=_TENANT_ID,
+        ):
+            pause_events.append(event)
+        paused = next(e for e in pause_events if e["type"] == "paused")
+        approval_id = paused["approval_id"]
+        pending = await storage.approvals.get(approval_id)
+        assert pending is not None
+        assert captured["artifact_id"] is None, (
+            "artifact produced before approval -- handler ran during pause"
+        )
+        await runtime.approve(
+            approval_id, principal=_approver(), expected_version=pending.version
+        )
+        async for _ in runtime.resume("run-chain"):
+            pass
+        final = await storage.runs.get("run-chain")
+        assert final is not None
+        assert final.status is RunStatus.SUCCEEDED, (
+            f"expected run SUCCEEDED after resume, got {final.status}"
+        )
+
+        # 4. The approved tool produced an artifact; it round-trips through the
+        #    adapter's ArtifactStore (content-addressed, tenant-scoped).
+        artifact_id = captured["artifact_id"]
+        assert artifact_id is not None, "tool handler did not produce an artifact"
+        assert isinstance(artifact_id, str) and artifact_id.startswith("art-")
+        retrieved = await storage.artifacts.get(
+            artifact_id=artifact_id,  # type: ignore[arg-type]
+            tenant_id=_TENANT_ID,
+        )
+        assert retrieved == captured["content"], (
+            f"artifact content mismatch: {retrieved!r} vs {captured['content']!r}"
+        )
+
+        # 5. The CONNECTING edge: a Job that REFERENCES the just-produced
+        #    artifact as its input_artifact_id. The four slice tests prove each
+        #    segment alone; this proves the artifact flows INTO the job in one
+        #    connected run -> approval -> resume -> artifact -> job flow.
+        task_store = storage.jobs
+        now = datetime.now(timezone.utc)
+        job = JobRecord(
+            id="job-chain",
+            status=JobStatus.PENDING,
+            principal=TaskPrincipal(tenant_id=_TENANT_ID, user_id="alice"),
+            actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
+            budget=TaskBudget(),
+            root_task_id="task-chain",
+            input_artifact_id=artifact_id,  # the artifact from step 4
+            output_artifact_id=None,
+            version=1,
+            created_at=now,
+            started_at=None,
+            finished_at=None,
+        )
+        root = TaskRecord(
+            id="task-chain",
+            job_id="job-chain",
+            parent_task_id=None,
+            key="root",
+            handler="echo",
+            status=TaskStatus.PENDING,
+            input_artifact_id=artifact_id,  # the artifact from step 4
+            output_artifact_id=None,
+            dependencies=(),
+            retry_policy=RetryPolicy(max_attempts=2),
+            side_effect_policy=SideEffectPolicy(),
+            attempt_count=0,
+            available_at=now,
+            lease_owner=None,
+            lease_expires_at=None,
+            fencing_token=0,
+            active_attempt_id=None,
+            timeout_seconds=None,
+            resource_snapshots=(),
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        await task_store.create_job(job, root)
+        claimed = await task_store.claim(
+            worker_id="w1", now=now, lease_seconds=30
+        )
+        assert claimed is not None, "job not claimable through the adapter"
+        done = await task_store.commit_success(claimed.claim, TaskSuccess())
+        assert done.status is TaskStatus.SUCCEEDED
+
+        # 6. The full chain landed: run SUCCEEDED, artifact retrievable, job
+        #    terminal, and the job's input_artifact_id IS the artifact the
+        #    approved tool produced -- the connected chain, not four slices.
+        job_final = await task_store.get_job("job-chain")
+        assert job_final is not None
+        assert job_final.status is JobStatus.SUCCEEDED, (
+            f"expected job SUCCEEDED, got {job_final.status}"
+        )
+        assert job_final.input_artifact_id == artifact_id, (
+            "the job's input_artifact_id is not the artifact the approved tool "
+            "produced -- the chain is disconnected"
+        )
+
+        # 7. Persistence breadth: the connected chain wrote EVENTS for the run
+        #    AND a CHECKPOINT for the resume through the adapter's public
+        #    EventStore / CheckpointStore -- the plan's "验证 event" + resume
+        #    checkpoint, asserted here in the connected flow (not only in the
+        #    disconnected slice tests).
+        run_events = await storage.events.list("run-chain", limit=100)
+        assert len(run_events.items) > 0, (
+            "no events persisted for the connected-chain run through the "
+            "adapter's EventStore"
+        )
+        resume_checkpoint = await storage.checkpoints.latest("run-chain")
+        assert resume_checkpoint is not None, (
+            "no checkpoint persisted for the connected-chain resume through "
+            "the adapter's CheckpointStore"
+        )
+
+    asyncio.run(_chain())
 

@@ -509,3 +509,31 @@ class EvalResultRow(Base):
     error_message: Mapped["str | None"] = mapped_column(Text, nullable=True)
     # scores + metrics live in the envelope.
     data_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ArtifactRecordRow(Base):
+    """ArtifactRecord metadata (the lineage half of an artifact; the content
+    blob lives out-of-band -- on the filesystem via FilesystemArtifactBlobStore,
+    never in this table). Query columns (artifact_id / tenant_id / sha256 /
+    producer_kind / producer_id / run_id) are indexed for the tenant gate, orphan
+    sweep, and parent/provenance lookups; the full record envelope is the
+    ``data_json`` column decoded via the public record codec."""
+
+    __tablename__ = "ai_artifact_records"
+    __table_args__ = (
+        Index("ix_ai_artifact_records_tenant", "tenant_id"),
+        Index("ix_ai_artifact_records_producer", "producer_kind", "producer_id"),
+        Index("ix_ai_artifact_records_run", "run_id"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(255))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    # Parent/provenance index columns: derived from the record's
+    # ArtifactProvenance at put() time so the store can look up records by
+    # producer / run without a JSON scan. parent_artifact_ids stays in data_json
+    # (a multi-valued field; a join table would be the production-grade index).
+    producer_kind: Mapped["str | None"] = mapped_column(String(64), nullable=True)
+    producer_id: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")

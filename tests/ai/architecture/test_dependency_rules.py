@@ -43,9 +43,8 @@ FORBIDDEN_IMPORTS: "dict[str, set[str]]" = {
     "jobs": {"_runtime"},
     # The artifact and asset domains are fully decoupled (plan §3.3). The
     # artifact facade depends only on the ArtifactBlobStore /
-    # ArtifactRecordStore Protocols; the asset-backed reference adapters and
-    # the build_artifact_store_from_assets factory live in the storage layer,
-    # so neither domain names the other. Enforced since Phase 3 op 6.
+    # ArtifactRecordStore Protocols; the filesystem + SQLAlchemy reference
+    # adapters live in the storage layer, so neither domain names the other.
     "artifact": {"asset"},
     "asset": {"artifact"},
 }
@@ -142,7 +141,7 @@ def test_forbidden_dependency_directions_hold(importer: str) -> None:
     """Enforced dependency rules must not be violated by new code."""
     forbidden = FORBIDDEN_IMPORTS[importer]
     if not (_AI / importer).is_dir():
-        pytest.skip(f"package {importer!r} not present yet at this phase")
+        pytest.skip(f"package {importer!r} not present in this checkout")
     violations: "list[str]" = []
     for path, imported in _package_imports(importer).items():
         bad = imported & forbidden

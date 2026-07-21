@@ -39,8 +39,10 @@ from .middleware.pipeline import MiddlewarePipeline
 from .model.router import ModelRouter
 from .mcp.client import MCPConnectionManager
 from .observability.metrics import ObservabilityMetrics
+from .run.commit import RunCommitCoordinator
 from .run.coordinator import RunCoordinator
 from .run.options import RuntimeCancellationOptions
+from .run.requirements import RuntimeRequirements, RuntimeTopology
 from .run.schema_registry import OutputSchemaRegistry
 from .storage.facade import Storage
 from .swarm.spec import SwarmSpec
@@ -50,7 +52,6 @@ if TYPE_CHECKING:
     from .capability.models import CapabilityInspection
     from .retrieval.retriever import Retriever
     from .identity.principal import PrincipalContext
-    from .run.requirements import RuntimeRequirements
     from .subagent.config import SkillPrivateSubagentConfig
 
 
@@ -68,6 +69,8 @@ class Runtime:
         cls,
         *,
         storage: Storage,
+        commit_coordinator: "RunCommitCoordinator | None" = None,
+        topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS,
         model_router: "ModelRouter | None" = None,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
         retriever: "Retriever | None" = None,
@@ -93,12 +96,26 @@ class Runtime:
         RuntimeDependencies); the direct ``Runtime.run(spec, ...)`` path stays the
         shortest and needs no providers configured.
 
+        ``commit_coordinator`` (REQUIRED at the build-kernel level): the build
+        kernel no longer selects a coordinator from Storage type -- the caller
+        (the composition root) constructs the concrete coordinator for its
+        Storage and injects it. ``None`` is accepted at this layer only so a
+        caller that fails to inject one gets the build kernel's clear fail-fast
+        error rather than a ``TypeError``; production code always passes a real
+        coordinator.
+
+        ``topology`` (default SINGLE_PROCESS) declares the shape of the
+        process graph; the build kernel uses it to derive default capability
+        minimums when ``requirements`` is not supplied. ``requirements``, when
+        passed, takes precedence.
+
         ``local_trusted_mode`` (default False): when False, cancel /
         resume reject a missing ``principal`` (production-safe); when True the
         Runtime is explicitly single-tenant / local and a missing principal is
         allowed (with a deprecation warning)."""
         config = RuntimeBuildConfig(
             storage=storage,
+            commit_coordinator=commit_coordinator,
             providers=providers or RuntimeDependencies(),
             model_router=model_router,
             middleware_pipeline=middleware_pipeline,
@@ -113,6 +130,7 @@ class Runtime:
                 local_trusted_mode=local_trusted_mode,
                 multi_tenant=multi_tenant,
                 cancellation=cancellation or RuntimeCancellationOptions(),
+                topology=topology,
             ),
             schema_registry=schema_registry,
             metrics=metrics,

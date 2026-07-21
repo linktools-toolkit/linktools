@@ -34,7 +34,6 @@ def _features(**overrides) -> StorageFeatures:
         streaming_blobs=True,
         full_text_search=False,
         semantic_search=False,
-        multi_process_swarm=False,
     )
     base.update(overrides)
     return StorageFeatures(**base)
@@ -90,6 +89,7 @@ def test_gate_through_runtime_build_rejects_process_local_for_distributed(tmp_pa
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
     with pytest.raises(_Err, match="coordination"):
@@ -98,6 +98,7 @@ def test_gate_through_runtime_build_rejects_process_local_for_distributed(tmp_pa
             requirements=RuntimeRequirements(
                 coordination=CoordinationScope.DISTRIBUTED
             ),
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
         )
 
 
@@ -107,32 +108,130 @@ def test_gate_through_runtime_build_passes_when_met(tmp_path):
     # also succeeds.
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
-    Runtime.build(storage=rt_storage)  # no gate
+    Runtime.build(
+        storage=rt_storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
+    )  # no gate
     Runtime.build(
         storage=rt_storage,
         requirements=RuntimeRequirements(
             coordination=CoordinationScope.PROCESS_LOCAL
         ),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
     )
 
 
-# --- §4.11 multi-worker Job + multi-process Swarm topology rules ---
+# --- §4.8 multi-worker Job topology rules + §6.6 feature/object consistency ---
 
 
-def test_for_multi_worker_jobs_encodes_the_section_4_11_rule():
+def test_for_multi_worker_jobs_encodes_the_section_4_8_rule():
     req = RuntimeRequirements.for_multi_worker_jobs()
     assert req.coordination is CoordinationScope.DISTRIBUTED
     assert req.leasing is True
     assert req.fencing is True
 
 
-def test_for_multi_process_swarm_encodes_the_section_4_11_rule():
-    req = RuntimeRequirements.for_multi_process_swarm()
-    assert req.coordination is CoordinationScope.DISTRIBUTED
-    assert req.fencing is True
-    assert req.multi_process_swarm is True
+def test_derive_uses_settings_topology_via_frozen_signature(tmp_path):
+    # B-C4: derive_runtime_requirements takes the frozen (*, settings,
+    # dependencies) signature and derives from settings.topology -- SINGLE_PROCESS
+    # imposes no minimums, MULTI_WORKER demands distributed coordination +
+    # leasing + fencing. dependencies is accepted (the gate reads it for
+    # real-object checks) but the capability minimums are a pure function of
+    # the topology.
+    from linktools.ai._runtime.build import RuntimeSettings
+    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.run.requirements import (
+        RuntimeTopology,
+        derive_runtime_requirements,
+    )
+
+    single = derive_runtime_requirements(
+        settings=RuntimeSettings(topology=RuntimeTopology.SINGLE_PROCESS),
+        dependencies=RuntimeDependencies(),
+    )
+    assert single == RuntimeRequirements()
+
+    # MULTI_WORKER needs a populated dependencies bundle (real Storage +
+    # RunCommitCoordinator). The external-adapter in-memory storage satisfies
+    # both, so derive returns the multi-worker minimums without raising.
+    from external_adapter import build_in_memory_external_storage
+
+    storage = build_in_memory_external_storage(root=tmp_path / "derive_multi")
+    multi = derive_runtime_requirements(
+        settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
+        dependencies=RuntimeDependencies(
+            storage=storage,
+            run_commit_coordinator=object(),  # any non-None coordinator
+        ),
+    )
+    assert multi == RuntimeRequirements.for_multi_worker_jobs()
+
+
+def test_derive_multi_worker_refuses_dependencies_missing_storage():
+    # The MULTI_WORKER real-object rule (plan §6.6): a dependencies bundle
+    # without a real Storage cannot serve a multi-worker topology (JobStore
+    # rows are shared across workers). derive refuses it rather than returning
+    # minimums the gate would then fail opaquely.
+    from linktools.ai._runtime.build import RuntimeSettings
+    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.errors import StorageRequirementsNotMetError
+    from linktools.ai.run.requirements import (
+        RuntimeTopology,
+        derive_runtime_requirements,
+    )
+
+    with pytest.raises(StorageRequirementsNotMetError, match="storage"):
+        derive_runtime_requirements(
+            settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
+            dependencies=RuntimeDependencies(run_commit_coordinator=object()),
+        )
+
+
+def test_derive_multi_worker_refuses_dependencies_missing_coordinator(tmp_path):
+    # The MULTI_WORKER real-object rule: a dependencies bundle without an
+    # injected RunCommitCoordinator cannot serve a multi-worker topology (the
+    # build kernel no longer selects one).
+    from linktools.ai._runtime.build import RuntimeSettings
+    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.errors import StorageRequirementsNotMetError
+    from linktools.ai.run.requirements import (
+        RuntimeTopology,
+        derive_runtime_requirements,
+    )
+
+    from external_adapter import build_in_memory_external_storage
+
+    storage = build_in_memory_external_storage(root=tmp_path / "derive_no_coord")
+    with pytest.raises(StorageRequirementsNotMetError, match="RunCommitCoordinator"):
+        derive_runtime_requirements(
+            settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
+            dependencies=RuntimeDependencies(storage=storage),
+        )
+
+
+def test_runtime_dependencies_carries_composition_root_fields():
+    # B-C5: RuntimeDependencies carries the composition-root objects the gate
+    # reads (storage + run_commit_coordinator). A spec-providers-only bundle
+    # leaves them None (the common case); the build kernel populates them on
+    # the effective dependencies it hands derive_runtime_requirements.
+    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.storage.filesystem.commit import (
+        FilesystemRunCommitCoordinator,
+    )
+
+    empty = RuntimeDependencies()
+    assert empty.storage is None
+    assert empty.run_commit_coordinator is None
+
+    storage = FilesystemStorage(root="/tmp/_deps_field_check")
+    coord = FilesystemRunCommitCoordinator.from_storage(storage)
+    populated = RuntimeDependencies(storage=storage, run_commit_coordinator=coord)
+    assert populated.storage is storage
+    assert populated.run_commit_coordinator is coord
 
 
 def test_multi_worker_jobs_rejects_process_local_storage(tmp_path):
@@ -142,42 +241,55 @@ def test_multi_worker_jobs_rejects_process_local_storage(tmp_path):
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)  # process-local coordination
     with pytest.raises(_Err, match="coordination"):
         Runtime.build(
             storage=rt_storage,
             requirements=RuntimeRequirements.for_multi_worker_jobs(),
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
         )
 
 
-def test_multi_process_swarm_rejects_process_local_coordination():
-    # The multi_process_swarm flag requires DISTRIBUTED coordination even when
-    # the scalar coordination requirement is left at its NONE default -- a
-    # bare RuntimeRequirements(multi_process_swarm=True) against process-local
-    # storage is rejected by the swarm-specific check (not the scalar one).
-    with pytest.raises(StorageRequirementsNotMetError, match="DISTRIBUTED"):
-        enforce_storage_capability_gate(
-            _features(coordination=CoordinationScope.PROCESS_LOCAL),
-            RuntimeRequirements(multi_process_swarm=True),
-        )
+def test_feature_consistency_rejects_streaming_blobs_without_artifact_store():
+    # §6.6: declaring streaming_blobs=True on StorageFeatures but wiring no
+    # ArtifactStore must fail fast at the consistency gate, not AttributeError
+    # at first use.
+    from types import SimpleNamespace
 
+    from linktools.ai.run.requirements import enforce_storage_feature_consistency
 
-def test_multi_process_swarm_rejects_distributed_without_fencing():
-    # Meets the DISTRIBUTED scope but lacks fencing -> still rejected.
-    with pytest.raises(StorageRequirementsNotMetError, match="fencing"):
-        enforce_storage_capability_gate(
-            _features(
-                coordination=CoordinationScope.DISTRIBUTED, fencing=False
-            ),
-            RuntimeRequirements(multi_process_swarm=True),
-        )
-
-
-def test_multi_process_swarm_accepts_distributed_with_fencing():
-    enforce_storage_capability_gate(
-        _features(
-            coordination=CoordinationScope.DISTRIBUTED, fencing=True
-        ),
-        RuntimeRequirements(multi_process_swarm=True),
+    bogus = SimpleNamespace(
+        features=_features(streaming_blobs=True),
+        transactions=object(),  # present
+        coordination=object(),  # present
+        artifacts=None,  # MISSING despite streaming_blobs=True
     )
+    with pytest.raises(StorageRequirementsNotMetError, match="ArtifactStore"):
+        enforce_storage_feature_consistency(bogus)
+
+
+def test_feature_consistency_rejects_distributed_coordination_without_coordinator():
+    # §6.6: declaring coordination=DISTRIBUTED but wiring no coordinator fails.
+    from types import SimpleNamespace
+
+    from linktools.ai.run.requirements import enforce_storage_feature_consistency
+
+    bogus = SimpleNamespace(
+        features=_features(coordination=CoordinationScope.DISTRIBUTED),
+        transactions=object(),
+        coordination=None,  # MISSING despite DISTRIBUTED
+        artifacts=object(),
+    )
+    with pytest.raises(StorageRequirementsNotMetError, match="LeaseCoordinator"):
+        enforce_storage_feature_consistency(bogus)
+
+
+def test_feature_consistency_accepts_an_honest_inrepo_storage(tmp_path):
+    # The in-repo FilesystemStorage wires every object its features declare, so
+    # the §6.6 consistency gate admits it.
+    from linktools.ai.run.requirements import enforce_storage_feature_consistency
+    from linktools.ai.storage.facade import FilesystemStorage
+
+    enforce_storage_feature_consistency(FilesystemStorage(root=tmp_path))

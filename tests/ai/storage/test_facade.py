@@ -12,6 +12,7 @@ from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.features import (
     FILE_STORAGE_FEATURES,
     SQLALCHEMY_STORAGE_FEATURES,
+    TransactionScope,
 )
 from linktools.ai.storage import SqlAlchemyStorage
 from linktools.ai.storage.facade import FilesystemStorage, Storage
@@ -116,6 +117,26 @@ def test_file_storage_transaction_raises_storage_capability_error(tmp_path):
         asyncio.run(_run())
 
 
+def test_file_storage_transaction_raises_storage_feature_error(tmp_path):
+    """FilesystemStorage.transaction() must fail as a StorageFeatureError (the
+    §4.5 contract: features.transactions is NONE, so the call raises
+    StorageTransactionNotSupportedError, which IS-A StorageFeatureError IS-A
+    StorageCapabilityError). Asserting the specific subclass locks the contract
+    -- a backend that raised the broad parent directly, or silently no-op-ed,
+    would fail here."""
+    from linktools.ai.errors import StorageFeatureError
+
+    storage = FilesystemStorage(root=tmp_path)
+    assert storage.features.transactions is TransactionScope.NONE  # honest: no tx
+
+    async def _run():
+        async with storage.transaction():
+            pass
+
+    with pytest.raises(StorageFeatureError):
+        asyncio.run(_run())
+
+
 def _sqlalchemy_storage(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/facade.db")
 
@@ -127,7 +148,12 @@ def _sqlalchemy_storage(tmp_path):
     asyncio.run(_create())
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/facade.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(session_factory=session_factory), engine
+    return (
+        SqlAlchemyStorage(
+            session_factory=session_factory, blobs_root=tmp_path / "blobs"
+        ),
+        engine,
+    )
 
 
 def test_sqlalchemy_storage_constructs_full_facade_with_sql_capabilities(tmp_path):
@@ -174,13 +200,18 @@ def test_sqlalchemy_storage_transaction_yields_a_unit_of_work(tmp_path):
 
 
 def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
-    """All seven tx.* stores bind to the same AsyncSession in UoW mode."""
+    """All tx.* stores bind to the same AsyncSession in UoW mode. artifact_records
+    is a real session-bound SqlAlchemyArtifactRecordStore sharing the UoW session;
+    assets is still honestly None (no session-bound asset backend yet)."""
     storage, _ = _sqlalchemy_storage(tmp_path)
 
     async def _run():
         async with storage.transaction() as tx:
             return {
                 "session": tx.session,
+                "assets": tx.assets,
+                "artifact_records": tx.artifact_records,
+                "artifact_records_session": tx.artifact_records._session,
                 "runs": tx.runs._session,
                 "events": tx.events._session,
                 "checkpoints": tx.checkpoints._session,
@@ -191,7 +222,19 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
             }
 
     bound = asyncio.run(_run())
+    # assets has no session-bound backend yet: MUST be None (honest), not a
+    # self-committing fake pretending to share the UoW atomicity.
+    assert bound["assets"] is None, "tx.assets must be None until a session-bound backend exists"
+    # artifact_records IS session-bound now; it must share the UoW session.
+    from linktools.ai.storage.sqlalchemy.artifact_record import (
+        SqlAlchemyArtifactRecordStore,
+    )
+
+    assert isinstance(bound["artifact_records"], SqlAlchemyArtifactRecordStore)
     shared = bound["session"]
+    assert bound["artifact_records_session"] is shared, (
+        "tx.artifact_records must bind to the UoW's shared AsyncSession"
+    )
     for name in (
         "runs",
         "events",
@@ -202,6 +245,66 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
         "memories",
     ):
         assert bound[name] is shared, f"{name} does not share the UoW session"
+
+
+def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
+    """R3 check method: inject a failure inside the UoW -> the run AND the
+    artifact record are both invisible (rolled back together); the blob (written
+    outside the UoW, content-addressed) survives as an orphan candidate."""
+    import hashlib
+    from datetime import datetime, timezone
+
+    from linktools.ai.artifact.models import (
+        ArtifactProvenance,
+        ArtifactRecord,
+        ArtifactRef,
+    )
+
+    storage, _ = _sqlalchemy_storage(tmp_path)
+
+    # Pre-write the content blob OUTSIDE the UoW (content-addressed; the record
+    # transaction pins a reference to it). This is the normal put_stream shape:
+    # blob lands first, then the record transaction.
+    payload = b"rollback-test"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def _src():
+        yield payload
+
+    async def _seed():
+        await storage.artifacts._blob.put_if_absent(
+            digest=digest, source=_src(), size=len(payload)
+        )
+
+    asyncio.run(_seed())
+
+    record = ArtifactRecord(
+        ref=ArtifactRef(
+            id="art-1", sha256=digest, media_type="text/plain", size=len(payload)
+        ),
+        tenant_id="t1",
+        provenance=ArtifactProvenance(producer_kind="test", producer_id="t"),
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _run():
+        with pytest.raises(RuntimeError, match="injected"):
+            async with storage.transaction() as tx:
+                await tx.runs.create(_run_record("run-1"))
+                await tx.artifact_records.put(record)
+                raise RuntimeError("injected rollback")
+
+    asyncio.run(_run())
+
+    async def _check():
+        # Both the run and the artifact record rolled back -- neither visible.
+        assert await storage.runs.get("run-1") is None
+        assert await storage.artifacts.stat(artifact_id="art-1", tenant_id="t1") is None
+        # The blob survives (written outside the UoW) -> orphan candidate.
+        info = await storage.artifacts._blob.stat(digest=digest)
+        assert info is not None and info.size == len(payload)
+
+    asyncio.run(_check())
 
 
 def test_sqlalchemy_session_concurrent_append_normal_store(tmp_path):

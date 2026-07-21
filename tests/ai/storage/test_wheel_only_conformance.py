@@ -4,21 +4,23 @@
 installed wheel + the ``test`` extra, with NO source-tree access and NO in-repo
 relative imports.
 
-Three checks:
+Three checks, all in the default suite (a skipped acceptance test is not
+evidence, §6.8):
 1. The conformance package (linktools-ai/conformance/) imports ONLY the
    installed ``linktools.ai.*`` public surface + sibling modules within the
    package -- never the source tree, ``tests.*``, or private modules.
 2. The conformance suite passes when run against the installed linktools.ai
    in the current environment (subprocess pytest).
-3. (opt-in, slow) The FULL gold standard: build the wheel, install it + the
-   ``test`` extra into a fresh virtualenv, copy the conformance package in,
-   and run it there -- proving it executes with zero source-tree access. Set
-   RUN_WHEEL_CONFORMANCE=1 to run this (it builds + creates a venv)."""
+3. The FULL gold standard: build the wheel, install it + the ``test`` extra
+   into a fresh virtualenv, copy the conformance package + its sibling
+   ``testing`` conformance-testkit package in (both test-support code, never
+   shipped inside the wheel), and run it there -- proving the ADAPTER executes
+   with zero source-tree access. SKIPS honestly (not gated) when the
+   environment cannot create a working venv."""
 
 from __future__ import annotations
 
 import ast
-import os
 import shutil
 import subprocess
 import sys
@@ -93,10 +95,6 @@ def test_conformance_runs_in_current_env() -> None:
     assert "passed" in result.stdout or "no tests ran" not in result.stdout
 
 
-@pytest.mark.skipif(
-    not os.environ.get("RUN_WHEEL_CONFORMANCE"),
-    reason="slow gold-standard wheel-build test; set RUN_WHEEL_CONFORMANCE=1 to run",
-)
 def test_conformance_runs_from_built_wheel(tmp_path) -> None:
     # The gold standard (§7.2 line 1852): build the wheel, install it + the
     # [test] extra into a FRESH venv, copy the conformance package in, run it
@@ -125,6 +123,11 @@ def test_conformance_runs_from_built_wheel(tmp_path) -> None:
 
     pkg_dir = tmp_path / "conformance"
     shutil.copytree(_CONFORMANCE, pkg_dir)
+    # The testkit itself is test-support code, not shipped in the wheel --
+    # copy it alongside conformance/ (mirroring their real sibling layout
+    # under linktools-ai/) so conformance/conftest.py's sys.path insert
+    # resolves ``import testing`` the same way it does in-repo.
+    shutil.copytree(_REPO / "linktools-ai" / "testing", tmp_path / "testing")
     run = subprocess.run(
         [py, "-m", "pytest", str(pkg_dir), "-q", "-p", "no:cacheprovider"],
         capture_output=True, text=True, timeout=120,

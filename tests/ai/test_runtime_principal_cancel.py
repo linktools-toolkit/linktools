@@ -27,6 +27,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.identity.principal import PrincipalContext
 from linktools.ai.governance.security.authorization import ScopeAuthorization
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.jobs.models import ActorRef, ScopeSet
 
 _NOW = datetime(2026, 7, 6, tzinfo=timezone.utc)
@@ -79,7 +80,10 @@ def _principal(tenant_id: str = "t1", actor_id: str = "alice") -> PrincipalConte
 
 def test_cancel_without_principal_denied_by_default(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)  # default strict
+    runtime = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )  # default strict
     _seed_run(storage, "run-1", RunStatus.RUNNING)
 
     with pytest.raises(PrincipalAccessDeniedError):
@@ -90,7 +94,10 @@ def test_cancel_without_principal_denied_by_default(tmp_path):
 
 def test_cancel_without_principal_emits_deprecation(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)
+    runtime = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-2", RunStatus.RUNNING)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -102,7 +109,11 @@ def test_cancel_without_principal_emits_deprecation(tmp_path):
 
 def test_cancel_without_principal_allowed_in_local_trusted_mode(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-3", RunStatus.RUNNING)
 
     with warnings.catch_warnings():
@@ -118,7 +129,11 @@ def test_cancel_without_principal_allowed_in_local_trusted_mode(tmp_path):
 
 def test_cancel_with_principal_proceeds_and_audits(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
+    runtime = Runtime.build(
+        storage=storage,
+        authorization=ScopeAuthorization(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-4", RunStatus.RUNNING)
 
     asyncio.run(
@@ -135,7 +150,11 @@ def test_cancel_with_principal_proceeds_and_audits(tmp_path):
 
 def test_cancel_with_principal_emits_no_deprecation(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
+    runtime = Runtime.build(
+        storage=storage,
+        authorization=ScopeAuthorization(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-5", RunStatus.RUNNING)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -146,7 +165,11 @@ def test_cancel_with_principal_emits_no_deprecation(tmp_path):
 
 def test_task_attempt_can_cancel_only_its_bound_run(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, authorization=ScopeAuthorization())
+    runtime = Runtime.build(
+        storage=storage,
+        authorization=ScopeAuthorization(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-self", task_attempt_id="attempt-1")
     principal = PrincipalContext(tenant_id="t1", user_id="alice",
         actor=ActorRef(kind="task-attempt", id="attempt-1"),
@@ -161,7 +184,10 @@ def test_task_attempt_can_cancel_only_its_bound_run(tmp_path):
 
 def test_resume_without_principal_denied_by_default(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage)
+    runtime = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
 
     async def _drive():
         async for _event in runtime.resume("missing"):
@@ -180,7 +206,11 @@ def test_cancel_cross_tenant_denied(tmp_path):
     from linktools.ai.run.definition import RunDefinitionSnapshot
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-6", RunStatus.RUNNING)
     # Seed the run's definition owning it for "owner-tenant" so the principal's
     # tenant can be compared against a real resource tenant.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """Replay + snapshot validation tests (sections 25.2 / 25.3)."""
 
 import asyncio
@@ -7,7 +8,6 @@ import asyncio
 import pytest
 
 from linktools.ai.artifact import ArtifactStore
-from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
 from linktools.ai.evaluation.models import EvalExecution, EvalTarget
 from linktools.ai.evaluation.replay import (
     SnapshotValidationError,
@@ -15,13 +15,22 @@ from linktools.ai.evaluation.replay import (
     validate_snapshot,
 )
 from linktools.ai.evaluation.snapshot import RunSnapshot
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.filesystem.artifact import (
+    FilesystemArtifactBlobStore,
+    FilesystemArtifactRecordStore,
+)
+
+
+def _artifacts(tmp_path) -> ArtifactStore:
+    return ArtifactStore(
+        FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
+        FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+    )
 
 
 def _artifact(artifacts: ArtifactStore, content: bytes, tenant: str) -> str:
     async def _put() -> str:
-        rec = await artifacts.put(content, media_type="text/plain", tenant_id=tenant)
+        rec = await artifacts.put(content=content, media_type="text/plain", tenant_id=tenant, provenance=ANONYMOUS_PROVENANCE,)
         return rec.ref.id
 
     return asyncio.run(_put())
@@ -36,8 +45,8 @@ class _RecordingExecutor:
         return EvalExecution(case_id=case.id, run_id="new-run", output="replayed")
 
 
-def test_validate_snapshot_rejects_missing_artifact() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_validate_snapshot_rejects_missing_artifact(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
     snap = RunSnapshot(
         run_id="r1",
         run_record_artifact_id="missing-sha",
@@ -52,8 +61,8 @@ def test_validate_snapshot_rejects_missing_artifact() -> None:
     asyncio.run(run())
 
 
-def test_validate_snapshot_passes_when_all_artifacts_exist() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_validate_snapshot_passes_when_all_artifacts_exist(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
     rr = _artifact(artifacts, b"rec", "t1")
     rd = _artifact(artifacts, b"def", "t1")
     inp = _artifact(artifacts, b"input", "t1")
@@ -71,8 +80,8 @@ def test_validate_snapshot_passes_when_all_artifacts_exist() -> None:
     asyncio.run(run())
 
 
-def test_replay_validates_then_creates_new_execution() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_replay_validates_then_creates_new_execution(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
     rr = _artifact(artifacts, b"rec", "t1")
     rd = _artifact(artifacts, b"def", "t1")
     inp = _artifact(artifacts, b"original-input", "t1")
@@ -100,8 +109,8 @@ def test_replay_validates_then_creates_new_execution() -> None:
     asyncio.run(run())
 
 
-def test_replay_refuses_on_invalid_snapshot() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_replay_refuses_on_invalid_snapshot(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
     snap = RunSnapshot(
         run_id="r1",
         run_record_artifact_id="missing",

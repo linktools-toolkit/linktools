@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Blob orphan sweeper -- the core orphan contract + the asset-backed reference
-sweep implementation.
+"""Blob orphan sweeper -- the core orphan contract + the backend-agnostic sweep
+implementation.
 
 A blob becomes an orphan candidate when it is written but the record
 transaction that would pin it fails (or the record is later deleted). The core
@@ -13,10 +13,12 @@ eagerly would corrupt a still-in-flight put.
 
 The contract config (:class:`OrphanSweepConfig`) is core business policy and
 lives here; the enumeration + delete is adapter-specific (an external object
-store sweeps its own way). This module provides the asset-backed reference
-sweep that walks the blob and record trees via the asset-backed adapters'
-enumeration methods; a downstream adapter implements the same policy against
-its own backend.
+store sweeps its own way). This module provides the backend-agnostic sweep that
+walks the blob and record trees via the orphan-enumeration extension
+(``iter_digests_with_mtime`` / ``iter_referenced_digests``) that the in-repo
+Filesystem + SqlAlchemy backends provide. The base ArtifactBlobStore /
+ArtifactRecordStore Protocols are intentionally minimal (not every backend can
+list its blobs); a backend is sweepable only if it implements that extension.
 """
 
 from __future__ import annotations
@@ -26,7 +28,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .artifact_backends import AssetBackedArtifactBlobStore, AssetBackedArtifactRecordStore
+    from ..observability.metrics import ObservabilityMetrics
+    from .protocols import ArtifactBlobStore, ArtifactRecordStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +37,11 @@ class OrphanSweepConfig:
     """Core orphan policy. Defaults follow the plan: a 24h grace window before
     an unreferenced blob is deletable, swept at most every 6h.
 
-    ``grace_period`` is enforced by ``sweep_asset_backed_orphan_blobs`` (a blob
-    inside the window is never deleted). ``sweep_interval`` is NOT enforced by
-    the sweep function -- it is the upper bound on how often a SCHEDULER calls
-    the sweep, and is declared here so the policy lives in one place. A caller
-    that runs the sweep on a timer reads ``sweep_interval`` to size that timer.
+    ``grace_period`` is enforced by :func:`sweep_orphan_blobs` (a blob inside
+    the window is never deleted). ``sweep_interval`` is NOT enforced by the
+    sweep function -- it is the upper bound on how often a SCHEDULER calls the
+    sweep, and is declared here so the policy lives in one place. A caller that
+    runs the sweep on a timer reads ``sweep_interval`` to size that timer.
     """
 
     grace_period: timedelta = timedelta(hours=24)
@@ -54,18 +57,23 @@ class OrphanSweepStats:
     in_use: int
 
 
-async def sweep_asset_backed_orphan_blobs(
-    blob_store: "AssetBackedArtifactBlobStore",
-    record_store: "AssetBackedArtifactRecordStore",
+async def sweep_orphan_blobs(
+    blob_store: "ArtifactBlobStore",
+    record_store: "ArtifactRecordStore",
     config: "OrphanSweepConfig | None" = None,
     *,
     now: "datetime | None" = None,
-    metrics: "Any | None" = None,
+    metrics: "ObservabilityMetrics | None" = None,
 ) -> OrphanSweepStats:
-    """Delete asset-backed blobs that no record references AND that are past
-    the grace window. Blobs still in use (referenced by a live record) are never
-    touched; unreferenced blobs within the grace window are kept (an in-flight
+    """Delete blobs that no record references AND that are past the grace
+    window. Blobs still in use (referenced by a live record) are never touched;
+    unreferenced blobs within the grace window are kept (an in-flight
     transaction may still pin them).
+
+    The function is backend-agnostic: it walks ``blob_store.iter_digests_with_mtime``
+    and ``record_store.iter_referenced_digests`` through the storage Protocols,
+    so any backend that implements them (filesystem, SQLAlchemy, external) can
+    be swept.
 
     Returns counts of each disposition so a caller can observe sweep progress.
     Idempotent: re-running with the same state deletes nothing more.
@@ -120,5 +128,5 @@ async def sweep_asset_backed_orphan_blobs(
 __all__: "list[str]" = [
     "OrphanSweepConfig",
     "OrphanSweepStats",
-    "sweep_asset_backed_orphan_blobs",
+    "sweep_orphan_blobs",
 ]

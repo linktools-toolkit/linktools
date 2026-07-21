@@ -91,7 +91,17 @@ class StorageRequirementsNotMetError(StorageCapabilityError):
     declared it needs distributed). Fail-fast, never a silent degradation."""
 
 
-class StorageTransactionNotSupportedError(StorageCapabilityError):
+class StorageFeatureError(StorageCapabilityError):
+    """Raised when a Storage's declared StorageFeatures do not match its wired
+    objects -- a declared capability that has no backing object (e.g.
+    streaming_blobs=True with no ArtifactStore, or a NONE transaction scope
+    where a cross-store UoW was requested). Plan §4.5/§6.6 name this class as
+    the unified signal for feature/behavior mismatch. The more specific
+    :class:`StorageTransactionNotSupportedError` subclasses it so a caller
+    catching ``StorageFeatureError`` sees both."""
+
+
+class StorageTransactionNotSupportedError(StorageFeatureError):
     """features.transactions is TransactionScope.NONE or PROCESS_LOCAL on this
     Storage (no cross-store UoW available) but a caller requested an atomic
     cross-store write."""

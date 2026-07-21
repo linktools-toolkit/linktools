@@ -163,7 +163,7 @@ from linktools.ai.tool.idempotency import (
     IdempotencyStatus,
 )
 
-from .example_external_adapter import (
+from .conformance_adapter import (
     InMemoryArtifactBlobStore,
     InMemoryArtifactRecordStore,
     InMemoryLeaseCoordinator,
@@ -1370,12 +1370,12 @@ class InMemoryJobStore:
 
     Single-process scope: the in-process ``asyncio.Lock`` is the only
     serializer, so multi-process races are NOT guarded (mirrors
-    FilesystemTaskStore's documented scope). Dict writes are atomic in Python,
+    FilesystemJobStore's documented scope). Dict writes are atomic in Python,
     so the Filesystem journal's crash-window proof does not apply here -- a
     mid-method crash either completes the dict mutation or leaves it
     untouched, never half-applied.
 
-    Typed errors raised mirror FilesystemTaskStore exactly: TaskClaimLostError
+    Typed errors raised mirror FilesystemJobStore exactly: TaskClaimLostError
     on a fencing failure, JobNotFoundError / TaskNotFoundError on absent
     records, TaskBudgetExceededError on max_tasks / max_depth breach,
     InvalidTaskCommandError on an illegal command combination,
@@ -1456,7 +1456,7 @@ class InMemoryJobStore:
 
     def _converge_jobs(self, now: datetime) -> None:
         """Move jobs whose tasks are all terminal to their terminal target.
-        Mirrors FilesystemTaskStore._converge_jobs_sync: RUNNING+only-WAITING-
+        Mirrors FilesystemJobStore._converge_jobs_sync: RUNNING+only-WAITING-
         tasks parks at WAITING; WAITING+non-WAITING-active returns to RUNNING;
         all-terminal moves to SUCCEEDED / FAILED / CANCELLED via legal edges
         only (a WAITING job two-steps through RUNNING). Never raises -- a
@@ -1510,7 +1510,7 @@ class InMemoryJobStore:
 
     def _resolve_dependencies(self, job_id: str, now: datetime) -> None:
         """Promote PENDING tasks whose dependencies have all SUCCEEDED to READY
-        (claimable). Mirrors FilesystemTaskStore._resolve_dependencies."""
+        (claimable). Mirrors FilesystemJobStore._resolve_dependencies."""
         for task in list(self._tasks.values()):
             if task.job_id != job_id or task.status is not TaskStatus.PENDING:
                 continue
@@ -2522,11 +2522,9 @@ class InMemoryJobStore:
 
 class InMemoryExternalStorage(Storage):
     """Composition of the in-memory chain stores into one frozen ``Storage``
-    subclass. ``root`` is provided so the FilesystemRunCommitCoordinator (the
-    default commit coordinator Runtime.build selects when
-    ``features.transactions`` is PROCESS_LOCAL) can place its crash-recovery
-    journal under ``{root}/transactions`` -- Runtime's internal choice, NOT
-    an adapter import of a private module.
+    subclass. ``root`` gives callers a filesystem path for their own
+    bookkeeping (e.g. a caller-supplied commit coordinator's crash-recovery
+    journal); the in-memory stores themselves never read or write it.
 
     The state is held by the per-store dicts (each store constructed once and
     shared across callers of this Storage); the frozen dataclass holds only
@@ -2540,28 +2538,26 @@ class InMemoryExternalStorage(Storage):
 
     @property
     def root(self) -> Path:
-        """Directory the FilesystemRunCommitCoordinator uses for its crash-
-        recovery journal (``{root}/transactions``). The in-memory stores
-        themselves do not read or write this directory; only Runtime's
-        commit-coordinator construction does."""
+        """A filesystem path available to callers for their own bookkeeping.
+        The in-memory stores themselves do not read or write this
+        directory."""
         return self._root
 
 
 def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
     """Wire every Store Protocol to a fresh in-memory implementation and
-    return a ``Storage`` whose ``root`` satisfies the FilesystemRunCommit-
-    Coordinator bridge contract.
+    return a ``Storage`` composed entirely from public Store Protocols.
 
-    Features are declared as ``FILE_STORAGE_FEATURES`` so Runtime.build
-    selects the sequential ``FilesystemRunCommitCoordinator`` (the same it
-    selects for ``FilesystemStorage``). Transactions are
-    ``NoCrossStoreTransactions`` -- the in-memory stores are independent
-    (no shared atomic scope), which the honest PROCESS_LOCAL declaration
-    reflects. Coordination is the existing ``InMemoryLeaseCoordinator``;
-    artifacts reuse the existing ``InMemoryArtifactBlobStore`` /
-    ``InMemoryArtifactRecordStore``; assets use the public
-    ``AssetStore(primary=MemoryAssetBackend())`` composition; tasks uses
-    the new ``InMemoryJobStore`` so a downstream wiring ``JobRuntime`` on
+    Features are declared as ``FILE_STORAGE_FEATURES`` (PROCESS_LOCAL
+    coordination/transactions) since the in-memory stores are independent
+    (no shared atomic scope) -- the same honest declaration
+    ``FilesystemStorage`` makes for the same reason. Transactions are
+    ``NoCrossStoreTransactions``. Coordination is the existing
+    ``InMemoryLeaseCoordinator``; artifacts reuse the existing
+    ``InMemoryArtifactBlobStore`` / ``InMemoryArtifactRecordStore``; assets
+    use the public ``AssetStore(primary=MemoryAssetBackend())`` composition;
+    tasks uses the new ``InMemoryJobStore`` so a downstream wiring
+    ``JobRuntime`` on
     this Storage gets a real JobStore (not None)."""
     runs = InMemoryRunStore()
     sessions = InMemorySessionStore()
@@ -2577,7 +2573,7 @@ def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
     record_store = InMemoryArtifactRecordStore()
     artifacts = ArtifactStore(blob_store, record_store)
     assets = AssetStore(primary=MemoryAssetBackend())
-    tasks = InMemoryJobStore()
+    jobs = InMemoryJobStore()
     root_path = Path(root)
     root_path.mkdir(parents=True, exist_ok=True)
     return InMemoryExternalStorage(
@@ -2596,7 +2592,7 @@ def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
         transactions=NoCrossStoreTransactions("InMemoryExternalStorage"),
         run_definitions=run_definitions,
         artifacts=artifacts,
-        tasks=tasks,
+        jobs=jobs,
     )
 
 

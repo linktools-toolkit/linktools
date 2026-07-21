@@ -22,6 +22,7 @@ from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.retry import DefaultRetryPolicy
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 # --- contract: tools-only ToolContribution partial/full filtering ---
@@ -132,7 +133,11 @@ async def test_inspect_returns_immutable_capability_inspection(tmp_path):
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.capability.models import CapabilityInspection
 
-    rt = Runtime.build(storage=FilesystemStorage(root=tmp_path))
+    storage = FilesystemStorage(root=tmp_path)
+    rt = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="a",
         name="a",
@@ -225,6 +230,7 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="a",
@@ -342,6 +348,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="a",

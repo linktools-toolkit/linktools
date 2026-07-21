@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+from linktools.ai.storage.filesystem.job import FilesystemJobStore
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.task import SqlAlchemyTaskStore
+from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -52,12 +52,12 @@ def _run(coro):
 async def _make_store(backend, tmp_path):
     clock = FakeClock(datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc))
     if backend == "file":
-        return FilesystemTaskStore(tmp_path, clock=clock)
+        return FilesystemJobStore(tmp_path, clock=clock)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/sig.db")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyTaskStore(session_factory=factory, clock=clock)
+    return SqlAlchemyJobStore(session_factory=factory, clock=clock)
 
 
 @pytest.fixture(params=["file", "sqlite"])

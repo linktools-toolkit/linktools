@@ -8,6 +8,7 @@ from linktools.ai.model.router import ModelRouter
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 _DEGRADE_KIND = "degrade"
 
@@ -46,10 +47,12 @@ class _DegradingProvider:
 
 
 def _runtime(tmp_path, *capabilities) -> Runtime:
+    storage = FilesystemStorage(root=tmp_path)
     return Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(),
         providers=RuntimeDependencies(capabilities=tuple(capabilities)),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
 
 

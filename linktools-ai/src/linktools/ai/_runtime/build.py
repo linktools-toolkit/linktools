@@ -28,15 +28,20 @@ from ..mcp.client import MCPConnectionManager
 from ..mcp.provider import MCPProvider
 from ..extension.capability_provider import ExtensionProvider
 from .dependencies import RuntimeDependencies
+from ..run.commit import RunCommitCoordinator
 from ..run.controller import RunController
 from ..run.models import RunnableType
 from ..run.options import RuntimeCancellationOptions
+from ..run.requirements import (
+    RuntimeRequirements,
+    RuntimeTopology,
+    derive_runtime_requirements,
+)
 from ..run.schema_registry import OutputSchemaRegistry
 from ..observability.metrics import InMemoryMetrics
 from ..session.models import SessionRecord, SessionStatus
 from ..skill.provider import SkillProvider
 from ..storage.facade import Storage
-from ..storage.features import TransactionScope
 from ..subagent.models import SubagentResult
 from ..subagent.provider import SubagentProvider
 from ..swarm.runner import SwarmRunner
@@ -49,7 +54,6 @@ if TYPE_CHECKING:
     from ..retrieval.retriever import Retriever
     from ..run.dispatch import RunDispatcher, RunDispatchRequest
     from ..run.models import RunResult
-    from ..run.requirements import RuntimeRequirements
     from ..swarm.runner import SwarmRunner as _SwarmRunner
 
 
@@ -103,6 +107,13 @@ class RuntimeSettings:
     cancellation: RuntimeCancellationOptions = dataclasses.field(
         default_factory=RuntimeCancellationOptions
     )
+    # The shape of the process graph this Runtime is assembled for. The build
+    # kernel derives default capability minimums from this when the caller does
+    # not pass explicit RuntimeRequirements; the capability gate stays the
+    # single source of truth. Carried on RuntimeSettings (a serializable value)
+    # so the topology travels with the rest of the configuration, not as a
+    # loose build-time-only field.
+    topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -136,6 +147,12 @@ class RuntimeBuildConfig:
 
     storage: Storage
     providers: RuntimeDependencies
+    # The cross-store commit coordinator. REQUIRED (no default): the build
+    # kernel no longer selects one based on Storage type -- the composition
+    # root (the caller that constructs this config) picks the concrete
+    # coordinator and injects it. ``build_runtime_components`` fail-closes if
+    # this is None rather than silently degrading.
+    commit_coordinator: "RunCommitCoordinator | None"
     # Typed skill-private-subagent wiring (was 5 Any fields on RuntimeDependencies).
     # Injected straight into the SubagentProvider / SkillProvider; never flows
     # through RuntimeDependencies (which would cycle providers <-> skill/subagent).
@@ -154,22 +171,10 @@ class RuntimeBuildConfig:
     authorization: Any = None
     # Optional capability minimums the topology declares it needs; the
     # capability gate (enforce_storage_capability_gate) refuses a Storage whose
-    # StorageFeatures fall below these at build time. None = no gate.
+    # StorageFeatures fall below these at build time. None = derive from
+    # ``settings.topology`` (single-process -> no minimums; multi-worker ->
+    # distributed coordination + leasing + fencing).
     requirements: "RuntimeRequirements | None" = None
-
-
-def _build_file_commit_coordinator(storage):
-    """Build a FilesystemRunCommitCoordinator from a File-backed Storage."""
-    from ..storage.filesystem.commit import FilesystemRunCommitCoordinator
-
-    return FilesystemRunCommitCoordinator(
-        approval_store=storage.approvals,
-        checkpoint_store=storage.checkpoints,
-        run_store=storage.runs,
-        session_store=storage.sessions,
-        event_store=storage.events,
-        transactions_root=storage.root / "transactions",
-    )
 
 
 def _capability_attribute_from_features(features) -> "dict[str, str]":
@@ -185,20 +190,6 @@ def _capability_attribute_from_features(features) -> "dict[str, str]":
         }
     except Exception:  # noqa: BLE001 - attributes are observability-only
         return {}
-
-
-def _build_commit_coordinator(storage):
-    """Build the storage-appropriate RunCommitCoordinator.
-
-    SQL-backed storage (database-scoped transactions) gets the atomic
-    SqlAlchemyRunCommitCoordinator -- pause/complete share one transaction so
-    the cross-store commit is all-or-nothing. File-backed storage gets the
-    sequential FilesystemRunCommitCoordinator (no cross-store txn available)."""
-    if storage.features.transactions is TransactionScope.DATABASE:
-        from ..storage.sqlalchemy.commit import SqlAlchemyRunCommitCoordinator
-
-        return SqlAlchemyRunCommitCoordinator(storage)
-    return _build_file_commit_coordinator(storage)
 
 
 def _build_capability_registry(
@@ -436,6 +427,16 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     RuntimeBuildConfig. Internal splits: resolve security + exposure -> build
     executor -> build capability assembler -> build compiler -> build runner ->
     build swarm runner."""
+    if config.commit_coordinator is None:
+        # The build kernel no longer selects a coordinator based on Storage
+        # type -- the composition root must inject one. Fail fast at build
+        # time rather than silently degrading to a no-op commit path.
+        from ..errors import RuntimeInitializationError
+
+        raise RuntimeInitializationError(
+            "RunCommitCoordinator must be injected; the build kernel no "
+            "longer selects one"
+        )
     if config.settings.multi_tenant and config.execution is not None:
         # Protocol runtime checks cannot distinguish a trusted local backend;
         # use its declared isolation level when available.
@@ -454,15 +455,44 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         raise RuntimeInitializationError(
             "RunDefinitionStore is required for resumable runs"
         )
-    # Pure-capability gate: when the caller declares RuntimeRequirements,
-    # refuse a Storage whose StorageFeatures fall below them -- fail fast
-    # rather than silently degrading to a weaker scope.
+    # Pure-capability gate: derive the effective requirements from the
+    # caller's explicit declaration OR the declared topology (single-process
+    # -> no minimums; multi-worker -> distributed coordination + leasing +
+    # fencing), then refuse a Storage whose StorageFeatures fall below them.
+    # The gate runs unconditionally -- topology-derived defaults and
+    # caller-supplied explicit minimums hit the same enforcement path.
     from ..errors import StorageRequirementsNotMetError
-    from ..run.requirements import enforce_storage_capability_gate
+    from ..run.requirements import (
+        enforce_storage_capability_gate,
+        enforce_storage_feature_consistency,
+    )
 
+    effective_requirements = (
+        config.requirements
+        if config.requirements is not None
+        else derive_runtime_requirements(
+            settings=config.settings,
+            # The gate reads dependencies.storage / .run_commit_coordinator for
+            # real-object checks; populate them from the composition root so the
+            # effective dependencies carry the wired objects, not the
+            # spec-providers-only bundle the caller may have passed.
+            dependencies=dataclasses.replace(
+                config.providers,
+                storage=config.storage,
+                run_commit_coordinator=config.commit_coordinator,
+            ),
+        )
+    )
     build_metrics = config.metrics
     try:
-        enforce_storage_capability_gate(config.storage.features, config.requirements)
+        enforce_storage_capability_gate(
+            config.storage.features, effective_requirements
+        )
+        # Beyond feature FLAGS, verify the Storage wired the real OBJECTS behind
+        # them (a backend declaring streaming_blobs without an ArtifactStore, or
+        # transactions without a manager, would otherwise AttributeError at first
+        # use).
+        enforce_storage_feature_consistency(config.storage)
     except StorageRequirementsNotMetError:
         # The gate's message identifies which capability fell short. Record it
         # under both the generic build-failure counter (any runtime build
@@ -509,7 +539,6 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     resolved_executor = config.tool_executor
     if resolved_executor is None:
         from ..governance.policy.engine import PolicyEngine
-        from ..storage.artifact_backends import build_artifact_store_from_assets
 
         rules: "list[Any]" = []
         if baseline.enabled and baseline.command_policy is not None:
@@ -523,7 +552,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             approval_store=config.storage.approvals,
             idempotency_store=config.storage.idempotency,
             metrics=config.metrics or InMemoryMetrics(),
-            receipt_store=build_artifact_store_from_assets(config.storage.assets),
+            receipt_store=config.storage.artifacts,
             tenant_id_resolver=lambda context: context.tenant_id,
         )
     compiler = AgentCompiler(
@@ -587,7 +616,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         security_audit_failure_mode=getattr(
             baseline, "audit_failure_mode", "fail_closed"
         ),
-        commit_coordinator=_build_commit_coordinator(config.storage),
+        commit_coordinator=config.commit_coordinator,
     )
     if dispatcher_handle is not None:
         dispatcher_handle.bind(runner)

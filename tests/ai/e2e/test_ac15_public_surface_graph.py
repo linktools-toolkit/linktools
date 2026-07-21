@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AC-15 evidence (plan evidence type: "import graph"): the run -> approval ->
-resume -> artifact -> job chain is drivable through the PUBLIC linktools.ai
-surface alone -- the chain-driving tests reach no private ``_runtime`` or
-underscore-private module. (The chain's correctness is covered by the
-component tests -- run/complete here, pause/approve/resume in
-test_runtime_resume.py, artifact and job in their suites; this test pins the
-public-surface-only property so a future change cannot quietly reach into
-runtime internals to drive the chain.)
+"""SECONDARY import guard, NOT the AC-15 proof (plan §6.8: '仅扫描内部 E2E 是否
+import 私有模块' is explicitly listed as non-evidence).
 
-The strong AC-15 form -- a from-scratch EXTERNAL adapter running the full chain
--- needs the adapter to implement the full Storage surface (RunStore /
-SessionStore / EventStore / CheckpointStore / ApprovalStore / IdempotencyStore
-+ a transaction manager), which is a separate, larger effort. Protocol
-sufficiency for the artifact-domain Protocols the external adapter does cover
-(blob / record / lease) is proven by tests/ai/storage/test_external_adapter_
-conformance.py (Phase 9 op 4)."""
+The strong AC-15 form -- a from-scratch EXTERNAL adapter driving the FULL
+connected run -> approval -> resume -> artifact -> job chain through the public
+Protocol surface alone -- lives in
+``tests/ai/storage/test_external_adapter_full_chain.py::
+test_external_adapter_full_connected_chain_run_approval_resume_artifact_job``.
+That test is the AC-15 evidence; it runs the connected chain through the
+adapter's public stores with real persistence assertions.
+
+This test is retained only as a defense-in-depth IMPORT GUARD: it AST-scans the
+in-repo chain-driving modules (run/complete, pause/approve/resume, MCP) and
+fails if any reaches into ``linktools.ai._runtime`` or an underscore-private
+module -- catching a regression where an in-repo test quietly uses a private
+surface. It is deliberately NOT counted as AC-15 evidence; the connected
+external-adapter chain is."""
 
 from __future__ import annotations
 

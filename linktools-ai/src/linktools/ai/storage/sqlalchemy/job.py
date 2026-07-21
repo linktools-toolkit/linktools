@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemyTaskStore: DB-backed JobStore.
+"""SqlAlchemyJobStore: DB-backed JobStore.
 
 Mirrors the other SQLAlchemy stores: a ``session_factory`` constructor and
 read-check-mutate-commit transactions. The reliable-task semantics live in SQL:
@@ -335,7 +335,7 @@ def _row_to_attempt(row: TaskAttemptRow) -> TaskAttemptRecord:
     )
 
 
-class SqlAlchemyTaskStore:
+class SqlAlchemyJobStore:
     def __init__(
         self,
         *,
@@ -2107,4 +2107,4 @@ def _retry_delay(policy: RetryPolicy, attempt_number: int) -> float:
     return max(0.0, base)
 
 
-__all__: "list[str]" = ["SqlAlchemyTaskStore"]
+__all__: "list[str]" = ["SqlAlchemyJobStore"]

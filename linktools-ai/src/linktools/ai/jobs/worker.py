@@ -194,7 +194,7 @@ class JobWorker:
             raise _InputResolutionFailed
         try:
             record = await self._artifact_store.stat(
-                artifact_id, tenant_id=job.principal.tenant_id
+            artifact_id=artifact_id, tenant_id=job.principal.tenant_id
             )
         except Exception as exc:  # noqa: BLE001 - any store error fails the input
             await self._commit_input_failure(

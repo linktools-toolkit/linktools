@@ -99,7 +99,7 @@ class TaskEvalExecutor:
             return None, {}
         try:
             content = await self._artifact_store.get(
-                output_artifact_id, tenant_id=self._tenant_id
+                artifact_id=output_artifact_id, tenant_id=self._tenant_id
             )
         except Exception:  # noqa: BLE001 - read is best-effort
             return None, {}

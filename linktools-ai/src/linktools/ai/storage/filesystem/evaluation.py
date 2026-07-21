@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """FilesystemEvaluationStore: a persistent, local EvalStore.
 
-Mirrors FilesystemTaskStore's pattern (an asyncio.Lock across asyncio.to_thread, and
+Mirrors FilesystemJobStore's pattern (an asyncio.Lock across asyncio.to_thread, and
 per-record JSON files written atomically with fsync) so the default-local
 Storage (FilesystemStorage) provides real cross-process evaluation persistence. The
 generic to_jsonable/from_jsonable serde handles the EvalRun/EvalResult models

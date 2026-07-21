@@ -53,11 +53,15 @@ class StorageFeatures:
     streaming_blobs: bool
     full_text_search: bool
     semantic_search: bool
-    multi_process_swarm: bool
 
 
 FILE_STORAGE_FEATURES = StorageFeatures(
-    transactions=TransactionScope.PROCESS_LOCAL,
+    # NONE: each file store is independently durable (atomic writes), but there
+    # is NO general cross-store transaction -- Storage.transaction() raises.
+    # Claiming PROCESS_LOCAL would over-state a capability the Filesystem cannot
+    # prove across the union of stores (the Filesystem's cross-store UoW is
+    # not implemented).
+    transactions=TransactionScope.NONE,
     coordination=CoordinationScope.PROCESS_LOCAL,
     optimistic_concurrency=True,
     append_only_events=True,
@@ -67,7 +71,6 @@ FILE_STORAGE_FEATURES = StorageFeatures(
     streaming_blobs=True,
     full_text_search=False,
     semantic_search=False,
-    multi_process_swarm=False,
 )
 
 SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
@@ -81,7 +84,6 @@ SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
     streaming_blobs=True,
     full_text_search=True,
     semantic_search=False,
-    multi_process_swarm=False,
 )
 
 

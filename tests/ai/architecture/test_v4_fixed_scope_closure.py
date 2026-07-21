@@ -120,6 +120,7 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
     Runtime.build raises RuntimeInitializationError when it is None."""
     from linktools.ai.errors import RuntimeInitializationError
     from linktools.ai.runtime import Runtime
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     fields = {f.name: f for f in dataclasses.fields(FilesystemStorage)}
     assert fields["run_definitions"].default is dataclasses.MISSING, (
@@ -129,7 +130,10 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
     storage = FilesystemStorage(root=tmp_path)
     object.__setattr__(storage, "run_definitions", None)
     with pytest.raises(RuntimeInitializationError):
-        Runtime.build(storage=storage)
+        Runtime.build(
+            storage=storage,
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -248,7 +248,7 @@ class RuntimeTaskHandler:
         output_artifact = None
         if result is not None:
             try:
-                output_artifact = await self._seal_run_result(result, context)
+                output_artifact = await self._seal_run_result(result, context, run_id)
             except _OutputTooLarge:
                 return TaskFailure(
                     kind=TaskFailureKind.PERMANENT,
@@ -362,7 +362,7 @@ class RuntimeTaskHandler:
         make the run non-deterministic."""
         tenant = context.principal.tenant_id
         for snap in context.resource_snapshots:
-            record = await self._artifact_store.stat(snap.artifact_id, tenant_id=tenant)
+            record = await self._artifact_store.stat(artifact_id=snap.artifact_id, tenant_id=tenant)
             if record is None or record.ref.sha256 != snap.sha256:
                 return TaskFailure(
                     kind=TaskFailureKind.INVALID_INPUT,
@@ -374,7 +374,7 @@ class RuntimeTaskHandler:
                 )
         return None
 
-    async def _seal_run_result(self, result, context: TaskContext):
+    async def _seal_run_result(self, result, context: TaskContext, run_id: str):
         """Seal the RunResult into a content-addressed Artifact so downstream
         tasks can consume the run's output through the artifact chain. The
         RunResult is serialized as JSON via the domain serde; an output the
@@ -383,6 +383,7 @@ class RuntimeTaskHandler:
         import json
 
         from ..models import to_jsonable
+        from ...artifact.models import ArtifactProvenance
 
         output = getattr(result, "output", result)
         token_usage = dict(getattr(result, "token_usage", {}) or {})
@@ -405,12 +406,14 @@ class RuntimeTaskHandler:
         if len(payload) > MAX_OUTPUT_PAYLOAD_BYTES:
             raise _OutputTooLarge()
         record = await self._artifact_store.put(
-            payload,
+            content=payload,
             media_type="application/json",
             tenant_id=context.principal.tenant_id,
-            created_by_job_id=context.job_id,
-            created_by_task_id=context.task_id,
-            created_by_attempt_id=context.attempt_id,
+            provenance=ArtifactProvenance(
+                producer_kind="job_attempt",
+                producer_id=context.attempt_id,
+                run_id=run_id,
+            ),
         )
         return record.ref
 

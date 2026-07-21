@@ -104,18 +104,28 @@ def validate_job_budget(budget: object) -> None:
     must be >= 1 or the root task can never coexist with its own budget. The
     other caps (depth/attempts/runtime/tokens/cost) are only bounded below by
     positivity when set. ``max_tasks`` is the one that can brick a legal job."""
-    max_tasks = getattr(budget, "max_tasks", None)
+    # Read each cap defensively: budget may be the canonical TaskBudget
+    # dataclass OR a deserialized Mapping/Mapping-like object an external
+    # adapter constructs. The accessor returns the attribute verbatim (no type
+    # coercion) so the comparisons below keep their original semantics -- a
+    # malformed non-int value raises at the comparison instead of being silently
+    # treated as unset. The field name is passed as a parameter so none is
+    # hard-coded inside the accessor.
+    def _optional_int(name: str) -> "int | None":
+        return getattr(budget, name, None)
+
+    max_tasks = _optional_int("max_tasks")
     if max_tasks is not None and max_tasks < 1:
         raise ValueError(
             "job budget max_tasks must be >= 1 because every job has a root task"
         )
-    max_depth = getattr(budget, "max_depth", None)
+    max_depth = _optional_int("max_depth")
     if max_depth is not None and max_depth < 0:
         raise ValueError("job budget max_depth must be >= 0")
-    max_attempts = getattr(budget, "max_attempts", None)
+    max_attempts = _optional_int("max_attempts")
     if max_attempts is not None and max_attempts < 1:
         raise ValueError("job budget max_attempts must be >= 1")
-    max_runtime = getattr(budget, "max_runtime_seconds", None)
+    max_runtime = _optional_int("max_runtime_seconds")
     if max_runtime is not None and max_runtime <= 0:
         raise ValueError("job budget max_runtime_seconds must be > 0")
 

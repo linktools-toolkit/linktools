@@ -20,6 +20,7 @@ from linktools.ai.governance.security.pipeline import (
     ToolResultEvent,
 )
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 class _DenyAllPipeline:
@@ -85,6 +86,7 @@ async def test_runtime_with_default_baseline_runs(tmp_path):
     rt = Runtime.build(
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     result = await rt.run(_spec(), "hello")
     assert "hello" in str(result.output)
@@ -100,6 +102,7 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         security=SecurityBaseline(enabled=False),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     result = await rt.run(_spec(), "hello")
     assert "hello" in str(result.output)
@@ -134,13 +137,15 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
 
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",
@@ -183,14 +188,16 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
 
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(enabled=False),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",
@@ -243,11 +250,13 @@ async def test_pipeline_attached_to_runtime(tmp_path):
 
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=pipeline),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",
@@ -333,6 +342,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
         security=SecurityBaseline(pipeline=_RequireApprovalPipeline()),
         options=CapabilityRuntimeOptions(tool_exposure=CapabilityToolExposurePolicy()),
         local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",
@@ -431,12 +441,14 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
 
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=LocalExecutionBackend(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_ModifyPathPipeline("real.txt")),
         options=CapabilityRuntimeOptions(tool_exposure=CapabilityToolExposurePolicy()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",
@@ -470,13 +482,15 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
         model=FunctionModel(lambda m, i: ModelResponse(parts=[TextPart(content="ok")])),
     )
     backend = LocalExecutionBackend(runtime_dir=tmp_path)
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(registry=registry),
         execution=backend,
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy()
         ),  # defaults: no execution tools
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="e2e",

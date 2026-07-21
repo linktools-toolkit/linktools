@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemyTaskStore contract (plan section 28 phase-4 acceptance).
+"""SqlAlchemyJobStore contract (plan section 28 phase-4 acceptance).
 
-Exercises the same reliable-task invariants as the FilesystemTaskStore suite, over an
+Exercises the same reliable-task invariants as the FilesystemJobStore suite, over an
 in-memory SQLite backend. The CAS ``UPDATE ... WHERE status='ready'`` + rowcount
 is the atomic claim that stops two workers taking one task; the fencing
 ``UPDATE ... WHERE status='claimed' AND lease_owner AND ... AND fencing_token``
@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.task import SqlAlchemyTaskStore
+from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -102,7 +102,7 @@ def task_store(tmp_path):
 
     asyncio.run(_create_tables(engine))
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyTaskStore(session_factory=factory, clock=clock)
+    return SqlAlchemyJobStore(session_factory=factory, clock=clock)
 
 
 async def _create_tables(engine) -> None:

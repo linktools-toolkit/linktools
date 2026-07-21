@@ -26,6 +26,8 @@ from ..swarm.spec import SwarmSpecProvider
 if TYPE_CHECKING:
     from ..capability.provider import CapabilityProvider
     from ..extension.resolver import EntrypointResolver
+    from ..run.commit import RunCommitCoordinator
+    from ..storage.facade import Storage
 
 T = TypeVar("T")
 
@@ -75,10 +77,20 @@ class RuntimeDependencies:
     extension_resources: "ExtensionResourceProvider | None" = None
     entrypoints: "EntrypointResolver | None" = None
     capabilities: "tuple[CapabilityProvider, ...]" = ()
+    # The composition-root objects the capability gate (derive_runtime_requirements)
+    # reads to verify real-object requirements (plan: "RuntimeDependencies 增加
+    # storage + run_commit_coordinator"). Optional so a spec-providers-only
+    # bundle (the common case for ``RuntimeDependencies()`` in tests) stays
+    # constructible; the build kernel populates these on the effective
+    # dependencies it hands the gate so multi-worker / transaction requirements
+    # are checked against the real Storage, not a None.
+    storage: "Storage | None" = None
+    run_commit_coordinator: "RunCommitCoordinator | None" = None
     # NOTE: skill-private-subagent wiring no longer lives here -- it flows
     # through a typed SkillPrivateSubagentConfig injected via
     # ``Runtime.build(skill_subagent=...)`` straight into the SubagentProvider.
-    # RuntimeDependencies is now spec-providers + capabilities only.
+    # RuntimeDependencies is spec-providers + capabilities + the two
+    # composition-root objects the gate reads.
 
     def is_empty(self) -> bool:
         return (

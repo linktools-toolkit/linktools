@@ -11,7 +11,7 @@ StorageTransactionManagerContract) against the in-repo reference backends:
 * AssetStoreContract -> FilesystemStorage.assets (FileAssetBackend under an
   AssetStore primary+overlay composition).
 * EventStoreContract -> FilesystemStorage.events (FilesystemEventStore).
-* JobStoreContract -> FilesystemStorage.tasks (FilesystemTaskStore).
+* JobStoreContract -> FilesystemStorage.jobs (FilesystemJobStore).
 * StorageTransactionManagerContract -> BOTH SqlAlchemyStorage.transactions
   (the supported cross-store UoW path -- skipped when SQLAlchemy is not
   installed) AND NoCrossStoreTransactions (the unsupported-scope path that
@@ -26,22 +26,25 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.storage.testing import (
+from testing import (
     AssetStoreContract,
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
     EventStoreContract,
     JobStoreContract,
     LeaseCoordinatorContract,
+    StorageFeaturesContract,
     StorageTransactionManagerContract,
 )
 
 
-def test_public_testkit_exports_all_seven_contracts() -> None:
-    """The C5 closure: the public testkit surface must expose all seven
-    Contracts so a downstream adapter can subclass each one and run the
-    contract suite in its own CI."""
-    from linktools.ai.storage import testing
+def test_public_testkit_exports_all_eight_contracts() -> None:
+    """The testkit surface must expose all eight Contracts so a downstream
+    adapter can subclass each one and run the contract suite in its own CI.
+    The eighth, StorageFeaturesContract, pins feature self-consistency: a
+    Storage's declared StorageFeatures must match what its stores actually
+    support (transactions=DATABASE yields a real UoW; NONE raises)."""
+    import testing
 
     expected = {
         "AssetStoreContract",
@@ -50,6 +53,7 @@ def test_public_testkit_exports_all_seven_contracts() -> None:
         "EventStoreContract",
         "JobStoreContract",
         "LeaseCoordinatorContract",
+        "StorageFeaturesContract",
         "StorageTransactionManagerContract",
     }
     assert expected.issubset(set(dir(testing)))
@@ -86,8 +90,8 @@ class TestEventStoreConformance(EventStoreContract):
 
 
 class TestJobStoreConformance(JobStoreContract):
-    """JobStoreContract against FilesystemStorage.tasks -- the in-repo
-    reference FilesystemTaskStore."""
+    """JobStoreContract against FilesystemStorage.jobs -- the in-repo
+    reference FilesystemJobStore."""
 
     @pytest.fixture(autouse=True)
     def _build_storage(self, tmp_path) -> None:
@@ -96,7 +100,7 @@ class TestJobStoreConformance(JobStoreContract):
         self._storage = FilesystemStorage(root=tmp_path)
 
     def job_store(self):
-        return self._storage.tasks
+        return self._storage.jobs
 
 
 # --- additional parameterizations -----------------------------------------
@@ -126,7 +130,7 @@ class TestExternalEventStoreConformance(EventStoreContract):
     EventStore surface is sufficient for a downstream adapter."""
 
     def event_store(self):
-        from .example_external_adapter_full import InMemoryEventStore
+        from external_adapter import InMemoryEventStore
 
         return InMemoryEventStore()
 
@@ -139,7 +143,7 @@ class TestExternalJobStoreConformance(JobStoreContract):
     JobStore surface is sufficient for a downstream adapter."""
 
     def job_store(self):
-        from .example_external_adapter_full import InMemoryJobStore
+        from external_adapter import InMemoryJobStore
 
         return InMemoryJobStore()
 
@@ -157,6 +161,23 @@ class TestNoCrossStoreTransactionsConformance(StorageTransactionManagerContract)
         from linktools.ai.storage.transaction import NoCrossStoreTransactions
 
         return NoCrossStoreTransactions(backend_name="TestBackend")
+
+
+class TestFilesystemStorageFeaturesConformance(StorageFeaturesContract):
+    """StorageFeaturesContract against FilesystemStorage. The Filesystem
+    declares transactions=NONE (each file store is independently durable, no
+    cross-store UoW), so transaction() must raise at the call. streaming_blobs
+    is True, so artifacts MUST be wired. Pins the feature self-consistency
+    contract against the in-repo file reference."""
+
+    @pytest.fixture(autouse=True)
+    def _build_storage(self, tmp_path) -> None:
+        from linktools.ai.storage.facade import FilesystemStorage
+
+        self._storage = FilesystemStorage(root=tmp_path)
+
+    def storage(self):
+        return self._storage
 
 
 # --- SqlAlchemy cross-store UoW path --------------------------------------
@@ -184,7 +205,9 @@ def _build_sqlalchemy_storage(tmp_path):
     asyncio.run(_create())
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/contract.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(session_factory=session_factory)
+    return SqlAlchemyStorage(
+        session_factory=session_factory, blobs_root=tmp_path / "blobs"
+    )
 
 
 class TestSqlAlchemyAssetStoreConformance(AssetStoreContract):
@@ -217,8 +240,8 @@ class TestSqlAlchemyEventStoreConformance(EventStoreContract):
 
 
 class TestSqlAlchemyJobStoreConformance(JobStoreContract):
-    """JobStoreContract against SqlAlchemyStorage.tasks -- the DB-backed
-    SqlAlchemyTaskStore. Mirrors the Filesystem reference's fencing-token /
+    """JobStoreContract against SqlAlchemyStorage.jobs -- the DB-backed
+    SqlAlchemyJobStore. Mirrors the Filesystem reference's fencing-token /
     transition semantics; the contract verifies a SQL backend honors the same
     reliable-task guarantees."""
 
@@ -227,13 +250,19 @@ class TestSqlAlchemyJobStoreConformance(JobStoreContract):
         self._storage = _build_sqlalchemy_storage(tmp_path)
 
     def job_store(self):
-        return self._storage.tasks
+        return self._storage.jobs
 
 
 class TestSqlAlchemyTransactionManagerConformance(StorageTransactionManagerContract):
     """The supported-scope path: SqlAlchemyStorage.transactions yields a real
     UnitOfWork whose stores share one AsyncSession + one transaction. A clean
-    exit commits; an exception rolls back with no partial commit."""
+    exit commits; an exception rolls back with no partial commit.
+
+    The contract's default ``_write_inside_scope`` / ``_verify_rollback``
+    pair already probes via ``uow.sessions`` through a fresh transaction, so
+    no override is needed -- the default IS the assertion a real rollback
+    undoes writes (the row written inside the rolled-back scope must be
+    absent through a subsequent scope)."""
 
     @pytest.fixture(autouse=True)
     def _build_storage(self, tmp_path) -> None:
@@ -242,23 +271,17 @@ class TestSqlAlchemyTransactionManagerConformance(StorageTransactionManagerContr
     def transaction_manager(self):
         return self._storage.transactions
 
-    async def _write_inside_scope(self, uow) -> None:
-        from linktools.ai.session.models import SessionRecord, SessionStatus
 
-        now = datetime.now(timezone.utc)
-        await uow.sessions.create(
-            SessionRecord(
-                id="tx-rollback",
-                parent_id=None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
+class TestSqlAlchemyStorageFeaturesConformance(StorageFeaturesContract):
+    """StorageFeaturesContract against SqlAlchemyStorage. The SQL backend
+    declares transactions=DATABASE (a real cross-store UoW), so
+    transaction() must yield a real UoW (not raise). streaming_blobs is True,
+    so artifacts MUST be wired. Pins the feature self-consistency contract
+    against the in-repo SQL reference."""
 
-    async def _verify_rollback(self) -> None:
-        # After the scope rolled back, the row written inside the scope must
-        # not be visible through a fresh query.
-        fetched = await self._storage.sessions.get("tx-rollback")
-        assert fetched is None
+    @pytest.fixture(autouse=True)
+    def _build_storage(self, tmp_path) -> None:
+        self._storage = _build_sqlalchemy_storage(tmp_path)
+
+    def storage(self):
+        return self._storage

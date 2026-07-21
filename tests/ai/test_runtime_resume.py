@@ -51,6 +51,7 @@ from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.tool.executor import GovernedToolInvoker
 
 TOOL_NAME = "risky"
@@ -146,6 +147,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FilesystemStorage]":
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     return runtime, storage
 
@@ -614,6 +616,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
             tool_executor=executor,
             providers=RuntimeDependencies(capabilities=(_PromptedRiskyProvider(),)),
             local_trusted_mode=True,
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
         )
         spec = _spec()
         now = datetime.now(timezone.utc)

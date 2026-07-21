@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FilesystemTaskStore contract -- the reliable-task invariants over the file backend
+"""FilesystemJobStore contract -- the reliable-task invariants over the file backend
 (plan section 28 phase-3 acceptance, section 30.4 key invariants).
 
 A fake clock drives lease/retry timing so no real sleep is needed (plan 30.5).
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+from linktools.ai.storage.filesystem.job import FilesystemJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -94,16 +94,16 @@ def _task(clock, *, task_id="t1", job_id="j1", handler="runtime") -> TaskRecord:
 
 
 @pytest.fixture
-def task_store(tmp_path: Path) -> FilesystemTaskStore:
+def task_store(tmp_path: Path) -> FilesystemJobStore:
     clock = FakeClock(datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc))
-    return FilesystemTaskStore(tmp_path, clock=clock)
+    return FilesystemJobStore(tmp_path, clock=clock)
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-def test_create_claim_complete_completes_job(task_store: FilesystemTaskStore) -> None:
+def test_create_claim_complete_completes_job(task_store: FilesystemJobStore) -> None:
     clock = task_store._clock
 
     async def run() -> None:
@@ -124,7 +124,7 @@ def test_create_claim_complete_completes_job(task_store: FilesystemTaskStore) ->
 
 
 def test_stale_fencing_token_is_rejected_after_reclaim(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     clock = task_store._clock
 
@@ -147,7 +147,7 @@ def test_stale_fencing_token_is_rejected_after_reclaim(
     _run(run())
 
 
-def test_completed_task_is_not_reclaimed(task_store: FilesystemTaskStore) -> None:
+def test_completed_task_is_not_reclaimed(task_store: FilesystemJobStore) -> None:
     clock = task_store._clock
 
     async def run() -> None:
@@ -166,7 +166,7 @@ def test_completed_task_is_not_reclaimed(task_store: FilesystemTaskStore) -> Non
 
 
 def test_json_commit_journal_recovers_without_reexecuting_commands(
-    task_store: FilesystemTaskStore, monkeypatch
+    task_store: FilesystemJobStore, monkeypatch
 ) -> None:
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
     clock = task_store._clock
@@ -196,7 +196,7 @@ def test_json_commit_journal_recovers_without_reexecuting_commands(
     _run(run())
 
 
-def test_transient_failure_retries_then_succeeds(task_store: FilesystemTaskStore) -> None:
+def test_transient_failure_retries_then_succeeds(task_store: FilesystemJobStore) -> None:
     clock = task_store._clock
 
     async def run() -> None:
@@ -221,7 +221,7 @@ def test_transient_failure_retries_then_succeeds(task_store: FilesystemTaskStore
     _run(run())
 
 
-def test_permanent_failure_does_not_retry(task_store: FilesystemTaskStore) -> None:
+def test_permanent_failure_does_not_retry(task_store: FilesystemJobStore) -> None:
     clock = task_store._clock
 
     async def run() -> None:
@@ -246,7 +246,7 @@ def test_permanent_failure_does_not_retry(task_store: FilesystemTaskStore) -> No
 
 
 def test_cancel_marks_job_and_non_active_tasks_cancelled(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     clock = task_store._clock
 
@@ -260,7 +260,7 @@ def test_cancel_marks_job_and_non_active_tasks_cancelled(
 
 
 def test_cancel_moves_in_flight_claimed_task_to_cancelling(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     clock = task_store._clock
 
@@ -288,7 +288,7 @@ def test_cancel_moves_in_flight_claimed_task_to_cancelling(
 
 
 def test_two_workers_concurrent_claim_same_task_only_one_wins(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     clock = task_store._clock
 
@@ -312,7 +312,7 @@ def test_two_workers_concurrent_claim_same_task_only_one_wins(
 
 
 def test_concurrent_cancel_and_complete_stays_consistent(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """§30.2: a request_cancel racing with commit_success must leave a
     consistent state (no crash, no illegal transition) -- fencing + the
@@ -346,7 +346,7 @@ def test_concurrent_cancel_and_complete_stays_consistent(
 
 
 def test_recover_expired_resets_claimed_and_supersedes_attempt(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     clock = task_store._clock
 
@@ -375,14 +375,14 @@ def test_recover_expired_resets_claimed_and_supersedes_attempt(
 def test_persistence_survives_reopen(tmp_path: Path) -> None:
     # A new store over the same root sees the previously written job (recovery).
     clock = FakeClock(datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc))
-    task_store = FilesystemTaskStore(tmp_path, clock=clock)
+    task_store = FilesystemJobStore(tmp_path, clock=clock)
 
     async def run() -> None:
         await task_store.create_job(_job(clock), _task(clock))
 
     _run(run())
 
-    reopened = FilesystemTaskStore(
+    reopened = FilesystemJobStore(
         tmp_path, clock=FakeClock(datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc))
     )
 
@@ -395,7 +395,7 @@ def test_persistence_survives_reopen(tmp_path: Path) -> None:
     _run(read())
 
 
-def test_recovery_tolerates_missing_attempt_file(task_store: FilesystemTaskStore) -> None:
+def test_recovery_tolerates_missing_attempt_file(task_store: FilesystemJobStore) -> None:
     # Crash window: claim wrote the task but the attempt file is gone. Recovery
     # must not abort -- it resets the task and moves on.
     clock = task_store._clock
@@ -418,7 +418,7 @@ def test_recovery_tolerates_missing_attempt_file(task_store: FilesystemTaskStore
 
 
 def test_recovery_converges_job_left_running_after_commit_crash(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     # Crash window: the root task was committed SUCCEEDED but the job-completion
     # write did not land, leaving the job RUNNING. Recovery re-converges it.
@@ -446,7 +446,7 @@ def test_recovery_converges_job_left_running_after_commit_crash(
     _run(run())
 
 
-def test_recovery_fails_task_when_attempts_exhausted(task_store: FilesystemTaskStore) -> None:
+def test_recovery_fails_task_when_attempts_exhausted(task_store: FilesystemJobStore) -> None:
     # A task whose attempt_count has reached max_attempts is FAILED on lease
     # recovery, not reset to READY (section 21.3 / 20.1 -- no infinite retry).
     clock = task_store._clock
@@ -467,7 +467,7 @@ def test_recovery_fails_task_when_attempts_exhausted(task_store: FilesystemTaskS
     _run(run())
 
 
-def test_create_task_command_creates_child(task_store: FilesystemTaskStore) -> None:
+def test_create_task_command_creates_child(task_store: FilesystemJobStore) -> None:
     clock = task_store._clock
 
     async def run() -> None:
@@ -491,7 +491,7 @@ def test_create_task_command_creates_child(task_store: FilesystemTaskStore) -> N
     _run(run())
 
 
-def test_wait_signal_command_transitions_to_waiting(task_store: FilesystemTaskStore) -> None:
+def test_wait_signal_command_transitions_to_waiting(task_store: FilesystemJobStore) -> None:
     from linktools.ai.jobs.protocols import TaskSuccess, WaitSignal
 
     clock = task_store._clock
@@ -516,7 +516,7 @@ def test_wait_signal_command_transitions_to_waiting(task_store: FilesystemTaskSt
     _run(run())
 
 
-def test_signal_wakes_matching_waiting_task(task_store: FilesystemTaskStore) -> None:
+def test_signal_wakes_matching_waiting_task(task_store: FilesystemJobStore) -> None:
     from linktools.ai.jobs.models import TaskSignalRecord
     from linktools.ai.jobs.protocols import TaskSuccess, WaitSignal
 
@@ -564,7 +564,7 @@ def test_signal_wakes_matching_waiting_task(task_store: FilesystemTaskStore) -> 
 
 
 def test_dependency_resolution_promotes_pending_to_ready(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
 
@@ -592,7 +592,7 @@ def test_dependency_resolution_promotes_pending_to_ready(
     _run(run())
 
 
-def test_missing_dependency_does_not_crash(task_store: FilesystemTaskStore) -> None:
+def test_missing_dependency_does_not_crash(task_store: FilesystemJobStore) -> None:
     """C1 regression: _resolve_dependencies must tolerate a missing dep ref."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
 
@@ -625,7 +625,7 @@ def test_missing_dependency_does_not_crash(task_store: FilesystemTaskStore) -> N
 
 
 def test_commit_success_rejects_too_many_commands(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Wired command-count limit (section 17.5): an outcome carrying more than
     MAX_COMMANDS commands is rejected before any write."""
@@ -651,7 +651,7 @@ def test_commit_success_rejects_too_many_commands(
 
 
 def test_commit_success_rejects_oversized_output_artifact(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Wired output-payload limit (section 17.5): an output artifact larger than
     the ceiling is rejected at commit."""
@@ -681,7 +681,7 @@ def test_commit_success_rejects_oversized_output_artifact(
 
 
 def test_submit_signal_rejects_oversized_metadata(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Wired signal-metadata limit (section 17.5): inline signal JSON above the
     metadata ceiling is rejected before the signal is persisted."""
@@ -708,7 +708,7 @@ def test_submit_signal_rejects_oversized_metadata(
 
 
 def test_child_task_delegated_scopes_narrow_and_actor_appends(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """A child task's delegated scopes are the intersection of the parent's
     scopes and the command's requested scopes (never a union -- an ungranted
@@ -768,7 +768,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(
     _run(run())
 
 
-def test_max_depth_exceeded_fails_commit(task_store: FilesystemTaskStore) -> None:
+def test_max_depth_exceeded_fails_commit(task_store: FilesystemJobStore) -> None:
     """Plan 5.1.6: a child beyond max_depth must fail the whole commit (raise
     TaskBudgetExceededError) -- it is never silently dropped. The over-depth
     child is not created AND the parent is not marked successful."""
@@ -814,7 +814,7 @@ def test_max_depth_exceeded_fails_commit(task_store: FilesystemTaskStore) -> Non
 
 
 def test_job_runtime_budget_does_not_leave_ready_task(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Plan 5.1.7: once a job exceeds its runtime cap, a claim does not skip the
     READY candidate and leave it as a zombie -- it finalizes the job (tasks
@@ -856,7 +856,7 @@ def test_job_runtime_budget_does_not_leave_ready_task(
 
 
 def test_job_attempt_budget_does_not_leave_ready_task(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Plan 5.1.7: once a job's aggregate attempt cap is met, a later claim
     finalizes the job (the still-READY child is CANCELLED, job FAILED) rather
@@ -907,7 +907,7 @@ def test_job_attempt_budget_does_not_leave_ready_task(
     _run(run())
 
 
-def test_bind_run_fences_on_worker_id(task_store: FilesystemTaskStore) -> None:
+def test_bind_run_fences_on_worker_id(task_store: FilesystemJobStore) -> None:
     """bind_run applies the full 4-field guard: a wrong worker_id is rejected
     even if status/attempt/fencing match, so a stale worker cannot bind a run
     to a claim another worker now owns."""
@@ -941,7 +941,7 @@ def test_bind_run_fences_on_worker_id(task_store: FilesystemTaskStore) -> None:
 
 
 def test_concurrent_signals_for_same_waiting_task_wake_it_once(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """§30.2: two signals for the same WAITING task submitted concurrently must
     wake it exactly once -- the second finds it no longer WAITING."""
@@ -978,7 +978,7 @@ def test_concurrent_signals_for_same_waiting_task_wake_it_once(
 
 
 def test_commit_success_write_fault_leaves_parent_claimed_not_half_committed(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """§12.5 + §30.3: a write fault mid commit_success (here, while creating the
     child task) must NOT leave the parent SUCCEEDED with its child missing. The
@@ -1016,7 +1016,7 @@ def test_commit_success_write_fault_leaves_parent_claimed_not_half_committed(
 
 
 def test_recover_expired_reconciles_unconsumed_signal_to_waiting_task(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Crash-window reconciliation: if submit_signal's signal file landed on disk
     but its matching WAITING task was never woken (process died between save and
@@ -1061,7 +1061,7 @@ def test_recover_expired_reconciles_unconsumed_signal_to_waiting_task(
 
 
 def test_create_task_rejects_duplicate_key_within_job(
-    task_store: FilesystemTaskStore,
+    task_store: FilesystemJobStore,
 ) -> None:
     """Per-task key uniqueness within a job (section 13.3, the UNIQUE(job_id,key)
     invariant): a second child created with an already-used key is rejected

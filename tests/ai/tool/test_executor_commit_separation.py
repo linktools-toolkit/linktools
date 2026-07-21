@@ -86,6 +86,61 @@ def _execute(executor, store, run_id, key, handler):
     )
 
 
+def test_successful_idempotent_execution_persists_receipt_artifact(tmp_path):
+    # A successful idempotent execution persists a receipt artifact via
+    # ArtifactStore.put -- which takes provenance= (not metadata=). This pins
+    # the signature contract that the receipt_store.put call site must honor.
+    from datetime import datetime, timezone
+
+    from linktools.ai.artifact.models import (
+        ArtifactProvenance,
+        ArtifactRecord,
+        ArtifactRef,
+    )
+
+    class _CapturingReceiptStore:
+        def __init__(self) -> None:
+            self.puts: "list[tuple[str, ArtifactProvenance]]" = []
+
+        async def put(self, content, *, media_type, tenant_id, provenance=None, now=None):
+            prov = provenance or ArtifactProvenance(
+                producer_kind="tool_receipt", producer_id=""
+            )
+            self.puts.append((tenant_id, prov))
+            return ArtifactRecord(
+                ref=ArtifactRef(
+                    id="art-receipt",
+                    sha256="x" * 64,
+                    media_type=media_type,
+                    size=len(content),
+                ),
+                tenant_id=tenant_id,
+                provenance=prov,
+                created_at=now or datetime.now(timezone.utc),
+            )
+
+    receipt_store = _CapturingReceiptStore()
+    store = FilesystemIdempotencyStore(root=tmp_path / "idem")
+    executor = GovernedToolInvoker(
+        policy=PolicyEngine(rules=()),
+        idempotency_store=store,
+        receipt_store=receipt_store,
+        tenant_id_resolver=lambda context: "tenant-1",
+    )
+
+    async def handler(**kwargs):
+        return {"ok": 1}
+
+    result = _execute(executor, store, "r-rec", "k-rec", handler)
+    assert result == {"ok": 1}
+    assert len(receipt_store.puts) == 1, "a receipt artifact must be persisted"
+    tenant_id, provenance = receipt_store.puts[0]
+    assert tenant_id == "tenant-1"
+    assert provenance.producer_kind == "tool_receipt"
+    assert provenance.producer_id == "charge"  # the tool name
+
+
+
 def test_handler_runs_once_when_complete_fails(tmp_path):
     # §9.1: a commit failure after the Handler returned must never re-invoke it.
     calls = {"n": 0}

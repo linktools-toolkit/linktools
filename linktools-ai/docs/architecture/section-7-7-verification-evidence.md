@@ -18,7 +18,7 @@
 
 ### 步骤 2 — 创建需要审批的 run
 
-证据：`tests/ai/test_runtime_resume.py::test_resume_round_trip_pause_approve_resume_succeeds`、`tests/ai/storage/test_external_adapter_full_chain.py::test_external_adapter_drives_approval_resume`（受治理 tool 触发 approval，run 进入 `WAITING_APPROVAL`）。
+证据：`tests/ai/test_runtime_resume.py::test_resume_round_trip_pause_approve_resume_succeeds`、`tests/external_adapter/tests/test_runtime_e2e.py::test_external_adapter_drives_approval_resume`（受治理 tool 触发 approval，run 进入 `WAITING_APPROVAL`）。
 
 ### 步骤 3 — 验证暂停后进程重启
 
@@ -30,7 +30,7 @@ CHECKPOINT: {"seq": 1, "format": "pydantic-ai-v1", "payload_bytes": 1259}
 
 ### 步骤 4 — 使用正确 Principal approve 并 resume
 
-证据：`Runtime.approve(approval_id, principal=<PrincipalContext>, expected_version=...)` → `ApprovalStatus.PENDING → APPROVED`；`Runtime.resume(run_id)` → `RunStatus.SUCCEEDED`。`tests/ai/storage/test_external_adapter_full_chain.py::test_external_adapter_drives_approval_resume` 断言完整链路，且 tool 在 resume 后真正执行（`{"name": "risky", "ok": True}`）。Principal 经 `principal.require_tenant(...)` 边界校验（`identity/principal.py`）。
+证据：`Runtime.approve(approval_id, principal=<PrincipalContext>, expected_version=...)` → `ApprovalStatus.PENDING → APPROVED`；`Runtime.resume(run_id)` → `RunStatus.SUCCEEDED`。`tests/external_adapter/tests/test_runtime_e2e.py::test_external_adapter_drives_approval_resume` 断言完整链路，且 tool 在 resume 后真正执行（`{"name": "risky", "ok": True}`）。Principal 经 `principal.require_tenant(...)` 边界校验（`identity/principal.py`）。
 
 ### 步骤 5 — 下载 Artifact，验证 tenant 与 digest
 
@@ -42,7 +42,7 @@ ARTIFACT: {"artifact_id": "art-9d57d20511254bd5b0902906eeed1e1c",
             "roundtrip_ok": true, "foreign_tenant_denied": true}
 ```
 
-digest 与 `sha256(content)` 一致；`ArtifactStore.get(artifact_id, tenant_id="tenant-B")` 对 `tenant-A` 的 artifact 返回 `None`（租户隔离在 record/store 层）。契约由 `tests/ai/storage/test_external_adapter_conformance.py::TestExternalRecordStoreConformance` 覆盖。
+digest 与 `sha256(content)` 一致；`ArtifactStore.get(artifact_id, tenant_id="tenant-B")` 对 `tenant-A` 的 artifact 返回 `None`（租户隔离在 record/store 层）。契约由 `tests/external_adapter/tests/test_conformance.py::TestExternalRecordStoreConformance` 覆盖。
 
 ### 步骤 6 — 启动作业并在 heartbeat 中杀死 worker
 
@@ -83,15 +83,15 @@ RUN: {"run_id": "398c26c0-cfab-4ee7-b10e-742e18cbdce9",
 
 ### 步骤 1 — 只依赖构建后的 wheel 和公开 testkit
 
-证据（C2）：`linktools-ai/conformance/` 是一个独立包，AST 扫描（`tests/ai/storage/test_wheel_only_conformance.py::test_conformance_package_imports_only_public_surface`）断言它只 import `linktools.ai.*` 公开面，无 `_runtime` / `storage.filesystem` / `storage.sqlalchemy` / `storage.coordination` / `tests.*`。`[test]` extra 见 `linktools-ai/requirements.yml`。gold-standard（`RUN_WHEEL_CONFORMANCE=1`）构建 wheel 并在干净 venv 安装 `[test]` 后跑该包。
+证据（C2）：`linktools-ai/conformance/` 是一个独立包，AST 扫描（`tests/ai/storage/test_wheel_only_conformance.py::test_conformance_package_imports_only_public_surface`）断言它只 import `linktools.ai.*` 公开面，无 `_runtime` / `storage.filesystem` / `storage.sqlalchemy` / `storage.coordination` / `tests.*`。`[test]` extra 见 `linktools-ai/requirements.yml`。gold-standard（`test_conformance_runs_from_built_wheel`，现已在默认套件中运行，无需 env var）构建 wheel 并在干净 venv 安装 `[test]` 后跑该包。
 
 ### 步骤 2 — 实现 ArtifactBlobStore / StorageTransactionManager / LeaseCoordinator
 
-证据：`linktools-ai/conformance/adapter.py`（`InMemoryArtifactBlobStore` / `InMemoryArtifactRecordStore` / `InMemoryLeaseCoordinator`，纯公开 Protocol）。契约复用公开 testkit（`linktools.ai.storage.testing`）。
+证据：`linktools-ai/conformance/adapter.py`（`InMemoryArtifactBlobStore` / `InMemoryArtifactRecordStore` / `InMemoryLeaseCoordinator`，纯公开 Protocol）。契约复用测试支持包 `testing`（`linktools-ai/testing/`，不随 wheel 发布，通过 `conftest.py` 解析）。
 
 ### 步骤 3 — 注入 RuntimeDependencies
 
-证据：`tests/ai/storage/test_external_adapter_full_chain.py::test_external_adapter_drives_run_to_completion` 用 `Runtime.build(storage=build_in_memory_external_storage(root=...))` 把适配器注入 Runtime。
+证据：`tests/external_adapter/tests/test_runtime_e2e.py::test_external_adapter_drives_run_to_completion` 用 `Runtime.build(storage=build_in_memory_external_storage(root=...))` 把适配器注入 Runtime。
 
 ### 步骤 4 — 完成 run→approval→resume→artifact→job 链路
 
@@ -103,7 +103,7 @@ RUN: {"run_id": "398c26c0-cfab-4ee7-b10e-742e18cbdce9",
 
 ### 步骤 6 — 检查 adapter 未 import 私有模块
 
-证据：`tests/ai/storage/test_external_adapter_full_chain.py::test_external_adapter_imports_only_public_paths` + `test_external_adapter_conformance.py::test_external_adapter_imports_only_public_paths`（AST allowlist；适配器只 import 公开模块）。
+证据：`tests/external_adapter/tests/test_runtime_e2e.py::test_external_adapter_imports_only_public_paths` + `tests/external_adapter/tests/test_conformance.py::test_external_adapter_imports_only_public_paths`（AST allowlist；适配器只 import 公开模块）。
 
 ---
 
@@ -126,9 +126,9 @@ ai_task_signals, ai_task_transitions, ai_tasks
 
 ```text
 python -m pytest tests/ai -q                                   # 总报告
-python -m pytest tests/ai/storage/test_external_adapter_full_chain.py -v   # 外部适配器全链路
+python -m pytest tests/external_adapter/tests/test_runtime_e2e.py -v   # 外部适配器全链路
 python -m pytest tests/ai/run/test_requirements_gate.py -v     # capability gate
 python -m pytest tests/ai/architecture -q                      # import graph + 旧名
-RUN_WHEEL_CONFORMANCE=1 python -m pytest tests/ai/storage/test_wheel_only_conformance.py  # wheel-only gold standard
+python -m pytest tests/ai/storage/test_wheel_only_conformance.py  # wheel-only gold standard（默认套件，无需 env var）
 python linktools-ai/scripts/rebuild_dev_storage.py --data-root ./data --db-path ./dev.db    # 一键重建
 ```

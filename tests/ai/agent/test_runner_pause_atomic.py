@@ -142,7 +142,9 @@ def _sqlalchemy_storage(tmp_path):
     asyncio.run(_create())
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/pause.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(session_factory=session_factory)
+    return SqlAlchemyStorage(
+        session_factory=session_factory, blobs_root=tmp_path / "blobs"
+    )
 
 
 def _seed_session(storage, session_id) -> None:

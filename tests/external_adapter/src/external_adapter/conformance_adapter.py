@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """A deterministic, in-memory EXTERNAL storage adapter built ONLY from the
-public storage Protocols (plan §4.4 / Phase 9 op 4).
+public storage Protocols.
 
 It imports nothing private: no ``_runtime``, no ``storage.filesystem`` /
 ``storage.sqlalchemy`` reference backends, no ``storage.coordination``. Its
@@ -12,18 +12,23 @@ ArtifactIntegrityError) -- both public surfaces.
 It exists to PROVE the public Protocol surface is sufficient: a downstream
 adapter can implement conformant blob / record / lease storage against the
 Protocols alone, without reaching into core private modules. The conformance
-testkit (``linktools.ai.storage.testing``) is run against this adapter in
-``test_external_adapter_conformance.py``. If that test ever fails because this
-adapter NEEDS a private import to conform, the Protocol design is inadequate
-(plan §9 failure handling: 回到阶段 3)."""
+testkit (``testing``, a test-support package outside the shipped wheel) is
+run against this adapter in ``test_conformance.py``. If that test ever fails
+because this adapter NEEDS a private import to conform, the Protocol design
+is inadequate."""
 
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from linktools.ai.artifact.models import ArtifactIntegrityError, ArtifactRecord
+from linktools.ai.artifact.models import (
+    ArtifactBlobNotFoundError,
+    ArtifactIntegrityError,
+    ArtifactRecord,
+)
 from linktools.ai.storage.protocols import BlobInfo, LeaseToken
 
 
@@ -46,16 +51,27 @@ class InMemoryArtifactBlobStore:
             raise ArtifactIntegrityError(
                 f"digest mismatch: claimed sha256 {digest[:12]}..."
             )
+        if size is not None and len(actual) != size:
+            raise ArtifactIntegrityError(
+                f"size mismatch: claimed {size} bytes, got {len(actual)}"
+            )
         # Idempotent on digest: a second put of the same content is a reuse,
         # not an error.
         self._blobs.setdefault(digest, actual)
         return BlobInfo(digest=digest, size=len(actual), content_type=None)
 
-    async def open(self, *, digest: str) -> AsyncIterator[bytes]:
+    @asynccontextmanager
+    async def open(self, *, digest: str):
         existing = self._blobs.get(digest)
         if existing is None:
-            raise ArtifactIntegrityError(f"blob for sha256 {digest[:12]} missing")
-        yield existing
+            raise ArtifactBlobNotFoundError(
+                f"blob for sha256 {digest[:12]} missing"
+            )
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            yield existing
+
+        yield _chunks()
 
     async def stat(self, *, digest: str) -> "BlobInfo | None":
         data = self._blobs.get(digest)
@@ -127,16 +143,22 @@ class InMemoryLeaseCoordinator:
         )
 
     async def renew(self, *, token: LeaseToken, ttl: timedelta) -> LeaseToken:
+        now = self._now()
         held = self._holders.get(token.key)
-        if (
-            held is None
-            or held[0] != token.owner_id
-            or held[1] != token.fencing_token
-        ):
+        if held is None:
+            raise LookupError(
+                f"cannot renew a released lease for key {token.key!r}"
+            )
+        if held[0] != token.owner_id or held[1] != token.fencing_token:
             raise LookupError(
                 f"cannot renew a lease not currently held by {token.owner_id!r}"
             )
-        expires = self._now() + ttl
+        if held[2] <= now:
+            raise LookupError(
+                f"cannot renew an expired lease for key {token.key!r} "
+                f"(expired at {held[2].isoformat()})"
+            )
+        expires = now + ttl
         # Renew preserves the fencing token (renew is not a re-acquire).
         self._holders[token.key] = (token.owner_id, token.fencing_token, expires)
         return LeaseToken(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FilesystemTaskStore: single-process file backend for JobStore.
+"""FilesystemJobStore: single-process file backend for JobStore.
 
 One JSON file per record under ``root/jobs/{job_id}/{job,tasks,attempts,
 transitions,signals}/...``. Each public async method delegates to a ``_*_sync``
@@ -54,7 +54,7 @@ class FilesystemTaskCommitRecoveryError(RuntimeError):
 
 
 class FilesystemTaskCommitJournal:
-    """Durable outcome journal used by :class:`FilesystemTaskStore`.
+    """Durable outcome journal used by :class:`FilesystemJobStore`.
 
     The store owns the state-machine replay; this small type centralizes the
     on-disk JSON step journal so recovery is explicit and inspectable.
@@ -111,7 +111,7 @@ from ...jobs.store import (
 from ._util import _atomic_write, _validate_id_segment
 
 
-class FilesystemTaskStore:
+class FilesystemJobStore:
     def __init__(self, root: Path, *, clock: "Clock | None" = None) -> None:
         self._root = Path(root)
         self._journal = FilesystemTaskCommitJournal(self._root / "commit-journal")
@@ -1906,4 +1906,4 @@ def _retry_delay(policy, attempt_number: int) -> float:
     return max(0.0, base)
 
 
-__all__: "list[str]" = ["FilesystemTaskStore"]
+__all__: "list[str]" = ["FilesystemJobStore"]

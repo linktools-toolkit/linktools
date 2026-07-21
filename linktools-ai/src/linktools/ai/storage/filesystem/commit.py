@@ -72,6 +72,25 @@ class FilesystemRunCommitCoordinator:
             transactions_root = tempfile.mkdtemp(prefix="lt-txns-")
         self._journal = TransactionJournal(transactions_root)
 
+    @classmethod
+    def from_storage(cls, storage: Any) -> "FilesystemRunCommitCoordinator":
+        """Build a coordinator wired to a File-backed Storage's stores.
+
+        The composition root (the caller that constructs RuntimeBuildConfig)
+        uses this to assemble the coordinator from its Storage without the
+        build kernel having to know any concrete backend. ``storage`` must
+        expose the five stores + a ``root`` path (FilesystemStorage does, and
+        the in-memory external Storage pattern mirrors the same shape so a
+        coordinator can be wired to it the same way)."""
+        return cls(
+            approval_store=storage.approvals,
+            checkpoint_store=storage.checkpoints,
+            run_store=storage.runs,
+            session_store=storage.sessions,
+            event_store=storage.events,
+            transactions_root=storage.root / "transactions",
+        )
+
     async def pause(self, command: PauseRunCommand) -> PausedRunCommit:
         """Persist approval + checkpoint + transition + events sequentially,
         advancing the journal after each write so a crash is recoverable."""

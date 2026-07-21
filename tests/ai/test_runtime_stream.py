@@ -19,6 +19,7 @@ from linktools.ai.run.models import RunStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 def _text_pair(text: str = "hello from stream"):
@@ -37,7 +38,9 @@ def _build_runtime(tmp_path):
     registry.register("test-model", model=FunctionModel(fn, stream_function=stream_fn))
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=registry)
+        storage=storage,
+        model_router=ModelRouter(registry=registry),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     return runtime, storage
 

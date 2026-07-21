@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """DirectEvalExecutor tests: reads the case input artifact, runs the target via
 Runtime, and wraps the result (or a target error) in an EvalExecution."""
 
 import asyncio
 from types import SimpleNamespace
 
-from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
+from linktools.ai.artifact import ArtifactStore
 from linktools.ai.evaluation.executors import DirectEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.filesystem.artifact import (
+    FilesystemArtifactBlobStore,
+    FilesystemArtifactRecordStore,
+)
+
+
+def _artifacts(tmp_path) -> ArtifactStore:
+    return ArtifactStore(
+        FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
+        FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+    )
 
 
 class _Resolver:
@@ -30,13 +40,13 @@ class _FakeRuntime:
         )
 
 
-def test_direct_executor_reads_input_and_runs() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_direct_executor_reads_input_and_runs(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
     rt = _FakeRuntime()
     executor = DirectEvalExecutor(rt, _Resolver(), artifacts, tenant_id="t1")
 
     async def run():
-        record = await artifacts.put(b"hello", media_type="text/plain", tenant_id="t1")
+        record = await artifacts.put(content=b"hello", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=record.ref.id)
         execution = await executor.execute(
             EvalTarget(kind="agent", id="a1"), case
@@ -54,8 +64,8 @@ def test_direct_executor_reads_input_and_runs() -> None:
     asyncio.run(run())
 
 
-def test_direct_executor_captures_target_error() -> None:
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def test_direct_executor_captures_target_error(tmp_path) -> None:
+    artifacts = _artifacts(tmp_path)
 
     class _BoomRuntime:
         async def run(self, spec, prompt, **kw):
@@ -66,7 +76,7 @@ def test_direct_executor_captures_target_error() -> None:
     )
 
     async def run():
-        record = await artifacts.put(b"x", media_type="text/plain", tenant_id="t1")
+        record = await artifacts.put(content=b"x", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=record.ref.id)
         execution = await executor.execute(EvalTarget(kind="agent", id="a1"), case)
         # The target raised; the execution records the error rather than crashing.
@@ -76,14 +86,14 @@ def test_direct_executor_captures_target_error() -> None:
     asyncio.run(run())
 
 
-def test_direct_executor_captures_full_runsnapshot() -> None:
+def test_direct_executor_captures_full_runsnapshot(tmp_path) -> None:
     """When Run/Definition/Event stores are wired, the executor seals the run
     record, run definition, and event stream into artifacts and returns a full
     RunSnapshot + its artifact id on the EvalExecution."""
     from linktools.ai.evaluation.snapshot import RunSnapshot
     from linktools.ai.events.store import EventPage
 
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    artifacts = _artifacts(tmp_path)
 
     class _FakeRunStore:
         def __init__(self):
@@ -139,7 +149,7 @@ def test_direct_executor_captures_full_runsnapshot() -> None:
     )
 
     async def run():
-        record = await artifacts.put(b"hello", media_type="text/plain", tenant_id="t1")
+        record = await artifacts.put(content=b"hello", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=record.ref.id)
         execution = await executor.execute(
             EvalTarget(kind="agent", id="a1"), case
@@ -158,10 +168,10 @@ def test_direct_executor_captures_full_runsnapshot() -> None:
     asyncio.run(run())
 
 
-def test_direct_executor_normalizes_total_tokens_from_runtime_usage() -> None:
+def test_direct_executor_normalizes_total_tokens_from_runtime_usage(tmp_path) -> None:
     """The real Runtime reports input_tokens + output_tokens (not total_tokens);
     the executor derives total_tokens so the eval avg-tokens metric populates."""
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    artifacts = _artifacts(tmp_path)
 
     class _RuntimeUsage:
         async def run(self, spec, prompt, *, run_id=None, user_id=None, tenant_id=None, **kw):
@@ -173,7 +183,7 @@ def test_direct_executor_normalizes_total_tokens_from_runtime_usage() -> None:
     executor = DirectEvalExecutor(_RuntimeUsage(), _Resolver(), artifacts, tenant_id="t1")
 
     async def run():
-        record = await artifacts.put(b"in", media_type="text/plain", tenant_id="t1")
+        record = await artifacts.put(content=b"in", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=record.ref.id)
         execution = await executor.execute(
             EvalTarget(kind="agent", id="a1"), case
@@ -185,11 +195,11 @@ def test_direct_executor_normalizes_total_tokens_from_runtime_usage() -> None:
     asyncio.run(run())
 
 
-def test_direct_executor_captures_safety_refusal_on_policy_error() -> None:
+def test_direct_executor_captures_safety_refusal_on_policy_error(tmp_path) -> None:
     """When the Runtime's security pipeline refuses (raises a PolicyError), the
     direct executor records a safety refusal so the rate is populated in direct
     mode too (not only task mode)."""
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    artifacts = _artifacts(tmp_path)
 
     class PolicyError(Exception):
         pass
@@ -203,7 +213,7 @@ def test_direct_executor_captures_safety_refusal_on_policy_error() -> None:
     )
 
     async def run():
-        record = await artifacts.put(b"in", media_type="text/plain", tenant_id="t1")
+        record = await artifacts.put(content=b"in", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=record.ref.id)
         execution = await executor.execute(
             EvalTarget(kind="agent", id="a1"), case
@@ -212,3 +222,4 @@ def test_direct_executor_captures_safety_refusal_on_policy_error() -> None:
         assert execution.model_usage.get("safety_refusal") == 1.0
 
     asyncio.run(run())
+

@@ -22,6 +22,7 @@ from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 
 
@@ -50,7 +51,12 @@ def test_invariant_runtime_has_no_assemble():
 
 # --- Runtime exposes no public capability_assembler -----------------------------
 def test_invariant_runtime_has_no_public_capability_assembler(tmp_path):
-    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_router(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     assert not hasattr(runtime, "capability_assembler")
     assert not hasattr(runtime, "assembler")
 
@@ -71,7 +77,12 @@ def test_invariant_tool_contribution_has_only_tools_field():
 def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
     from linktools.ai.errors import RuntimeInitializationError
 
-    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_router(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="needs-tools",
         name="needs-tools",
@@ -84,7 +95,12 @@ def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
 
 
 def test_invariant_runner_empty_tools_does_not_require_assembler(tmp_path):
-    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_router(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="no-tools",
         name="no-tools",
@@ -145,7 +161,12 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
 
 # --- Runtime.inspect returns no handler ----------------------------------------
 def test_invariant_inspect_returns_no_handler(tmp_path):
-    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path), model_router=_router())
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_router(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="a",
         name="a",

@@ -14,6 +14,7 @@ import json
 import uuid
 from typing import Protocol
 
+from ...artifact.models import ArtifactProvenance
 from ...json import to_jsonable
 from ..models import EvalCase, EvalExecution, EvalTarget, normalize_usage
 from ..snapshot import RunSnapshot
@@ -99,7 +100,7 @@ class DirectEvalExecutor:
         if not case.input_artifact_id:
             return ""
         content = await self._artifact_store.get(
-            case.input_artifact_id, tenant_id=self._tenant_id
+            artifact_id=case.input_artifact_id, tenant_id=self._tenant_id
         )
         return content.decode("utf-8") if content else ""
 
@@ -114,9 +115,10 @@ class DirectEvalExecutor:
             text = json.dumps({"value": str(value), "_value_coerced": True})
         try:
             record = await self._artifact_store.put(
-                text.encode("utf-8"),
+                content=text.encode("utf-8"),
                 media_type="application/json",
                 tenant_id=self._tenant_id,
+                provenance=ArtifactProvenance(producer_kind="eval", producer_id=""),
             )
             return record.ref.id
         except Exception:  # noqa: BLE001 - sealing is best-effort

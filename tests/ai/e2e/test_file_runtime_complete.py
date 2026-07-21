@@ -20,6 +20,7 @@ from linktools.ai.run.models import RunStatus
 from linktools.ai.session.models import MessageRole
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -37,7 +38,11 @@ def _registry():
 
 def test_file_runtime_complete_has_one_of_each_artifact(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, model_router=_registry())
+    runtime = Runtime.build(
+        storage=storage,
+        model_router=_registry(),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     spec = AgentSpec(
         id="agent-1",
         name="e2e-agent",

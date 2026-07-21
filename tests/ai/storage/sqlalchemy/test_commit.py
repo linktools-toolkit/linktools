@@ -58,7 +58,9 @@ def _storage(tmp_path):
     asyncio.run(_create())
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/commit.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(session_factory=session_factory)
+    return SqlAlchemyStorage(
+        session_factory=session_factory, blobs_root=tmp_path / "blobs"
+    )
 
 
 def _seed(storage, run_id, session_id, status=RunStatus.RUNNING):
@@ -246,6 +248,8 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
             async with original_transaction() as tx:
                 yield type(tx)(
                     session=tx.session,
+                    assets=tx.assets,
+                    artifact_records=tx.artifact_records,
                     runs=_FailingRuns(tx.runs),
                     events=tx.events,
                     checkpoints=tx.checkpoints,
@@ -254,7 +258,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
                     swarms=tx.swarms,
                     memories=tx.memories,
                     idempotency=tx.idempotency,
-                    tasks=tx.tasks,
+                    jobs=tx.jobs,
                     evaluations=tx.evaluations,
                 )
 
@@ -323,6 +327,8 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
             async with original_transaction() as tx:
                 yield type(tx)(
                     session=tx.session,
+                    assets=tx.assets,
+                    artifact_records=tx.artifact_records,
                     runs=tx.runs,
                     events=tx.events,
                     checkpoints=_FailingCheckpoints(tx.checkpoints),
@@ -331,7 +337,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                     swarms=tx.swarms,
                     memories=tx.memories,
                     idempotency=tx.idempotency,
-                    tasks=tx.tasks,
+                    jobs=tx.jobs,
                     evaluations=tx.evaluations,
                 )
 

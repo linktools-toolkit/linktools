@@ -9,12 +9,12 @@ change the existing runtime's public surface or storage shape:
 * the ``linktools.ai`` root still exports exactly ``Runtime`` -- nothing else;
 * importing the root (in a fresh interpreter) does not pull in the new domains;
 * the existing ``Storage`` facade field set is snapshotted, so adding the
-  optional ``tasks`` / ``evaluations`` fields later is a visible, intentional
+  optional ``jobs`` / ``evaluations`` fields later is a visible, intentional
   change rather than an accident;
 * the rejected ``linktools.ai.durable`` namespace stays absent.
 
-When a later phase legitimately changes one of these (e.g. 阶段3 adds
-``Storage.tasks``), update the snapshot here in the same change.
+When a later phase legitimately changes one of these (e.g. phase 3 adds
+``Storage.jobs``), update the snapshot here in the same change.
 """
 
 import dataclasses
@@ -61,12 +61,13 @@ def test_storage_facade_field_set_snapshot() -> None:
     from linktools.ai.storage.facade import Storage
 
     fields = {f.name for f in dataclasses.fields(Storage)}
-    # The facade. Phase 3 added optional `tasks`; phase 8 added optional
-    # `evaluations`. Both default to None for backward compatibility.
-    # StorageCapabilities was converged to StorageFeatures (the capability
-    # surface is now scoped enums + first-class streaming/fencing flags).
-    # `coordination` is the LeaseCoordinator field (process-local reference;
-    # downstream injects a distributed one and declares it on StorageFeatures).
+    # The facade. Phase 3 added optional `jobs` (renamed from `tasks`); phase
+    # 8 added optional `evaluations`. Both default to None for backward
+    # compatibility. StorageCapabilities was converged to StorageFeatures
+    # (the capability surface is now scoped enums + first-class
+    # streaming/fencing flags). `coordination` is the LeaseCoordinator field
+    # (process-local reference; downstream injects a distributed one and
+    # declares it on StorageFeatures).
     assert fields == {
         "assets",
         "sessions",
@@ -81,7 +82,7 @@ def test_storage_facade_field_set_snapshot() -> None:
         "coordination",
         "transactions",
         "run_definitions",
-        "tasks",
+        "jobs",
         "evaluations",
         "artifacts",
     }

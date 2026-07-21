@@ -11,6 +11,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -36,7 +37,9 @@ def test_runtime_build_hides_internal_components(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     assert not hasattr(runtime, "storage")
     assert not hasattr(runtime, "runner")
@@ -54,6 +57,7 @@ def test_runtime_build_no_longer_accepts_workdir(tmp_path):
         Runtime.build(
             storage=storage,
             model_router=ModelRouter(registry=_registry()),
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
             workdir=tmp_path,
         )
 
@@ -71,6 +75,7 @@ def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         execution=backend,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     assert runtime._components.execution is backend
 
@@ -80,7 +85,9 @@ def test_runtime_run_creates_session_when_none_given_and_returns_result(tmp_path
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="agent-1",
@@ -112,7 +119,9 @@ def test_runtime_run_with_explicit_session_reuses_it(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     fixed_session_id = "fixed-session-7"
     now = datetime.now(timezone.utc)
@@ -174,7 +183,9 @@ def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_p
     registry.register("test-model", model=FunctionModel(_worker_fn))
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=registry)
+        storage=storage,
+        model_router=ModelRouter(registry=registry),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
 
     def _agent_spec(agent_id: str) -> AgentSpec:
@@ -245,7 +256,9 @@ def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     swarm_spec = SwarmSpec(
         id="swarm-2",
@@ -314,7 +327,9 @@ def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_echo_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_echo_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     # Memory is on-by-default: the runner's memory_store is the facade's memories.
     assert isinstance(runtime._components.runner._memory_store, FilesystemMemoryStore)
@@ -328,7 +343,9 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=storage, model_router=ModelRouter(registry=_echo_registry())
+        storage=storage,
+        model_router=ModelRouter(registry=_echo_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     now = datetime.now(timezone.utc)
 
@@ -407,6 +424,7 @@ def test_runtime_applies_session_window_policy(tmp_path):
         storage=storage,
         model_router=ModelRouter(registry=_registry()),
         options=CapabilityRuntimeOptions(session_window_policy=_Recording()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="agent-1",

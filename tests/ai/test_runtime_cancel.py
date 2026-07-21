@@ -22,6 +22,7 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 _NOW = datetime(2026, 7, 6, tzinfo=timezone.utc)
 
@@ -75,7 +76,11 @@ def _seed_run(store, run_id: str, status: RunStatus) -> None:
 
 def test_cancel_running_run_transitions_to_cancelled(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-running", RunStatus.RUNNING)
 
     async def _cancel():
@@ -96,7 +101,11 @@ def test_cancel_running_run_transitions_to_cancelled(tmp_path):
 
 def test_cancel_succeeded_run_is_noop(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-done", RunStatus.SUCCEEDED)
 
     async def _cancel():
@@ -118,7 +127,11 @@ def test_cancel_succeeded_run_is_noop(tmp_path):
 
 def test_cancel_already_cancelled_run_is_noop(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-cancelled", RunStatus.CANCELLED)
 
     async def _cancel():
@@ -139,7 +152,11 @@ def test_cancel_already_cancelled_run_is_noop(tmp_path):
 
 def test_cancel_missing_run_raises_not_found(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
 
     async def _cancel():
         await runtime.cancel("does-not-exist")
@@ -158,7 +175,11 @@ def test_cancel_missing_run_raises_not_found(tmp_path):
 
 def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-1", RunStatus.RUNNING)
 
     async def _scenario():
@@ -195,7 +216,11 @@ def test_cancel_inflight_cancelling_run_is_idempotent(tmp_path):
 
 def test_cancel_handles_conflict_when_fresh_status_is_cancelling(tmp_path, monkeypatch):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(storage=storage, local_trusted_mode=True)
+    runtime = Runtime.build(
+        storage=storage,
+        local_trusted_mode=True,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     _seed_run(storage, "run-2", RunStatus.RUNNING)
 
     async def _scenario():

@@ -5,32 +5,32 @@ backends. This proves the testkit is importable and that the reference
 backends satisfy the Protocol contracts a downstream adapter would be checked
 against."""
 
-import hashlib
-
 import pytest
 
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.path import AssetPath
-from linktools.ai.asset.store import AssetStore
 from linktools.ai.artifact.models import ArtifactIntegrityError
-from linktools.ai.storage.testing import (
+from testing import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
 )
 
 
-from linktools.ai.storage.testing import LeaseCoordinatorContract  # noqa: E402
+from testing import LeaseCoordinatorContract  # noqa: E402
 
 
 class TestArtifactBlobStoreConformance(ArtifactBlobStoreContract):
+    @pytest.fixture(autouse=True)
+    def _cache_tmp_path(self, tmp_path) -> None:
+        # The contract's blob_store() is no-arg; cache the per-test tmp_path so
+        # each call returns a fresh, empty Filesystem store rooted here.
+        self._tmp_path = tmp_path
+
     def blob_store(self):
-        from linktools.ai.storage.artifact_backends import (
-            AssetBackedArtifactBlobStore,
+        from linktools.ai.storage.filesystem.artifact import (
+            FilesystemArtifactBlobStore,
         )
 
-        assets = AssetStore(primary=MemoryAssetBackend())
-        return AssetBackedArtifactBlobStore(
-            assets, blobs_root=AssetPath("/artifacts/blobs/sha256")
+        return FilesystemArtifactBlobStore(
+            blobs_root=self._tmp_path / "blobs"
         )
 
     # The contract references the integrity error; expose it for the mixin's
@@ -39,14 +39,17 @@ class TestArtifactBlobStoreConformance(ArtifactBlobStoreContract):
 
 
 class TestArtifactRecordStoreConformance(ArtifactRecordStoreContract):
+    @pytest.fixture(autouse=True)
+    def _cache_tmp_path(self, tmp_path) -> None:
+        self._tmp_path = tmp_path
+
     def record_store(self):
-        from linktools.ai.storage.artifact_backends import (
-            AssetBackedArtifactRecordStore,
+        from linktools.ai.storage.filesystem.artifact import (
+            FilesystemArtifactRecordStore,
         )
 
-        assets = AssetStore(primary=MemoryAssetBackend())
-        return AssetBackedArtifactRecordStore(
-            assets, records_root=AssetPath("/artifacts/records")
+        return FilesystemArtifactRecordStore(
+            records_root=self._tmp_path / "records"
         )
 
 

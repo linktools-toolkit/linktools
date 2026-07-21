@@ -195,8 +195,18 @@ def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
     )
 
     storage = FilesystemStorage(root=project.state_root)
+    # The composition root knows its concrete Storage, so it owns the concrete
+    # RunCommitCoordinator construction (Filesystem -> journaled sequential
+    # commit under {state_root}/transactions). The build kernel accepts the
+    # coordinator as an injected dependency and never branches on Storage type.
+    from linktools.ai.storage.filesystem.commit import (
+        FilesystemRunCommitCoordinator,
+    )
+
+    commit_coordinator = FilesystemRunCommitCoordinator.from_storage(storage)
     runtime = Runtime.build(
         storage=storage,
+        commit_coordinator=commit_coordinator,
         model_router=model_router,
         execution=LocalExecutionBackend(runtime_dir=project.root),
         providers=providers,

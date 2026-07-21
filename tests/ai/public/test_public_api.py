@@ -21,9 +21,14 @@ def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
 
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     assert not hasattr(Runtime, "assemble")
-    runtime = Runtime.build(storage=FilesystemStorage(root=tmp_path))
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     assert not hasattr(runtime, "runner")
     assert not hasattr(runtime, "compiler")
     assert not hasattr(runtime, "capability_assembler")

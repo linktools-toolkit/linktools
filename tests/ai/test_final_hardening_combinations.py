@@ -24,6 +24,7 @@ from linktools.ai.governance.security.emitter import (
     EventStoreSecurityEventEmitter,
 )
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.storage.filesystem.event import FilesystemEventStore
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.managed import ManagedToolAdapter
@@ -120,10 +121,12 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
     )
     provider = MCPProvider(_InfoSpecProvider(spec_mcp), _UnenumerableManager())
 
+    storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=ModelRouter(),
         providers=RuntimeDependencies(capabilities=(provider,)),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
 
     agent = AgentSpec(

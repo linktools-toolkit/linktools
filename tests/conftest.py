@@ -25,8 +25,27 @@ thread), so this cannot break a still-in-use store, including a
 session-scoped one.
 """
 import gc
+import sys
+from pathlib import Path
 
 import pytest
+
+# Make the standalone external_adapter package (AC-15 wheel-only proof, plan
+# §4.11) importable repo-wide without an installed wheel: its src/ dir goes on
+# sys.path here so test modules under tests/ai/ that import ``external_adapter``
+# resolve it. When the package IS installed (isolated-venv wheel proof), this
+# insert is a harmless no-op (the installed package is found first).
+_EXTERNAL_ADAPTER_SRC = Path(__file__).parent / "external_adapter" / "src"
+if str(_EXTERNAL_ADAPTER_SRC) not in sys.path:
+    sys.path.insert(0, str(_EXTERNAL_ADAPTER_SRC))
+
+# The storage conformance testkit (``linktools-ai/testing/``) is test-support
+# code, not library code -- it is never packaged into the linktools-ai wheel.
+# Putting the linktools-ai/ package root on sys.path makes it importable as
+# ``testing`` repo-wide without shipping it in the wheel.
+_LINKTOOLS_AI_ROOT = Path(__file__).parent.parent / "linktools-ai"
+if str(_LINKTOOLS_AI_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LINKTOOLS_AI_ROOT))
 
 
 @pytest.fixture(autouse=True)

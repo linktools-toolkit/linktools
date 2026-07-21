@@ -11,16 +11,20 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
+from linktools.ai.artifact import ArtifactStore
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.models import Asset, AssetInfo, AssetKind
 from linktools.ai.asset.path import AssetPath
 from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.filesystem.artifact import (
+    FilesystemArtifactBlobStore,
+    FilesystemArtifactRecordStore,
+)
 from linktools.ai.storage.sqlalchemy.models import Base, TaskRow
-from linktools.ai.storage.sqlalchemy.task import (
+from linktools.ai.storage.sqlalchemy.job import (
     TASK_ENVELOPE_SCHEMA_VERSION,
-    SqlAlchemyTaskStore,
+    SqlAlchemyJobStore,
     _store_dt,
 )
 from linktools.ai.jobs.models import (
@@ -64,7 +68,7 @@ async def _sql_store(tmp_path):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyTaskStore(session_factory=factory)
+    return SqlAlchemyJobStore(session_factory=factory)
 
 
 def _envelope_task(clock, *, depth=2) -> TaskRecord:
@@ -329,7 +333,12 @@ def test_snapshot_uses_single_resource_read(tmp_path) -> None:
             options=WriteOptions(content_type="text/plain"),
         )
         counter = _CountingResource(resources)
-        artifacts = build_artifact_store_from_assets(resources)  # separate store for the sealed blob
+        # Separate store for the sealed blob: the artifact domain decouples from
+        # the resource store, so the snapshot is pinned into its own backend.
+        artifacts = ArtifactStore(
+            FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
+            FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+        )
         snap = await snapshot_resource(
             counter, artifacts, "/data/file.txt", tenant_id="t1"
         )
@@ -371,7 +380,10 @@ def test_snapshot_picks_consistent_revision_under_concurrent_change(
             async def stat(self, path):
                 raise AssertionError("snapshot_resource must not call stat")
 
-        artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+        artifacts = ArtifactStore(
+            FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
+            FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+        )
         snap = await snapshot_resource(
             _MutatingResource(), artifacts, "/data/x", tenant_id="t1"
         )
@@ -460,10 +472,10 @@ def test_resolve_effective_scopes_never_expands() -> None:
 def test_root_task_inherits_job_scopes_at_creation(tmp_path) -> None:
     """A root task with no explicit scopes inherits the job's actor-chain scopes
     at creation (persisted, not left as an unresolved None)."""
-    from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+    from linktools.ai.storage.filesystem.job import FilesystemJobStore
 
     async def run() -> None:
-        store = FilesystemTaskStore(tmp_path / "t")
+        store = FilesystemJobStore(tmp_path / "t")
         now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
         job = JobRecord(
             id="j1",

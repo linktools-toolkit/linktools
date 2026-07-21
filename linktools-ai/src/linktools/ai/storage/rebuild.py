@@ -75,21 +75,25 @@ async def _init_sql_schema(engine: Any) -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
-def rebuild_sqlite_storage(*, engine: Any) -> Any:
+def rebuild_sqlite_storage(*, engine: Any, blobs_root: Path) -> Any:
     """Initialize a fresh SqlAlchemyStorage on a caller-constructed ``engine``:
     run ``Base.metadata.create_all`` and wrap a session_factory.
 
     The caller owns the engine lifecycle (constructs it, disposes it). This
     module does NOT construct engines -- the core never parses a connection
     string (§6.4 / the SQLAlchemy adapter-boundary invariant). The caller is
-    expected to point the engine at a fresh (deleted-then-recreated) db file."""
+    expected to point the engine at a fresh (deleted-then-recreated) db file.
+    ``blobs_root`` is the filesystem path the SqlAlchemyStorage uses for its
+    FilesystemArtifactBlobStore (artifact content lives outside the DB)."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from .sqlalchemy.facade import SqlAlchemyStorage
 
     asyncio.run(_init_sql_schema(engine))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(session_factory=session_factory)
+    return SqlAlchemyStorage(
+        session_factory=session_factory, blobs_root=blobs_root
+    )
 
 
 def rebuild_dev_storage(
@@ -98,7 +102,9 @@ def rebuild_dev_storage(
     """One-click verify: wipe + rebuild the Filesystem data dir, smoke-test it,
     then (if a ``sqlite_engine`` is given) initialize the SQLite schema on that
     engine and smoke-test it too. Returns a summary dict. The caller constructs
-    and disposes the sqlite_engine; this helper only initializes + verifies."""
+    and disposes the sqlite_engine; this helper only initializes + verifies.
+    The SQLite dev DB shares the same ``data_root`` for its artifact blobs
+    (under ``{data_root}/artifacts/blobs``) so a single wipe resets both."""
     fs_storage = rebuild_filesystem_storage(root=data_root)
     asyncio.run(_smoke_round_trip(fs_storage))
     summary: "dict[str, str]" = {
@@ -106,7 +112,9 @@ def rebuild_dev_storage(
         "filesystem_smoke": "ok",
     }
     if sqlite_engine is not None:
-        sql_storage = rebuild_sqlite_storage(engine=sqlite_engine)
+        sql_storage = rebuild_sqlite_storage(
+            engine=sqlite_engine, blobs_root=data_root / "artifacts" / "blobs"
+        )
         asyncio.run(_smoke_round_trip(sql_storage))
         summary["sqlite_smoke"] = "ok"
     return summary

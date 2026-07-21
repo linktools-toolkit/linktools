@@ -85,7 +85,14 @@ def test_adapter_imports_no_dialect_driver() -> None:
 
 def test_adapter_parses_no_dsn_or_engine_url() -> None:
     """No core source may parse a database URL/DSN or build an
-    engine from one -- the adapter receives a downstream-built session_factory."""
+    engine from one -- the adapter receives a downstream-built session_factory.
+
+    The ONE exemption is the SQLite reference helper
+    (``storage/sqlite/facade.py``): plan §6.5 explicitly allows the SQLite
+    helper to construct an engine ('SQLite helper 可以构造 engine'), and SQLite
+    is the only in-repo integration dialect. Every other core module is
+    forbidden from calling ``create_engine`` / ``create_async_engine`` /
+    ``make_url`` / ``URL.create``."""
     # Calls/attribute references that indicate URL/DSN handling. ``create_engine``
     # (sync) is forbidden outright; ``create_async_engine`` / ``make_url`` /
     # ``engine.url`` indicate the core is parsing a connection string.
@@ -97,6 +104,11 @@ def test_adapter_parses_no_dsn_or_engine_url() -> None:
     }
     offenders: "list[str]" = []
     for path in _core_py_files():
+        # The SQLite reference helper is the single core site allowed to
+        # construct an engine (plan §6.5). Skip it; everywhere else the ban
+        # holds.
+        if "storage" in path.parts and "sqlite" in path.parts:
+            continue
         text = path.read_text(encoding="utf-8")
         for call in forbidden_calls:
             if re.search(rf"\b{re.escape(call)}\s*\(", text):
@@ -144,4 +156,27 @@ def test_sqlalchemy_storage_constructor_takes_session_factory_not_url() -> None:
     )
     assert not (params & {"url", "dsn", "engine", "connection_string"}), (
         f"SqlAlchemyStorage must not take a url/dsn/engine; found: {sorted(params & {'url', 'dsn', 'engine', 'connection_string'})}"
+    )
+
+
+def test_sqlalchemy_storage_adapter_has_frozen_constructor() -> None:
+    """Plan §4.7 freezes the generic SqlAlchemyStorageAdapter constructor: it
+    takes session_factory + the caller's artifact_blobs + coordination +
+    features (and must NOT take a url/dsn/engine). This is the positive contract
+    a downstream composes against -- the generic adapter must accept injected
+    blob/coordination/features, not construct them internally."""
+    import inspect
+
+    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorageAdapter
+
+    sig = inspect.signature(SqlAlchemyStorageAdapter.__init__)
+    params = set(sig.parameters) - {"self"}
+    required = {"session_factory", "artifact_blobs", "coordination", "features"}
+    assert required <= params, (
+        f"SqlAlchemyStorageAdapter must take the frozen §4.7 params; missing: "
+        f"{sorted(required - params)}"
+    )
+    assert not (params & {"url", "dsn", "engine", "connection_string"}), (
+        f"SqlAlchemyStorageAdapter must not take a url/dsn/engine; found: "
+        f"{sorted(params & {'url', 'dsn', 'engine', 'connection_string'})}"
     )

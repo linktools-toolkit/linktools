@@ -34,7 +34,7 @@ async def validate_snapshot(snapshot, artifact_store, *, tenant_id: str) -> None
         artifact_ids.append(snap_ref.artifact_id)
     for artifact_id in artifact_ids:
         try:
-            content = await artifact_store.get(artifact_id, tenant_id=tenant_id)
+            content = await artifact_store.get(artifact_id=artifact_id, tenant_id=tenant_id)
         except ArtifactIntegrityError as exc:
             raise SnapshotValidationError(
                 f"snapshot artifact integrity failed: {artifact_id}: {exc}"

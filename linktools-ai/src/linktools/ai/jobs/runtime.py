@@ -69,7 +69,7 @@ class JobRuntimeOptions:
 
 
 class JobStoreRequiredError(Exception):
-    """Raised when JobRuntime is built without a Storage.tasks store."""
+    """Raised when JobRuntime is built without a Storage.jobs store."""
 
 
 class JobRuntime:
@@ -84,11 +84,11 @@ class JobRuntime:
         run_canceler: "Callable[[str], Awaitable[None]] | None" = None,
         artifact_store=None,
     ) -> None:
-        task_store = getattr(storage, "tasks", None)
+        task_store = storage.jobs
         if task_store is None:
             raise JobStoreRequiredError(
-                "JobRuntime requires Storage.tasks; wire a FilesystemTaskStore or "
-                "SqlAlchemyTaskStore into Storage"
+                "JobRuntime requires Storage.jobs; wire a FilesystemJobStore or "
+                "SqlAlchemyJobStore into Storage"
             )
         self._storage = storage
         self._task_store: JobStore = task_store
@@ -101,13 +101,14 @@ class JobRuntime:
         # the jobs domain stays decoupled from Runtime internals.
         self._run_canceler = run_canceler
         # The artifact store resolves task input artifacts. It is injected
-        # explicitly (storage.artifacts, or the explicit artifact_store arg) --
-        # there is no implicit getattr fallback onto the asset backend. A
+        # explicitly: the caller passes artifact_store directly, or it falls back
+        # to the Storage's declared (typed, Optional) ``artifacts`` attribute --
+        # direct attribute access, never a reflective getattr(storage, ...). A
         # runtime without one simply cannot serve tasks that declare an input
         # artifact (the RuntimeTaskHandler check below rejects that).
         self._artifact_store = artifact_store
         if self._artifact_store is None:
-            self._artifact_store = getattr(storage, "artifacts", None)
+            self._artifact_store = storage.artifacts
         # Runtime-backed handlers require both durable stores in production;
         # reject a silently degraded registration at the orchestration boundary.
         for name, handler in self._handlers.items():

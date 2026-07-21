@@ -145,7 +145,8 @@ class GovernedToolInvoker:
         if self._receipt_store is not None and record.receipt_artifact_id:
             tenant_id = claim.scope.split(":", 1)[0]
             blob = await self._receipt_store.get(
-                record.receipt_artifact_id, tenant_id=tenant_id)
+                artifact_id=record.receipt_artifact_id, tenant_id=tenant_id
+            )
             if blob is None:
                 raise ToolDeniedError("raw execution receipt is unavailable")
             from ..json import canonical_json
@@ -420,11 +421,17 @@ class GovernedToolInvoker:
                 tenant_id = self._tenant_id_resolver(context) if self._tenant_id_resolver else None
                 if tenant_id:
                     try:
+                        from ..artifact.models import ArtifactProvenance
+
                         receipt = await self._receipt_store.put(
-                            canonical_json(result).encode("utf-8"),
+                            content=canonical_json(result).encode("utf-8"),
                             media_type="application/json", tenant_id=tenant_id,
-                            metadata={"tool_name": request.tool_name,
-                                      "request_hash": request_hash})
+                            provenance=ArtifactProvenance(
+                                producer_kind="tool_receipt",
+                                producer_id=request.tool_name,
+                                metadata={"request_hash": request_hash},
+                            ),
+                        )
                         receipt_artifact_id = receipt.ref.id
                     except Exception as exc:
                         await self._idempotency_store.mark_unknown(claim)

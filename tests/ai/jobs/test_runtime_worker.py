@@ -3,7 +3,7 @@
 """JobRuntime + JobWorker end-to-end (plan section 28 phase-5 acceptance).
 
 Drives the full claim → execute → commit loop over a FilesystemStorage-backed
-FilesystemTaskStore with real asyncio timing (tiny intervals) and a SystemClock.
+FilesystemJobStore with real asyncio timing (tiny intervals) and a SystemClock.
 """
 
 import asyncio
@@ -291,13 +291,13 @@ def test_transient_commit_error_is_retried_without_rerun(tmp_path) -> None:
     """A transient store error at commit must not re-run the handler: the
     worker retries the COMMIT (re-reading to confirm it still holds the claim),
     never the handler."""
-    from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+    from linktools.ai.storage.filesystem.job import FilesystemJobStore
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.worker import JobWorker
 
     async def run() -> None:
         clock = SystemClock()
-        inner = FilesystemTaskStore(tmp_path, clock=clock)
+        inner = FilesystemJobStore(tmp_path, clock=clock)
         flaky = _FlakyCommitStore(inner, fail_times=2)
         handler = _CountingHandler()
         worker = JobWorker(
@@ -347,14 +347,14 @@ class _FlakyRenewStore:
 
 
 def test_heartbeat_renew_failure_is_counted_not_silently_dropped(tmp_path) -> None:
-    from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+    from linktools.ai.storage.filesystem.job import FilesystemJobStore
     from linktools.ai.jobs.metrics import CountersTaskMetrics
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.worker import JobWorker
 
     async def run() -> None:
         clock = SystemClock()
-        inner = FilesystemTaskStore(tmp_path, clock=clock)
+        inner = FilesystemJobStore(tmp_path, clock=clock)
         flaky = _FlakyRenewStore(inner)
         metrics = CountersTaskMetrics()
         worker = JobWorker(
@@ -392,7 +392,7 @@ def test_heartbeat_cancels_when_renew_failures_burn_past_lease(tmp_path) -> None
     import types
     from datetime import datetime, timedelta, timezone
 
-    from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+    from linktools.ai.storage.filesystem.job import FilesystemJobStore
     from linktools.ai.jobs.metrics import CountersTaskMetrics
     from linktools.ai.jobs.worker import JobWorker
 
@@ -412,7 +412,7 @@ def test_heartbeat_cancels_when_renew_failures_burn_past_lease(tmp_path) -> None
 
     async def run() -> None:
         clock = _FakeClock()
-        inner = FilesystemTaskStore(tmp_path, clock=clock)
+        inner = FilesystemJobStore(tmp_path, clock=clock)
         flaky = _FlakyRenewStore(inner)  # renew_lease always raises
         metrics = CountersTaskMetrics()
         worker = JobWorker(
@@ -536,7 +536,7 @@ def test_orphan_run_reconciler_cancels_superseded_runs(tmp_path) -> None:
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
 
-    from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+    from linktools.ai.storage.filesystem.job import FilesystemJobStore
 
     class _FakeClock:
         def __init__(self, start):
@@ -553,14 +553,14 @@ def test_orphan_run_reconciler_cancels_superseded_runs(tmp_path) -> None:
 
     async def run() -> None:
         clock = _FakeClock(datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc))
-        task_store = FilesystemTaskStore(tmp_path, clock=clock)
+        task_store = FilesystemJobStore(tmp_path, clock=clock)
         canceled: "list[str]" = []
 
         async def cancel(run_id: str) -> None:
             canceled.append(run_id)
 
         runtime = JobRuntime(
-            storage=SimpleNamespace(tasks=task_store),
+            storage=SimpleNamespace(jobs=task_store, artifacts=None),
             handlers={"echo": _EchoHandler()},
             options=FAST,
             clock=clock,

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """TaskEvalExecutor tests: routes a case through JobRuntime and captures
 retry_count + the sealed output (section 23.4 task mode)."""
 
 import asyncio
 
-from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
 from linktools.ai.evaluation.executors import TaskEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
 from linktools.ai.storage.facade import FilesystemStorage
@@ -29,9 +29,9 @@ def test_task_eval_executor_captures_output_and_retry_count_zero(tmp_path) -> No
     artifacts: "object | None" = None
 
     async def handler(request, context):
-        rec = await artifacts.put(  # type: ignore[union-attr]
-            _envelope_bytes("done"), media_type="application/json", tenant_id="t1"
-        )
+        rec = await artifacts.put(  content=# type: ignore[union-attr]
+            _envelope_bytes("done"), media_type="application/json", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,
+    )
         from linktools.ai.jobs.protocols import TaskSuccess
 
         return TaskSuccess(output_artifact=rec.ref)
@@ -39,14 +39,14 @@ def test_task_eval_executor_captures_output_and_retry_count_zero(tmp_path) -> No
     async def run():
         nonlocal artifacts
         storage = FilesystemStorage(root=tmp_path)
-        artifacts = build_artifact_store_from_assets(storage.assets)
+        artifacts = storage.artifacts
         runtime = JobRuntime(
             storage=storage, handlers={"eval": CallableTaskHandler(handler)}, options=FAST
         )
         executor = TaskEvalExecutor(
             runtime, artifacts, tenant_id="t1", handler_name="eval", wait_timeout=10
         )
-        inp = await artifacts.put(b"case-in", media_type="text/plain", tenant_id="t1")
+        inp = await artifacts.put(content=b"case-in", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=inp.ref.id)
         execution = await executor.execute(EvalTarget(kind="agent", id="a1"), case)
         assert execution.error is None
@@ -74,9 +74,9 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
             return TaskFailure(
                 kind=TaskFailureKind.TRANSIENT, error_type="Flaky", message="retry"
             )
-        rec = await artifacts.put(  # type: ignore[union-attr]
-            _envelope_bytes("ok"), media_type="application/json", tenant_id="t1"
-        )
+        rec = await artifacts.put(  content=# type: ignore[union-attr]
+            _envelope_bytes("ok"), media_type="application/json", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,
+    )
         from linktools.ai.jobs.protocols import TaskSuccess
 
         return TaskSuccess(output_artifact=rec.ref)
@@ -84,7 +84,7 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
     async def run():
         nonlocal artifacts
         storage = FilesystemStorage(root=tmp_path)
-        artifacts = build_artifact_store_from_assets(storage.assets)
+        artifacts = storage.artifacts
         runtime = JobRuntime(
             storage=storage, handlers={"eval": CallableTaskHandler(flaky)}, options=FAST
         )
@@ -96,7 +96,7 @@ def test_task_eval_executor_captures_retry_after_transient(tmp_path) -> None:
             retry_policy=RetryPolicy(max_attempts=2, initial_delay_seconds=0.01),
             wait_timeout=10,
         )
-        inp = await artifacts.put(b"case-in", media_type="text/plain", tenant_id="t1")
+        inp = await artifacts.put(content=b"case-in", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=inp.ref.id)
         execution = await executor.execute(EvalTarget(kind="agent", id="a1"), case)
         # First attempt failed transiently, second succeeded -> 1 retry.
@@ -122,7 +122,7 @@ def test_task_eval_executor_captures_safety_refusal_on_policy_denial(tmp_path) -
 
     async def run():
         storage = FilesystemStorage(root=tmp_path)
-        artifacts = build_artifact_store_from_assets(storage.assets)
+        artifacts = storage.artifacts
         runtime = JobRuntime(
             storage=storage,
             handlers={"eval": CallableTaskHandler(denied)},
@@ -131,7 +131,7 @@ def test_task_eval_executor_captures_safety_refusal_on_policy_denial(tmp_path) -
         executor = TaskEvalExecutor(
             runtime, artifacts, tenant_id="t1", handler_name="eval", wait_timeout=10
         )
-        inp = await artifacts.put(b"in", media_type="text/plain", tenant_id="t1")
+        inp = await artifacts.put(content=b"in", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         case = EvalCase(id="c1", input_artifact_id=inp.ref.id)
         execution = await executor.execute(EvalTarget(kind="agent", id="a1"), case)
         assert execution.error == "TaskFailed"

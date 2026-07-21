@@ -19,13 +19,14 @@ conform, the Protocol design is inadequate and the work returns to Phase 3."""
 import ast
 import pathlib
 
-from linktools.ai.storage.testing import (
+from testing import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
     LeaseCoordinatorContract,
 )
 
-from .example_external_adapter import (
+from external_adapter import conformance_adapter
+from external_adapter.conformance_adapter import (
     InMemoryArtifactBlobStore,
     InMemoryArtifactRecordStore,
     InMemoryLeaseCoordinator,
@@ -39,16 +40,13 @@ from .example_external_adapter import (
 _PUBLIC_ADAPTER_IMPORTS = frozenset(
     {
         "linktools.ai.storage.protocols",
-        "linktools.ai.storage.testing",
         "linktools.ai.artifact.models",
     }
 )
 
 
 def test_external_adapter_imports_only_public_paths() -> None:
-    src = pathlib.Path(__file__).with_name("example_external_adapter.py").read_text(
-        encoding="utf-8"
-    )
+    src = pathlib.Path(conformance_adapter.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
     imported: "set[str]" = set()
     for node in ast.walk(tree):

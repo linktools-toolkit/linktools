@@ -23,6 +23,7 @@ from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.mcp.spec import MCPServerSpec
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.tool.executor import GovernedToolInvoker
 
 
@@ -138,10 +139,12 @@ def _text_router():
 async def test_runtime_runs_mcp_through_managed_execution(tmp_path):
     manager = _Manager()
     provider = MCPProvider(_SpecProvider(), manager)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=_router(),
         providers=RuntimeDependencies(capabilities=(provider,)),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="agent",
@@ -174,6 +177,7 @@ async def test_runtime_mcp_governance_executes_exactly_once(tmp_path):
         tool_executor=executor,
         security=SecurityBaseline(pipeline=pipeline),
         providers=RuntimeDependencies(capabilities=(provider,)),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="agent",
@@ -215,10 +219,12 @@ async def test_runtime_mcp_governance_executes_exactly_once(tmp_path):
 async def test_runtime_empty_mcp_allowlist_exposes_and_calls_no_tools(tmp_path):
     manager = _Manager()
     provider = MCPProvider(_SpecProvider(enabled_tools=()), manager)
+    storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
-        storage=FilesystemStorage(root=tmp_path),
+        storage=storage,
         model_router=_text_router(),
         providers=RuntimeDependencies(capabilities=(provider,)),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
         id="agent",

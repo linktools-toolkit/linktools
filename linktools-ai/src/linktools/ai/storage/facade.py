@@ -32,8 +32,11 @@ if TYPE_CHECKING:
     from ...evaluation.store import EvalStore
     from ..artifact.store import ArtifactStore
     from ..jobs.store import JobStore
-    from .protocols import LeaseCoordinator, StorageTransactionManager
-    from .sqlalchemy.facade import _UnitOfWork
+    from .protocols import (
+        LeaseCoordinator,
+        StorageTransactionManager,
+        StorageUnitOfWork,
+    )
 
 from ..agent.approval import ApprovalStore
 from ..events.store import EventStore
@@ -100,10 +103,11 @@ class Storage:
     # without one is rejected at Runtime build time -- resumability is not an
     # opt-in capability.
     run_definitions: RunDefinitionStore
-    # Reliable-task store. Optional + None for backward compatibility with
-    # existing Storage(...) constructions; JobRuntime rejects a None tasks
-    # store at build time. Backends wire their own (FilesystemStorage -> FilesystemTaskStore).
-    tasks: "JobStore | None" = None
+    # Reliable-task store (jobs domain). Optional + None for backward
+    # compatibility with existing Storage(...) constructions; JobRuntime rejects
+    # a None jobs store at build time. Backends wire their own
+    # (FilesystemStorage -> FilesystemJobStore).
+    jobs: "JobStore | None" = None
     # Evaluation store. Optional + None for backward compatibility; the eval
     # runner persists lifecycle + results when a caller wires one (e.g. an
     # InMemoryEvalStore or a backend-provided file/SQL store).
@@ -113,7 +117,7 @@ class Storage:
     # it explicitly (no implicit getattr fallback on the asset store).
     artifacts: "ArtifactStore | None" = None
 
-    def transaction(self) -> "AsyncIterator[_UnitOfWork]":
+    def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         """Cross-store transactional scope, delegating to the ``transactions``
         field (the canonical surface). A backend whose stores share a
         transaction provider (SqlAlchemyStorage) yields a real UoW; a backend
@@ -137,11 +141,15 @@ class FilesystemStorage(Storage):
         # from pulling the jobs/evaluation domains; only constructing a
         # FilesystemStorage does.
         from .filesystem.evaluation import FilesystemEvaluationStore
-        from .filesystem.task import FilesystemTaskStore
+        from .filesystem.job import FilesystemJobStore
 
         root_path = Path(root)
-        from .artifact_backends import build_artifact_store_from_assets
+        from ..artifact.store import ArtifactStore
         from .coordination.process_local import ProcessLocalLeaseCoordinator
+        from .filesystem.artifact import (
+            FilesystemArtifactBlobStore,
+            FilesystemArtifactRecordStore,
+        )
         from .transaction import NoCrossStoreTransactions
 
         assets = AssetStore(primary=FileAssetBackend(root=root_path / "resources"))
@@ -159,9 +167,16 @@ class FilesystemStorage(Storage):
             features=FILE_STORAGE_FEATURES,
             coordination=ProcessLocalLeaseCoordinator(),
             transactions=NoCrossStoreTransactions("FilesystemStorage"),
-            tasks=FilesystemTaskStore(root_path / "tasks"),
+            jobs=FilesystemJobStore(root_path / "jobs"),
             evaluations=FilesystemEvaluationStore(root=root_path / "evaluations"),
-            artifacts=build_artifact_store_from_assets(assets),
+            artifacts=ArtifactStore(
+                FilesystemArtifactBlobStore(
+                    blobs_root=root_path / "artifacts" / "blobs"
+                ),
+                FilesystemArtifactRecordStore(
+                    records_root=root_path / "artifacts" / "records"
+                ),
+            ),
         )
         # Stash the root so the FilesystemRunCommitCoordinator can place its crash-
         # recovery journal under {root}/transactions (frozen dataclass -> bypass).

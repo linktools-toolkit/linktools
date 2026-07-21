@@ -15,11 +15,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
+from linktools.ai.artifact import ArtifactStore, ANONYMOUS_PROVENANCE
 from linktools.ai.identity.principal import ScopeSet
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.store import AssetStore
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.artifact import (
+    FilesystemArtifactBlobStore,
+    FilesystemArtifactRecordStore,
+)
 from linktools.ai.jobs.handlers.runtime import (
     MappingRunnableResolver,
     RuntimeTaskHandler,
@@ -126,10 +128,9 @@ class _CapturingHandler:
 def test_input_artifact_reaches_handler(tmp_path) -> None:
     async def run() -> None:
         storage = FilesystemStorage(root=tmp_path)
-        artifact_store = build_artifact_store_from_assets(storage.assets)
-        record = await artifact_store.put(
-            b"hello", media_type="text/plain", tenant_id="t1"
-        )
+        record = await storage.artifacts.put(
+            content=b"hello", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,
+    )
         handler = _CapturingHandler()
         runtime = JobRuntime(
             storage=storage, handlers={"cap": handler}, options=FAST
@@ -197,9 +198,15 @@ class _NoopTaskStore:
     async def bind_run(self, **kwargs): return None
 
 
-def _handler(runtime, resolver, **kwargs):
+def _handler(runtime, resolver, tmp_path=None, **kwargs):
+    import tempfile
+    from pathlib import Path
+    root = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp())
     return RuntimeTaskHandler(runtime, resolver, task_store=_NoopTaskStore(),
-        artifact_store=build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend())),
+        artifact_store=ArtifactStore(
+            FilesystemArtifactBlobStore(blobs_root=root / "blobs"),
+            FilesystemArtifactRecordStore(records_root=root / "records"),
+        ),
         **kwargs)
 
 
@@ -369,7 +376,7 @@ def test_reconcile_strict_raises_on_canceler_failure(tmp_path) -> None:
     async def run() -> None:
         storage = FilesystemStorage(root=tmp_path)
         recovered = (
-            dataclasses.replace(_task(storage.tasks._clock), status=TaskStatus.READY),
+            dataclasses.replace(_task(storage.jobs._clock), status=TaskStatus.READY),
         )
         attempts = [_attempt(run_id="run-1", status=AttemptStatus.SUPERSEDED)]
 
@@ -391,7 +398,7 @@ def test_reconcile_strict_raises_on_canceler_failure(tmp_path) -> None:
 def test_ensure_recovered_reconciles_orphan_run_and_marks_recovered(tmp_path) -> None:
     async def run() -> None:
         storage = FilesystemStorage(root=tmp_path)
-        clock = storage.tasks._clock
+        clock = storage.jobs._clock
         seeded_task = dataclasses.replace(_task(clock), status=TaskStatus.READY)
         seeded_attempt = _attempt(run_id="run-1", status=AttemptStatus.SUPERSEDED)
         cancelled_runs: "list[str]" = []
@@ -415,7 +422,7 @@ def test_ensure_recovered_reconciles_orphan_run_and_marks_recovered(tmp_path) ->
 def test_failed_startup_reconciliation_leaves_unrecovered(tmp_path) -> None:
     async def run() -> None:
         storage = FilesystemStorage(root=tmp_path)
-        clock = storage.tasks._clock
+        clock = storage.jobs._clock
         seeded_task = dataclasses.replace(_task(clock), status=TaskStatus.READY)
         seeded_attempt = _attempt(run_id="run-1", status=AttemptStatus.SUPERSEDED)
         calls = {"n": 0}
@@ -445,7 +452,7 @@ def test_failed_startup_reconciliation_is_retried_and_refinds_orphans(
 
     async def run() -> None:
         storage = FilesystemStorage(root=tmp_path)
-        clock = storage.tasks._clock
+        clock = storage.jobs._clock
         seeded_task = dataclasses.replace(_task(clock), status=TaskStatus.READY)
         seeded_attempt = _attempt(run_id="run-1", status=AttemptStatus.SUPERSEDED)
         calls: "list[str]" = []
@@ -496,7 +503,7 @@ def test_non_idempotent_orphan_run_is_finalized_not_requeued(tmp_path) -> None:
         from linktools.ai.jobs.models import SideEffectMode
 
         storage = FilesystemStorage(root=tmp_path)
-        store = storage.tasks
+        store = storage.jobs
         clock = _FakeClock(datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc))
         now = clock.now()
         task = dataclasses.replace(
@@ -566,7 +573,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
         )
 
         storage = FilesystemStorage(root=tmp_path)
-        store = storage.tasks
+        store = storage.jobs
         now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
         job = JobRecord(
             id="j1",
@@ -619,7 +626,10 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             _OkRuntime(),
             MappingRunnableResolver({"a": "spec-after-change"}),
             task_store=store,
-            artifact_store=build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend())),
+            artifact_store=ArtifactStore(
+                FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
+                FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+            ),
         )
         ct = CancellationToken()
         ctx = TaskContext(

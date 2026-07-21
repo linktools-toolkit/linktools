@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """A from-scratch in-memory EXTERNAL storage adapter for the wheel-only
-conformance suite (plan §7.2 line 1852).
+conformance suite.
 
 This module is the proof that a THIRD-PARTY adapter can be built against the
 PUBLIC surface alone: it imports ONLY ``linktools.ai.storage.protocols`` and
 ``linktools.ai.artifact.models`` -- nothing private, no in-repo reference
 backend, no source-tree relative import. A downstream package installs the
-built ``linktools-ai`` wheel + the ``test`` extra, copies this adapter, and
-runs the public testkit Contracts (``linktools.ai.storage.testing``) against
-it in its own CI."""
+built ``linktools-ai`` wheel + the ``test`` extra, copies this adapter (plus
+the sibling ``testing`` conformance-testkit package, which ships alongside
+the wheel rather than inside it), and runs the testkit Contracts against it
+in its own CI."""
 
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from linktools.ai.artifact.models import ArtifactIntegrityError, ArtifactRecord
+from linktools.ai.artifact.models import (
+    ArtifactBlobNotFoundError,
+    ArtifactIntegrityError,
+    ArtifactRecord,
+)
 from linktools.ai.storage.protocols import BlobInfo, LeaseToken
 
 
@@ -40,14 +46,25 @@ class InMemoryArtifactBlobStore:
             raise ArtifactIntegrityError(
                 f"digest mismatch: claimed sha256 {digest[:12]}..."
             )
+        if size is not None and len(actual) != size:
+            raise ArtifactIntegrityError(
+                f"size mismatch: claimed {size} bytes, got {len(actual)}"
+            )
         self._blobs.setdefault(digest, actual)
         return BlobInfo(digest=digest, size=len(actual), content_type=None)
 
-    async def open(self, *, digest: str) -> AsyncIterator[bytes]:
+    @asynccontextmanager
+    async def open(self, *, digest: str):
         existing = self._blobs.get(digest)
         if existing is None:
-            raise ArtifactIntegrityError(f"blob for sha256 {digest[:12]} missing")
-        yield existing
+            raise ArtifactBlobNotFoundError(
+                f"blob for sha256 {digest[:12]} missing"
+            )
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            yield existing
+
+        yield _chunks()
 
     async def stat(self, *, digest: str) -> "BlobInfo | None":
         data = self._blobs.get(digest)
@@ -112,16 +129,22 @@ class InMemoryLeaseCoordinator:
         )
 
     async def renew(self, *, token: LeaseToken, ttl: timedelta) -> LeaseToken:
+        now = self._now()
         held = self._holders.get(token.key)
-        if (
-            held is None
-            or held[0] != token.owner_id
-            or held[1] != token.fencing_token
-        ):
+        if held is None:
+            raise LookupError(
+                f"cannot renew a released lease for key {token.key!r}"
+            )
+        if held[0] != token.owner_id or held[1] != token.fencing_token:
             raise LookupError(
                 f"cannot renew a lease not currently held by {token.owner_id!r}"
             )
-        expires = self._now() + ttl
+        if held[2] <= now:
+            raise LookupError(
+                f"cannot renew an expired lease for key {token.key!r} "
+                f"(expired at {held[2].isoformat()})"
+            )
+        expires = now + ttl
         self._holders[token.key] = (token.owner_id, token.fencing_token, expires)
         return LeaseToken(
             lease_id=token.lease_id,

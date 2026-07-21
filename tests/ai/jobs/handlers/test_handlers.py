@@ -131,11 +131,20 @@ class _FakeTaskStore:
         return None
 
 
-def _stores():
-    from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.store import AssetStore
-    return _FakeTaskStore(), build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+def _stores(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    from linktools.ai.artifact import ArtifactStore
+    from linktools.ai.storage.filesystem.artifact import (
+        FilesystemArtifactBlobStore,
+        FilesystemArtifactRecordStore,
+    )
+    root = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp())
+    artifacts = ArtifactStore(
+        FilesystemArtifactBlobStore(blobs_root=root / "blobs"),
+        FilesystemArtifactRecordStore(records_root=root / "records"),
+    )
+    return _FakeTaskStore(), artifacts
 
 
 def _runtime_handler(runtime, resolver, **kwargs):
@@ -228,15 +237,11 @@ def test_runtime_handler_resolver_miss() -> None:
     asyncio.run(run())
 
 
-def test_runtime_handler_seals_run_result_to_artifact() -> None:
+def test_runtime_handler_seals_run_result_to_artifact(tmp_path) -> None:
     """When an ArtifactStore is wired, the handler seals the RunResult into a
     content-addressed artifact and returns its ref as the task output."""
-    from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.store import AssetStore
-
     rt = _FakeRuntime()
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    _, artifacts = _stores(tmp_path)
     handler = _runtime_handler(
         rt,
         MappingRunnableResolver({"agent-1": "fake-spec"}),
@@ -253,26 +258,22 @@ def test_runtime_handler_seals_run_result_to_artifact() -> None:
         )
         assert isinstance(outcome, TaskSuccess)
         assert outcome.output_artifact is not None
-        content = await artifacts.get(outcome.output_artifact.id, tenant_id="t1")
+        content = await artifacts.get(artifact_id=outcome.output_artifact.id, tenant_id="t1")
         assert content is not None
         assert b"done" in content
 
     asyncio.run(run())
 
 
-def test_runtime_handler_rejects_oversized_output_before_writing() -> None:
+def test_runtime_handler_rejects_oversized_output_before_writing(tmp_path) -> None:
     """An output exceeding the per-task payload cap is rejected BEFORE the
     oversized blob is written to the content-addressed store (fail-closed, not
     post-hoc)."""
-    from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.store import AssetStore
-
     class _HugeRuntime:
         async def run(self, spec, prompt, **kw):
             return {"output": "x" * (2 * 1024 * 1024)}  # 2 MiB > 1 MiB cap
 
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    _, artifacts = _stores(tmp_path)
     handler = _runtime_handler(
         _HugeRuntime(),
         MappingRunnableResolver({"agent-1": "fake-spec"}),
@@ -293,17 +294,14 @@ def test_runtime_handler_rejects_oversized_output_before_writing() -> None:
     asyncio.run(run())
 
 
-def test_runtime_handler_rejects_stale_resource_snapshot() -> None:
+def test_runtime_handler_rejects_stale_resource_snapshot(tmp_path) -> None:
     """A pinned resource snapshot whose artifact is missing fails fast with
     INVALID_INPUT -- the runtime is never invoked against possibly-changed
     resources."""
-    from linktools.ai.storage.artifact_backends import build_artifact_store_from_assets
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.store import AssetStore
     from linktools.ai.jobs.models import ResourceSnapshotRef
 
     rt = _FakeRuntime()
-    artifacts = build_artifact_store_from_assets(AssetStore(primary=MemoryAssetBackend()))
+    _, artifacts = _stores(tmp_path)
     handler = _runtime_handler(
         rt,
         MappingRunnableResolver({"agent-1": "fake-spec"}),

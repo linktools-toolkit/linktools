@@ -18,9 +18,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.filesystem.task import FilesystemTaskStore
+from linktools.ai.storage.filesystem.job import FilesystemJobStore
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.task import SqlAlchemyTaskStore
+from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -70,11 +70,11 @@ async def _create_tables(engine) -> None:
 def _make_store(backend: str, tmp_path):
     clock = FakeClock(datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc))
     if backend == "file":
-        return FilesystemTaskStore(tmp_path, clock=clock)
+        return FilesystemJobStore(tmp_path, clock=clock)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/rel.db")
     asyncio.run(_create_tables(engine))
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyTaskStore(session_factory=factory, clock=clock)
+    return SqlAlchemyJobStore(session_factory=factory, clock=clock)
 
 
 @pytest.fixture(params=["file", "sqlite"])
@@ -148,7 +148,7 @@ async def _force_job_status(store, job_id: str, status: JobStatus) -> None:
     they are, so the claim whitelist (5.2.2) can be exercised against an
     inconsistent-but-possible leftover state. Defense-in-depth only -- the store
     API itself cannot reach this state once 5.2.3 holds."""
-    if isinstance(store, FilesystemTaskStore):
+    if isinstance(store, FilesystemJobStore):
         job = await store.get_job(job_id)
         store._write(store._job_path(job_id), dataclasses.replace(job, status=status))
     else:
@@ -174,13 +174,13 @@ async def _inject_ready_sibling(store, job_id: str, task_id: str, clock) -> None
 
     record = _task(clock, task_id=task_id, job_id=job_id, key=task_id)
     record = dataclasses.replace(record, status=TaskStatus.READY)
-    if isinstance(store, FilesystemTaskStore):
+    if isinstance(store, FilesystemJobStore):
         store._write(store._task_path(job_id, task_id), record)
     else:
         import json
 
         from linktools.ai.storage.sqlalchemy.models import TaskRow
-        from linktools.ai.storage.sqlalchemy.task import _store_dt, _task_envelope
+        from linktools.ai.storage.sqlalchemy.job import _store_dt, _task_envelope
 
         async with store._session_factory() as session:
             session.add(

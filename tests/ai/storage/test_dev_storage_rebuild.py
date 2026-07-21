@@ -97,7 +97,8 @@ def test_sqlite_rebuild_wipes_and_reconstructs(tmp_path):
 
             await conn.run_sync(Base.metadata.create_all)
         storage = SqlAlchemyStorage(
-            session_factory=async_sessionmaker(engine, expire_on_commit=False)
+            session_factory=async_sessionmaker(engine, expire_on_commit=False),
+            blobs_root=tmp_path / "blobs",
         )
         await storage.runs.create(_make_run("pre-existing"))
         await engine.dispose()
@@ -109,7 +110,9 @@ def test_sqlite_rebuild_wipes_and_reconstructs(tmp_path):
     # rebuild helper initializes the schema on it.
     db_path.unlink()
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
-    storage = rebuild_sqlite_storage(engine=engine)
+    storage = rebuild_sqlite_storage(
+        engine=engine, blobs_root=tmp_path / "blobs"
+    )
 
     async def _check():
         assert await storage.runs.get("pre-existing") is None, (

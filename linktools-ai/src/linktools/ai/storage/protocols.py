@@ -11,26 +11,36 @@ adapters hide multipart uploads, connection pools, retries and vendor errors
 behind these Protocols; they convert all exceptions to core error types via
 ``raise ... from exc``.
 
-The AssetStore / ArtifactRecord-store Protocols that reference the asset
-domain types are hosted here once ``asset/`` lands; this module currently
-defines the Protocols whose signatures are independent of that rename:
-leasing, artifact blobs, and the transaction unit-of-work.
+``StorageUnitOfWork`` is the cross-store atomic handle: it types each store
+field as the concrete store Protocol (RunStore / SessionStore / EventStore /
+...) so a downstream consumer gets real attribute-completion checking. The
+optional stores (artifact_records, jobs) are explicit ``X | None`` rather
+than ``Any`` so a backend that does not provide one declares the gap
+honestly, not via an absent attribute.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, AsyncContextManager, AsyncIterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    # ArtifactRecord appears only in ArtifactRecordStore method signatures
-    # (string annotations, resolved lazily). Keeping this import TYPE_CHECKING-
-    # only breaks the runtime cycle storage.protocols -> artifact.models ->
-    # artifact (.__init__ imports .store) -> storage.protocols, so an external
-    # adapter can ``from linktools.ai.storage.protocols import ...`` in any
+    # Protocol-level imports kept TYPE_CHECKING-only so the ``storage.protocols``
+    # module has no runtime dependency on the concrete store modules (which
+    # would re-introduce the import cycle storage.protocols -> artifact.models
+    # -> artifact (.__init__ imports .store) -> storage.protocols). External
+    # adapters can ``from linktools.ai.storage.protocols import ...`` in any
     # import order without hitting a partially-initialized module.
+    from ..agent.approval import ApprovalStore
     from ..artifact.models import ArtifactRecord
+    from ..asset.store import AssetStore
+    from ..events.store import EventStore
+    from ..jobs.store import JobStore
+    from ..run.checkpoint import CheckpointStore
+    from ..run.store import RunStore
+    from ..session.store import SessionStore
+    from ..tool.idempotency import IdempotencyStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,18 +136,32 @@ class StorageTransactionManager(Protocol):
 
 @runtime_checkable
 class StorageUnitOfWork(Protocol):
-    """The stores sharing one transaction. Optional stores are ``None`` where
-    the backend does not provide them in this scope."""
+    """The stores sharing one transaction.
 
-    # Concrete stores are attached by the implementing backend (Filesystem
-    # journal / SQLAlchemy AsyncSession). Typed as Any so the Protocol stays
-    # free of concrete store imports.
-    runs: Any
-    sessions: Any
-    events: Any
-    checkpoints: Any
-    approvals: Any
-    idempotency: Any
+    Every field carries its concrete Protocol type so a downstream consumer
+    (run commit coordinator, runtime) gets real attribute-completion checking
+    against the union of stores a backend actually exposes. Optional stores
+    that a backend does not provide in this scope are declared as an explicit
+    ``X | None`` -- never an untyped ``Any`` and never an absent attribute
+    (an optional store + None is the honest declaration; an absent attribute
+    hides the capability gap from type-checking).
+    """
+
+    # assets is Optional in the UoW scope: a session-bound asset backend is not
+    # yet wired (the SQLAlchemy asset backend takes a session_factory, not a
+    # per-call AsyncSession, so it cannot join the UoW's single session without
+    # self-committing and breaking the atomicity guarantee). None is the honest
+    # value until one exists -- not a fake. A consumer that needs assets inside
+    # a transaction must check for None.
+    assets: "AssetStore | None"
+    artifact_records: "ArtifactRecordStore"
+    sessions: "SessionStore"
+    runs: "RunStore"
+    events: "EventStore"
+    checkpoints: "CheckpointStore"
+    approvals: "ApprovalStore"
+    idempotency: "IdempotencyStore"
+    jobs: "JobStore | None"
 
 
 __all__: "list[str]" = [

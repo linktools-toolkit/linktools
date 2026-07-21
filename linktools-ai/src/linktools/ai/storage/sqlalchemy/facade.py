@@ -12,10 +12,11 @@ can coordinate writes across stores atomically."""
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable, TYPE_CHECKING
+from pathlib import Path
+from typing import AsyncIterator, TYPE_CHECKING
 
 try:  # optional dependency -- give a clear install hint instead of a raw ImportError
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 except (
     ModuleNotFoundError
 ) as exc:  # pragma: no cover - exercised via import-blocking test
@@ -31,7 +32,14 @@ except (
 if TYPE_CHECKING:
     from ...evaluation.store import EvalStore
     from ...jobs.store import JobStore
+    from ..protocols import (
+        ArtifactBlobStore,
+        ArtifactRecordStore,
+        LeaseCoordinator,
+        StorageUnitOfWork,
+    )
 
+from ...asset.store import AssetStore
 from ...agent.approval import ApprovalStore
 from ...events.store import EventStore
 from ...memory.store import MemoryStore
@@ -40,21 +48,22 @@ from ...run.store import RunStore
 from ...session.store import SessionStore
 from ...swarm.store import SwarmStore
 from ...tool.idempotency import IdempotencyStore
-from ..features import SQLALCHEMY_STORAGE_FEATURES
+from ..features import SQLALCHEMY_STORAGE_FEATURES, StorageFeatures
 from ..facade import Storage
-from ...asset.store import AssetStore
 from .approval import SqlAlchemyApprovalStore
+from .artifact_record import SqlAlchemyArtifactRecordStore
 from .checkpoint import SqlAlchemyCheckpointStore
 from .definition import SqlAlchemyRunDefinitionStore
 from .event import SqlAlchemyEventStore
 from .evaluation import SqlAlchemyEvalStore
 from .idempotency import SqlAlchemyIdempotencyStore
 from .memory import SqlAlchemyMemoryStore
+from .naming import DEFAULT_SQL_NAMING, SqlNamingStrategy
 from .asset import SqlAlchemyAssetBackend
 from .run import SqlAlchemyRunStore
 from .session import SqlAlchemySessionStore
 from .swarm import SqlAlchemySwarmStore
-from .task import SqlAlchemyTaskStore
+from .job import SqlAlchemyJobStore
 
 
 @dataclass(frozen=True)
@@ -66,9 +75,21 @@ class _UnitOfWork:
     commit (clean exit) or all roll back (exception). Stores in UoW mode do NOT
     open their own sessions or call session.begin(); they reuse ``session`` and
     flush after each operation so subsequent reads within the unit observe prior
-    writes."""
+    writes.
+
+    Field types track ``StorageUnitOfWork`` (storage.protocols): the store
+    Protocols directly, no ``Any``. ``artifact_records`` is a real
+    session-bound ``SqlAlchemyArtifactRecordStore`` sharing this UoW's session
+    (flush, not commit) so artifact-record writes join the same atomic scope as
+    run/event/job writes. ``assets`` is ``None``: no session-bound asset backend
+    exists yet, and a per-call-session one would self-commit and break the
+    single-session invariant, so ``None`` is the honest value (not a fake). The
+    Protocol declares ``assets: AssetStore | None`` to match -- the typed
+    contract is honest about the gap, not faking the capability."""
 
     session: AsyncSession
+    assets: "AssetStore | None"
+    artifact_records: "ArtifactRecordStore"
     runs: RunStore
     events: EventStore
     checkpoints: CheckpointStore
@@ -77,23 +98,45 @@ class _UnitOfWork:
     swarms: SwarmStore
     memories: MemoryStore
     idempotency: IdempotencyStore
-    tasks: "JobStore"
+    jobs: "JobStore"
     evaluations: "EvalStore"
 
 
-class SqlAlchemyStorage(Storage):
-    """Storage backed by SQLAlchemy stores sharing one session_factory.
-    Cross-cutting writes can be coordinated through transaction(), which yields
-    a UnitOfWork whose stores share one AsyncSession + one transaction."""
+class SqlAlchemyStorageAdapter(Storage):
+    """The generic SQLAlchemy Storage adapter (plan §4.7 frozen constructor).
+
+    This is the thin, backend-neutral surface a DOWNSTREAM composes: it takes a
+    caller-constructed ``async_sessionmaker`` (NEVER a URL/engine), the caller's
+    chosen :class:`ArtifactBlobStore` + :class:`LeaseCoordinator` +
+    :class:`StorageFeatures`, and wires the SQLAlchemy metadata stores around
+    them. It imports no dialect driver, constructs no engine, branches on no
+    dialect name, and takes the blob store + coordination + features as INJECTED
+    dependencies -- the caller owns those choices. The artifact facade is built
+    over the injected blob store + a session-bound SqlAlchemyArtifactRecordStore
+    so artifact records share the cross-store transaction.
+
+    The in-repo :class:`SqlAlchemyStorage` and :class:`~..sqlite.SqliteStorage`
+    conveniences are thin subclasses that supply default blob/coordination/
+    features and delegate here."""
 
     def __init__(
         self,
         *,
-        session_factory: "Callable[[], AsyncSession]",
-        resource_coordinator: "object | None" = None,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        artifact_blobs: "ArtifactBlobStore",
+        coordination: "LeaseCoordinator | None",
+        features: StorageFeatures,
+        naming: "SqlNamingStrategy" = DEFAULT_SQL_NAMING,
     ) -> None:
-        from ..artifact_backends import build_artifact_store_from_assets
-        from ..coordination.process_local import ProcessLocalLeaseCoordinator
+        from ...artifact.store import ArtifactStore
+
+        # Apply the naming convention to the shared declarative metadata (the
+        # real SQLAlchemy mechanism for constraint/index name derivation; a
+        # downstream can standardize them for migration DDL).
+        from .models import Base
+
+        if naming.naming_convention:
+            Base.metadata.naming_convention = dict(naming.naming_convention)
 
         assets = AssetStore(
             primary=SqlAlchemyAssetBackend(session_factory=session_factory)
@@ -111,12 +154,40 @@ class SqlAlchemyStorage(Storage):
             run_definitions=SqlAlchemyRunDefinitionStore(
                 session_factory=session_factory
             ),
-            tasks=SqlAlchemyTaskStore(session_factory=session_factory),
+            jobs=SqlAlchemyJobStore(session_factory=session_factory),
             evaluations=SqlAlchemyEvalStore(session_factory=session_factory),
-            features=SQLALCHEMY_STORAGE_FEATURES,
-            coordination=ProcessLocalLeaseCoordinator(),
+            features=features,
+            coordination=coordination,
             transactions=_SqlAlchemyTransactionManager(session_factory),
-            artifacts=build_artifact_store_from_assets(assets),
+            artifacts=ArtifactStore(
+                artifact_blobs,
+                SqlAlchemyArtifactRecordStore(session_factory=session_factory),
+            ),
+        )
+
+
+class SqlAlchemyStorage(SqlAlchemyStorageAdapter):
+    """Convenience SQLAlchemy composition: a caller hands a session_factory +
+    a blobs_root and gets process-local coordination, default DATABASE-scope
+    features, and Filesystem-backed artifact blobs. Delegates the real wiring
+    to :class:`SqlAlchemyStorageAdapter` (the §4.7 surface). For a deployment
+    that brings its own blob store / coordination / features, use the adapter
+    directly."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        blobs_root: Path,
+    ) -> None:
+        from ..coordination.process_local import ProcessLocalLeaseCoordinator
+        from ..filesystem.artifact import FilesystemArtifactBlobStore
+
+        super().__init__(
+            session_factory=session_factory,
+            artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
+            coordination=ProcessLocalLeaseCoordinator(),
+            features=SQLALCHEMY_STORAGE_FEATURES,
         )
 
 
@@ -130,15 +201,26 @@ class _SqlAlchemyTransactionManager:
     Storage.transactions field holds an instance and Storage.transaction()
     delegates to it."""
 
-    def __init__(self, session_factory: "Callable[[], AsyncSession]") -> None:
+    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]") -> None:
         self._session_factory = session_factory
 
     @asynccontextmanager
-    async def transaction(self) -> "AsyncIterator[_UnitOfWork]":
+    async def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         async with self._session_factory() as session:
             async with session.begin():
                 yield _UnitOfWork(
                     session=session,
+                    # assets: no session-bound backend yet. A per-call-session
+                    # one would self-commit and break the single-session
+                    # atomicity this UoW guarantees, so None is the honest value
+                    # (not a fake) until one is wired.
+                    assets=None,
+                    # artifact_records: session-bound -- joins the UoW's atomic
+                    # scope (flush, not commit) so an artifact-record write
+                    # rolls back with a run/event write on failure.
+                    artifact_records=SqlAlchemyArtifactRecordStore(
+                        session_factory=self._session_factory, session=session
+                    ),
                     runs=SqlAlchemyRunStore(
                         session_factory=self._session_factory, session=session
                     ),
@@ -163,7 +245,7 @@ class _SqlAlchemyTransactionManager:
                     idempotency=SqlAlchemyIdempotencyStore(
                         session_factory=self._session_factory, session=session
                     ),
-                    tasks=SqlAlchemyTaskStore(
+                    jobs=SqlAlchemyJobStore(
                         session_factory=self._session_factory, session=session
                     ),
                     evaluations=SqlAlchemyEvalStore(

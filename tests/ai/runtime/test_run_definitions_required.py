@@ -22,6 +22,7 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunInput
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
 
 def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
@@ -33,7 +34,10 @@ def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
     object.__setattr__(storage, "run_definitions", None)
 
     with pytest.raises(RuntimeInitializationError):
-        Runtime.build(storage=storage)
+        Runtime.build(
+            storage=storage,
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+        )
 
 
 @dataclass

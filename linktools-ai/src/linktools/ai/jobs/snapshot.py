@@ -8,6 +8,7 @@ existing AssetStore), and the returned ResourceSnapshotRef records the
 original path/version/etag plus the artifact id and sha256 so a later replay can
 validate integrity before re-executing."""
 
+from ..artifact.models import ArtifactProvenance
 from ..artifact.store import ArtifactStore
 from ..asset.path import AssetPath
 from ..asset.store import AssetStore
@@ -24,6 +25,7 @@ async def snapshot_resource(
     path: str,
     *,
     tenant_id: str,
+    run_id: "str | None" = None,
     media_type: "str | None" = None,
 ) -> ResourceSnapshotRef:
     """Read the resource at ``path``, seal its bytes into an ArtifactStore, and
@@ -40,9 +42,19 @@ async def snapshot_resource(
         raise ResourceSnapshotError(f"resource not found: {path}")
     info = resource.info
     record = await artifact_store.put(
-        resource.content,
+        content=resource.content,
         media_type=media_type or info.content_type or "application/octet-stream",
         tenant_id=tenant_id,
+        provenance=(
+            ArtifactProvenance(
+                producer_kind="run_snapshot", producer_id=run_id, run_id=run_id
+            )
+            if run_id is not None
+            # No run context: an anonymous snapshot, consistent with the store's
+            # default for unattributed artifacts (not "run_snapshot" with an
+            # empty producer_id).
+            else ArtifactProvenance(producer_kind="anonymous", producer_id="")
+        ),
     )
     return ResourceSnapshotRef(
         path=path,

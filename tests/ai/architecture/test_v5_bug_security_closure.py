@@ -83,11 +83,16 @@ def test_v5_runtime_recovery_is_serialized():
     # The crash-recovery guard lives on RunCoordinator (Runtime delegates all
     # run-lifecycle methods there); the lock is created per-instance.
     from linktools.ai.run.coordinator import RunCoordinator
+    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     assert hasattr(RunCoordinator, "_ensure_recovered")
     import tempfile
 
-    rt = Runtime.build(storage=FilesystemStorage(root=tempfile.mkdtemp()))
+    storage = FilesystemStorage(root=tempfile.mkdtemp())
+    rt = Runtime.build(
+        storage=storage,
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
     assert hasattr(rt._coordinator, "_recovery_lock")
     assert hasattr(rt._coordinator, "_recovery_done")
 
