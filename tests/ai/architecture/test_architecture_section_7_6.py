@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Architecture guards for the plan's §7.6 misc invariants that the §3.3
+"""Architecture guards for 's misc invariants that the 
 dependency-direction test (test_dependency_rules.py) does not already cover:
 
-- the ``_runtime`` build kernel is imported at RUNTIME only by the composition
-  root (``runtime.py``); TYPE_CHECKING imports are typing-only and excluded;
+- the ``runtime`` build kernel (``runtime/builder.py``) is imported at RUNTIME
+  only within the ``runtime/`` package (the composition root); TYPE_CHECKING
+  imports are typing-only and excluded;
 - domain packages never import the concrete storage backends
   (``storage.filesystem`` / ``storage.sqlalchemy``) -- they depend on the
   Storage Protocols, and a backend is injected at the composition root;
@@ -94,28 +95,27 @@ def _src_py_files() -> "list[Path]":
 
 
 def test_runtime_kernel_imported_only_by_composition_root() -> None:
-    # The _runtime BUILD kernel (the composition root that assembles Runtime
-    # components) is imported at RUNTIME only by runtime.py. Every other src
-    # module uses the public Runtime facade. coordinator.py's TYPE_CHECKING
-    # import of RuntimeComponents is typing-only and excluded. Other _runtime
-    # submodules (lifecycle, inspection, dependencies) are separately shared
-    # and not in scope for this §7.6 line -- it names the BUILDER specifically.
+    # The runtime BUILD kernel (runtime/builder.py, the composition root that
+    # assembles Runtime components) is imported at RUNTIME only within the
+    # runtime/ package. Every other src module uses the public Runtime facade.
+    # coordinator.py's TYPE_CHECKING import of RuntimeComponents is typing-only
+    # and excluded. Other runtime/ submodules (lifecycle, inspection,
+    # dependencies) are separately shared and not in scope for this line --
+    # it names the BUILDER specifically.
     offenders: "list[str]" = []
     for path in _src_py_files():
         rel_parts = path.relative_to(_AI).parts
-        if "_runtime" in rel_parts:
+        if "runtime" in rel_parts:
             continue  # the kernel itself may import its own submodules
-        if rel_parts == ("runtime.py",):
-            continue  # the composition root
         for mod in _resolved_imports(path, exclude_type_checking=True):
-            if mod == "linktools.ai._runtime.build" or mod.startswith(
-                "linktools.ai._runtime.build."
+            if mod == "linktools.ai.runtime.builder" or mod.startswith(
+                "linktools.ai.runtime.builder."
             ):
                 offenders.append(f"{path.relative_to(_REPO)}: {mod}")
                 break
     assert not offenders, (
-        "_runtime.build kernel imported at runtime outside the composition "
-        "root (runtime.py):\n  " + "\n  ".join(sorted(offenders))
+        "runtime.builder kernel imported at runtime outside the composition "
+        "root (runtime/):\n  " + "\n  ".join(sorted(offenders))
     )
 
 
@@ -129,9 +129,9 @@ def test_domains_do_not_import_concrete_storage_backends() -> None:
     for path in _src_py_files():
         rel_parts = path.relative_to(_AI).parts
         # Only the storage/ package itself (its facade selects a backend) and
-        # _runtime/ (the build kernel wires the commit coordinator) may name a
+        # runtime/ (the build kernel wires the commit coordinator) may name a
         # concrete backend. Every other package is a domain and must not.
-        if rel_parts[0] in ("storage", "_runtime"):
+        if rel_parts[0] in ("storage", "runtime"):
             continue
         for mod in _resolved_imports(path):
             if mod.startswith(concrete):
@@ -161,7 +161,7 @@ def test_storage_protocols_does_not_import_concrete_backends() -> None:
 
 
 # Environment-specific dependencies that must NEVER appear in the installable
-# core (they live in optional extras or downstream adapters). The plan §6.1/§7.6
+# core (they live in optional extras or downstream adapters). The /
 # requires the core to stay free of storage SDKs, DB drivers, and distributed-
 # coordination clients.
 _ENV_SPECIFIC_SDK_PATTERNS = (

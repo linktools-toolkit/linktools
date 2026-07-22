@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """MCPProvider: the CapabilityProvider for ``mcp:<server_id>`` / ``mcp:*`` tool
 refs. Resolves server specs via an MCPServerSpecProvider and materializes
-toolsets through an MCPConnectionManager.
+toolsets through an MCPConnectionPool.
 
 ``mcp:*`` (expose every server's every tool) is dangerous and is gated behind
 ``allow_mcp_wildcard`` -- off by default. Per-server refs are always allowed.
 
 Exposure control applied at resolve time (when a connection manager is wired):
-  1. enumerate live tools via ``MCPConnectionManager.list_tools``;
+  1. enumerate live tools via ``MCPConnectionPool.list_tools``;
   2. filter by ``enabled_tools`` / ``disabled_tools``;
   3. apply ``tool_prefix`` to the final names;
   4. detect cross-server name conflicts (no silent overwrite);
@@ -20,7 +20,7 @@ when a connection manager is wired but ``list_tools`` returns no names, the
 server fails closed with ``CapabilityResolutionError`` rather than silently
 proceeding with an empty/unenumerated tool set -- max_tools, conflict
 detection, ToolExposurePolicy and ToolPolicyProvider all need the real tool
-set to do their job. A ``MCPConnectionManager.list_tools`` implementation
+set to do their job. A ``MCPConnectionPool.list_tools`` implementation
 (real or fake) MUST cooperate with enumeration for a server to be usable under
 strict discovery; ``discovery_mode="best_effort"`` opts a server out. The
 governance logic itself (filter_tool_names / detect_mcp_conflicts /
@@ -41,7 +41,7 @@ from ..errors import (
     RuntimeInitializationError,
 )
 from .spec import MCPServerSpecProvider
-from .client import MCPConnectionManager
+from .client import MCPConnectionPool
 from .client import MCPConnectionRef
 from .toolset import detect_mcp_conflicts, filter_tool_names, final_tool_name
 
@@ -117,7 +117,7 @@ class MCPDiscoveryResult:
 class MCPProvider:
     """CapabilityProvider for MCP servers. Both the spec provider and the
     connection manager are injectable so tests can supply fakes; production
-    wiring passes a real MCPCatalog + MCPConnectionManager.
+    wiring passes a real MCPCatalog + MCPConnectionPool.
 
     A connection manager is REQUIRED: without one the provider cannot enumerate
     live tools, so governance (filtering, conflict detection, max_tools,
@@ -126,7 +126,7 @@ class MCPProvider:
     must never surface as a verified-but-empty discovery result."""
 
     mcp_provider: MCPServerSpecProvider
-    connection_manager: MCPConnectionManager
+    connection_manager: MCPConnectionPool
     allow_mcp_wildcard: bool = False
     kind: str = "mcp"
     supported_kinds: "ClassVar[tuple[str, ...]]" = ("mcp",)
@@ -134,7 +134,7 @@ class MCPProvider:
     def __post_init__(self) -> None:
         if self.connection_manager is None:
             raise RuntimeInitializationError(
-                "MCPProvider requires an MCPConnectionManager; a server declared "
+                "MCPProvider requires an MCPConnectionPool; a server declared "
                 "without a connection manager cannot verify tool governance"
             )
 

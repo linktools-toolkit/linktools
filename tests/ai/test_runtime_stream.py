@@ -14,7 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelResolver
 from linktools.ai.run.models import RunStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -39,7 +39,7 @@ def _build_runtime(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelResolver(registry=registry),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     return runtime, storage

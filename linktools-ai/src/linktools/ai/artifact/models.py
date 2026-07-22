@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TypeAlias
 
+from ..errors import (
+    ArtifactError,
+    ArtifactRecordConflictError,
+    ArtifactRecordCorruptError,
+)
+
 # A JSON value: scalar | dict[str, JsonValue] | list[JsonValue]. The recursive
 # alias is a string so the self-reference resolves lazily (no runtime eval).
 JsonValue: "TypeAlias" = (
@@ -48,8 +54,8 @@ class ArtifactBlob:
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceSnapshotRef:
-    """A resource pinned into an immutable artifact: the original path/version/
+class AssetSnapshotRef:
+    """A asset pinned into an immutable artifact: the original path/version/
     etag plus the content-addressed artifact id and sha256. Lives in the
     artifact domain (the lowest layer both ``task`` and ``evaluation`` depend
     on) so neither has to reach across the other to reference it."""
@@ -93,36 +99,35 @@ class ArtifactRecord:
     created_at: datetime
 
 
-class ArtifactBlobNotFoundError(Exception):
+class ArtifactBlobNotFoundError(ArtifactError):
     """Raised when a content-addressed blob is absent -- the requested digest
     has no blob behind it (e.g. an orphaned record whose blob was swept, or a
     digest that was never written). Distinct from
     :class:`ArtifactIntegrityError` (which means the blob EXISTS but its bytes
     do not hash back to the recorded sha256): a caller can tell "does not
-    exist" apart from "exists but is corrupt." Plan §4.1 names this class as
-    the unified signal for the missing case across every blob backend."""
+    exist" apart from "exists but is corrupt." """
 
 
-class ArtifactIntegrityError(Exception):
+class ArtifactIntegrityError(ArtifactError):
     """Raised when stored artifact content does not match its sha256, or its
     size does not match the recorded size -- i.e. the blob EXISTS but is
     corrupt/tampered. A MISSING blob raises :class:`ArtifactBlobNotFoundError`
     instead."""
 
 
-class ArtifactBufferedSizeLimitError(Exception):
+class ArtifactBufferedSizeLimitError(ArtifactError):
     """Raised when the buffered (whole-bytes) API is used for content that
     exceeds the bounded-memory threshold. Callers must use the streaming API
     (``put_stream`` / ``open_stream``) for content at or above the limit, so the
     facade never materializes a whole artifact into a single ``bytes``."""
 
 
-class ArtifactStagingError(Exception):
+class ArtifactStagingError(ArtifactError):
     """Raised when the streaming-put staging path cannot complete its temporary
     file I/O -- most commonly disk-full (``OSError`` / ``ENOSPC``) on the
     staging spool, but also any other I/O failure while hashing + spilling the
     source. Wrapping the raw ``OSError`` gives callers a single domain error to
-    handle instead of a platform-specific errno. Plan §4.2 line 368."""
+    handle instead of a platform-specific errno."""
 
 
 __all__: "list[str]" = [
@@ -134,5 +139,8 @@ __all__: "list[str]" = [
     "ArtifactIntegrityError",
     "ArtifactBufferedSizeLimitError",
     "ArtifactStagingError",
-    "ResourceSnapshotRef",
+    "ArtifactError",
+    "ArtifactRecordConflictError",
+    "ArtifactRecordCorruptError",
+    "AssetSnapshotRef",
 ]

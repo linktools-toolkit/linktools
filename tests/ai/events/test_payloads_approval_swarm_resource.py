@@ -6,7 +6,7 @@ from linktools.ai.events.payloads import (
     ApprovalApproved,
     ApprovalRejected,
     ApprovalRequested,
-    ResourceChanged,
+    AssetChanged,
     SwarmCompleted,
     SwarmRoundCompleted,
     SwarmRoundStarted,
@@ -54,4 +54,4 @@ def test_swarm_payloads():
 
 
 def test_resource_changed_payload():
-    assert ResourceChanged(path="/a.txt", revision=5).revision == 5
+    assert AssetChanged(path="/a.txt", revision=5).revision == 5

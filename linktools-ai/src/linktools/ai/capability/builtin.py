@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BuiltinProvider: resolves builtin capability refs into the file/terminal
-FunctionToolset built from the per-Run ExecutionBackend. Returns
+FunctionToolset built from the per-Run Sandbox. Returns
 ToolContribution with proper per-tool ToolDescriptors so the governance chain
 uses real categories (file-read/file-write/terminal), not conservative defaults.
 
@@ -14,7 +14,7 @@ Recognized refs:
   - ``builtin:file``         -> maps to file-read + file-write (subject to Exposure Policy)."""
 
 from ..errors import CapabilityNotFoundError, CapabilityResolutionError
-from ..execution.toolset import BuiltinToolContext, build_builtin_toolset
+from ..tool.builtin.sandbox import BuiltinToolContext, build_builtin_toolset
 from ..tool.models import ToolDescriptor
 from ..tool.models import ToolContribution, declared_tool_definitions
 from .models import CapabilityBundle
@@ -25,7 +25,7 @@ _WILDCARD = {"*", ""}
 
 
 class BuiltinProvider:
-    """Provides builtin file/terminal toolsets. Requires an ExecutionBackend in
+    """Provides builtin file/terminal toolsets. Requires an Sandbox in
     the resolution context; a builtin ref with no backend is a configuration
     error, not a silent no-op."""
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RF-02 / §4.10: the conformance contract REJECTS a non-conformant
+"""the conformance contract REJECTS a non-conformant
 ArtifactBlobStore whose ``open()`` returns a bare async iterator instead of an
-AsyncContextManager. The §4.1 contract fixes the consumption shape as
+AsyncContextManager. The contract fixes the consumption shape as
 ``async with store.open(...) as chunks``; a backend that returned an async
 generator would let ``async for chunk in store.open(...)`` work but break the
-resource-cleanup guarantee (no __aexit__ to close the fd/connection). This
+asset-cleanup guarantee (no __aexit__ to close the fd/connection). This
 test pins that the contract SHAPE catches such an impl -- the headline
-negative-validation gap the cross-reference found (RF-02 had zero coverage)."""
+negative-validation gap the cross-reference found."""
 
 import hashlib
 from typing import AsyncIterator
@@ -25,8 +25,8 @@ async def _aiter(chunks):
 class _AsyncGenOpenBlobStore:
     """A DELIBERATELY non-conformant ArtifactBlobStore: ``open()`` returns a
     bare async generator (AsyncIterator[bytes]) instead of an
-    AsyncContextManager. This is exactly the §4.1-forbidden shape -- it works
-    with ``async for`` but provides no ``__aexit__`` resource cleanup."""
+    AsyncContextManager. This is exactly the -forbidden shape -- it works
+    with ``async for`` but provides no ``__aexit__`` asset cleanup."""
 
     def __init__(self) -> None:
         self._blobs: "dict[str, bytes]" = {}
@@ -55,7 +55,7 @@ class _AsyncGenOpenBlobStore:
 
 
 def test_contract_rejects_async_gen_open_that_is_not_a_context_manager():
-    """§4.1 / RF-02: a blob store whose open() returns a bare async iterator
+    """a blob store whose open() returns a bare async iterator
     (no __aenter__/__aexit__) CANNOT be consumed via the mandated
     ``async with store.open(...)`` shape -- ``async with`` on an async
     generator raises TypeError. The contract shape thus rejects the
@@ -78,7 +78,7 @@ def test_contract_rejects_async_gen_open_that_is_not_a_context_manager():
 
 def test_conformant_backend_open_is_usable_as_async_with(tmp_path):
     """The mirror: a CONFORMANT backend's open() (decorated with
-    @asynccontextmanager) IS consumable via the §4.1 ``async with`` shape, so
+    @asynccontextmanager) IS consumable via the ``async with`` shape, so
     the rejection above is specifically about the non-conformant shape, not the
     contract being unusable."""
     import asyncio

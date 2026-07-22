@@ -123,8 +123,8 @@ def test_spec_loader_from_filesystem_revision_is_deterministic(tmp_path):
     assert first == second
 
 
-# 4b. SpecLoader.from_resources is exercised against the real AssetStore API
-# in tests/ai/registry/test_spec_loader_from_resources.py (read/list_ids/revision/
+# 4b. SpecLoader.from_assets is exercised against the real AssetStore API
+# in tests/ai/registry/test_spec_loader_from_assets.py (read/list_ids/revision/
 # missing/prefix/parent-traversal).
 
 

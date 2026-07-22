@@ -4,15 +4,15 @@
 the public Store Protocols and drives the full Runtime chain (run -> approval
 -> resume -> artifact -> job) through the public surface ALONE.
 
-This is the AC-15 strong-form evidence: a wheel-only external
+This is the strong-form evidence: a wheel-only external
 adapter. The package imports ONLY public ``linktools.ai.*`` paths -- never
-``linktools.ai._runtime`` and never the in-repo reference backends
+``linktools.ai.runtime.builder`` and never the in-repo reference backends
 (``storage.filesystem`` / ``storage.sqlalchemy`` / ``storage.coordination``).
 The AST import guard in ``tests/test_wheel_isolation.py`` enforces this
 mechanically; the connected-chain E2E in ``tests/test_runtime_e2e.py`` is the
 behavioral proof.
 
-The submodules are organized by domain per the plan's recommended layout:
+The submodules are organized by domain per 's recommended layout:
 ``storage`` (the full storage surface), ``conformance_adapter`` (the smaller
 blob/record/lease adapter the conformance testkit runs against)."""
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""R2c: SqlAlchemyArtifactRecordStore (plan §5 op 6; §4.3 duties). Metadata-only
+"""SqlAlchemyArtifactRecordStore. Metadata-only
 SQL store for ArtifactRecord: it uses the caller-provided AsyncSession, holds no
 engine, branches on no dialect, and never stores blob bytes. Composes with
-FilesystemArtifactBlobStore at the SqlAlchemyStorage layer (R3 op 8)."""
+FilesystemArtifactBlobStore at the SqlAlchemyStorage layer."""
 
 import asyncio
 import json
@@ -93,16 +93,37 @@ def test_tenant_gate(tmp_path) -> None:
         asyncio.run(engine.dispose())
 
 
-def test_put_is_upsert_on_same_id(tmp_path) -> None:
+def test_put_same_id_identical_content_is_idempotent(tmp_path) -> None:
+    engine, factory = _make_factory(tmp_path)
+    store = SqlAlchemyArtifactRecordStore(session_factory=factory)
+
+    async def run():
+        first = await store.put(_record(artifact_id="art-1", tenant_id="t1", sha="a" * 64))
+        # Same id, byte-identical record -> idempotent return, no conflict.
+        second = await store.put(_record(artifact_id="art-1", tenant_id="t1", sha="a" * 64))
+        assert first == second
+        fetched = await store.get(artifact_id="art-1", tenant_id="t1")
+        assert fetched.ref.sha256 == "a" * 64
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_put_same_id_different_content_conflicts(tmp_path) -> None:
+    from linktools.ai.errors import ArtifactRecordConflictError
+
     engine, factory = _make_factory(tmp_path)
     store = SqlAlchemyArtifactRecordStore(session_factory=factory)
 
     async def run():
         await store.put(_record(artifact_id="art-1", tenant_id="t1", sha="a" * 64))
-        # Same id, updated metadata -> upsert, not a PK-violation.
-        await store.put(_record(artifact_id="art-1", tenant_id="t1", sha="b" * 64))
+        # Same id, different sha256 -> create-only conflict; lineage is preserved.
+        with pytest.raises(ArtifactRecordConflictError):
+            await store.put(_record(artifact_id="art-1", tenant_id="t1", sha="b" * 64))
         fetched = await store.get(artifact_id="art-1", tenant_id="t1")
-        assert fetched.ref.sha256 == "b" * 64
+        assert fetched.ref.sha256 == "a" * 64
 
     try:
         asyncio.run(run())
@@ -112,13 +133,16 @@ def test_put_is_upsert_on_same_id(tmp_path) -> None:
 
 def test_put_refuses_cross_tenant_re_homing(tmp_path) -> None:
     # A foreign tenant cannot overwrite another tenant's record by reusing an
-    # id; the row stays with its original tenant.
+    # id; the cross-tenant content difference is a conflict, and the original
+    # row stays with its tenant, unchanged.
+    from linktools.ai.errors import ArtifactRecordConflictError
+
     engine, factory = _make_factory(tmp_path)
     store = SqlAlchemyArtifactRecordStore(session_factory=factory)
 
     async def run():
         await store.put(_record(artifact_id="art-1", tenant_id="tenant-A"))
-        with pytest.raises(ValueError):
+        with pytest.raises(ArtifactRecordConflictError):
             await store.put(_record(artifact_id="art-1", tenant_id="tenant-EVIL"))
         # Original tenant still owns it, unchanged.
         fetched = await store.get(artifact_id="art-1", tenant_id="tenant-A")

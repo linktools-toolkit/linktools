@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for linktools.system platform/port helpers (spec §14.2, §14.3)."""
+"""Tests for linktools.system platform/port helpers."""
 import socket
 
 import pytest
@@ -7,7 +7,7 @@ import pytest
 from linktools import system
 
 
-# §14.2 SYS-001 ---------------------------------------------------------------
+# SYS-001 ---------------------------------------------------------------
 
 @pytest.mark.parametrize("raw, expected", [
     ("amd64", "x86_64"),
@@ -41,7 +41,7 @@ def test_get_system_get_machine_are_cached_strings():
     assert system.get_system() is s
 
 
-# §14.3 SYS-002 reserve_tcp_port ----------------------------------------------
+# SYS-002 reserve_tcp_port ----------------------------------------------
 
 def test_reserve_tcp_port_binds_and_releases():
     with system.reserve_tcp_port() as (host, port):

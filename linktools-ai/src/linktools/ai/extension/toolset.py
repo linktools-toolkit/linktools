@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Extension toolsets: read-only discovery tools exposed only when
-an agent declares ``extension-resource`` / ``extension-entrypoint``. They enforce
+an agent declares ``extension-asset`` / ``extension-entrypoint``. They enforce
 pagination + size limits at the provider layer and an allowlist at the toolset
 layer (an agent may only touch extensions it declared). Execution tools
-(``call_extension_entrypoint``) stay opt-in and are wired through the subagent
-path in a later phase."""
+(``call_extension_entrypoint``) stay opt-in and are wired through the subagent path."""
 
 from typing import Any, Mapping
 
@@ -14,9 +13,9 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..errors import (
     ExtensionEntrypointDeniedError,
     ExtensionEntrypointNotFoundError,
-    ExtensionResourceAccessDeniedError,
+    ExtensionContentAccessDeniedError,
 )
-from .spec import ExtensionResourceProvider
+from .spec import ExtensionContentSource
 from ..run.identity import ParentRunIdentity
 from .entrypoint import EntrypointRef
 from .provider import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
@@ -29,30 +28,30 @@ def _check_allowed(
 ) -> ExtensionScope:
     scope = allowed.get(extension_id)
     if scope is None:
-        raise ExtensionResourceAccessDeniedError(
+        raise ExtensionContentAccessDeniedError(
             f"extension {extension_id!r} is not declared in this agent's tools"
         )
     return scope
 
 
 def build_extension_resource_toolset(
-    provider: ExtensionResourceProvider,
+    provider: ExtensionContentSource,
     *,
     allowed: "Mapping[str, ExtensionScope]",
     max_resources_per_list: int = DEFAULT_LIST_LIMIT,
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES,
     emit=None,
 ) -> FunctionToolset:
-    """Level-1 read tools: list_extension_resources / read_extension_resource.
+    """Level-1 read tools: list_extension_content / read_extension_content.
     ``allowed`` maps a declared extension_id to its scope; undeclared ids are
     refused before any filesystem access."""
-    from ..events.payloads import ExtensionResourceListed, ExtensionResourceRead
+    from ..events.payloads import ExtensionContentListed, ExtensionContentRead
 
     toolset: FunctionToolset = FunctionToolset()
     cap_list = max_resources_per_list
     cap_read = max_read_bytes
 
-    async def list_extension_resources(
+    async def list_extension_content(
         extension_id: str,
         path: str = "",
         limit: int = cap_list,
@@ -61,7 +60,7 @@ def build_extension_resource_toolset(
         """List files under a path in a declared extension (paginated)."""
         scope = _check_allowed(extension_id, allowed)
         effective_limit = min(limit, cap_list) if cap_list else limit
-        result = await provider.list_resources(
+        result = await provider.list_entries(
             scope,
             path,
             limit=effective_limit,
@@ -69,29 +68,29 @@ def build_extension_resource_toolset(
         )
         if emit is not None:
             await emit(
-                ExtensionResourceListed(
+                ExtensionContentListed(
                     extension_id=extension_id, path=path, count=len(result.items)
                 )
             )
         return result.model_dump()
 
-    async def read_extension_resource(
+    async def read_extension_content(
         extension_id: str,
         path: str,
         max_bytes: "int | None" = None,
     ) -> "dict[str, Any]":
-        """Read one resource from a declared extension (size-clamped)."""
-        from .resource import ResourceRef
+        """Read one asset from a declared extension (size-clamped)."""
+        from .content import ExtensionContentRef
 
         scope = _check_allowed(extension_id, allowed)
         effective = min(max_bytes, cap_read) if max_bytes is not None else cap_read
-        content = await provider.read_resource(
-            ResourceRef(scope=scope, path=path),
+        content = await provider.read_content(
+            ExtensionContentRef(scope=scope, path=path),
             max_bytes=effective,
         )
         if emit is not None:
             await emit(
-                ExtensionResourceRead(
+                ExtensionContentRead(
                     extension_id=extension_id,
                     path=path,
                     truncated=bool(content.metadata.get("truncated")),
@@ -99,8 +98,8 @@ def build_extension_resource_toolset(
             )
         return content.model_dump()
 
-    toolset.add_function(list_extension_resources)
-    toolset.add_function(read_extension_resource)
+    toolset.add_function(list_extension_content)
+    toolset.add_function(read_extension_content)
     return toolset
 
 

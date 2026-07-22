@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""JobRuntime + JobWorker end-to-end (plan section 28 phase-5 acceptance).
+"""JobRuntime + JobWorker end-to-end.
 
 Drives the full claim → execute → commit loop over a FilesystemStorage-backed
 FilesystemJobStore with real asyncio timing (tiny intervals) and a SystemClock.
@@ -74,7 +74,7 @@ def _task(clock, *, handler="echo") -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Dev-storage rebuild helpers (plan Phase 9 op 11): wipe + reconstruct the
+"""Dev-storage rebuild helpers: wipe + reconstruct the
 Filesystem data dir and re-initialize the SQLite dev DB schema from scratch,
 so a developer can reset the local environment to a clean baseline.
 
@@ -8,7 +8,7 @@ FilesystemStorage auto-mkdirs on construction (the data dir rebuilds by
 deleting the root and re-instantiating). The SQLite rebuild runs
 ``Base.metadata.create_all`` on a caller-provided engine -- the ENGINE itself
 is constructed by the caller (the one-click script or a test), never by this
-module, honoring the §6.4 / adapter-boundary invariant that the core does not
+module, honoring the adapter-boundary invariant that the core does not
 parse connection strings or construct engines. Each rebuild is verified by a
 RunStore round-trip.
 
@@ -81,7 +81,7 @@ def rebuild_sqlite_storage(*, engine: Any, blobs_root: Path) -> Any:
 
     The caller owns the engine lifecycle (constructs it, disposes it). This
     module does NOT construct engines -- the core never parses a connection
-    string (§6.4 / the SQLAlchemy adapter-boundary invariant). The caller is
+    string (the SQLAlchemy adapter-boundary invariant). The caller is
     expected to point the engine at a fresh (deleted-then-recreated) db file.
     ``blobs_root`` is the filesystem path the SqlAlchemyStorage uses for its
     FilesystemArtifactBlobStore (artifact content lives outside the DB)."""

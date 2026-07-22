@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Approval modal tests (spec §23/§32).
+"""Approval modal tests.
 
 A run that pauses for approval pushes the approval modal; Approve resumes the
 run through the runtime, Reject cancels it, Later leaves it waiting. Drives the

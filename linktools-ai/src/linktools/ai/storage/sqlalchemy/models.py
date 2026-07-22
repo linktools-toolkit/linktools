@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLAlchemy table models for Resource and reliable-task storage. deleted_at/whiteout_version on
-ResourceRow encode the whiteout tombstone in the same row/table as live resources,
+"""SQLAlchemy table models for Asset and reliable-task storage. deleted_at/whiteout_version on
+AssetRow encode the whiteout tombstone in the same row/table as live assets,
 rather than a separate whiteouts table, so the unique path constraint naturally
 covers both live and deleted state."""
 
@@ -24,8 +24,8 @@ class Base(DeclarativeBase):
     pass
 
 
-class ResourceRow(Base):
-    __tablename__ = "ai_resources"
+class AssetRow(Base):
+    __tablename__ = "ai_assets"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     path: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
@@ -41,8 +41,8 @@ class ResourceRow(Base):
     whiteout_version: Mapped["int | None"] = mapped_column(nullable=True)
 
 
-class IdempotencyRow(Base):
-    __tablename__ = "ai_resource_idempotency"
+class AssetIdempotencyRow(Base):
+    __tablename__ = "ai_asset_idempotency"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
@@ -55,8 +55,8 @@ class ToolIdempotencyRow(Base):
     constraint on (scope, key) is the natural primary key for the
     IdempotencyStore Protocol -- it backs ``reserve``'s "find-or-create"
     semantics (IntegrityError on the race -> SELECT the winner -> hash-check).
-    Named ``ToolIdempotencyRow`` (not ``IdempotencyRow``) because that class
-    name is already taken by resource-side idempotency above."""
+    Named ``ToolIdempotencyRow`` (not ``AssetIdempotencyRow``) because that class
+    name is already taken by asset-side idempotency above."""
 
     __tablename__ = "ai_idempotency"
     __table_args__ = (
@@ -83,8 +83,8 @@ class ToolIdempotencyRow(Base):
     result_processor_revision: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
-class RevisionRow(Base):
-    __tablename__ = "ai_resource_revision"
+class AssetRevisionRow(Base):
+    __tablename__ = "ai_asset_revision"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     value: Mapped[int]
@@ -153,7 +153,7 @@ class RunCheckpointCounterRow(Base):
 
 class RunDefinitionRow(Base):
     """The immutable RunDefinitionSnapshot persisted at run creation so resume
-    can restore the exact original spec + identity (R-03)."""
+    can restore the exact original spec + identity ()."""
 
     __tablename__ = "ai_run_definitions"
 
@@ -177,7 +177,7 @@ class SessionRow(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     parent_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
-    # Principal the session belongs to (SEC-03). Nullable: legacy rows and
+    # Principal the session belongs to (). Nullable: legacy rows and
     # unowned (single-user CLI) sessions stay NULL. create_all adds the columns
     # for fresh databases; existing databases need an ALTER TABLE.
     user_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)

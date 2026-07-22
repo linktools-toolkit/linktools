@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Plan §7.6 fault injection for the artifact streaming path. The cases that
+"""fault injection for the artifact streaming path. The cases that
 were already covered elsewhere (digest mismatch, size mismatch, corrupt
 existing blob, cancellation, source-iterator-raises, orphan sweeping, stale
 fencing tokens, duplicate claim, transaction rollback, completion/cancel race)
@@ -359,7 +359,7 @@ def test_put_stream_staging_disk_failure_propagates_and_publishes_nothing(
     payload = b"never-staged-successfully"
 
     async def run() -> None:
-        # Plan §4.2 line 368: a staging I/O failure (disk full / read-only) is
+        # line 368: a staging I/O failure (disk full / read-only) is
         # wrapped as ArtifactStagingError, chained to the original OSError.
         from linktools.ai.artifact.models import ArtifactStagingError
 
@@ -426,11 +426,11 @@ def test_blob_put_if_absent_publish_dir_unwritable_propagates_and_cleans(
         os.chmod(shard_dir, parent_mode | stat.S_IRWXU)
 
 
-# --- lease-layer fault injection (extra §7.6 coverage) ----------------------
+# --- lease-layer fault injection (extra coverage) ----------------------
 
 
 def test_stale_lease_holder_write_is_rejected_after_reclaim(tmp_path: Path) -> None:
-    """§7.6 stale lease: a holder whose lease expired and was reclaimed by
+    """stale lease: a holder whose lease expired and was reclaimed by
     another owner must NOT be able to publish/write as if it still held the
     lease. The LeaseCoordinator Protocol's fencing-token monotonicity is what
     lets a state commit reject the stale holder; this test exercises the
@@ -448,13 +448,13 @@ def test_stale_lease_holder_write_is_rejected_after_reclaim(tmp_path: Path) -> N
     async def run() -> None:
         # Owner A acquires with TTL 0 -> the lease is already expired.
         a_token = await coord.acquire(
-            key="resource", owner_id="A", ttl=timedelta(seconds=0)
+            key="asset", owner_id="A", ttl=timedelta(seconds=0)
         )
         assert a_token is not None
         # Owner B reclaims (the lease had expired). B's fencing token must be
         # strictly larger than A's -- this is what a state commit checks.
         b_token = await coord.acquire(
-            key="resource", owner_id="B", ttl=timedelta(seconds=30)
+            key="asset", owner_id="B", ttl=timedelta(seconds=30)
         )
         assert b_token is not None
         assert b_token.fencing_token > a_token.fencing_token
@@ -476,8 +476,8 @@ def test_stale_lease_holder_write_is_rejected_after_reclaim(tmp_path: Path) -> N
 def test_stale_fencing_token_commit_is_rejected_after_higher_token_observed(
     tmp_path: Path,
 ) -> None:
-    """§7.6 stale fencing token: a write bearing a stale fencing token (lower
-    than the one currently observed for the resource) MUST be rejected.
+    """stale fencing token: a write bearing a stale fencing token (lower
+    than the one currently observed for the asset) MUST be rejected.
     Exercises the JobStore path end-to-end via the in-process coordinator +
     a Filesystem JobStore: worker A's lease expires, B reclaims at a higher
     token, then A's commit with its stale (lower) token is rejected."""
@@ -549,7 +549,7 @@ def test_stale_fencing_token_commit_is_rejected_after_higher_token_observed(
                 fencing_token=0,
                 active_attempt_id=None,
                 timeout_seconds=None,
-                resource_snapshots=(),
+                asset_snapshots=(),
                 version=1,
                 created_at=now,
                 updated_at=now,

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 2 reliability fixes: input-artifact data flow (6.1), cancellation
+"""reliability fixes: input-artifact data flow (6.1), cancellation
 propagation to the Runtime (6.2), and startup orphan-run reconciliation (6.3).
 
 6.1 is exercised end-to-end through JobRuntime + a FilesystemStorage (whose
-``resources`` backend auto-wires the ArtifactStore). 6.2 drives the
+``assets`` backend auto-wires the ArtifactStore). 6.2 drives the
 RuntimeTaskHandler against a fake Runtime. 6.3 unit-tests the reconciler's
 strict (startup) vs best-effort (periodic) failure modes directly.
 """
@@ -92,7 +92,7 @@ def _task(clock, *, handler="echo") -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),
@@ -244,7 +244,7 @@ def _ctx(cancellation: CancellationToken) -> TaskContext:
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
         delegated_scopes=ScopeSet.of("x"),
         budget=TaskBudget(),
-        resource_snapshots=(),
+        asset_snapshots=(),
         cancellation=cancellation,
     )
 
@@ -541,7 +541,7 @@ def test_non_idempotent_orphan_run_is_finalized_not_requeued(tmp_path) -> None:
     asyncio.run(run())
 
 
-# ------------------------------------------------------------- §7.5 binding --
+# ------------------------------------------------------------- binding --
 
 
 def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
@@ -608,7 +608,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=None,
-            resource_snapshots=(),
+            asset_snapshots=(),
             version=1,
             created_at=now,
             updated_at=now,
@@ -642,7 +642,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
             delegated_scopes=ScopeSet.of("x"),
             budget=TaskBudget(),
-            resource_snapshots=(),
+            asset_snapshots=(),
             cancellation=ct,
         )
         request = TaskRequest(

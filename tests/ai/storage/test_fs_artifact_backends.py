@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""R2b: FilesystemArtifactBlobStore + FilesystemArtifactRecordStore (plan §5
-ops 4-5; RF-03, RF-05). The Filesystem reference backends stream to/from disk
+"""FilesystemArtifactBlobStore + FilesystemArtifactRecordStore (
+ops 4-5; ). The Filesystem reference backends stream to/from disk
 (no whole-blob bytes buffer), verify the claimed digest on write, and reuse the
 crash-safe atomic-write helper used by every other File store."""
 
@@ -80,6 +80,51 @@ def test_blob_put_if_absent_is_idempotent_on_matching_digest(tmp_path: Path) -> 
     asyncio.run(run())
 
 
+def test_blob_put_if_absent_consumes_source_even_when_blob_exists(tmp_path: Path) -> None:
+    # The contract: when the blob already exists, the source is STILL fully
+    # consumed and verified -- a put can never skip input validation by claiming
+    # a digest that is already present.
+    blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
+    payload = b"already-present"
+
+    async def run() -> None:
+        d = _digest(payload)
+        await blob.put_if_absent(digest=d, source=_aiter([payload]), size=len(payload))
+
+        consumed: "list[bytes]" = []
+
+        async def _tracking() -> AsyncIterator[bytes]:
+            async for chunk in _aiter([payload]):
+                consumed.append(chunk)
+                yield chunk
+
+        info = await blob.put_if_absent(digest=d, source=_tracking(), size=len(payload))
+        assert info.digest == d
+        # The whole source was drained, not short-circuited by "blob exists".
+        assert b"".join(consumed) == payload
+
+    asyncio.run(run())
+
+
+def test_blob_put_if_absent_wrong_content_for_known_digest_fails(tmp_path: Path) -> None:
+    # Same digest but the source's actual bytes do not hash to it -> failure,
+    # even when a blob for the digest already exists (the existing blob is
+    # correct; the source is lying).
+    blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
+    payload = b"real-content"
+    digest = _digest(payload)
+
+    async def run() -> None:
+        await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=len(payload))
+        with pytest.raises(ArtifactIntegrityError):
+            await blob.put_if_absent(
+                digest=digest, source=_aiter([b"WRONG-content-same-claimed-digest"]),
+                size=len(b"WRONG-content-same-claimed-digest"),
+            )
+
+    asyncio.run(run())
+
+
 def test_blob_put_if_absent_rejects_digest_mismatch(tmp_path: Path) -> None:
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
 
@@ -119,7 +164,7 @@ def test_blob_open_missing_raises(tmp_path: Path) -> None:
 
     async def run() -> None:
         # Missing (absent) blob surfaces the UNIFIED ArtifactBlobNotFoundError
-        # (plan §4.1), distinct from ArtifactIntegrityError (corrupt-but-present).
+        # , distinct from ArtifactIntegrityError (corrupt-but-present).
         with pytest.raises(ArtifactBlobNotFoundError):
             async with blob.open(digest="0" * 64) as _chunks:
                 pass
@@ -206,6 +251,52 @@ def test_record_iter_referenced_digests(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_record_put_same_id_identical_is_idempotent(tmp_path: Path) -> None:
+    from linktools.ai.errors import ArtifactRecordConflictError
+
+    store = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
+
+    async def run() -> None:
+        first = await store.put(_record(artifact_id="art-1", sha="a" * 64))
+        # Same id + byte-identical record -> idempotent, no conflict.
+        second = await store.put(_record(artifact_id="art-1", sha="a" * 64))
+        assert first == second
+
+    asyncio.run(run())
+
+
+def test_record_put_same_id_different_content_conflicts(tmp_path: Path) -> None:
+    from linktools.ai.errors import ArtifactRecordConflictError
+
+    store = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
+
+    async def run() -> None:
+        await store.put(_record(artifact_id="art-1", sha="a" * 64))
+        with pytest.raises(ArtifactRecordConflictError):
+            await store.put(_record(artifact_id="art-1", sha="b" * 64))
+        # The original lineage is intact (no overwrite).
+        fetched = await store.get(artifact_id="art-1", tenant_id="t1")
+        assert fetched is not None and fetched.ref.sha256 == "a" * 64
+
+    asyncio.run(run())
+
+
+def test_record_corrupt_record_aborts_iter_fail_closed(tmp_path: Path) -> None:
+    from linktools.ai.errors import ArtifactRecordCorruptError
+
+    store = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
+
+    async def run() -> None:
+        await store.put(_record(artifact_id="art-1", sha="a" * 64))
+        # Corrupt the stored record: write garbage at its path.
+        (tmp_path / "records" / "t1" / "art-1.json").write_bytes(b"not json")
+        with pytest.raises(ArtifactRecordCorruptError):
+            async for _ in store.iter_referenced_digests():
+                pass
+
+    asyncio.run(run())
+
+
 def _record_with_provenance(
     artifact_id: str,
     tenant_id: str,
@@ -236,7 +327,7 @@ def _record_with_provenance(
 
 
 def test_record_iter_by_run_id_indexes_provenance(tmp_path: Path) -> None:
-    """parent/provenance index (plan §4.3 op): iter_by_run_id yields exactly the
+    """parent/provenance index: iter_by_run_id yields exactly the
     records produced under that run, tenant-scoped, and a None run_id yields the
     unattributed records. Filesystem has no index columns, so this is an honest
     scan-and-filter -- but it must still be correct."""
@@ -277,7 +368,7 @@ def test_record_iter_by_run_id_indexes_provenance(tmp_path: Path) -> None:
 
 
 def test_record_iter_by_producer_indexes_provenance(tmp_path: Path) -> None:
-    """parent/provenance index (plan §4.3 op): iter_by_producer yields records by
+    """parent/provenance index: iter_by_producer yields records by
     producer kind [+ id], tenant-scoped."""
     store = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_store.py"""
+"""tests/ai/storage/asset/test_store.py"""
 
 import pytest
 
 from linktools.ai.errors import (
     IdempotencyConflictError,
-    ResourcePreconditionFailedError,
-    ResourceReadOnlyError,
+    AssetPreconditionFailedError,
+    AssetReadOnlyError,
 )
 from linktools.ai.asset.file import FileAssetBackend
 from linktools.ai.asset.memory import MemoryAssetBackend
@@ -95,8 +95,8 @@ def backend_factory(request, tmp_path):
 async def test_primary_only_put_get_roundtrip(backend_factory):
     store = AssetStore(primary=backend_factory())
     await store.put(AssetPath("/a.txt"), b"hello")
-    resource = await store.get(AssetPath("/a.txt"))
-    assert resource.content == b"hello"
+    asset = await store.get(AssetPath("/a.txt"))
+    assert asset.content == b"hello"
 
 
 @pytest.mark.asyncio
@@ -112,8 +112,8 @@ async def test_overlay_fallback_when_primary_missing(backend_factory):
         AssetPath("/builtin.md"), b"builtin content", content_type=None, metadata={}
     )
     store = AssetStore(primary=backend_factory(), overlays=(overlay,))
-    resource = await store.get(AssetPath("/builtin.md"))
-    assert resource.content == b"builtin content"
+    asset = await store.get(AssetPath("/builtin.md"))
+    assert asset.content == b"builtin content"
 
 
 @pytest.mark.asyncio
@@ -125,8 +125,8 @@ async def test_primary_shadows_overlay(backend_factory):
     primary = backend_factory()
     store = AssetStore(primary=primary, overlays=(overlay,))
     await store.put(AssetPath("/shared.md"), b"primary version")
-    resource = await store.get(AssetPath("/shared.md"))
-    assert resource.content == b"primary version"
+    asset = await store.get(AssetPath("/shared.md"))
+    assert asset.content == b"primary version"
 
 
 @pytest.mark.asyncio
@@ -142,10 +142,11 @@ async def test_whiteout_prevents_overlay_resurrection(backend_factory):
 
 
 @pytest.mark.asyncio
-async def test_write_to_readonly_primary_raises(backend_factory):
-    store = AssetStore(primary=backend_factory(readonly=True))
-    with pytest.raises(ResourceReadOnlyError):
-        await store.put(AssetPath("/a.txt"), b"x")
+async def test_readonly_primary_is_rejected_at_construction(backend_factory):
+    # A readonly backend is a Reader, not a Writer; it cannot be a primary. The
+    # misconfiguration surfaces at construction, not on the first write.
+    with pytest.raises(AssetReadOnlyError):
+        AssetStore(primary=backend_factory(readonly=True))
 
 
 @pytest.mark.asyncio
@@ -198,7 +199,7 @@ async def test_delete_missing_path_is_a_no_op_success(backend_factory):
 async def test_conditional_put_if_none_match_rejects_existing(backend_factory):
     store = AssetStore(primary=backend_factory())
     await store.put(AssetPath("/a.txt"), b"x")
-    with pytest.raises(ResourcePreconditionFailedError):
+    with pytest.raises(AssetPreconditionFailedError):
         await store.put(
             AssetPath("/a.txt"), b"y", options=WriteOptions(if_none_match=True)
         )
@@ -208,7 +209,7 @@ async def test_conditional_put_if_none_match_rejects_existing(backend_factory):
 async def test_conditional_put_if_match_wrong_etag_rejects(backend_factory):
     store = AssetStore(primary=backend_factory())
     await store.put(AssetPath("/a.txt"), b"x")
-    with pytest.raises(ResourcePreconditionFailedError):
+    with pytest.raises(AssetPreconditionFailedError):
         await store.put(
             AssetPath("/a.txt"), b"y", options=WriteOptions(if_match="wrong-etag")
         )
@@ -281,20 +282,23 @@ async def test_idempotent_delete_same_key_replays(backend_factory):
 
 
 @pytest.mark.asyncio
-async def test_move_shadows_overlay_source_after_move(backend_factory):
+async def test_move_overlay_only_source_is_refused(backend_factory):
+    # An overlay-only source cannot be moved atomically (a cross-backend copy +
+    # whiteout is not an atomic move). The store refuses it rather than faking
+    # the move via a non-atomic put+delete.
+    from linktools.ai.errors import AssetMoveNotSupportedError
+
     overlay = backend_factory(readonly=True)
     await overlay.raw_put(
         AssetPath("/src.md"), b"overlay content", content_type=None, metadata={}
     )
     store = AssetStore(primary=backend_factory(), overlays=(overlay,))
-    moved = await store.move(AssetPath("/src.md"), AssetPath("/dst.md"))
-    assert moved.content == b"overlay content"
-    assert (await store.get(AssetPath("/src.md"))) is None
-    assert (await store.get(AssetPath("/dst.md"))).content == b"overlay content"
+    with pytest.raises(AssetMoveNotSupportedError):
+        await store.move(AssetPath("/src.md"), AssetPath("/dst.md"))
 
 
 @pytest.mark.asyncio
-async def test_propfind_merges_primary_and_overlay_primary_wins(backend_factory):
+async def test_list_merges_primary_and_overlay_primary_wins(backend_factory):
     overlay = backend_factory(readonly=True)
     await overlay.raw_put(
         AssetPath("/agents/shared.md"), b"overlay", content_type=None, metadata={}
@@ -308,7 +312,7 @@ async def test_propfind_merges_primary_and_overlay_primary_wins(backend_factory)
     primary = backend_factory()
     store = AssetStore(primary=primary, overlays=(overlay,))
     await store.put(AssetPath("/agents/shared.md"), b"primary")
-    page = await store.propfind(
+    page = await store.list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
     )
     by_path = {i.path.value: i for i in page.items}
@@ -318,11 +322,11 @@ async def test_propfind_merges_primary_and_overlay_primary_wins(backend_factory)
 
 
 @pytest.mark.asyncio
-async def test_propfind_prefix_does_not_treat_underscore_as_wildcard(backend_factory):
+async def test_list_prefix_does_not_treat_underscore_as_wildcard(backend_factory):
     store = AssetStore(primary=backend_factory())
     await store.put(AssetPath("/folder_1/a.txt"), b"real match")
     await store.put(AssetPath("/folderA1/b.txt"), b"must not match")
-    page = await store.propfind(
+    page = await store.list(
         AssetPath("/folder_1"), depth=Depth.ONE, limit=100, cursor=None
     )
     paths = {i.path.value for i in page.items}
@@ -342,11 +346,11 @@ async def test_put_identical_to_overlay_content_still_writes_primary(backend_fac
     from linktools.ai.asset.models import Found
 
     assert isinstance(primary_lookup, Found)
-    assert primary_lookup.resource.content == b"same"
+    assert primary_lookup.asset.content == b"same"
 
 
 @pytest.mark.asyncio
-async def test_propfind_hides_deleted_overlay_only_path(backend_factory):
+async def test_list_hides_deleted_overlay_only_path(backend_factory):
     overlay = backend_factory(readonly=True)
     await overlay.raw_put(
         AssetPath("/agents/only-overlay.md"),
@@ -356,36 +360,36 @@ async def test_propfind_hides_deleted_overlay_only_path(backend_factory):
     )
     store = AssetStore(primary=backend_factory(), overlays=(overlay,))
     await store.delete(AssetPath("/agents/only-overlay.md"))
-    page = await store.propfind(
+    page = await store.list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
     )
     assert "/agents/only-overlay.md" not in {i.path.value for i in page.items}
 
 
-async def _propfind_all(store, path, *, depth=Depth.ONE, limit=2):
-    """Drive propfind() to exhaustion via its cursor, collecting every page.
+async def _list_all(store, path, *, depth=Depth.ONE, limit=2):
+    """Drive list() to exhaustion via its cursor, collecting every page.
     Used by the G4 pagination regression tests below to prove the current
-    path-cursor implementation (not the spec's opaque ResourceStoreCursor)
-    still visits every item across primary+overlay without dropping any."""
+    path-cursor implementation (not an opaque cursor type) still visits every
+    item across primary+overlay without dropping any."""
     items = []
     cursor = None
     pages = 0
     seen_cursors = []
     while True:
-        page = await store.propfind(path, depth=depth, limit=limit, cursor=cursor)
+        page = await store.list(path, depth=depth, limit=limit, cursor=cursor)
         items.extend(page.items)
         pages += 1
         if page.cursor is None:
             break
         seen_cursors.append(page.cursor)
         cursor = page.cursor
-        assert pages < 1000, "propfind pagination did not terminate"
+        assert pages < 1000, "list pagination did not terminate"
     return items, seen_cursors
 
 
 @pytest.mark.asyncio
-async def test_propfind_can_iterate_all_items_across_backends(backend_factory):
-    """G4: with a small page limit forcing many pages, propfind() must still
+async def test_list_can_iterate_all_items_across_backends(backend_factory):
+    """G4: with a small page limit forcing many pages, list() must still
     surface every item split across primary and overlay -- no item lost to
     the per-backend limit+1 fetch/merge/cutoff dance."""
     overlay = backend_factory(readonly=True)
@@ -404,16 +408,16 @@ async def test_propfind_can_iterate_all_items_across_backends(backend_factory):
         await store.put(AssetPath(f"/d/primary-{i:02d}.md"), f"p{i}".encode())
         expected.add(f"/d/primary-{i:02d}.md")
 
-    items, _ = await _propfind_all(store, AssetPath("/d"), limit=2)
+    items, _ = await _list_all(store, AssetPath("/d"), limit=2)
     paths = [i.path.value for i in items]
     assert set(paths) == expected
     assert len(paths) == len(set(paths)), (
-        "propfind returned a duplicate path across pages"
+        "list returned a duplicate path across pages"
     )
 
 
 @pytest.mark.asyncio
-async def test_propfind_overlay_shadow_does_not_drop_later_items(backend_factory):
+async def test_list_overlay_shadow_does_not_drop_later_items(backend_factory):
     """G4: a primary path that shadows an overlay path (same path, primary
     wins) sits interspersed lexically among many overlay-only paths. Paginate
     with a small limit and verify every overlay-only path still surfaces --
@@ -439,7 +443,7 @@ async def test_propfind_overlay_shadow_does_not_drop_later_items(backend_factory
     )
     await store.put(AssetPath("/e/item-03.md"), b"primary-wins")
 
-    items, _ = await _propfind_all(store, AssetPath("/e"), limit=2)
+    items, _ = await _list_all(store, AssetPath("/e"), limit=2)
     by_path = {i.path.value: i for i in items}
     assert set(by_path) == {f"/e/item-{i:02d}.md" for i in range(6)}
     shadowed = await store.get(AssetPath("/e/item-03.md"))
@@ -447,7 +451,7 @@ async def test_propfind_overlay_shadow_does_not_drop_later_items(backend_factory
 
 
 @pytest.mark.asyncio
-async def test_propfind_whiteout_does_not_drop_later_overlay_items(backend_factory):
+async def test_list_whiteout_does_not_drop_later_overlay_items(backend_factory):
     """G4: deleting (whiteout) one overlay-only path in the middle of a
     lexically-sorted run of overlay-only paths must not drop the paths that
     sort after it when paginating with a small limit."""
@@ -465,13 +469,13 @@ async def test_propfind_whiteout_does_not_drop_later_overlay_items(backend_facto
         AssetPath("/f/item-03.md")
     )  # whiteout: hides overlay's item-03
 
-    items, _ = await _propfind_all(store, AssetPath("/f"), limit=2)
+    items, _ = await _list_all(store, AssetPath("/f"), limit=2)
     paths = {i.path.value for i in items}
     assert paths == {f"/f/item-{i:02d}.md" for i in range(6) if i != 3}
 
 
 @pytest.mark.asyncio
-async def test_propfind_cursor_monotonic_progress(backend_factory):
+async def test_list_cursor_monotonic_progress(backend_factory):
     """G4: successive page cursors must strictly advance (lexically) so
     pagination is guaranteed to terminate rather than looping on a page that
     never moves forward."""
@@ -479,13 +483,13 @@ async def test_propfind_cursor_monotonic_progress(backend_factory):
     for i in range(8):
         await store.put(AssetPath(f"/g/item-{i:02d}.md"), f"v{i}".encode())
 
-    _, cursors = await _propfind_all(store, AssetPath("/g"), limit=3)
+    _, cursors = await _list_all(store, AssetPath("/g"), limit=3)
     assert cursors == sorted(cursors), "cursor sequence must be non-decreasing"
     assert len(cursors) == len(set(cursors)), "cursor must strictly advance, not repeat"
 
 
 @pytest.mark.asyncio
-async def test_propfind_multi_overlay_merge_is_stable_and_non_duplicate(
+async def test_list_multi_overlay_merge_is_stable_and_non_duplicate(
     backend_factory,
 ):
     """scenario (actionable-fix-contract): primary + TWO overlays, small
@@ -508,11 +512,11 @@ async def test_propfind_multi_overlay_merge_is_stable_and_non_duplicate(
         AssetPath("/h/d.md"), b"overlay2-d", content_type=None, metadata={}
     )
 
-    items, _ = await _propfind_all(store, AssetPath("/h"), limit=2)
+    items, _ = await _list_all(store, AssetPath("/h"), limit=2)
     paths = [i.path.value for i in items]
     assert set(paths) == {"/h/a.md", "/h/b.md", "/h/c.md", "/h/d.md"}
     assert len(paths) == len(set(paths)), (
-        "propfind returned a duplicate path across pages"
+        "list returned a duplicate path across pages"
     )
     assert paths == sorted(paths), "merged listing must be in stable sorted order"
 
@@ -522,7 +526,7 @@ async def test_move_forwards_if_none_match_to_destination_write(backend_factory)
     store = AssetStore(primary=backend_factory())
     await store.put(AssetPath("/src.txt"), b"data")
     await store.put(AssetPath("/dst.txt"), b"already here")
-    with pytest.raises(ResourcePreconditionFailedError):
+    with pytest.raises(AssetPreconditionFailedError):
         await store.move(
             AssetPath("/src.txt"),
             AssetPath("/dst.txt"),

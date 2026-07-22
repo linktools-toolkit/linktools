@@ -7,7 +7,8 @@ scope (it lives on the filesystem via FilesystemArtifactBlobStore; a row here
 never holds bytes). The store uses the caller-provided AsyncSession: a
 ``session_factory`` for standalone use, or a shared ``session`` so it can
 participate in the same UnitOfWork as the other SQL stores. It holds no engine
-and branches on no dialect. Record serialization goes through the public codec
+and is SQLite-specific (the create-only INSERT uses the sqlite ``ON CONFLICT``
+upsert). Record serialization goes through the public codec
 (:func:`record_to_jsonable` / :func:`record_from_jsonable`) so the JSON shape is
 owned in one place."""
 
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...artifact.models import ArtifactRecord
 from ...artifact.store import record_from_jsonable, record_to_jsonable
+from ...errors import ArtifactRecordConflictError
 from .models import ArtifactRecordRow
 
 
@@ -30,7 +32,12 @@ class SqlAlchemyArtifactRecordStore:
     """ArtifactRecordStore backed by SQLAlchemy. The record's content blob is
     out of scope (metadata only); compose with a FilesystemArtifactBlobStore for
     the content-addressed bytes. ``session_factory`` for standalone use;
-    ``session`` for UoW participation (shared with the other SQL stores)."""
+    ``session`` for UoW participation (shared with the other SQL stores).
+
+    Records are create-only: an INSERT that hits an existing primary key is
+    reconciled -- byte-identical content is idempotent, any field change raises
+    :class:`ArtifactRecordConflictError`. There is no UPDATE path; the lineage
+    of a prior write can never be overwritten."""
 
     def __init__(
         self,
@@ -43,9 +50,7 @@ class SqlAlchemyArtifactRecordStore:
 
     async def _run(self, action):
         if self._session is not None:
-            result = await action(self._session)
-            await self._session.flush()
-            return result
+            return await action(self._session)
         async with self._session_factory() as session:
             result = await action(session)
             await session.commit()
@@ -54,40 +59,44 @@ class SqlAlchemyArtifactRecordStore:
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
         payload = json.dumps(record_to_jsonable(record))
 
-        async def _action(session: AsyncSession) -> None:
-            existing = await session.get(ArtifactRecordRow, record.ref.id)
-            if existing is None:
-                session.add(
-                    ArtifactRecordRow(
-                        artifact_id=record.ref.id,
-                        tenant_id=record.tenant_id,
-                        sha256=record.ref.sha256,
-                        producer_kind=record.provenance.producer_kind,
-                        producer_id=record.provenance.producer_id or None,
-                        run_id=record.provenance.run_id,
-                        data_json=payload,
-                    )
-                )
-            elif existing.tenant_id != record.tenant_id:
-                # Cross-tenant collision on the same id: refuse to re-home the
-                # row to a different tenant (defense-in-depth -- the facade mints
-                # fresh UUID ids so this is unreachable in normal use, but a
-                # foreign tenant that knows an id must not overwrite another
-                # tenant's record).
-                raise ValueError(
-                    f"artifact {record.ref.id} already belongs to tenant "
-                    f"{existing.tenant_id!r}; cannot re-home to "
-                    f"{record.tenant_id!r}"
-                )
-            else:
-                existing.sha256 = record.ref.sha256
-                existing.producer_kind = record.provenance.producer_kind
-                existing.producer_id = record.provenance.producer_id or None
-                existing.run_id = record.provenance.run_id
-                existing.data_json = payload
+        async def _action(session: AsyncSession) -> ArtifactRecord:
+            # INSERT first. ON CONFLICT DO NOTHING on the primary key means a
+            # concurrent same-id insert is absorbed without poisoning the
+            # session: rowcount 0 -> the row exists, so read it and reconcile
+            # (idempotent on identical content, conflict on a different value).
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-        await self._run(_action)
-        return record
+            stmt = sqlite_insert(ArtifactRecordRow).values(
+                artifact_id=record.ref.id,
+                tenant_id=record.tenant_id,
+                sha256=record.ref.sha256,
+                producer_kind=record.provenance.producer_kind,
+                producer_id=record.provenance.producer_id or None,
+                run_id=record.provenance.run_id,
+                data_json=payload,
+            ).on_conflict_do_nothing(index_elements=["artifact_id"])
+            result = await session.execute(stmt)
+            if result.rowcount == 0:
+                existing = await session.get(ArtifactRecordRow, record.ref.id)
+                if existing is None:
+                    # Conflict vanished after the no-op insert -- only possible
+                    # if another writer deleted the row mid-flight. Fail closed.
+                    raise ArtifactRecordConflictError(
+                        f"artifact {record.ref.id} insert conflicted but the row is absent"
+                    )
+                return self._reconcile_row(existing, payload, record.ref.id)
+            return record
+
+        return await self._run(_action)
+
+    def _reconcile_row(
+        self, existing: ArtifactRecordRow, payload: str, artifact_id: str
+    ) -> ArtifactRecord:
+        if existing.data_json != payload:
+            raise ArtifactRecordConflictError(
+                f"artifact {artifact_id} already exists with different content"
+            )
+        return record_from_jsonable(json.loads(existing.data_json))
 
     async def get(
         self, artifact_id: str, *, tenant_id: str
@@ -124,7 +133,7 @@ class SqlAlchemyArtifactRecordStore:
     async def iter_by_run_id(
         self, run_id: str, *, tenant_id: "str | None" = None
     ) -> AsyncIterator[ArtifactRecord]:
-        """Parent/provenance index (plan §4.3): yield every record produced
+        """Parent/provenance index: yield every record produced
         under ``run_id``, optionally tenant-scoped. Uses the indexed run_id
         column (no JSON scan)."""
         async def _action(session: AsyncSession) -> "list[ArtifactRecord]":
@@ -146,7 +155,7 @@ class SqlAlchemyArtifactRecordStore:
         *,
         tenant_id: "str | None" = None,
     ) -> AsyncIterator[ArtifactRecord]:
-        """Parent/provenance index (plan §4.3): yield every record from a given
+        """Parent/provenance index: yield every record from a given
         producer (kind [+ id]), optionally tenant-scoped. Uses the indexed
         (producer_kind, producer_id) column."""
         async def _action(session: AsyncSession) -> "list[ArtifactRecord]":

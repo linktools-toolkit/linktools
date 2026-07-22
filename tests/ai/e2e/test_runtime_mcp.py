@@ -15,7 +15,7 @@ from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.governance.security.baseline import SecurityBaseline
 from linktools.ai.governance.security.pipeline import PipelineAction, PipelineDecision
@@ -123,7 +123,7 @@ def _router():
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(model_fn))
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)
 
 
 def _text_router():
@@ -132,7 +132,7 @@ def _text_router():
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(model_fn))
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)
 
 
 @pytest.mark.asyncio

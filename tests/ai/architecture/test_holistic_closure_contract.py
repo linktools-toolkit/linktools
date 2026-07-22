@@ -27,7 +27,7 @@ def _src_text() -> str:
     return "\n".join(parts)
 
 
-# --- WP-01: checkpoint sequencing is Store-owned ---------------------------
+# --- checkpoint sequencing is Store-owned ---------------------------
 
 
 def test_checkpoint_callers_do_not_hardcode_sequence():
@@ -38,7 +38,7 @@ def test_checkpoint_callers_do_not_hardcode_sequence():
     first sequence; this contract targets callers."""
     import re
 
-    runner = (_AI_SRC / "agent" / "runner.py").read_text(encoding="utf-8")
+    runner = (_AI_SRC / "agent" / "engine.py").read_text(encoding="utf-8")
     assert "NewRunCheckpoint(" not in runner, (
         "AgentEngine must not construct checkpoints directly -- the "
         "RunCommitCoordinator owns checkpoint creation"
@@ -62,7 +62,7 @@ def test_checkpoint_callers_do_not_hardcode_sequence():
         )
 
 
-# --- WP-03: single approval path -------------------------------------------
+# --- single approval path -------------------------------------------
 
 
 def test_runtime_build_has_no_pause_on_approval():
@@ -78,7 +78,7 @@ def test_agent_runner_requires_commit_coordinator():
     """AgentEngine.commit_coordinator has no default -- the cross-store commit
     is coordinator-owned and Runtime.build always wires one. There is no inline
     fallback path."""
-    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.agent.engine import AgentEngine
 
     param = inspect.signature(AgentEngine.__init__).parameters["commit_coordinator"]
     assert param.default is inspect.Parameter.empty, (
@@ -89,7 +89,7 @@ def test_agent_runner_requires_commit_coordinator():
 def test_agent_runner_has_no_inline_commit_params():
     """The runner no longer accepts the old inline-commit knobs (uow_factory,
     approval_store) -- a single RunCommitCoordinator owns pause/complete."""
-    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.agent.engine import AgentEngine
 
     params = inspect.signature(AgentEngine.__init__).parameters
     forbidden = {"uow_factory", "approval_store"}
@@ -99,7 +99,7 @@ def test_agent_runner_has_no_inline_commit_params():
     )
 
 
-# --- WP-04: resume does not accept a caller spec / identity ----------------
+# --- resume does not accept a caller spec / identity ----------------
 
 
 def test_runtime_resume_takes_only_run_id():
@@ -113,7 +113,7 @@ def test_runtime_resume_takes_only_run_id():
     )
 
 
-# --- WP-05: swarm resume does not accept a caller spec ---------------------
+# --- swarm resume does not accept a caller spec ---------------------
 
 
 def test_swarm_resume_takes_only_swarm_run_id():
@@ -127,7 +127,57 @@ def test_swarm_resume_takes_only_swarm_run_id():
     )
 
 
-# --- WP-07: idempotency is claim/owner/generation --------------------------
+# --- Runtime lifecycle entries route through one RunCoordinator (single writer) ---
+
+
+def test_runtime_lifecycle_entries_delegate_to_run_coordinator():
+    """Every public Runtime run-lifecycle entry (run / run_stream /
+    cancel / approve / reject / resume) routes through the single
+    RunCoordinator. Runtime is a thin facade -- it never reaches the stores or
+    SwarmRunner directly for lifecycle state. SwarmRunner is an internal
+    delegate of RunCoordinator.run (reachable only via RuntimeComponents), not
+    a public entry, so the driving run's writes during a swarm have a single
+    owner (the coordinator's delegate) rather than two competing writers."""
+    import ast
+    import inspect
+
+    from linktools.ai.runtime import Runtime
+
+    LIFECYCLE = {"run", "run_stream", "cancel", "approve", "reject", "resume"}
+    src = inspect.getsource(Runtime)
+    tree = ast.parse(src)
+    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "Runtime")
+
+    def _refs_self_coordinator(method_node: "ast.AsyncFunctionDef") -> bool:
+        for n in ast.walk(method_node):
+            if (
+                isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Attribute)
+                and isinstance(n.value.value, ast.Name)
+                and n.value.value.id == "self"
+                and n.value.attr == "_coordinator"
+            ):
+                return True
+        return False
+
+    methods = {n.name: n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)}
+    missing = [m for m in LIFECYCLE if m not in methods]
+    assert not missing, f"Runtime missing lifecycle methods: {missing}"
+    non_delegating = [m for m in LIFECYCLE if not _refs_self_coordinator(methods[m])]
+    assert not non_delegating, (
+        f"Runtime lifecycle methods must delegate to self._coordinator "
+        f"(single entry writer): {non_delegating}"
+    )
+    # The facade never reaches SwarmRunner directly -- it is an internal
+    # delegate of RunCoordinator, reachable only via RuntimeComponents.
+    src = inspect.getsource(Runtime)
+    assert "self._components.swarm_runner" not in src, (
+        "Runtime must not call SwarmRunner directly -- route through "
+        "RunCoordinator (SwarmRunner is an internal delegate)"
+    )
+
+
+# --- idempotency is claim/owner/generation --------------------------
 
 
 def test_idempotency_store_exposes_claim():
@@ -138,7 +188,7 @@ def test_idempotency_store_exposes_claim():
     )
 
 
-# --- WP-09: domain models validate at construction -------------------------
+# --- domain models validate at construction -------------------------
 
 
 def test_core_domain_models_enforce_invariants():
@@ -159,7 +209,7 @@ def test_core_domain_models_enforce_invariants():
         ToolDescriptor(name="t", source="s", category="c", risk="low", mutating="yes")
 
 
-# --- WP-08: no default=str canonicalization --------------------------------
+# --- no default=str canonicalization --------------------------------
 
 
 def test_no_default_str_in_canonical_paths():
@@ -170,7 +220,7 @@ def test_no_default_str_in_canonical_paths():
     assert "default=str" not in text, "default=str still present in src"
 
 
-# --- WP-13: model security pipeline is wired -------------------------------
+# --- model security pipeline is wired -------------------------------
 
 
 def test_runner_invokes_model_security_hooks():
@@ -178,7 +228,7 @@ def test_runner_invokes_model_security_hooks():
     the runner passes to Agent.iter(model=...) -- not just once around the run.
     The runner wires the wrapper; the wrapper holds the before_model/after_model
     calls."""
-    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.agent.engine import AgentEngine
     from linktools.ai.governance.security.secured_model import SecuredModel
 
     runner_src = inspect.getsource(AgentEngine)
@@ -191,7 +241,7 @@ def test_runner_invokes_model_security_hooks():
     )
 
 
-# --- WP-14: budget is not deferred -----------------------------------------
+# --- budget is not deferred -----------------------------------------
 
 
 def test_budget_is_enforced():
@@ -201,7 +251,7 @@ def test_budget_is_enforced():
     )
 
 
-# --- WP-16: streaming does not swallow exceptions --------------------------
+# --- streaming does not swallow exceptions --------------------------
 
 
 def test_streaming_does_not_swallow_exceptions():
@@ -217,7 +267,7 @@ def test_streaming_does_not_swallow_exceptions():
         / "linktools"
         / "ai"
         / "agent"
-        / "runner.py"
+        / "engine.py"
     ).read_text(encoding="utf-8")
     swallow = re.findall(r"except Exception:\s*\n(?:\s*#[^\n]*\n)*\s*pass\b", src)
     assert not swallow, (

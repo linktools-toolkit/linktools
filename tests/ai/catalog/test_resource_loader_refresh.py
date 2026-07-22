@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset-backed registry refresh: the registry cache must reflect resource
-changes via SpecLoader.from_resources' revision. The MCP enabled_tools refresh
+"""Asset-backed registry refresh: the registry cache must reflect asset
+changes via SpecLoader.from_assets' revision. The MCP enabled_tools refresh
 case is the key security regression -- a server reconfigured from
 enabled_tools=[read] to enabled_tools=[] must take effect on the next read."""
 
@@ -40,9 +40,9 @@ async def _store_with(path_text: "dict[str, str]") -> AssetStore:
 async def test_mcp_registry_refreshes_enabled_tools_after_update():
     """A server reconfigured from enabled_tools=[read] to enabled_tools=[]
     must take effect on the next registry read -- the revision change drops the
-    cached spec and re-parses the resource."""
+    cached spec and re-parses the asset."""
     store = await _store_with({"/specs/mcp/risk.yaml": _yaml(["read"])})
-    registry = MCPCatalog.from_specloader(SpecLoader.from_resources(store, prefix="specs/mcp"))
+    registry = MCPCatalog.from_specloader(SpecLoader.from_assets(store, prefix="specs/mcp"))
 
     spec = await registry.get("risk")
     assert spec.enabled_tools == ("read",)
@@ -54,7 +54,7 @@ async def test_mcp_registry_refreshes_enabled_tools_after_update():
     )
     refreshed = await registry.get("risk")
     assert refreshed.enabled_tools == (), (
-        "enabled_tools=[] must take effect after the resource is updated"
+        "enabled_tools=[] must take effect after the asset is updated"
     )
 
 
@@ -63,7 +63,7 @@ async def test_mcp_registry_sees_new_and_deleted_servers():
     """list_ids refreshes as servers are added/removed: the revision-based cache
     invalidation drops the id listing alongside the per-id cache."""
     store = await _store_with({"/specs/mcp/risk.yaml": _yaml(None)})
-    registry = MCPCatalog.from_specloader(SpecLoader.from_resources(store, prefix="specs/mcp"))
+    registry = MCPCatalog.from_specloader(SpecLoader.from_assets(store, prefix="specs/mcp"))
 
     assert await registry.list_ids() == ("risk",)
 

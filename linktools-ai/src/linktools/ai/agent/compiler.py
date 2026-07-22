@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentCompiler: resolves an AgentSpec's model via ModelRouter and builds the
-underlying pydantic-ai Agent. Entirely stateless -- never touches Session, Run,
-or the filesystem. The compiler accepts no working-directory
-or ExecutionBackend parameter and never constructs ``LocalExecutionBackend``:
+"""AgentCompiler: resolves an AgentSpec's model via the ModelGateway and builds
+the underlying pydantic-ai Agent. Entirely stateless -- never touches Session,
+Run, or the filesystem. The compiler accepts no working-directory
+or Sandbox parameter and never constructs ``LocalSandbox``:
 builtin file/terminal tools are constructed at EXECUTION TIME from
 ``AgentDependencies.execution`` and passed to ``agent.iter(prompt, toolsets=)``.
 The compiled Agent carries model + capabilities (policy + middleware) + the
@@ -19,7 +19,7 @@ than silently governing nothing."""
 from ..errors import RuntimeInitializationError
 from ..middleware.capability import build_middleware_capability
 from ..middleware.pipeline import MiddlewarePipeline
-from ..model.router import ModelRouter
+from ..model.router import ModelGateway
 from ..tool.pydantic import build_policy_capability
 from ..tool.executor import GovernedToolInvoker
 from .dependencies import AgentDependencies
@@ -33,7 +33,7 @@ class AgentCompiler:
     def __init__(
         self,
         *,
-        model_router: ModelRouter,
+        model_router: ModelGateway,
         tool_executor: GovernedToolInvoker,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
     ) -> None:

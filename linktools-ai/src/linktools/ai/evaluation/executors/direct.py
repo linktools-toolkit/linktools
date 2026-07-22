@@ -155,7 +155,7 @@ class DirectEvalExecutor:
                 input_artifact_id=case.input_artifact_id,
                 output_artifact_id=output_artifact_id,
                 event_artifact_ids=tuple(event_ids),
-                resource_snapshots=(),
+                asset_snapshots=(),
                 task_attempt_id=None,
                 model_usage=dict(model_usage or {}),
                 metadata={},

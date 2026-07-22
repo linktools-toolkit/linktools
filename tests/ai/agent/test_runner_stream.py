@@ -22,14 +22,14 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -178,7 +178,7 @@ def _make_runner(tmp_path):
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        capability_assembler=CapabilityAssembler({"test": _EchoProvider()}),
+        capability_resolver=CapabilityResolver({"test": _EchoProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
@@ -202,7 +202,7 @@ def _compile(
 ) -> "tuple[AgentEngine, CompiledAgent]":
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry(fn, stream_fn)),
+        model_router=ModelGateway(ModelResolver(registry=_registry(fn, stream_fn))),
     )
     compiled = asyncio.run(
         compiler.compile(

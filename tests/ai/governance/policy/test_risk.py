@@ -4,7 +4,7 @@
 
 import asyncio
 
-from linktools.ai.governance.policy.risk import ResourceLimitRule, RiskRule
+from linktools.ai.governance.policy.risk import UsageLimitRule, RiskRule
 from linktools.ai.governance.policy.rule import (
     ApprovalMode,
     Permission,
@@ -60,7 +60,7 @@ async def _run_risk() -> None:
 
 
 async def _run_resource() -> None:
-    rule = ResourceLimitRule(limits={"max_tokens": 100})
+    rule = UsageLimitRule(limits={"max_tokens": 100})
 
     # tokens_used=150 > 100 -> DENY
     decision = await rule.evaluate(_request(), _ctx({"tokens_used": 150}))
@@ -71,7 +71,7 @@ async def _run_resource() -> None:
     assert decision.kind == PolicyDecisionKind.ALLOW
 
     # constructor knob: raise ceiling to 200 -> ALLOW at 150
-    rule = ResourceLimitRule(limits={"max_tokens": 200})
+    rule = UsageLimitRule(limits={"max_tokens": 200})
     decision = await rule.evaluate(_request(), _ctx({"tokens_used": 150}))
     assert decision.kind == PolicyDecisionKind.ALLOW
 

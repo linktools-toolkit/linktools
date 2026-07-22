@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ResourceCoordinator: hint-only revision/lock coordination. Never stores resource
+"""AssetCoordinator: hint-only revision/lock coordination. Never stores asset
 content and is never the source of correctness -- the DB (or file backend) always is."""
 
 from typing import AsyncContextManager, Protocol, runtime_checkable
 
 
 @runtime_checkable
-class ResourceCoordinator(Protocol):
+class AssetCoordinator(Protocol):
     async def revision_hint(self) -> "int | None": ...
 
     async def publish_revision(self, revision: int) -> None: ...

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the safe archive extractor (spec §10.7 TOL-007)."""
+"""Tests for the safe archive extractor."""
 import io
 import os
 import tarfile

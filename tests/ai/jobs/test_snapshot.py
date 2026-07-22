@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset snapshot utility tests: pinning a live resource into an immutable
+"""Asset snapshot utility tests: pinning a live asset into an immutable
 Artifact so retries/replay read the exact pinned bytes."""
 
 import asyncio
@@ -13,7 +13,7 @@ from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.models import WriteOptions
 from linktools.ai.asset.path import AssetPath
 from linktools.ai.asset.store import AssetStore
-from linktools.ai.jobs.snapshot import ResourceSnapshotError, snapshot_resource
+from linktools.ai.jobs.snapshot import AssetSnapshotError, snapshot_asset
 from linktools.ai.storage.filesystem.artifact import (
     FilesystemArtifactBlobStore,
     FilesystemArtifactRecordStore,
@@ -21,25 +21,25 @@ from linktools.ai.storage.filesystem.artifact import (
 
 
 def _stores(tmp_path) -> "tuple[AssetStore, ArtifactStore]":
-    resources = AssetStore(primary=MemoryAssetBackend())
+    assets = AssetStore(primary=MemoryAssetBackend())
     artifacts = ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
     )
-    return resources, artifacts
+    return assets, artifacts
 
 
-def test_snapshot_resource_pins_content_and_metadata(tmp_path) -> None:
-    resources, artifacts = _stores(tmp_path)
+def test_snapshot_asset_pins_content_and_metadata(tmp_path) -> None:
+    assets, artifacts = _stores(tmp_path)
 
     async def run() -> None:
-        await resources.put(
+        await assets.put(
             AssetPath("/data/file.txt"),
             b"snapshot-me",
             options=WriteOptions(content_type="text/plain"),
         )
-        snap = await snapshot_resource(
-            resources, artifacts, "/data/file.txt", tenant_id="t1"
+        snap = await snapshot_asset(
+            assets, artifacts, "/data/file.txt", tenant_id="t1"
         )
         assert snap.path == "/data/file.txt"
         assert snap.version >= 1
@@ -57,10 +57,10 @@ def test_snapshot_resource_pins_content_and_metadata(tmp_path) -> None:
 
 
 def test_snapshot_missing_resource_raises(tmp_path) -> None:
-    resources, artifacts = _stores(tmp_path)
+    assets, artifacts = _stores(tmp_path)
 
     async def run() -> None:
-        with pytest.raises(ResourceSnapshotError):
-            await snapshot_resource(resources, artifacts, "/missing", tenant_id="t1")
+        with pytest.raises(AssetSnapshotError):
+            await snapshot_asset(assets, artifacts, "/missing", tenant_id="t1")
 
     asyncio.run(run())

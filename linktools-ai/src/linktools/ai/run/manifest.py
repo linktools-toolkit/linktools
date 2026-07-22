@@ -10,22 +10,22 @@ This module is the contracts + construction + provider-drift layer for
 deterministic resume. The manifest is BUILT and PERSISTED at prepare time
 (run/preparation.py runs after compile, so the resolved provider revision is
 captured). The concrete ``DefaultManifestResolver`` consumes it on resume
-(§13.6 -- refuse drift, never fall back to latest) and is wired into
-``Runtime.resume``. Tool-handler revisions and pinned resource (skill /
+(refuse drift, never fall back to latest) and is wired into
+``Runtime.resume``. Tool-handler revisions and pinned asset (skill /
 subagent) snapshots are NOT yet populated -- handlers are resolved at
 execution time, not prepare time, so their revisions layer in once tool
-resolution moves earlier; resource snapshotting is its own follow-up.
+resolution moves earlier; asset snapshotting is its own follow-up.
 
 Revision helpers:
 - ``descriptor_fingerprint`` -- content hash of a tool declaration (the ToolRef
   at prepare time, or a resolved descriptor post-compile).
 - ``handler_revision`` -- a tool handler's revision: an explicit ``revision``
   attribute if the handler exposes one, else derived from its module / qualname
-  / package version (§13.4). Returns None for a handler that cannot be stably
+  / package version. Returns None for a handler that cannot be stably
   versioned.
 - ``provider_revision`` -- a model provider's revision if it is a
   ``VersionedProvider``, else None (an unversioned provider makes the run
-  non-resumable per §13.7)."""
+  non-resumable)."""
 
 import hashlib
 from dataclasses import dataclass, field
@@ -74,8 +74,8 @@ def provider_revision(provider: Any) -> "str | None":
     """Return ``provider.revision`` if it is a non-empty string, else None.
 
     Accepts any object; a provider need only expose a ``revision`` attribute or
-    property. A None result means the provider is unversioned and (per §13.7)
-    the run is not resumable."""
+    property. A None result means the provider is unversioned and the run is
+    not resumable."""
     revision = getattr(provider, "revision", None)
     if isinstance(revision, str) and revision:
         return revision
@@ -101,7 +101,7 @@ def descriptor_fingerprint(descriptor: Any) -> str:
 
 
 def handler_revision(handler: Any) -> "str | None":
-    """A tool handler's revision (§13.4). Preference order:
+    """A tool handler's revision. Preference order:
 
     1. an explicit ``revision`` attribute the handler exposes (downstream tools
        that know their own version);
@@ -163,9 +163,9 @@ class ToolManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceRevision:
-    """A pinned skill / subagent resource (§13.5): its path + revision + etag +
-    sha256 + artifact_id, so resume restores the EXACT resource instead of
+class CapabilityRevision:
+    """A pinned skill / subagent asset: its path + revision + etag +
+    sha256 + artifact_id, so resume restores the EXACT asset instead of
     re-reading latest."""
 
     path: str
@@ -190,7 +190,7 @@ class ExecutionManifest:
     prepare time; consumed by ``DefaultManifestResolver`` on resume to refuse
     drift. Provider revision is populated from the compiled run; tool-handler
     revisions are populated when the corresponding providers expose stable
-    revisions; unversioned resources are marked non-resumable."""
+    revisions; unversioned assets are marked non-resumable."""
 
     schema_version: int
     runnable_id: str
@@ -201,8 +201,8 @@ class ExecutionManifest:
     model_provider: "str | None"
     model_revision: "str | None"
     tool_descriptors: "tuple[ToolManifest, ...]" = field(default_factory=tuple)
-    skill_revisions: "tuple[ResourceRevision, ...]" = field(default_factory=tuple)
-    subagent_revisions: "tuple[ResourceRevision, ...]" = field(default_factory=tuple)
+    skill_revisions: "tuple[CapabilityRevision, ...]" = field(default_factory=tuple)
+    subagent_revisions: "tuple[CapabilityRevision, ...]" = field(default_factory=tuple)
     mcp_servers: "tuple[MCPManifest, ...]" = field(default_factory=tuple)
     policy_revision: "str | None" = None
     security_baseline_revision: "str | None" = None
@@ -237,9 +237,9 @@ def manifest_to_dict(manifest: ExecutionManifest) -> "dict[str, Any]":
             }
             for t in manifest.tool_descriptors
         ],
-        "skill_revisions": [_resource_to_dict(r) for r in manifest.skill_revisions],
+        "skill_revisions": [_capability_revision_to_dict(r) for r in manifest.skill_revisions],
         "subagent_revisions": [
-            _resource_to_dict(r) for r in manifest.subagent_revisions
+            _capability_revision_to_dict(r) for r in manifest.subagent_revisions
         ],
         "mcp_servers": [
             {"name": m.name, "revision": m.revision} for m in manifest.mcp_servers
@@ -252,13 +252,13 @@ def manifest_to_dict(manifest: ExecutionManifest) -> "dict[str, Any]":
     }
 
 
-def _resource_to_dict(resource: ResourceRevision) -> "dict[str, Any]":
+def _capability_revision_to_dict(asset: CapabilityRevision) -> "dict[str, Any]":
     return {
-        "path": resource.path,
-        "revision": resource.revision,
-        "etag": resource.etag,
-        "sha256": resource.sha256,
-        "artifact_id": resource.artifact_id,
+        "path": asset.path,
+        "revision": asset.revision,
+        "etag": asset.etag,
+        "sha256": asset.sha256,
+        "artifact_id": asset.artifact_id,
     }
 
 
@@ -283,10 +283,10 @@ def manifest_from_dict(data: "Mapping[str, Any]") -> ExecutionManifest:
             for t in data.get("tool_descriptors", ())
         ),
         skill_revisions=tuple(
-            _resource_from_dict(r) for r in data.get("skill_revisions", ())
+            _capability_revision_from_dict(r) for r in data.get("skill_revisions", ())
         ),
         subagent_revisions=tuple(
-            _resource_from_dict(r) for r in data.get("subagent_revisions", ())
+            _capability_revision_from_dict(r) for r in data.get("subagent_revisions", ())
         ),
         mcp_servers=tuple(
             MCPManifest(name=m["name"], revision=m.get("revision"))
@@ -300,8 +300,8 @@ def manifest_from_dict(data: "Mapping[str, Any]") -> ExecutionManifest:
     )
 
 
-def _resource_from_dict(data: "Mapping[str, Any]") -> ResourceRevision:
-    return ResourceRevision(
+def _capability_revision_from_dict(data: "Mapping[str, Any]") -> CapabilityRevision:
+    return CapabilityRevision(
         path=data.get("path") or "",
         revision=data.get("revision"),
         etag=data.get("etag"),
@@ -323,8 +323,8 @@ def build_execution_manifest(
     policy_revision: "str | None" = None,
     security_baseline_revision: "str | None" = None,
     capability_revision: "str | None" = None,
-    skill_revisions: "tuple[ResourceRevision, ...]" = (),
-    subagent_revisions: "tuple[ResourceRevision, ...]" = (),
+    skill_revisions: "tuple[CapabilityRevision, ...]" = (),
+    subagent_revisions: "tuple[CapabilityRevision, ...]" = (),
     mcp_servers: "tuple[MCPManifest, ...]" = (),
     output_schema_id: "str | None" = None,
     output_schema_revision: "str | None" = None,
@@ -384,9 +384,9 @@ def build_execution_manifest(
 def compute_resumability(
     manifest: ExecutionManifest,
 ) -> "tuple[Resumability, tuple[str, ...]]":
-    """Pure verdict over a manifest: RESUMABLE unless any §13.7 disqualifier is
+    """Pure verdict over a manifest: RESUMABLE unless any disqualifier is
     present -- an unversioned tool handler, an ephemeral/unversioned provider,
-    or a resource snapshot missing all pinning fields. Returns the verdict plus
+    or a asset snapshot missing all pinning fields. Returns the verdict plus
     the de-duplicated reasons that applied (empty for RESUMABLE).
 
     A None ``handler_revision`` / ``model_revision`` only disqualifies when the
@@ -394,12 +394,12 @@ def compute_resumability(
     revision was not recorded; a named provider with no revision). This keeps
     the verdict honest about what the manifest actually claims.
 
-    A resource (skill / subagent) is considered pinned when ANY of its
+    A asset (skill / subagent) is considered pinned when ANY of its
     snapshot fields is set (sha256 / revision / artifact_id / etag) -- a single
-    pinning field is enough per §13.5. MCP-server drift is detected by the
+    pinning field is enough. MCP-server drift is detected by the
     resume-side resolver, not by this verdict.
 
-    Dynamic-output-type detection (§13.7) requires inspecting the compiled
+    Dynamic-output-type detection requires inspecting the compiled
     output type; it is not inferable from this manifest alone and is layered in
     once the manifest carries compiled revisions."""
     reasons: list = []
@@ -408,12 +408,12 @@ def compute_resumability(
             reasons.append(NON_RESUMABLE_UNVERSIONED_HANDLER)
     if manifest.model_name is not None and manifest.model_revision is None:
         reasons.append(NON_RESUMABLE_EPHEMERAL_PROVIDER)
-    for resource in (*manifest.skill_revisions, *manifest.subagent_revisions):
+    for asset in (*manifest.skill_revisions, *manifest.subagent_revisions):
         if (
-            not resource.sha256
-            and not resource.revision
-            and not resource.artifact_id
-            and not resource.etag
+            not asset.sha256
+            and not asset.revision
+            and not asset.artifact_id
+            and not asset.etag
         ):
             reasons.append(NON_RESUMABLE_MISSING_RESOURCE_SNAPSHOT)
     if reasons:
@@ -435,7 +435,7 @@ class ResolvedExecution:
 
 @runtime_checkable
 class ManifestResolver(Protocol):
-    """Resolve a persisted manifest back to an executable form on resume (§13.6).
+    """Resolve a persisted manifest back to an executable form on resume.
 
     Contract: the exact pinned versions must be present and fingerprint-consistent;
     a missing version or fingerprint mismatch is an explicit failure. Silent
@@ -452,12 +452,12 @@ class ManifestResolver(Protocol):
 
 
 class DefaultManifestResolver:
-    """Provider-revision drift detection (§13.6).
+    """Provider-revision drift detection.
 
     Re-resolves the manifest's declared model against the current environment
     and refuses (``ManifestDriftError``) when the provider revision changed
     between prepare and resume, or when the model is no longer resolvable.
-    Drift checks for tool handlers and pinned resources are layered in once
+    Drift checks for tool handlers and pinned assets are layered in once
     those revisions are populated at prepare time.
 
     ``resolve_model_revision`` maps a model name to its CURRENT revision (or

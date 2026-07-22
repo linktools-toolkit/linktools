@@ -42,8 +42,8 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
     return data
 
 
-def _stable_resource_revision(items: "Sequence[Any]") -> int:
-    """Process-stable revision over a resource-info set: a SHA-256 digest of
+def _stable_asset_revision(items: "Sequence[Any]") -> int:
+    """Process-stable revision over a asset-info set: a SHA-256 digest of
     each item's path/etag/version/modified_at/size, so changing one item,
     adding one, or removing one yields a different revision and a registry
     refreshes its cache. Sorted by path so reordering does not perturb the
@@ -121,11 +121,11 @@ class SpecLoader:
         return cls(read=read, list_ids=list_ids, revision=revision)
 
     @classmethod
-    def from_resources(cls, resource_store: Any, *, prefix: str) -> "SpecLoader":
-        # AssetStore exposes get(AssetPath) + propfind(AssetPath); it has
-        # no .list() and no global .revision(). Build paths via AssetPath so the
-        # store's own normalization + sandbox apply. The revision is a stable hash
-        # over the live resource metadata (path/etag/version/modified_at/size) so
+    def from_assets(cls, asset_store: Any, *, prefix: str) -> "SpecLoader":
+        # AssetStore exposes get(AssetPath) + list(AssetPath); there is no global
+        # revision() to call, so the revision below is a stable hash over the live
+        # metadata. Build paths via AssetPath so the store's own normalization +
+        # sandbox apply. The hash is over path/etag/version/modified_at/size so
         # the registry cache refreshes after any add/modify/delete instead of
         # pinning to a constant.
         from ..asset.models import Depth
@@ -136,17 +136,17 @@ class SpecLoader:
         def _full(path: str) -> "AssetPath":
             joined = f"{base}/{path.strip('/')}" if base else path.strip("/")
             if not joined or ".." in joined.split("/"):
-                raise RegistryNotFoundError(f"invalid spec resource path: {path!r}")
+                raise RegistryNotFoundError(f"invalid spec asset path: {path!r}")
             return AssetPath(f"/{joined}")
 
         async def _list_items() -> "list[Any]":
-            # Follow propfind cursor pagination so the full resource set is read
+            # Follow list cursor pagination so the full asset set is read
             # (the revision must reflect every item, not just the first page).
             root = AssetPath(f"/{base}") if base else AssetPath("/")
             items: "list[Any]" = []
             cursor = None
             while True:
-                page = await resource_store.propfind(
+                page = await asset_store.list(
                     root, depth=Depth.ONE, limit=1000, cursor=cursor
                 )
                 items.extend(page.items)
@@ -156,10 +156,10 @@ class SpecLoader:
 
         async def read(path: str) -> str:
             full = _full(path)
-            resource = await resource_store.get(full)
-            if resource is None:
-                raise RegistryNotFoundError(f"spec resource not found: {full.value}")
-            return resource.text()
+            asset = await asset_store.get(full)
+            if asset is None:
+                raise RegistryNotFoundError(f"spec asset not found: {full.value}")
+            return asset.text()
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
             ids: "list[str]" = []
@@ -170,7 +170,7 @@ class SpecLoader:
             return tuple(sorted(ids))
 
         async def revision() -> int:
-            return _stable_resource_revision(await _list_items())
+            return _stable_asset_revision(await _list_items())
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 

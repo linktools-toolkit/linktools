@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """Jobs domain: reliable task execution as an extension of the existing runtime.
 
-Public types. The concrete ``JobRuntime`` and the orchestration commands land
-in later phases; the data models, state machine, handler contract and store
+Public types: the data models, state machine, handler contract, and store
 contract are the stable surface exported here.
 """
 
@@ -14,7 +13,7 @@ from .models import (
     IllegalTaskTransitionError,
     JobRecord,
     JobStatus,
-    ResourceSnapshotRef,
+    AssetSnapshotRef,
     RetryPolicy,
     SideEffectMode,
     SideEffectPolicy,
@@ -58,7 +57,7 @@ __all__: "list[str]" = [
     "ActorRef",
     "ActorChain",
     "TaskBudget",
-    "ResourceSnapshotRef",
+    "AssetSnapshotRef",
     "JobRecord",
     "TaskRecord",
     "TaskAttemptRecord",

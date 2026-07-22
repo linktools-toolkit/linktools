@@ -13,7 +13,7 @@ Three angles:
 2. A run driven by a runner WITHOUT an execution backend exposes no builtin
    tools -- a FunctionModel that tries to call read_file gets a tool-error
    back (pydantic-ai's "unknown tool" surface), never a file payload.
-3. A run driven by a runner WITH a LocalExecutionBackend wired sees a real
+3. A run driven by a runner WITH a LocalSandbox wired sees a real
    read_file tool call land on the backend -- the file content shows up as
    a tool-return in the run history. This is the positive-path replacement
    for the old "compiled agent has builtin tools" test, now driven through
@@ -26,12 +26,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.execution.local import LocalExecutionBackend
+from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -70,7 +70,7 @@ def _user_function_toolsets(compiled) -> "list[FunctionToolset]":
 
 
 def _make_runner(tmp_path, *, execution=None) -> AgentEngine:
-    from linktools.ai.capability.assembler import CapabilityAssembler
+    from linktools.ai.capability.resolver import CapabilityResolver
     from linktools.ai.capability.builtin import BuiltinProvider
     from linktools.ai.governance.policy.engine import PolicyEngine
     from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
@@ -87,7 +87,7 @@ def _make_runner(tmp_path, *, execution=None) -> AgentEngine:
         event_store=event_store,
         checkpoint_store=checkpoint_store,
         execution=execution,
-        capability_assembler=CapabilityAssembler({"builtin": BuiltinProvider()}),
+        capability_resolver=CapabilityResolver({"builtin": BuiltinProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
@@ -134,11 +134,11 @@ def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
     # Those tools are constructed at execution time, not compile time.
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(
+        model_router=ModelGateway(ModelResolver(
             registry=_registry(
                 lambda m, i: ModelResponse(parts=[TextPart(content="ok")])
             )
-        ),
+        )),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
 
@@ -148,7 +148,7 @@ def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
 
 
 def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
-    # When no ExecutionBackend is wired, the runner-driven run exposes no
+    # When no Sandbox is wired, the runner-driven run exposes no
     # builtin tools. A FunctionModel that emits a read_file ToolCallPart
     # cannot land it on a backend. Drive the run via run_stream and collect
     # every yielded event: without a backend, NO successful "tool" event for
@@ -169,7 +169,7 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry(model_fn)),
+        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
     runner = _make_runner(tmp_path)  # execution=None -> no builtin tools
@@ -203,7 +203,7 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
 
 
 def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
-    # Positive path: with a LocalExecutionBackend wired into the runner, a
+    # Positive path: with a LocalSandbox wired into the runner, a
     # read_file tool call from the model lands on the backend. The runner
     # surfaces the call as a "tool" event via run_stream -- assert read_file
     # fires a successful "end" event AND the file content shows up in the
@@ -231,10 +231,10 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry(model_fn)),
+        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
-    backend = LocalExecutionBackend(runtime_dir=tmp_path)
+    backend = LocalSandbox(runtime_dir=tmp_path)
     runner = _make_runner(tmp_path, execution=backend)
     _seed_session(runner._session_store, "session-1")
 

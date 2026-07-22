@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MCP client wiring: construct pydantic-ai MCP servers from MCPServerSpec, and
-MCPConnectionManager to cache/share live toolsets and close them on shutdown.
+MCPConnectionPool to cache/share live toolsets and close them on shutdown.
 Construction is synchronous and side-effect-free; connections are
 opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 
@@ -129,7 +129,7 @@ def build_mcp_server(spec: MCPServerSpec) -> Any:
     raise MCPConnectionError(f"mcp {spec.id}: unknown transport {spec.transport!r}")
 
 
-class MCPConnectionManager:
+class MCPConnectionPool:
     """Owns the lifecycle of live MCP toolsets. ``get_toolset`` builds (and
     caches) a pydantic-ai MCPToolset for a server; ``close`` / ``close_server``
     release them. Runtime closes this on shutdown so connections do not leak."""

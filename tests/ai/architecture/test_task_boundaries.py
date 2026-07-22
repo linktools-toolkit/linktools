@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Boundary freeze for the task / evaluation / artifact extension.
 
-Phase 0 of the infrastructure plan establishes architecture invariants BEFORE
+of the infrastructure plan establishes architecture invariants BEFORE
 any task/evaluation/artifact code lands, so the extension cannot silently
 change the existing runtime's public surface or storage shape:
 
@@ -13,7 +13,7 @@ change the existing runtime's public surface or storage shape:
   change rather than an accident;
 * the rejected ``linktools.ai.durable`` namespace stays absent.
 
-When a later phase legitimately changes one of these (e.g. phase 3 adds
+When a legitimately changes one of these (e.g. phase 3 adds
 ``Storage.jobs``), update the snapshot here in the same change.
 """
 
@@ -30,7 +30,7 @@ def test_root_api_exports_exactly_runtime() -> None:
 
 
 def test_importing_root_in_fresh_process_does_not_load_new_domains() -> None:
-    # Plan section 30.6: a fresh interpreter importing the root must not load
+    # a fresh interpreter importing the root must not load
     # the new domains (they must not exist / not auto-load). Run in a
     # subprocess so other tests' imports cannot pollute the check.
     code = (
@@ -61,7 +61,7 @@ def test_storage_facade_field_set_snapshot() -> None:
     from linktools.ai.storage.facade import Storage
 
     fields = {f.name for f in dataclasses.fields(Storage)}
-    # The facade. Phase 3 added optional `jobs` (renamed from `tasks`); phase
+    # The facade. added optional `jobs` (renamed from `tasks`); phase
     # 8 added optional `evaluations`. Both default to None for backward
     # compatibility. StorageCapabilities was converged to StorageFeatures
     # (the capability surface is now scoped enums + first-class
@@ -80,7 +80,7 @@ def test_storage_facade_field_set_snapshot() -> None:
         "idempotency",
         "features",
         "coordination",
-        "transactions",
+        "_transaction_manager",
         "run_definitions",
         "jobs",
         "evaluations",
@@ -100,7 +100,7 @@ def test_existing_storage_backends_remain_importable() -> None:
 
 
 def test_importing_jobs_does_not_load_sqlalchemy_or_langgraph() -> None:
-    # Plan section 30.6 (second block): importing the jobs domain keeps the
+    # (second block): importing the jobs domain keeps the
     # optional heavy deps out of sys.modules.
     code = (
         "import sys\n"
@@ -115,7 +115,7 @@ def test_importing_jobs_does_not_load_sqlalchemy_or_langgraph() -> None:
 
 
 def test_no_runtime_internals_or_pydantic_ai_in_new_domains() -> None:
-    # Plan section 30.7: jobs/ and evaluation/ must not reach into the runtime
+    # jobs/ and evaluation/ must not reach into the runtime
     # internals; jobs/ must not import pydantic_ai.
     from pathlib import Path
 
@@ -123,7 +123,7 @@ def test_no_runtime_internals_or_pydantic_ai_in_new_domains() -> None:
     for sub in ("jobs", "evaluation"):
         for p in (root / sub).rglob("*.py"):
             text = p.read_text(encoding="utf-8")
-            assert "linktools.ai._runtime" not in text, f"_runtime leak in {p}"
+            assert "linktools.ai.runtime.builder" not in text, f"_runtime leak in {p}"
     for p in (root / "jobs").rglob("*.py"):
         text = p.read_text(encoding="utf-8")
         assert "pydantic_ai" not in text, f"pydantic_ai leak in {p}"

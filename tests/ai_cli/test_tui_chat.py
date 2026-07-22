@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Textual ChatScreen behavior tests (spec §32).
+"""Textual ChatScreen behavior tests.
 
 Drives the app with ``run_test()`` and a ``FakeRuntimeClient`` -- no real
 Runtime/model. Covers the headline flows end to end: submitting starts and
 renders a streamed run, bracket-bearing model text is rendered literally (not
 swallowed by Rich markup), a second submit while running is ignored, and ``Esc``
 cancels the run *through the runtime* without reporting it as a failure (spec
-§22). Textual is required, so this module imports it at top level."""
+). Textual is required, so this module imports it at top level."""
 
 import asyncio
 import unittest
@@ -82,7 +82,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_streamed_markup_chars_are_escaped(self):
-        # Regression for spec §17.1: bracket-bearing model output must reach the
+        # Regression for : bracket-bearing model output must reach the
         # log escaped, not be consumed/restyled by the markup=True RichLog.
         screen = ChatScreen(client=FakeRuntimeClient())
         log = mock.MagicMock()
@@ -105,7 +105,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", log.write.call_args.args[0])
 
     async def test_second_submit_ignored_while_running(self):
-        # Spec §21: one active Run at a time -- a second submit is dropped.
+        # Spec : one active Run at a time -- a second submit is dropped.
         fake = _BlockingClient()
         app = LinktoolsAIApp(client=fake)
         async with app.run_test() as pilot:
@@ -122,7 +122,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
 
 class TestTuiChatCancel(unittest.IsolatedAsyncioTestCase):
     async def test_escape_cancels_run_through_runtime(self):
-        # Spec §22: Esc must cancel via RuntimeClient.cancel(run_id), not only
+        # Spec : Esc must cancel via RuntimeClient.cancel(run_id), not only
         # stop the Worker.
         fake = _BlockingClient()
         app = LinktoolsAIApp(client=fake)

@@ -21,8 +21,8 @@ from linktools.ai.errors import LinktoolsAIError
         E.MCPConnectionError,
         E.MCPToolError,
         E.ExtensionNotFoundError,
-        E.ExtensionResourceNotFoundError,
-        E.ExtensionResourceAccessDeniedError,
+        E.ExtensionContentNotFoundError,
+        E.ExtensionContentAccessDeniedError,
         E.ExtensionEntrypointNotFoundError,
         E.ExtensionEntrypointDeniedError,
         E.SubagentNotFoundError,
@@ -46,7 +46,7 @@ def test_capability_tree():
         E.SkillNotFoundError,
         E.MCPServerNotFoundError,
         E.ExtensionNotFoundError,
-        E.ExtensionResourceNotFoundError,
+        E.ExtensionContentNotFoundError,
         E.ExtensionEntrypointNotFoundError,
         E.SubagentNotFoundError,
     ):
@@ -56,7 +56,7 @@ def test_capability_tree():
 def test_policy_backed_errors():
     # Denied / depth-exceeded are policy decisions, not resolution misses.
     for leaf in (
-        E.ExtensionResourceAccessDeniedError,
+        E.ExtensionContentAccessDeniedError,
         E.ExtensionEntrypointDeniedError,
         E.SubagentDepthExceededError,
     ):

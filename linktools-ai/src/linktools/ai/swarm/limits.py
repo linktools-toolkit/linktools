@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SwarmLimits: the resource/governance caps a SwarmRun enforces ."""
+"""SwarmLimits: the asset/governance caps a SwarmRun enforces ."""
 
 from dataclasses import dataclass
 from decimal import Decimal

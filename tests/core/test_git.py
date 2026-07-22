@@ -270,7 +270,7 @@ class TestGit(unittest.TestCase):
             GitRepository(environ, not_a_repo)
 
     def test_clone_target_exists_raises(self):
-        # Atomic clone (§12.2): refuse to clobber an existing target rather
+        # Atomic clone: refuse to clobber an existing target rather
         # than leaving a half-merged repository.
         os.makedirs(self.clone_path)
         with self.assertRaises(GitError):
@@ -278,7 +278,7 @@ class TestGit(unittest.TestCase):
 
     def test_clone_failure_leaves_no_partial(self):
         # If the clone fails mid-way, no staging dir or partial repo survives
-        # at the target (spec §27.2: interrupted clone never produces a valid
+        # at the target (: interrupted clone never produces a valid
         # repository).
         from unittest import mock
 

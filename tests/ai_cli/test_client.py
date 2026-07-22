@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeClient tests (spec §31).
+"""RuntimeClient tests.
 
 ``FakeRuntimeClient`` is the shared double both console and TUI tests drive, so
-it must implement every protocol method (§31 enumerates them). ``LocalRuntimeClient``
+it must implement every protocol method. ``LocalRuntimeClient``
 maps each protocol method onto the Runtime + Storage + registries without
-re-implementing capability assembly (spec §14/§15)."""
+re-implementing capability assembly."""
 
 import asyncio
 import types
@@ -26,7 +26,7 @@ def _run(coro):
 
 
 class TestFakeRuntimeClientCoversProtocol(unittest.TestCase):
-    """§31 -- the Fake implements + records every protocol method."""
+    """-- the Fake implements + records every protocol method."""
 
     def _fake(self) -> FakeRuntimeClient:
         return FakeRuntimeClient(

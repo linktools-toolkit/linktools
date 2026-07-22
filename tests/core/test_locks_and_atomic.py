@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for LockManager (§7.11) and atomic file utils (§17.1)."""
+"""Tests for LockManager and atomic file utils."""
 import os
 import threading
 from pathlib import Path
@@ -11,7 +11,7 @@ from linktools import utils
 
 
 # --------------------------------------------------------------------------- #
-# §7.11 LockManager
+# LockManager
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -62,7 +62,7 @@ def test_different_process_locks_are_independent(manager):
 
 
 def test_file_lock_uses_lock_dir_not_business_file(manager, tmp_path):
-    # §6.2: file_lock must NOT lock the business file itself; the lock lives
+    # : file_lock must NOT lock the business file itself; the lock lives
     # under lock_dir keyed by the sha256 of the absolute target path.
     target = tmp_path / "f.bin"
     lock = manager.file_lock(target)
@@ -80,7 +80,7 @@ def test_sanitize_drops_separators():
 
 
 # --------------------------------------------------------------------------- #
-# §17.1 atomic_write / atomic_replace
+# atomic_write / atomic_replace
 # --------------------------------------------------------------------------- #
 
 def test_atomic_write_creates_file(tmp_path):

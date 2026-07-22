@@ -99,12 +99,12 @@ class PrincipalContext:
             raise TypeError("PrincipalContext.scopes must be an explicit ScopeSet")
 
     def require_tenant(self, tenant_id: "str | None") -> None:
-        """Fail-closed tenant check (§5.4). Raises if the target resource has
+        """Fail-closed tenant check. Raises if the target asset has
         no tenant to compare against, or if this principal's tenant does not
         own it."""
         if tenant_id is None:
             raise PrincipalAccessDeniedError(
-                "target resource has no tenant; refusing to authorize against "
+                "target asset has no tenant; refusing to authorize against "
                 f"principal tenant {self.tenant_id!r}"
             )
         if self.tenant_id != tenant_id:
@@ -115,7 +115,7 @@ class PrincipalContext:
 
     @property
     def resolved_by(self) -> str:
-        """The audit identity derived from the trusted Principal (§7.5), never
+        """The audit identity derived from the trusted Principal, never
         caller-supplied. Used as ``resolved_by`` on approve/reject and the
         ``cancel_requested_by`` / resume audit fields."""
         return f"{self.actor.kind}:{self.actor.id}"

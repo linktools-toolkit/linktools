@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``continue_run`` status dispatch (spec §7.3/§27.2).
+"""``continue_run`` status dispatch.
 
 WAITING_APPROVAL + --approve -> approve + resume; + --reject -> reject + cancel;
 + --resume -> resume; (no flag) -> interactive. RUNNING -> report; terminal ->
@@ -78,7 +78,7 @@ class TestContinueWaitingApproval(unittest.TestCase):
 
     def test_reject_builds_client_without_model(self):
         # `continue --reject` never drives the model, so it must NOT require one
-        # (spec §27.2). build_runtime_client is called with with_model=False.
+        # . build_runtime_client is called with with_model=False.
         import linktools.ai_cli.console.continue_run as mod
 
         fake = self._fake()

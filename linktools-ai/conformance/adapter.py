@@ -84,7 +84,19 @@ class InMemoryArtifactRecordStore:
         self._records: "dict[tuple[str, str], ArtifactRecord]" = {}
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
-        self._records[(record.ref.id, record.tenant_id)] = record
+        key = (record.ref.id, record.tenant_id)
+        existing = self._records.get(key)
+        if existing is not None:
+            # Create-only: identical content is idempotent, a different value
+            # is a conflict (never a silent overwrite of lineage).
+            if existing != record:
+                from linktools.ai.errors import ArtifactRecordConflictError
+
+                raise ArtifactRecordConflictError(
+                    f"artifact {record.ref.id} already exists with different content"
+                )
+            return existing
+        self._records[key] = record
         return record
 
     async def get(

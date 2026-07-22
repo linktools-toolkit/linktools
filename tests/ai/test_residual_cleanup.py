@@ -56,7 +56,7 @@ def test_no_requirement_source_comment_markers():
 
 
 def test_runtime_build_has_no_default_command_rule():
-    rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
+    rt = (_AI_SRC / "runtime" / "facade.py").read_text(encoding="utf-8")
     assert "DEFAULT_DENIED_COMMAND_PATTERNS" not in rt, (
         "Runtime.build must not inject a default command denylist"
     )
@@ -97,7 +97,7 @@ async def test_import_linktools_ai_without_sqlalchemy():
 
 
 def test_resolve_methods_removed_from_public_api():
-    rt = (_AI_SRC / "runtime.py").read_text(encoding="utf-8")
+    rt = (_AI_SRC / "runtime" / "facade.py").read_text(encoding="utf-8")
     # No-compat simplification: resolve_agent / resolve_swarm / assemble are
     # removed. Runtime.inspect is the single assembly-inspection entry point;
     # by-id resolution is the caller's job via the RuntimeDependencies directly.
@@ -112,14 +112,6 @@ def test_tool_exposure_counting_uses_descriptors_not_introspection():
     # (the single source of truth), NOT via toolset introspection
     # (toolset_names / getattr(ts, "tools")) -- opaque toolsets would otherwise
     # be miscounted.
-    runner = (_AI_SRC / "agent" / "runner.py").read_text(encoding="utf-8")
+    runner = (_AI_SRC / "agent" / "engine.py").read_text(encoding="utf-8")
     assert "toolset_names" not in runner, "runner must not count via toolset_names"
     assert 'getattr(ts, "tools"' not in runner
-
-
-def test_spec_loader_from_resources_uses_resourcestore_api():
-    parser = (_AI_SRC / "catalog" / "parsing.py").read_text(encoding="utf-8")
-    body = parser.split("def from_resources")[1].split("return cls")[0]
-    # Must not call the non-existent AssetStore.list / global .revision.
-    assert "resource_store.list" not in body
-    assert "resource_store.revision" not in body

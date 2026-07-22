@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""BUG-04 (v5 guide §11): post-commit observation hooks (after_run, metrics,
+"""(v5 guide ): post-commit observation hooks (after_run, metrics,
 on_error) must be isolated from the run's terminal state.
 
 - after_run runs BEFORE the commit, so its failure takes the normal FAILED
@@ -24,10 +24,10 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -158,7 +158,7 @@ def _seed(session_store, session_id="session-1") -> None:
 def _compiled(model_fn):
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry(model_fn)),
+        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
     )
     return asyncio.run(
         compiler.compile(

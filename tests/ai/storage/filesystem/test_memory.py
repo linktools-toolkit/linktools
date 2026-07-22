@@ -248,12 +248,12 @@ def test_path_traversal_memory_id_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Tenant partitioning + legacy quarantine (§12.8 / §12.10)
+# 8. Tenant partitioning + legacy quarantine
 # ---------------------------------------------------------------------------
 
 
 def test_tenant_id_path_traversal_rejected(tmp_path):
-    # §12.8: the tenant path segment is validated, so a caller-controlled
+    # : the tenant path segment is validated, so a caller-controlled
     # tenant_id can't escape the store root via "../".
     async def _run_case():
         store = FilesystemMemoryStore(root=tmp_path)
@@ -270,7 +270,7 @@ def test_tenant_id_path_traversal_rejected(tmp_path):
 
 
 def test_search_isolates_tenants_via_partition(tmp_path):
-    # §12.8 / §12.10: search scans ONLY the requesting tenant's subdir, so one
+    # : search scans ONLY the requesting tenant's subdir, so one
     # tenant can never enumerate another's records (even with a shared owner).
     async def _run_case():
         store = FilesystemMemoryStore(root=tmp_path)
@@ -289,7 +289,7 @@ def test_search_isolates_tenants_via_partition(tmp_path):
 
 
 def test_legacy_flat_record_quarantined_from_real_tenant(tmp_path):
-    # §12.9: a pre-tenant record (flat layout, no tenant_id field) is read
+    # : a pre-tenant record (flat layout, no tenant_id field) is read
     # under the reserved legacy tenant. A real tenant's search must NEVER see
     # it; only an explicit legacy-scope search does (migration quarantine).
     import json as _json

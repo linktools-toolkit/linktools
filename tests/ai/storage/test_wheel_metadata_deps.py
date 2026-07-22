@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""R5: the core wheel carries NO environment-specific DB driver (postgres/mysql/
+"""the core wheel carries NO environment-specific DB driver (postgres/mysql/
 etc.) or external coordination client (redis/etcd). The core stays
 backend-neutral; a deployment using those brings its own driver + injects a
 distributed coordinator.
 
 Three gates, all in the default suite (a skipped acceptance test is not
-evidence, §6.8):
+evidence):
 1. requirements.yml -- the source the wheel's METADATA is generated from --
    declares no env driver. Catches the common regression at zero build cost.
 2. build the real wheel + parse its METADATA Requires-Dist + assert no env
-   driver. This is the plan's mandated artifact scan (the source scan alone
+   driver. This is 's mandated artifact scan (the source scan alone
    could miss a build-pipeline surprise).
 3. install the wheel in a fresh venv WITHOUT extras + import linktools.ai --
    the root surface needs no optional dep. SKIPS honestly (not gated) when the
@@ -30,7 +30,7 @@ _PKG = _REPO / "linktools-ai"
 _REQS = _PKG / "requirements.yml"
 
 # Drivers/clients the core wheel must NOT carry. A deployment using one of
-# these brings it itself; the core never pins it. The §7.7 forbidden-token set
+# these brings it itself; the core never pins it. The forbidden-token set
 # is asyncpg|asyncmy|aiomysql|redis|boto|s3|mysql|postgres; pymysql/etcd are
 # kept as reasonable additions in the same class.
 _FORBIDDEN_DEPS = (
@@ -88,7 +88,7 @@ def test_requirements_yml_carries_no_env_drivers() -> None:
 
 
 def test_wheel_metadata_carries_no_env_drivers(tmp_path) -> None:
-    # The plan-mandated artifact scan: build the real wheel + parse its
+    # The artifact scan: build the real wheel + parse its
     # METADATA Requires-Dist. No env driver may appear in any extra.
     wheelhouse = tmp_path / "wheels"
     wheelhouse.mkdir()

@@ -10,7 +10,7 @@ from .engine import PolicyEngine
 from .network import NetworkRule
 from .path import PathRule
 from .permission import PermissionRule
-from .risk import ResourceLimitRule, RiskRule
+from .risk import UsageLimitRule, RiskRule
 from .rule import (
     ApprovalMode,
     Permission,
@@ -36,7 +36,7 @@ __all__ = [
     "PolicyDecisionKind",
     "PolicyEngine",
     "PolicyRule",
-    "ResourceLimitRule",
+    "UsageLimitRule",
     "RiskLevel",
     "RiskRule",
     "SideEffectKind",

@@ -59,7 +59,7 @@ class Asset:
 
 @dataclass(frozen=True, slots=True)
 class Found:
-    resource: Asset
+    asset: Asset
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +109,6 @@ class IdempotencyRecord:
 AssetLookupInfo: TypeAlias = AssetInfo
 
 # MoveResult is the result shape of an atomic MOVE. The target
-# resource (info + content) is what callers receive from AssetStore.move();
+# asset (info + content) is what callers receive from AssetStore.move();
 # aliasing Asset avoids parallel result types.
 MoveResult: TypeAlias = Asset

@@ -49,7 +49,7 @@ class ArtifactService:
         self, *, tenant_id: str, run_id: str
     ) -> "tuple[AssetInfo, ...]":
         prefix = AssetPath(f"/artifacts/{tenant_id}/{run_id}")
-        page = await self._assets.propfind(
+        page = await self._assets.list(
             prefix, depth=Depth.ONE, limit=1000, cursor=None
         )
         return page.items

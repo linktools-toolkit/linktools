@@ -14,6 +14,7 @@ from linktools.ai.artifact.models import (
     ArtifactProvenance,
     ArtifactRecord,
     ArtifactRef,
+    ArtifactRecordCorruptError,
 )
 from linktools.ai.storage.filesystem.artifact import (
     FilesystemArtifactBlobStore,
@@ -158,3 +159,42 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
+    """A corrupt record file must abort the sweep and delete nothing -- the
+    sweeper cannot know whether the broken record pins a blob, so it fails
+    closed rather than risk deleting a referenced blob."""
+    blob_store, record_store = _stores(tmp_path)
+
+    async def _seed():
+        # A referenced blob pinned by a valid record.
+        ref_content = b"referenced"
+        ref_sha = _sha(ref_content)
+        await blob_store.put_if_absent(
+            digest=ref_sha, source=_aiter(ref_content), size=len(ref_content)
+        )
+        await record_store.put(_record("art-ref", ref_sha))
+        # An orphan blob past the grace window that the sweeper WOULD delete if
+        # the scan were healthy.
+        orphan_content = b"would-be-deleted"
+        orphan_sha = _sha(orphan_content)
+        await blob_store.put_if_absent(
+            digest=orphan_sha, source=_aiter(orphan_content), size=len(orphan_content)
+        )
+        return ref_sha, orphan_sha
+
+    ref_sha, orphan_sha = _run(_seed())
+
+    # Corrupt the record JSON in place (unparseable).
+    record_path = tmp_path / "records" / "t1" / "art-ref.json"
+    record_path.write_bytes(b"{not valid json")
+
+    future = datetime.now(timezone.utc) + timedelta(hours=25)
+    with pytest.raises(ArtifactRecordCorruptError):
+        _run(sweep_orphan_blobs(blob_store, record_store, now=future))
+
+    # Nothing was deleted: the orphan survives because the scan aborted, and the
+    # referenced blob is untouched.
+    assert _run(blob_store.stat(digest=orphan_sha)) is not None
+    assert _run(blob_store.stat(digest=ref_sha)) is not None

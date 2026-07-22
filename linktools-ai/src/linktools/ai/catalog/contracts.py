@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CatalogSource / CatalogCodec / RevisionCache: the generic, domain-agnostic
-contracts a Catalog composes (plan §4.3).
+contracts a Catalog composes.
 
 - ``CatalogSource``: the raw byte/text origin. Exposes a revision string (any
   change means the cached specs are stale), an id listing, and a single-item
@@ -130,7 +130,7 @@ class RevisionCache(Generic[T]):
                 if self._metrics is not None:
                     # A refresh happened: the source revision moved since the
                     # last call. Counted as an observability signal (not a
-                    # failure) per the production-hardening metric floor.
+                    # failure).
                     self._metrics.counter("catalog_revision_refresh_total")
             return revision
 

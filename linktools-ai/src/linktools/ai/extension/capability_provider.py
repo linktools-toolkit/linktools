@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ExtensionProvider: the CapabilityProvider for ``extension`` / ``extension-resource``
+"""ExtensionProvider: the CapabilityProvider for ``extension`` / ``extension-asset``
 / ``extension-entrypoint`` tool refs.
 
 - ``extension:<id>``            -> prompt catalog only (Level 0), no tools.
-- ``extension-resource:<id>``   -> Level-1 list/read resource tools for that extension.
+- ``extension-asset:<id>``   -> Level-1 list/read asset tools for that extension.
 - ``extension-entrypoint:<id>`` -> Level-1 list-entrypoints tool (+ opt-in call).
 
-An extension NEVER auto-exposes all its resources/entrypoints as tools: only the
+An extension NEVER auto-exposes all its assets/entrypoints as tools: only the
 explicitly declared extension ids become reachable, and only the read/list tools
 are added by default."""
 
@@ -18,11 +18,11 @@ from typing import ClassVar
 from ..capability.models import CapabilityBundle
 from ..capability.provider import CapabilityContext
 from ..capability.models import CapabilityRef
-from .spec import ExtensionResourceProvider
+from .spec import ExtensionContentSource
 from ..run.identity import ParentRunIdentity
 from ..tool.models import ToolDescriptor
 from ..tool.models import ToolContribution, declared_tool_definitions
-from ..subagent.runner import SubagentExecutor
+from ..subagent.runner import SubagentExecutorProtocol
 from .resolver import EntrypointResolver
 from .scope import ExtensionScope
 from .toolset import build_extension_entrypoint_toolset, build_extension_resource_toolset
@@ -31,7 +31,7 @@ from .toolset import build_extension_entrypoint_toolset, build_extension_resourc
 @dataclass
 class ExtensionProvider:
     """CapabilityProvider for extension-scoped capabilities. Depends only on the
-    ExtensionResourceProvider / EntrypointResolver Protocols (the Directory
+    ExtensionContentSource / EntrypointResolver Protocols (the Directory
     implementations are one possible Provider, not a type boundary). The
     entrypoint executor is injected at construction so call_extension_entrypoint
     can run scoped agents without runtime mutation."""
@@ -41,12 +41,12 @@ class ExtensionProvider:
     # it once under all three instead of alias-registering three copies.
     supported_kinds: "ClassVar[tuple[str, ...]]" = (
         "extension",
-        "extension-resource",
+        "extension-asset",
         "extension-entrypoint",
     )
-    resource_provider: "ExtensionResourceProvider | None" = None
+    content_source: "ExtensionContentSource | None" = None
     entrypoint_resolver: "EntrypointResolver | None" = None
-    entrypoint_executor: "SubagentExecutor | None" = None
+    entrypoint_executor: "SubagentExecutorProtocol | None" = None
 
     async def resolve(
         self,
@@ -57,7 +57,7 @@ class ExtensionProvider:
         if ref.kind == "extension":
             return CapabilityBundle(
                 prompt_sections={
-                    "extensions": f"Extension declared: {ref.name}. Use extension-resource / "
+                    "extensions": f"Extension declared: {ref.name}. Use extension-asset / "
                     f"extension-entrypoint tools to inspect it when enabled.",
                 }
             )
@@ -70,11 +70,11 @@ class ExtensionProvider:
 
         emit = make_event_emitter(context)
 
-        if ref.kind == "extension-resource":
-            if self.resource_provider is None:
+        if ref.kind == "extension-asset":
+            if self.content_source is None:
                 return CapabilityBundle()
             ts = build_extension_resource_toolset(
-                self.resource_provider,
+                self.content_source,
                 allowed=allowed,
                 max_resources_per_list=cfg.get(
                     "max_resources_per_list", cap.max_resources_per_list
@@ -84,15 +84,15 @@ class ExtensionProvider:
             )
             pkw = dict(
                 source="extension",
-                capability_kind="extension-resource",
+                capability_kind="extension-asset",
                 capability_name=ref.name,
                 category="extension-read",
                 risk="low",
                 mutating=False,
             )
             descriptors = (
-                ToolDescriptor(name="list_extension_resources", **pkw),
-                ToolDescriptor(name="read_extension_resource", **pkw),
+                ToolDescriptor(name="list_extension_content", **pkw),
+                ToolDescriptor(name="read_extension_content", **pkw),
             )
             contrib = ToolContribution(tools=declared_tool_definitions(ts, descriptors))
             return CapabilityBundle(tool_contributions=(contrib,))

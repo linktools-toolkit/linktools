@@ -2,31 +2,31 @@
 # -*- coding: utf-8 -*-
 """Reliability-architecture boundary freeze for linktools.ai.
 
-Phase 0 of the production-hardening plan
+of the 
 (``.docs/linktools-ai-production-hardening-plan.md``) snapshots the CURRENT
 reliability-relevant architecture. Every assertion describes the code as it is
-on the branch base; when a later phase legitimately changes one of these
+on the branch base; when a legitimately changes one of these
 invariants, update the snapshot in the same change so the change is visible.
 
 Already-in-place invariants (frozen so a regression is caught):
 
 * ``RunStatus`` carries a ``CANCELLING`` intermediate state and the transition
-  table routes in-flight runs through it (§8.1 -- already implemented);
+  table routes in-flight runs through it;
 * a cooperative ``CancellationToken`` propagates ``Runtime.cancel`` into the
-  agent loop / tool executor (§8.5 -- already implemented).
+  agent loop / tool executor.
 
-Snapshot invariants (a later phase WILL change these -- update here then):
+Snapshot invariants (a WILL change these -- update here then):
 
 * ``IdempotencyStatus`` now spans {reserved, executed, completed, failed,
-  unknown} -- §9.2 EXECUTED + UNKNOWN separate "Handler returned" from
+  unknown} -- EXECUTED + UNKNOWN separate "Handler returned" from
   "result committed" so a commit failure is never resolved by re-running it;
 * the atomic-write helper is the private ``_atomic_write`` shared across file
-  stores -- §16.1 promotes it to a public ``atomic_write_bytes``;
+  stores -- promotes it to a public ``atomic_write_bytes``;
 * ``RunRecord`` carries cancel-request audit and worker fencing/manifest fields.
 
 (The ``Runtime.cancel`` signature snapshot -- cross-process ownership fencing
-lands in §8.3 / §8.7 -- lives in ``test_security_boundaries.py`` next to the
-``resume`` signature under the §7.3 Principal change.)
+lands in -- lives in ``test_security_boundaries.py`` next to the
+``resume`` signature under the Principal change.)
 """
 
 import dataclasses
@@ -37,7 +37,7 @@ import importlib.util
 
 
 def test_run_status_includes_cancelling_intermediate_state() -> None:
-    # §8.1 requires a CANCELLING intermediate state between RUNNING and
+    # requires a CANCELLING intermediate state between RUNNING and
     # CANCELLED so cancel is never falsely advertised as complete.
     from linktools.ai.run.models import RunStatus
 
@@ -46,7 +46,7 @@ def test_run_status_includes_cancelling_intermediate_state() -> None:
 
 
 def test_cancelling_transitions_only_to_terminal() -> None:
-    # §8.1: CANCELLING -> {CANCELLED, FAILED}; it must not return to RUNNING.
+    # : CANCELLING -> {CANCELLED, FAILED}; it must not return to RUNNING.
     from linktools.ai.run.models import (
         ALLOWED_RUN_TRANSITIONS,
         RunStatus,
@@ -58,7 +58,7 @@ def test_cancelling_transitions_only_to_terminal() -> None:
 
 
 def test_in_flight_states_can_reach_cancelling() -> None:
-    # §8.1: RUNNING / WAITING_APPROVAL / PAUSED may transition to CANCELLING
+    # : RUNNING / WAITING_APPROVAL / PAUSED may transition to CANCELLING
     # rather than jumping straight to CANCELLED.
     from linktools.ai.run.models import (
         ALLOWED_RUN_TRANSITIONS,
@@ -69,11 +69,11 @@ def test_in_flight_states_can_reach_cancelling() -> None:
         assert RunStatus.CANCELLING in ALLOWED_RUN_TRANSITIONS[src], src
 
 
-# --- Cancellation primitive (§8.5) -------------------------------------------
+# --- Cancellation primitive -------------------------------------------
 
 
 def test_cancellation_token_surface_snapshot() -> None:
-    # §8.5: cancellation must reach the execution points via this token.
+    # : cancellation must reach the execution points via this token.
     # Freeze the method surface so a refactor that silently guts the token
     # (e.g. drops raise_if_cancelled) is caught instead of passing vacuously.
     from linktools.ai.run.cancellation import CancellationToken
@@ -82,11 +82,11 @@ def test_cancellation_token_surface_snapshot() -> None:
         assert callable(getattr(CancellationToken, method, None)), method
 
 
-# --- Tool idempotency status (§9.2 will extend) ------------------------------
+# --- Tool idempotency status ------------------------------
 
 
 def test_idempotency_status_values_snapshot() -> None:
-    # §9.2 landed: EXECUTED (Handler returned, never re-run; result held as the
+    # landed: EXECUTED (Handler returned, never re-run; result held as the
     # execution receipt) and UNKNOWN (commit could not be confirmed after the
     # Handler ran) now separate "side effect happened" from "result committed".
     from linktools.ai.tool.idempotency import IdempotencyStatus
@@ -101,11 +101,11 @@ def test_idempotency_status_values_snapshot() -> None:
     }, values
 
 
-# --- File storage atomicity (§16 will promote) -------------------------------
+# --- File storage atomicity -------------------------------
 
 
 def test_atomic_write_helper_is_the_public_module() -> None:
-    # §16.1 landed: the file-store's atomic-write helper is now the public
+    # landed: the file-store's atomic-write helper is now the public
     # ``atomic_write_bytes`` in storage/filesystem/atomic.py (temp + fsync + os.replace
     # + parent-directory fsync). The historical private ``_atomic_write`` in
     # _util.py remains as a thin delegate so every existing store import keeps
@@ -118,13 +118,13 @@ def test_atomic_write_helper_is_the_public_module() -> None:
     assert callable(_util._atomic_write)
 
 
-# --- Run record shape (§8.2 / §8.7 / §13 will extend) ------------------------
+# --- Run record shape ------------------------
 
 
 def test_run_record_has_cancel_audit_and_fencing_fields() -> None:
-    # §8.2 landed: cancel_requested_at / _by / reason are present (audit). Still
-    # absent (snapshot so a future addition is visible): §8.7 execution_token /
-    # heartbeat_at / worker_id (distributed-worker fencing) and §13 manifest_id
+    # landed: cancel_requested_at / _by / reason are present (audit). Still
+    # absent (snapshot so a future addition is visible): execution_token /
+    # heartbeat_at / worker_id (distributed-worker fencing) and manifest_id
     # / resumability (deterministic resume).
     from linktools.ai.run.models import RunRecord
 

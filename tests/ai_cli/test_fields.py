@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ConfigField tests (spec §30).
+"""ConfigField tests.
 
 Priority: explicit → env → cache → prompt → error. Base URL/model are cached;
 the API key is never cached and is marked secret. Tests use ConfigStore +
@@ -46,7 +46,7 @@ def ai_env(**values):
 
 class TestFieldShape(unittest.TestCase):
     def test_api_key_is_secret_and_not_cached(self):
-        """Spec §12: API key must be secret and never cached."""
+        """Spec : API key must be secret and never cached."""
         self.assertTrue(fields.OPENAI_API_KEY.secret)
         provider = fields.OPENAI_API_KEY.provider
         # ChainProvider wraps sub-providers; find the PromptProvider.

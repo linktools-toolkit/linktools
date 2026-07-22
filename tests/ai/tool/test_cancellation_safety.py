@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§14.1 / §14.5: cancellation + interrupt safety. CancelledError and
+"""cancellation + interrupt safety. CancelledError and
 KeyboardInterrupt are BaseExceptions, not business errors -- they must
 propagate (to the Runtime / event loop) and never be swallowed or rewrapped as
 a ToolError. The tool executor catches only ``except Exception``, so these
@@ -70,7 +70,7 @@ def test_execute_propagates_keyboard_interrupt():
 def test_atomic_write_propagates_cancelled_error_and_cleans_temp(
     tmp_path, monkeypatch
 ):
-    # §14.1: the atomic-write helper must (a) propagate CancelledError and
+    # : the atomic-write helper must (a) propagate CancelledError and
     # (b) still remove its temp file -- the try/finally does both.
     from linktools.ai.storage.filesystem._util import _atomic_write
 
@@ -94,7 +94,7 @@ def test_atomic_write_propagates_cancelled_error_and_cleans_temp(
 
 
 def test_execute_does_not_consult_retry_policy_for_cancelled_error():
-    # Stronger §14.1 guard: the executor's except branch must NOT be entered for
+    # Stronger guard: the executor's except branch must NOT be entered for
     # a BaseException. If it were (e.g. a widening of ``except Exception`` to
     # ``except BaseException``), the retry policy's should_retry would be
     # consulted with error=CancelledError. A recording policy that rejects any

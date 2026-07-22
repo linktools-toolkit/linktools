@@ -32,7 +32,7 @@ def _make_config(tmp_path, local_data=None, global_data=None, env_prefix=""):
     ]), local_source, global_source
 
 
-# -- exact priority chain (spec §69) -----------------------------------------
+# -- exact priority chain -----------------------------------------
 
 def test_os_environment_outranks_runtime(tmp_path, monkeypatch):
     config, _, _ = _make_config(tmp_path)

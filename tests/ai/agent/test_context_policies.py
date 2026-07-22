@@ -54,7 +54,7 @@ class _RecordingRetriever:
 
 
 def test_memory_policy_fails_closed_without_tenant():
-    # §12.6: a run with no tenant gets NO memories -- never a global search.
+    # : a run with no tenant gets NO memories -- never a global search.
     store = _RecordingStore()
     policy = DefaultMemoryPolicy(store=store)
     hits = asyncio.run(policy.select_memories(_ctx(tenant_id=None), "hello"))

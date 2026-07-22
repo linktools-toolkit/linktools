@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Import-time safety test (spec §19.2).
+"""Import-time safety test.
 
 Importing ``linktools`` must NOT:
 - create directories;
@@ -20,7 +20,7 @@ import tempfile
 
 
 def test_import_does_not_mutate_path_or_create_dirs():
-    """import linktools must not mutate PATH or create storage dirs (§19.2)."""
+    """import linktools must not mutate PATH or create storage dirs."""
     result = subprocess.run(
         [sys.executable, "-c", """
 import os, sys, tempfile
@@ -63,7 +63,7 @@ if home_override is not None:
 
 
 def test_import_does_not_configure_logging():
-    """import linktools must not add handlers to the root logger (§19.2)."""
+    """import linktools must not add handlers to the root logger."""
     result = subprocess.run(
         [sys.executable, "-c", """
 import logging

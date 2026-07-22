@@ -128,7 +128,7 @@ def test_plan_rejects_unsupported_action(fresh_manager):
 
 
 def test_plan_commands_reuse_real_arg_builder(fresh_manager, monkeypatch):
-    """Plan's build/up args must come from the exact same ComposeRunner
+    """build/up args must come from the exact same ComposeRunner
     builder the real path uses, not a re-implementation."""
     from linktools.cntr.runtime.compose import ComposeOptions
     recorded_options = []
@@ -381,7 +381,7 @@ def test_plan_up_options_match_real_up_options(fresh_manager):
 
 def test_plan_restart_build_tail_matches_real_restart_dispatch(fresh_manager, monkeypatch):
     """End-to-end: the real ComposeOperations.restart() build-phase argv and
-    the Plan's restart build-command argv must have an identical tail, since
+    's restart build-command argv must have an identical tail, since
     both now come from the same build_options()/build_args() call."""
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)

@@ -92,7 +92,7 @@ import pytest  # noqa: E402
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef  # noqa: E402
 from linktools.ai.capability.provider import CapabilityContext  # noqa: E402
-from linktools.ai.capability.assembler import CapabilityAssembler  # noqa: E402
+from linktools.ai.capability.resolver import CapabilityResolver  # noqa: E402
 from linktools.ai.capability.models import CapabilityBundle  # noqa: E402
 from linktools.ai.model.policy import ModelPolicy  # noqa: E402
 from linktools.ai.tool.models import ToolDescriptor  # noqa: E402
@@ -140,7 +140,7 @@ def _spec():
 async def test_mutating_mcp_tool_hidden_by_default_policy():
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy as Policy
 
-    asm = CapabilityAssembler({"mcp": _FakeMutatingProvider()})
+    asm = CapabilityResolver({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(agent_id="a1", exposure_policy=Policy())
     bundle = await asm.assemble(_spec(), ctx)
     assert bundle.tool_contributions == ()
@@ -150,7 +150,7 @@ async def test_mutating_mcp_tool_hidden_by_default_policy():
 async def test_mutating_mcp_tool_exposed_when_execution_tools_allowed():
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy as Policy
 
-    asm = CapabilityAssembler({"mcp": _FakeMutatingProvider()})
+    asm = CapabilityResolver({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(
         agent_id="a1", exposure_policy=Policy(expose_execution_tools=True)
     )

@@ -20,7 +20,7 @@ from ..swarm.spec import SwarmSpec
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from .._runtime.build import RuntimeComponents
+    from ..runtime.builder import RuntimeComponents
     from ..agent.spec import AgentSpec
     from ..identity.principal import PrincipalContext
 
@@ -420,7 +420,7 @@ class RunCoordinator:
         compiled = await self._components.compiler.compile(spec)
         # 12. Construct the full context, restoring the ORIGINAL identity from
         # the snapshot (user/tenant/workspace) + lineage from the record.
-        from .._runtime.lifecycle import create_run_context
+        from ..runtime.assembly.lifecycle import create_run_context
 
         context = create_run_context(
             run_id=run_id,

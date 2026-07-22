@@ -15,9 +15,9 @@ from ..agent.spec import AgentSpec
 from ..errors import ExtensionEntrypointNotFoundError, ExtensionNotFoundError
 
 if TYPE_CHECKING:
-    from .provider import DirectoryExtensionResourceProvider
+    from .provider import DirectoryExtensionContentSource
 from .entrypoint import EntrypointInfo, EntrypointListResult, EntrypointRef
-from .resource import sanitize_extension_path
+from .content import sanitize_extension_path
 from .scope import ExtensionScope
 
 _KIND_TO_DIR = {
@@ -115,29 +115,29 @@ class DirectoryEntrypointResolver:
 
 
 class ExtensionRegistry:
-    """Default ExtensionSpecProvider AND ExtensionResourceProvider over a directory
+    """Default ExtensionSpecProvider AND ExtensionContentSource over a directory
     tree: each subdirectory of ``base_dir`` is an extension. The kind
     is read from an optional ``extension.yaml``; otherwise it defaults to 'custom'.
-    Resource list/read delegate to a DirectoryExtensionResourceProvider so a single
+    Asset list/read delegate to a DirectoryExtensionContentSource so a single
     registry satisfies both Protocols."""
 
     def __init__(self, base_dir: "Path | str") -> None:
         self._base = Path(base_dir)
-        # Lazily built; constructed on first resource access so ExtensionRegistry
+        # Lazily built; constructed on first asset access so ExtensionRegistry
         # stays cheap to instantiate when only spec listing is needed.
-        self._resource_provider: "DirectoryExtensionResourceProvider | None" = None
+        self._content_source: "DirectoryExtensionContentSource | None" = None
 
-    def _resources(self) -> "DirectoryExtensionResourceProvider":
-        from .provider import DirectoryExtensionResourceProvider
+    def _content(self) -> "DirectoryExtensionContentSource":
+        from .provider import DirectoryExtensionContentSource
 
-        if self._resource_provider is None:
+        if self._content_source is None:
             roots = (
                 {p.name: p for p in self._base.iterdir() if p.is_dir()}
                 if self._base.is_dir()
                 else {}
             )
-            self._resource_provider = DirectoryExtensionResourceProvider(roots)
-        return self._resource_provider
+            self._content_source = DirectoryExtensionContentSource(roots)
+        return self._content_source
 
     async def list_ids(self) -> "tuple[str, ...]":
         if not self._base.is_dir():
@@ -163,15 +163,15 @@ class ExtensionRegistry:
             name = str(payload.get("name") or name)
         return ExtensionSpec(id=extension_id, name=name, kind=kind)
 
-    async def list_resources(
+    async def list_entries(
         self, scope, path: str = "", *, limit: int = 50, cursor: "str | None" = None
     ):
-        return await self._resources().list_resources(
+        return await self._content().list_entries(
             scope, path, limit=limit, cursor=cursor
         )
 
-    async def read_resource(self, ref, *, max_bytes: "int | None" = None):
-        return await self._resources().read_resource(ref, max_bytes=max_bytes)
+    async def read_content(self, ref, *, max_bytes: "int | None" = None):
+        return await self._content().read_content(ref, max_bytes=max_bytes)
 
 
 DirectoryExtensionRegistry = ExtensionRegistry

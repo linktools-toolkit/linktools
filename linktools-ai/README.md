@@ -85,7 +85,7 @@ Cost and token limits (`max_total_cost`, `max_total_tokens`) can cap execution.
 `Runtime.build` accepts a `ProviderBundle` of spec providers (agents, skills,
 MCP, tools, swarms, subagents, packages). Default registries parse
 `agent.md` / `SKILL.md` / `mcp.yaml` / `tool.yaml` / `swarm.yaml` from a
-filesystem root or a `ResourceStore`.
+filesystem root or an `AssetStore`.
 
 Custom providers implement the same Protocols — the Runtime depends on
 Protocols, never on a concrete Registry.

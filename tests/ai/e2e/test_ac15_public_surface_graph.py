@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SECONDARY import guard, NOT the AC-15 proof (plan §6.8: '仅扫描内部 E2E 是否
+"""SECONDARY import guard, NOT the proof (: '仅扫描内部 E2E 是否
 import 私有模块' is explicitly listed as non-evidence).
 
-The strong AC-15 form -- a from-scratch EXTERNAL adapter driving the FULL
+The strong form -- a from-scratch EXTERNAL adapter driving the FULL
 connected run -> approval -> resume -> artifact -> job chain through the public
 Protocol surface alone -- lives in
 ``tests/ai/storage/test_external_adapter_full_chain.py::
 test_external_adapter_full_connected_chain_run_approval_resume_artifact_job``.
-That test is the AC-15 evidence; it runs the connected chain through the
+That test is the evidence; it runs the connected chain through the
 adapter's public stores with real persistence assertions.
 
 This test is retained only as a defense-in-depth IMPORT GUARD: it AST-scans the
 in-repo chain-driving modules (run/complete, pause/approve/resume, MCP) and
-fails if any reaches into ``linktools.ai._runtime`` or an underscore-private
+fails if any reaches into ``linktools.ai.runtime.builder`` or an underscore-private
 module -- catching a regression where an in-repo test quietly uses a private
-surface. It is deliberately NOT counted as AC-15 evidence; the connected
+surface. It is deliberately NOT counted as evidence; the connected
 external-adapter chain is."""
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[3]
 
 # The modules that drive the chain end-to-end. If any of these reaches into
-# ``linktools.ai._runtime`` or any underscore-private submodule, the public
+# ``linktools.ai.runtime.builder`` or any underscore-private submodule, the public
 # surface is no longer sufficient to drive the chain.
 _CHAIN_TEST_MODULES = [
     "tests/ai/e2e/test_file_runtime_complete.py",  # run -> complete
@@ -66,7 +66,7 @@ def _public_linktools_imports(path: Path) -> "set[str]":
 
 def _is_private(mod: str) -> bool:
     """A linktools.ai module is private if any segment after ``linktools.ai``
-    starts with ``_`` (e.g. ``linktools.ai._runtime.build``,
+    starts with ``_`` (e.g. ``linktools.ai.runtime.builder``,
     ``linktools.ai.governance._internal``)."""
     tail = mod[len("linktools.ai") :].lstrip(".")
     if not tail:

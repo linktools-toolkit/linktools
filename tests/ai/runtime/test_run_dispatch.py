@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RunDispatcher (plan §4.1 "消除隐式循环"): AgentEngine.dispatch() adapts run()
-to the narrow Protocol, and the build kernel's _LateBoundRunDispatcher defers
+"""RunDispatcher: AgentEngine.dispatch() adapts run()
+to the narrow Protocol, and the build kernel's LateBoundRunDispatcher defers
 binding to the real dispatcher until it exists."""
 
 import asyncio
 
 import pytest
 
-from linktools.ai._runtime.build import _LateBoundRunDispatcher
+from linktools.ai.runtime.dispatcher import LateBoundRunDispatcher
 from linktools.ai.run.dispatch import RunDispatchRequest
 
 
@@ -18,7 +18,7 @@ class _FakeDispatcher:
 
 
 def test_late_bound_dispatcher_raises_before_bind():
-    handle = _LateBoundRunDispatcher()
+    handle = LateBoundRunDispatcher()
 
     async def _run():
         with pytest.raises(RuntimeError, match="before bind"):
@@ -28,7 +28,7 @@ def test_late_bound_dispatcher_raises_before_bind():
 
 
 def test_late_bound_dispatcher_delegates_after_bind():
-    handle = _LateBoundRunDispatcher()
+    handle = LateBoundRunDispatcher()
     target = _FakeDispatcher()
     handle.bind(target)
     request = RunDispatchRequest(agent="agent", input="input", context="context")

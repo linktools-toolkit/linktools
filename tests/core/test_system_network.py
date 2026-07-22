@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for system.network WAN-IP validation (spec §14.4 SYS-003)."""
+"""Tests for system.network WAN-IP validation."""
 
 import pytest
 

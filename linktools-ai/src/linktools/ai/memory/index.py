@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryIndex: decoupled ranked-search abstraction over memories. Extension
-point for a future vector index; KeywordMemoryIndex adapts a MemoryStore.
+point for a pluggable vector index; KeywordMemoryIndex adapts a MemoryStore.
 
-``search`` is tenant-scoped (takes a required :class:`MemoryScope`) so a future
-vector index can never return a neighbor across the tenant boundary."""
+``search`` is tenant-scoped (takes a required :class:`MemoryScope`) so a vector
+index can never return a neighbor across the tenant boundary."""
 
 from dataclasses import dataclass
 from enum import Enum

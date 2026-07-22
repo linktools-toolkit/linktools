@@ -18,7 +18,7 @@ class SnapshotValidationError(Exception):
 
 async def validate_snapshot(snapshot, artifact_store, *, tenant_id: str) -> None:
     """Validate a RunSnapshot before replay. Every artifact it references (run
-    record, run definition, input, output, events, resource snapshots) must
+    record, run definition, input, output, events, asset snapshots) must
     resolve for this tenant AND hash back to its content-addressed id -- get()
     re-hashes on read, so a tampered or truncated artifact is refused (not just
     a missing one)."""
@@ -30,7 +30,7 @@ async def validate_snapshot(snapshot, artifact_store, *, tenant_id: str) -> None
     if snapshot.output_artifact_id is not None:
         artifact_ids.append(snapshot.output_artifact_id)
     artifact_ids.extend(snapshot.event_artifact_ids)
-    for snap_ref in snapshot.resource_snapshots:
+    for snap_ref in snapshot.asset_snapshots:
         artifact_ids.append(snap_ref.artifact_id)
     for artifact_id in artifact_ids:
         try:

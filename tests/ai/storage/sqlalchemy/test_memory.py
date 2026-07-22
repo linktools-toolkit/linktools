@@ -290,12 +290,12 @@ def test_search_category_filter_isolates_categories(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Tenant isolation + legacy quarantine (§12.7 / §12.10)
+# 8. Tenant isolation + legacy quarantine
 # ---------------------------------------------------------------------------
 
 
 def test_search_isolates_tenants_with_same_owner(tmp_path):
-    # §12.10: tenant-a/alice and tenant-b/alice share an owner_id but must not
+    # : tenant-a/alice and tenant-b/alice share an owner_id but must not
     # see each other's memories. owner_id is display-only.
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
@@ -330,7 +330,7 @@ def test_search_isolates_tenants_with_same_owner(tmp_path):
 
 
 def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
-    # §12.9: a pre-tenant row (tenant_id IS NULL) is read under the reserved
+    # : a pre-tenant row (tenant_id IS NULL) is read under the reserved
     # legacy tenant. A real tenant's search never matches it (NULL != tenant-a);
     # only an explicit legacy-scope search does.
     async def _run_case():

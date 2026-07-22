@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from .models import RunnableType
 
 if TYPE_CHECKING:
-    from ..execution.workspace import WorkspaceRef
+    from ..sandbox.workspace import WorkspaceRef
 
 
 @dataclass(frozen=True, slots=True)

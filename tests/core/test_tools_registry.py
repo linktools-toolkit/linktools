@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for ToolDefinition + ToolRegistry dependency validation (spec §10.5)."""
+"""Tests for ToolDefinition + ToolRegistry dependency validation."""
 import pytest
 
 from linktools.core._tools_registry import ToolDefinition, ToolRegistry

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """PromptBuilder: owns model-prompt template composition. Folds session
 history, memory, knowledge, and capability-resolved prompt sections around the
-user prompt into the single string sent to the model. Plan §4.2: the prompt
+user prompt into the single string sent to the model. The prompt
 domain owns PromptSpec + PromptBuilder + template composition, and does not
 read the filesystem -- the runner hands in already-fetched sections (memory,
 knowledge, capability catalog) and the builder only composes.

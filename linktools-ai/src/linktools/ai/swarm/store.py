@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SwarmStore Protocol: persistence contract for SwarmRun/SwarmTask.
-Method signatures are this phase's concrete resolution of the spec's `(...)`
-ellipses . Two backends implement it: FilesystemSwarmStore (single-process)
-and SqlAlchemySwarmStore (multi-process via atomic optimistic claim)."""
+Two backends implement it: FilesystemSwarmStore (single-process) and
+SqlAlchemySwarmStore (multi-process via atomic optimistic claim)."""
 
 from typing import Any, Protocol, runtime_checkable
 

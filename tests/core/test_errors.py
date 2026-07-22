@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the linktools exception hierarchy (spec §18).
+"""Tests for the linktools exception hierarchy.
 
 The hierarchy has a single root ``LinktoolsError`` with one direct child per
 domain. ``Error`` is retained as an alias of ``LinktoolsError`` for the

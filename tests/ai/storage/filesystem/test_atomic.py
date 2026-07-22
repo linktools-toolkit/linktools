@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""§16.1 / §16.4: the unified atomic-write helper is crash-safe (temp + fsync +
+"""the unified atomic-write helper is crash-safe (temp + fsync +
 rename + parent-dir fsync) and a corrupt session JSON surfaces as
 SessionCorruptionError rather than being masked as a missing session."""
 
@@ -33,7 +33,7 @@ def test_atomic_write_bytes_replaces_existing_atomically(tmp_path) -> None:
 def test_atomic_write_bytes_fsyncs_parent_directory_after_replace(
     tmp_path, monkeypatch
 ) -> None:
-    # The parent-dir fsync is the §16.1 crash-safety invariant: without it the
+    # The parent-dir fsync is the crash-safety invariant: without it the
     # rename is not durable after a power loss. Pin it: a successful write
     # fsyncs the parent exactly once, AFTER os.replace; a write whose replace
     # raises does NOT fsync the parent (and still cleans its temp).

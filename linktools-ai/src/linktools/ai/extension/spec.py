@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ExtensionSpec: an extension declaration. An extension bundles
-resources + entrypoints under one id/kind; ``skill`` is one built-in kind, but
+assets + entrypoints under one id/kind; ``skill`` is one built-in kind, but
 the model is general (agentpack / toolpack / mcp-pack / workflow / custom)."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from .resource import ResourceContent, ResourceListResult, ResourceRef
+from .content import ExtensionContent, ExtensionContentPage, ExtensionContentRef
 from .scope import ExtensionScope
 
 _BUILTIN_KINDS = ("skill", "agentpack", "toolpack", "mcp-pack", "workflow", "custom")
@@ -19,7 +19,7 @@ class ExtensionSpec:
     name: str
     kind: str
     version: "str | None" = None
-    root: "ResourceRef | None" = None
+    root: "ExtensionContentRef | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     @property
@@ -37,22 +37,22 @@ class ExtensionSpecProvider(Protocol):
 
 
 @runtime_checkable
-class ExtensionResourceProvider(Protocol):
-    """Reads extension resources. ``list_resources`` MUST paginate -- never
+class ExtensionContentSource(Protocol):
+    """Reads extension assets. ``list_entries`` MUST paginate -- never
     return an entire extension tree in one call."""
 
-    async def list_resources(
+    async def list_entries(
         self,
         scope: ExtensionScope,
         path: str = "",
         *,
         limit: int = 50,
         cursor: "str | None" = None,
-    ) -> ResourceListResult: ...
+    ) -> ExtensionContentPage: ...
 
-    async def read_resource(
+    async def read_content(
         self,
-        ref: ResourceRef,
+        ref: ExtensionContentRef,
         *,
         max_bytes: "int | None" = None,
-    ) -> ResourceContent: ...
+    ) -> ExtensionContent: ...

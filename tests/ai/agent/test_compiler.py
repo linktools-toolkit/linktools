@@ -11,7 +11,7 @@ from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 
@@ -33,7 +33,7 @@ def _config(model_type: str) -> RuntimeModelConfig:
 async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelRouter(registry=registry)
+    router = ModelGateway(ModelResolver(registry=registry))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
@@ -69,7 +69,7 @@ async def test_compile_wires_spec_instructions_into_pydantic_agent():
     # passed to the constructor.
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelRouter(registry=registry)
+    router = ModelGateway(ModelResolver(registry=registry))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
@@ -91,7 +91,7 @@ async def test_compile_wires_spec_instructions_into_pydantic_agent():
 async def test_compile_reuses_model_router_fallback():
     registry = ModelRegistry()
     registry.register("fallback-model", config=_config("fallback-model"))
-    router = ModelRouter(registry=registry)
+    router = ModelGateway(ModelResolver(registry=registry))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
@@ -113,7 +113,7 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
 
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelRouter(registry=registry)
+    router = ModelGateway(ModelResolver(registry=registry))
     pipeline = MiddlewarePipeline(middlewares=())
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
@@ -142,7 +142,7 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
 async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelRouter(registry=registry)
+    router = ModelGateway(ModelResolver(registry=registry))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
     )
@@ -157,11 +157,11 @@ async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
 
 
 def test_compiler_requires_tool_executor():
-    """WP-03 §8.4: AgentCompiler without an explicit GovernedToolInvoker fails loudly
+    """AgentCompiler without an explicit GovernedToolInvoker fails loudly
     (no silent ALLOW-all fallback)."""
     from linktools.ai.errors import RuntimeInitializationError
 
     with pytest.raises(RuntimeInitializationError):
         AgentCompiler(
-            model_router=ModelRouter(registry=ModelRegistry()), tool_executor=None
+            model_router=ModelGateway(ModelResolver(registry=ModelRegistry())), tool_executor=None
         )

@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     # enforce_storage_feature_consistency; RuntimeSettings /
     # RuntimeDependencies only in derive_runtime_requirements' signature.
     # All kept lazy to avoid a runtime import cycle.
-    from .._runtime.build import RuntimeSettings
-    from .._runtime.dependencies import RuntimeDependencies
+    from ..runtime.builder import RuntimeSettings
+    from ..runtime.dependencies import RuntimeDependencies
     from ..storage.facade import Storage
 
 # Scope ranks: a storage scope must meet-or-exceed the required scope. The two
@@ -60,13 +60,15 @@ _TRANSACTION_RANK: "dict[TransactionScope, int]" = {
 }
 # Boolean capabilities a runtime may require. Each defaults to False (no
 # requirement); the gate fails only when a requirement is set that storage
-# does not offer.
+# does not offer. ``streaming_artifacts`` / ``optimistic_concurrency`` are
+# component-level frozensets on StorageFeatures -- a True requirement is met
+# when the frozenset is non-empty (the storage offers the capability for at
+# least one component).
 _BOOL_CAPABILITIES: "tuple[str, ...]" = (
     "leasing",
     "fencing",
     "idempotency",
-    "streaming_blobs",
-    "optimistic_concurrency",
+    "streaming_artifacts",
     "append_only_events",
 )
 
@@ -105,7 +107,7 @@ def derive_runtime_requirements(
 
     ``settings.topology`` is the single source for the shape of the process
     graph. ``dependencies`` carries the composition-root objects the topology's
-    real-object rules read (plan §6.6): a MULTI_WORKER topology demands a real
+    real-object rules read: a MULTI_WORKER topology demands a real
     Storage (JobStore rows are shared across workers) AND an injected
     RunCommitCoordinator (the build kernel no longer selects one). derive
     refuses a dependencies bundle that is missing what the topology needs --
@@ -117,14 +119,14 @@ def derive_runtime_requirements(
     - MULTI_WORKER: DISTRIBUTED coordination + leasing + fencing required (a
       process-local coordinator races on shared JobStore rows; an unfenced
       stale worker's commit is unsafe) AND the dependencies bundle must carry
-      a real Storage + RunCommitCoordinator (plan: "JobStore 必须存在;
-      coordinator 必须存在").
+      a real Storage + RunCommitCoordinator.
     """
     if settings.topology is RuntimeTopology.MULTI_WORKER:
         # Real-object presence the topology's shared-row model requires: a
         # multi-worker deployment cannot run without a Storage (JobStore rows
-        # are shared) or without an injected RunCommitCoordinator. These are
-        # composition-root rules read off ``dependencies`` -- the capability
+        # are shared), without a JobStore on that Storage (the rows workers
+        # share live there), or without an injected RunCommitCoordinator. These
+        # are composition-root rules read off ``dependencies`` -- the capability
         # minimums below are enforced separately by the capability gate.
         if dependencies.storage is None:
             from ..errors import StorageRequirementsNotMetError
@@ -133,6 +135,14 @@ def derive_runtime_requirements(
                 "MULTI_WORKER topology requires a real Storage on dependencies "
                 "(JobStore rows are shared across workers); got dependencies."
                 "storage=None"
+            )
+        if dependencies.storage.jobs is None:
+            from ..errors import StorageRequirementsNotMetError
+
+            raise StorageRequirementsNotMetError(
+                "MULTI_WORKER topology requires a JobStore on the Storage "
+                "(workers share JobStore rows); got dependencies.storage."
+                "jobs=None"
             )
         if dependencies.run_commit_coordinator is None:
             from ..errors import StorageRequirementsNotMetError
@@ -155,7 +165,7 @@ class RuntimeRequirements:
     leasing: bool = False
     fencing: bool = False
     idempotency: bool = False
-    streaming_blobs: bool = False
+    streaming_artifacts: bool = False
     optimistic_concurrency: bool = False
     append_only_events: bool = False
 
@@ -177,23 +187,23 @@ def enforce_storage_capability_gate(
 ) -> None:
     """Raise :class:`StorageRequirementsNotMetError` if ``features`` does not
     satisfy ``requirements``. A no-op when ``requirements`` is ``None`` (the
-    default, backward-compatible path -- existing callers impose no gate)."""
+    default, so existing callers impose no gate)."""
     if requirements is None:
         return
     from ..errors import StorageRequirementsNotMetError
 
-    if _COORDINATION_RANK[features.coordination] < _COORDINATION_RANK[
+    if _COORDINATION_RANK[features.coordination_scope] < _COORDINATION_RANK[
         requirements.coordination
     ]:
         raise StorageRequirementsNotMetError(
-            f"storage coordination scope {features.coordination.value!r} is "
+            f"storage coordination scope {features.coordination_scope.value!r} is "
             f"below the required {requirements.coordination.value!r}"
         )
-    if _TRANSACTION_RANK[features.transactions] < _TRANSACTION_RANK[
+    if _TRANSACTION_RANK[features.transaction_scope] < _TRANSACTION_RANK[
         requirements.transactions
     ]:
         raise StorageRequirementsNotMetError(
-            f"storage transaction scope {features.transactions.value!r} is "
+            f"storage transaction scope {features.transaction_scope.value!r} is "
             f"below the required {requirements.transactions.value!r}"
         )
     for flag in _BOOL_CAPABILITIES:
@@ -201,48 +211,126 @@ def enforce_storage_capability_gate(
             raise StorageRequirementsNotMetError(
                 f"storage does not provide the required capability {flag!r}"
             )
+    # optimistic_concurrency is component-level on features (frozenset) but a
+    # bool on requirements: a True requirement is met when the storage offers
+    # optimistic concurrency for at least one component.
+    if requirements.optimistic_concurrency and not features.optimistic_concurrency:
+        raise StorageRequirementsNotMetError(
+            "storage does not provide the required capability 'optimistic_concurrency'"
+        )
 
 
 def enforce_storage_feature_consistency(storage: "Storage") -> None:
     """Verify a Storage's declared :class:`StorageFeatures` match its WIRED
-    objects (plan §6.6: '只校验 StorageFeatures 不够，还必须检查真实对象'). This
-    catches a backend that DECLARES a capability on its features but did not
-    actually wire the object backing it -- a silent degradation the
+    objects. This catches a backend that DECLARES a capability on its features
+    but did not actually wire the object backing it -- a silent degradation the
     requirements-vs-features gate cannot see (it only reads the feature flags).
 
     Checks:
-    * transactions != NONE  -> storage.transactions must be a real manager.
-    * coordination != NONE  -> storage.coordination must be a real coordinator.
-    * streaming_blobs=True  -> storage.artifacts must be a real ArtifactStore.
-    * leasing=True          -> coordination present (acquire/renew/release live
-      on the coordinator; a None coordinator cannot lease).
+    * transaction_scope != NONE  -> _transaction_manager must be a real manager
+      (not NoCrossStoreTransactions), and a DATABASE scope must not use a
+      NoCrossStoreTransactions manager (which cannot group stores).
+    * coordination_scope != NONE  -> storage.coordination must be a real coordinator.
+    * streaming_artifacts=True  -> storage.artifacts must be a real ArtifactStore
+      (and the reverse: an ArtifactStore wired but streaming_artifacts=False is a
+      flag that disagrees with the wired store).
+    * leasing=True          -> coordination present.
+    * transactional_components -> each declared component must have a real wired
+      store on the Storage (a declared-but-unwired component is a false claim).
+    * JOBS in transactional_components -> storage.jobs must be non-None.
 
     Run this at Runtime.build alongside the requirements gate so a
     misconfigured Storage fails fast instead of producing an AttributeError at
     the first use."""
     from ..errors import StorageRequirementsNotMetError
+    from ..storage.features import StorageComponent
+    from ..storage.transaction import NoCrossStoreTransactions
 
     f = storage.features
-    if f.transactions is not TransactionScope.NONE and storage.transactions is None:
+    if f.transaction_scope is not TransactionScope.NONE:
+        if storage._transaction_manager is None:
+            raise StorageRequirementsNotMetError(
+                f"Storage declares transaction_scope={f.transaction_scope.value!r} "
+                "but its transaction manager is None"
+            )
+        if (
+            f.transaction_scope is TransactionScope.DATABASE
+            and isinstance(storage._transaction_manager, NoCrossStoreTransactions)
+        ):
+            raise StorageRequirementsNotMetError(
+                "Storage declares transaction_scope=DATABASE but its transaction "
+                "manager is NoCrossStoreTransactions (cannot group stores)"
+            )
+    if (
+        f.coordination_scope is not CoordinationScope.NONE
+        and storage.coordination is None
+    ):
         raise StorageRequirementsNotMetError(
-            f"Storage declares transactions={f.transactions.value!r} but its "
-            "transactions manager is None"
+            f"Storage declares coordination_scope={f.coordination_scope.value!r} "
+            "but its LeaseCoordinator is None"
         )
-    if f.coordination is not CoordinationScope.NONE and storage.coordination is None:
+    if f.streaming_artifacts and storage.artifacts is None:
         raise StorageRequirementsNotMetError(
-            f"Storage declares coordination={f.coordination.value!r} but its "
-            "LeaseCoordinator is None"
-        )
-    if f.streaming_blobs and storage.artifacts is None:
-        raise StorageRequirementsNotMetError(
-            "Storage declares streaming_blobs=True but its ArtifactStore "
+            "Storage declares streaming_artifacts=True but its ArtifactStore "
             "(storage.artifacts) is None"
+        )
+    if storage.artifacts is not None and not f.streaming_artifacts:
+        # The reverse direction: an ArtifactStore is wired (it can stream) but
+        # the flag says it cannot. The flag must agree with the wired store.
+        raise StorageRequirementsNotMetError(
+            "Storage wires an ArtifactStore (storage.artifacts) but declares "
+            "streaming_artifacts=False -- the flag must agree with the wired store"
         )
     if f.leasing and storage.coordination is None:
         raise StorageRequirementsNotMetError(
             "Storage declares leasing=True but its LeaseCoordinator is None "
             "(acquire/renew/release need a coordinator)"
         )
+    if f.fencing and storage.coordination is None:
+        # Fencing tokens are minted by the coordinator; a fencing=True
+        # declaration with no coordinator is a capability with no backing.
+        raise StorageRequirementsNotMetError(
+            "Storage declares fencing=True but its LeaseCoordinator is None "
+            "(fencing tokens are minted by the coordinator)"
+        )
+    # Each declared transactional component must be backed by a real wired
+    # store; a declared component with no store is a capability the Storage
+    # cannot actually deliver inside a transaction.
+    wired = _wired_components(storage)
+    missing = f.transactional_components - wired
+    if missing:
+        names = ", ".join(sorted(c.value for c in missing))
+        raise StorageRequirementsNotMetError(
+            f"Storage declares transactional_components that are not wired: {names}"
+        )
+    if (
+        StorageComponent.JOBS in f.transactional_components
+        and storage.jobs is None
+    ):
+        raise StorageRequirementsNotMetError(
+            "Storage declares JOBS transactional but storage.jobs is None"
+        )
+
+
+def _wired_components(storage: "Storage") -> "frozenset[StorageComponent]":
+    """The set of StorageComponents that have a non-None wired store on this
+    Storage. ``assets`` / ``jobs`` are optional on the Storage facade and read
+    through their accessors; the core stores are always present."""
+    from ..storage.features import StorageComponent
+
+    wired: "set[StorageComponent]" = {
+        StorageComponent.RUNS,
+        StorageComponent.SESSIONS,
+        StorageComponent.EVENTS,
+        StorageComponent.APPROVALS,
+        StorageComponent.CHECKPOINTS,
+        StorageComponent.ARTIFACT_RECORDS,
+    }
+    if storage.assets is not None:
+        wired.add(StorageComponent.ASSETS)
+    if storage.jobs is not None:
+        wired.add(StorageComponent.JOBS)
+    return frozenset(wired)
 
 
 __all__: "list[str]" = [

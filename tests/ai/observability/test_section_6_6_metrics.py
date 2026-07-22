@@ -22,7 +22,7 @@ from linktools.ai.observability.metrics import (
 )
 
 
-# Names required by the §6.6 floor (15 instruments across the 11 categories;
+# Names required by the floor (15 instruments across the 11 categories;
 # categories 5, 6, 11 split into more than one instrument).
 _REQUIRED_METRIC_NAMES = (
     "runtime_build_failure_total",
@@ -57,8 +57,8 @@ def test_runtime_build_failure_total_fires_on_capability_gate_shortfall(tmp_path
     """When enforce_storage_capability_gate raises, both
     runtime_build_failure_total and storage_capability_validation_failure_total
     increment before the error propagates."""
-    from linktools.ai._runtime.build import RuntimeBuildConfig, build_runtime_components
-    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.runtime.builder import RuntimeBuildConfig, build_runtime_components
+    from linktools.ai.runtime.dependencies import RuntimeDependencies
     from linktools.ai.errors import StorageRequirementsNotMetError
     from linktools.ai.run.requirements import RuntimeRequirements
     from linktools.ai.storage.facade import FilesystemStorage
@@ -465,7 +465,7 @@ def test_job_lease_expiry_and_recovery_total_fire_on_recover_expired(tmp_path):
                 fencing_token=0,
                 active_attempt_id=None,
                 timeout_seconds=None,
-                resource_snapshots=(),
+                asset_snapshots=(),
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -607,7 +607,7 @@ def test_job_stale_fence_total_fires_on_lost_claim(tmp_path):
                 fencing_token=0,
                 active_attempt_id=None,
                 timeout_seconds=None,
-                resource_snapshots=(),
+                asset_snapshots=(),
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -745,7 +745,7 @@ def test_catalog_revision_refresh_total_fires_on_revision_change():
 def test_external_adapter_conformance_failure_total_fires_on_contract_failure():
     """A contract test method that raises records the metric through the
     contract's conformance_metrics sink before propagating the failure."""
-    from testing.contracts import ArtifactBlobStoreContract
+    from linktools.ai.testing.contracts import ArtifactBlobStoreContract
 
     metrics = InMemoryMetrics()
 

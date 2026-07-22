@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqliteStorage: the SQLite reference Storage composition (plan §4.7 / §3.2).
+"""SqliteStorage: the SQLite reference Storage composition.
 
 Constructs a ``sqlite+aiosqlite`` async engine + ``async_sessionmaker`` (the
 single core site allowed to construct an engine), Filesystem artifact blobs, a
@@ -11,7 +11,7 @@ multi-worker deployment injects a distributed coordinator + brings its own
 session_factory via the adapter directly.
 
 The engine-construction call (``create_async_engine``) lives here, NOT in the
-generic sqlalchemy adapter module, so the §6.5 boundary ('the generic adapter
+generic sqlalchemy adapter module, so the boundary ('the generic adapter
 constructs no engine') is preserved mechanically -- the architecture boundary
 test exempts this module from its create_async_engine scan."""
 
@@ -46,7 +46,7 @@ def configure_wal_pragmas(engine: AsyncEngine) -> None:
 
     These are the production-grade defaults a write-heavy SQLite deployment
     sets; without them the per-event commit path runs at rollback-journal +
-    synchronous=FULL speeds (well below the plan §7.5 500 events/s gate). The
+    synchronous=FULL speeds (well below the  500 events/s gate). The
     listener attaches to the engine's SYNC engine (aiosqlite hands the raw
     sqlite3 connection to the connect event)."""
 
@@ -67,24 +67,51 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
     wiring to the generic :class:`SqlAlchemyStorageAdapter`. The engine is held
     for an explicit ``dispose()`` on shutdown and is tuned with WAL +
     synchronous=NORMAL (via :func:`configure_wal_pragmas`) so the write-heavy
-    event store meets plan §7.5 throughput out of the box."""
+    event store meets throughput out of the box."""
 
-    def __init__(self, *, database: "str | Path") -> None:
+    def __init__(
+        self,
+        *,
+        database: "str | Path",
+        artifact_root: "Path | None" = None,
+    ) -> None:
+        database_str = str(database)
+        # An in-memory or URI database has no filesystem path to derive a
+        # private artifact root from, and a shared ``parent / "blobs"`` would
+        # collide across databases -- so the caller MUST name one explicitly.
+        if artifact_root is None and (
+            database_str == ":memory:" or database_str.startswith("file:")
+        ):
+            raise ValueError(
+                "SqliteStorage with an in-memory or URI database requires an "
+                "explicit artifact_root (the blob directory cannot be derived "
+                "and must not be shared across databases)"
+            )
         self._engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
         configure_wal_pragmas(self._engine)
         session_factory: "async_sessionmaker[AsyncSession]" = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
-        blobs_root = Path(database).parent / "blobs"
+        # Each database owns a private artifact root (``<db>.artifacts``), so two
+        # SQLite databases in the same directory never share blob storage and a
+        # sweep over one cannot touch the other's blobs.
+        resolved_root = (
+            Path(artifact_root)
+            if artifact_root is not None
+            else Path(f"{database_str}.artifacts")
+        )
+        self._artifact_root = resolved_root
         super().__init__(
             session_factory=session_factory,
-            artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
+            artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
             coordination=ProcessLocalLeaseCoordinator(),
             features=SQLALCHEMY_STORAGE_FEATURES,
         )
 
     async def dispose(self) -> None:
-        """Release the engine's connection pool. Call on shutdown."""
+        """Release the engine's connection pool. Call on shutdown. The artifact
+        root on disk is left in place -- dispose is a connection-pool release,
+        not a data wipe."""
         await self._engine.dispose()
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/e2e/test_file_runtime_complete.py — File-backed Runtime end-to-end
-run-completion contract (WP-01/WP-02).
+run-completion contract.
 
 Drives the real path: FilesystemStorage -> Runtime.build -> Runtime.run -> agent
 returns. Asserts the cross-store commit leaves exactly one of each artifact
@@ -29,11 +29,11 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
 
 def _registry():
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)
 
 
 def test_file_runtime_complete_has_one_of_each_artifact(tmp_path):

@@ -3,7 +3,7 @@
 """SpecLoaderSource: the generic CatalogSource adapter over the in-repo
 SpecLoader (catalog/parsing).
 
-Every domain Catalog that reads from a filesystem / resource-backed loader uses
+Every domain Catalog that reads from a filesystem / asset-backed loader uses
 this adapter -- it is not agent-specific (it previously lived in
 agent/catalog.py, which coupled every other domain to agent). The loader exposes
 an int revision (a monotonic clock); CatalogSource declares a string revision,

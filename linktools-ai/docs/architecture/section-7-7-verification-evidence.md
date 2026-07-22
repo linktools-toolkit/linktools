@@ -87,7 +87,7 @@ RUN: {"run_id": "398c26c0-cfab-4ee7-b10e-742e18cbdce9",
 
 ### 步骤 2 — 实现 ArtifactBlobStore / StorageTransactionManager / LeaseCoordinator
 
-证据：`linktools-ai/conformance/adapter.py`（`InMemoryArtifactBlobStore` / `InMemoryArtifactRecordStore` / `InMemoryLeaseCoordinator`，纯公开 Protocol）。契约复用测试支持包 `testing`（`linktools-ai/testing/`，不随 wheel 发布，通过 `conftest.py` 解析）。
+证据：`linktools-ai/conformance/adapter.py`（`InMemoryArtifactBlobStore` / `InMemoryArtifactRecordStore` / `InMemoryLeaseCoordinator`，纯公开 Protocol）。契约复用独立测试支持发行包 `linktools-ai-testing`（导入路径 `linktools.ai.testing`，不随核心 wheel 发布，作为单独 wheel 安装）。
 
 ### 步骤 3 — 注入 RuntimeDependencies
 

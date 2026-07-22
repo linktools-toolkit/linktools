@@ -22,7 +22,7 @@ from .runner import (
     DEFAULT_MAX_CONCURRENCY,
     DEFAULT_MAX_DEPTH,
     DEFAULT_TIMEOUT_SECONDS,
-    SubagentExecutor,
+    SubagentExecutorProtocol,
     current_depth,
 )
 from .toolset import build_subagent_toolset
@@ -36,7 +36,7 @@ class SubagentProvider:
 
     subagent_provider: "SubagentSpecProvider | None" = None
     entrypoint_resolver: "EntrypointResolver | None" = None
-    executor: "SubagentExecutor | None" = None
+    executor: "SubagentExecutorProtocol | None" = None
     # Reads the contextvar so multi-hop depth accounting works when the runtime
     # executor updates it per child run.
     depth_provider: "Callable[[], int]" = field(default=current_depth)

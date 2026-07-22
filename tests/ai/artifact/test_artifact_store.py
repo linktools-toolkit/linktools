@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """ArtifactStore over the Filesystem reference backends -- content addressing,
-immutability, lineage, tenant scoping, integrity (plan section 18, phase-1
+immutability, lineage, tenant scoping, integrity (phase-1
 acceptance)."""
 
 import asyncio

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""JobStore Protocol contract (plan section 12).
+"""JobStore Protocol contract.
 
 The domain-semantic surface every JobStore backend (file, sqlalchemy) must
 implement. The full backend contract test -- exercising claim / commit /
 recover against real storage -- is parametrized over backends once they land
-(plan 30.1); this phase fixes the Protocol shape and proves a conforming fake
+; this phase fixes the Protocol shape and proves a conforming fake
 is accepted while a stripped object is rejected.
 """
 

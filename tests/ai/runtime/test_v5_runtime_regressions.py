@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""BUG-01 (v5 guide §8): Runtime crash-recovery initialization must be
+"""(v5 guide ): Runtime crash-recovery initialization must be
 serialized and must stay retryable after a failure.
 
 Before the fix the flag was flipped before recovery ran, so (a) two concurrent

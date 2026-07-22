@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlAlchemyJobStore contract (plan section 28 phase-4 acceptance).
+"""SqlAlchemyJobStore contract.
 
 Exercises the same reliable-task invariants as the FilesystemJobStore suite, over an
 in-memory SQLite backend. The CAS ``UPDATE ... WHERE status='ready'`` + rowcount
@@ -88,7 +88,7 @@ def _task(clock, *, task_id="t1", job_id="j1") -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),
@@ -599,7 +599,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(task_store) -> Non
 
 
 def test_max_depth_exceeded_fails_commit(task_store) -> None:
-    """Plan 5.1.6: a child beyond max_depth must fail the whole commit (raise
+    """a child beyond max_depth must fail the whole commit (raise
     TaskBudgetExceededError) -- it is never silently dropped. The over-depth
     child is not created AND the parent is not marked successful."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
@@ -643,7 +643,7 @@ def test_max_depth_exceeded_fails_commit(task_store) -> None:
 
 
 def test_job_runtime_budget_does_not_leave_ready_task(task_store) -> None:
-    """Plan 5.1.7: once a job exceeds its runtime cap, a claim finalizes the
+    """once a job exceeds its runtime cap, a claim finalizes the
     job (tasks CANCELLED, job FAILED) instead of leaving a READY zombie."""
     clock = task_store._clock
 
@@ -680,7 +680,7 @@ def test_job_runtime_budget_does_not_leave_ready_task(task_store) -> None:
 
 
 def test_job_attempt_budget_does_not_leave_ready_task(task_store) -> None:
-    """Plan 5.1.7: once a job's aggregate attempt cap is met, a later claim
+    """once a job's aggregate attempt cap is met, a later claim
     finalizes the job (READY child CANCELLED, job FAILED), no zombie."""
     from linktools.ai.jobs.protocols import CreateTask
 

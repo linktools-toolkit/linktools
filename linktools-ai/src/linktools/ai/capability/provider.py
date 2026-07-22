@@ -16,7 +16,7 @@ from .exposure import CapabilityToolExposurePolicy
 from .models import CapabilityRef
 
 if TYPE_CHECKING:
-    from ..execution.protocols import ExecutionBackend
+    from ..sandbox.protocols import Sandbox
     from ..events.store import EventStore
 
 
@@ -29,7 +29,7 @@ class CapabilityContext:
 
     agent_id: str
     exposure_policy: CapabilityToolExposurePolicy
-    execution: "ExecutionBackend | None" = None
+    execution: "Sandbox | None" = None
     run_id: "str | None" = None
     root_run_id: "str | None" = None
     parent_run_id: "str | None" = None
@@ -81,7 +81,7 @@ async def _noop_emit(payload: Any) -> None:
 def make_event_emitter(context: "CapabilityContext | None"):
     """Return an ``async emit(payload)`` bound to the context's EventStore + run
     ids, or a no-op when no store/run is wired. Capability toolset closures use
-    this to fire per-operation events (skill.list, extension.resource.read, ...)."""
+    this to fire per-operation events (skill.list, extension.content.read, ...)."""
     if context is None or context.event_store is None or context.run_id is None:
         return _noop_emit
     if context.security_event_emitter is not None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Task domain models: JSON round-trip, immutability, state-machine legality,
-policy validation (plan section 28, phase-2 acceptance)."""
+policy validation."""
 
 import dataclasses
 import json
@@ -28,7 +28,7 @@ from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
     ScopeSet,
-    ResourceSnapshotRef,
+    AssetSnapshotRef,
     assert_attempt_transition,
     assert_job_transition,
     assert_task_transition,
@@ -52,8 +52,8 @@ def _budget() -> TaskBudget:
     return TaskBudget(max_tasks=10, max_depth=3, max_total_cost="1.25")
 
 
-def _snapshot() -> ResourceSnapshotRef:
-    return ResourceSnapshotRef(
+def _snapshot() -> AssetSnapshotRef:
+    return AssetSnapshotRef(
         path="/skills/skill-a", version=1, etag="abc", artifact_id="aid", sha256="dead"
     )
 
@@ -96,7 +96,7 @@ def _task() -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=30.0,
-        resource_snapshots=(_snapshot(),),
+        asset_snapshots=(_snapshot(),),
         version=1,
         created_at=NOW,
         updated_at=NOW,

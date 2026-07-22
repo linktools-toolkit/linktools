@@ -12,7 +12,7 @@ optional SQLAlchemy/aiosqlite dependencies. The SQLAlchemy-backed composition
 loaded lazily via ``storage/__init__.__getattr__``.
 
 - Storage: frozen composition of the nine backends + capabilities; the base
-  ``transaction()`` delegates to the ``transactions`` field. A backend whose
+  ``transaction()`` delegates to the internal ``_transaction_manager``. A backend whose
   stores share a transaction provider (SqlAlchemyStorage) yields a real UoW; a
   backend whose stores are independent (FilesystemStorage) raises
   StorageTransactionNotSupportedError at the call.
@@ -83,58 +83,56 @@ class Storage:
     # Jobs or multi-process Swarms injects a distributed one and declares
     # CoordinationScope.DISTRIBUTED on its StorageFeatures. The build-time
     # capability gate that REJECTS a multi-worker/multi-process topology
-    # configured against process-local coordination is part of the later
-    # RuntimeRequirements work (not yet wired); until then Storage.coordination
-    # is an available, conformant capability without an enforcing consumer.
+    # configured against process-local coordination is enforced by the build-time
+    # capability gate (run.requirements); Storage.coordination is the available,
+    # conformant capability that gate reads.
     coordination: "LeaseCoordinator"
-    # Cross-store UnitOfWork manager. The canonical surface for an
-    # atomic cross-store scope: storage.transactions.transaction() yields a UoW
-    # whose stores share one transaction. A backend whose stores are independent
-    # (FilesystemStorage) supplies a NoCrossStoreTransactions manager that
-    # raises StorageTransactionNotSupportedError at the call -- the honest
-    # declaration for features.transactions = PROCESS_LOCAL (single-store
-    # durability only, no cross-store UoW). A backend with a shared transaction
-    # provider (SqlAlchemyStorage) supplies a real manager and declares
+    # Cross-store UnitOfWork manager. INTERNAL: callers go through
+    # storage.transaction(), never the manager object directly. A backend whose
+    # stores are independent (FilesystemStorage) supplies a
+    # NoCrossStoreTransactions manager that raises
+    # StorageTransactionNotSupportedError at the call -- the honest declaration
+    # for features.transaction_scope = NONE (each store independently durable,
+    # no cross-store UoW). A backend with a shared transaction provider
+    # (SqlAlchemyStorage) supplies a real manager and declares
     # TransactionScope.DATABASE.
-    transactions: "StorageTransactionManager"
+    _transaction_manager: "StorageTransactionManager"
     # Required, not optional: every run entry point (agent / subagent / swarm
     # worker) persists a RunDefinitionSnapshot so Runtime.resume(child_run_id)
     # can restore its spec + identity after an approval pause. A Storage built
     # without one is rejected at Runtime build time -- resumability is not an
     # opt-in capability.
     run_definitions: RunDefinitionStore
-    # Reliable-task store (jobs domain). Optional + None for backward
-    # compatibility with existing Storage(...) constructions; JobRuntime rejects
+    # Reliable-task store (jobs domain). Optional + None for existing
+    # Storage(...) constructions; JobRuntime rejects
     # a None jobs store at build time. Backends wire their own
     # (FilesystemStorage -> FilesystemJobStore).
     jobs: "JobStore | None" = None
-    # Evaluation store. Optional + None for backward compatibility; the eval
-    # runner persists lifecycle + results when a caller wires one (e.g. an
-    # InMemoryEvalStore or a backend-provided file/SQL store).
+    # Evaluation store. Optional + None when a caller does not wire one; the
+    # eval runner persists lifecycle + results when a backend supplies it.
     evaluations: "EvalStore | None" = None
     # Artifact store (content-addressed blobs + lineage records). Optional +
-    # None for backward compatibility; backends wire one and JobRuntime consumes
-    # it explicitly (no implicit getattr fallback on the asset store).
+    # None when a backend does not supply one; JobRuntime consumes it explicitly
+    # when present (no implicit getattr fallback on the asset store).
     artifacts: "ArtifactStore | None" = None
 
     def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
-        """Cross-store transactional scope, delegating to the ``transactions``
-        field (the canonical surface). A backend whose stores share a
-        transaction provider (SqlAlchemyStorage) yields a real UoW; a backend
-        whose stores are independent (FilesystemStorage) raises
-        StorageTransactionNotSupportedError at the call. Branch on
-        ``features.transactions is TransactionScope.DATABASE`` before relying on
-        it. Retained as a thin delegator so existing call sites (run commit
-        coordinators, tests) keep working; new code should call
-        ``storage.transactions.transaction()`` directly."""
-        return self.transactions.transaction()
+        """Cross-store transactional scope -- the single public entry. A backend
+        whose stores share a transaction provider (SqlAlchemyStorage) yields a
+        real UoW; a backend whose stores are independent (FilesystemStorage)
+        raises StorageTransactionNotSupportedError at the call. Branch on
+        ``features.transaction_scope is TransactionScope.DATABASE`` before
+        relying on it. The wired transaction manager is an internal dependency;
+        callers go through this method, never the manager object directly."""
+        return self._transaction_manager.transaction()
 
 
 class FilesystemStorage(Storage):
     """Storage backed by independent file-system backends. Each backend manages
     its own files, so cross-store transactions are NOT available -- transaction()
-    raises StorageTransactionNotSupportedError. Branch on features.transactions
-    == TransactionScope.DATABASE (False here) before calling it."""
+    raises StorageTransactionNotSupportedError. Branch on
+    features.transaction_scope == TransactionScope.DATABASE (False here) before
+    calling it."""
 
     def __init__(self, *, root: "str | Path" = "./data") -> None:
         # Lazy import keeps `import linktools.ai` / `import linktools.ai.storage`
@@ -152,7 +150,7 @@ class FilesystemStorage(Storage):
         )
         from .transaction import NoCrossStoreTransactions
 
-        assets = AssetStore(primary=FileAssetBackend(root=root_path / "resources"))
+        assets = AssetStore(primary=FileAssetBackend(root=root_path / "assets"))
         super().__init__(
             assets=assets,
             sessions=FilesystemSessionStore(root=root_path / "sessions"),
@@ -166,7 +164,7 @@ class FilesystemStorage(Storage):
             run_definitions=FilesystemRunDefinitionStore(root=root_path / "definitions"),
             features=FILE_STORAGE_FEATURES,
             coordination=ProcessLocalLeaseCoordinator(),
-            transactions=NoCrossStoreTransactions("FilesystemStorage"),
+            _transaction_manager=NoCrossStoreTransactions("FilesystemStorage"),
             jobs=FilesystemJobStore(root_path / "jobs"),
             evaluations=FilesystemEvaluationStore(root=root_path / "evaluations"),
             artifacts=ArtifactStore(

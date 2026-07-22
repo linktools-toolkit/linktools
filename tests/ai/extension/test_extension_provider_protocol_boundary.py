@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ExtensionProvider works against any ExtensionResourceProvider / EntrypointResolver
+"""ExtensionProvider works against any ExtensionContentSource / EntrypointResolver
 implementation, not just the Directory defaults (contract)."""
 
 import pytest
@@ -12,17 +12,17 @@ from linktools.ai.extension.capability_provider import ExtensionProvider
 
 
 class _FakeResourceProvider:
-    async def list_resources(self, scope, path="", *, limit=50, cursor=None):
-        from linktools.ai.extension.resource import AssetInfo, ResourceListResult
+    async def list_entries(self, scope, path="", *, limit=50, cursor=None):
+        from linktools.ai.extension.content import AssetInfo, ExtensionContentPage
 
-        return ResourceListResult(
+        return ExtensionContentPage(
             items=[AssetInfo(path="SKILL.md", kind="file", size_bytes=3)]
         )
 
-    async def read_resource(self, ref, *, max_bytes=None):
-        from linktools.ai.extension.resource import ResourceContent
+    async def read_content(self, ref, *, max_bytes=None):
+        from linktools.ai.extension.content import ExtensionContent
 
-        return ResourceContent(path="SKILL.md", content=b"abc", size_bytes=3)
+        return ExtensionContent(path="SKILL.md", content=b"abc", size_bytes=3)
 
 
 class _FakeEntrypointResolver:
@@ -42,14 +42,14 @@ def _ctx():
 
 
 @pytest.mark.asyncio
-async def test_fake_resource_provider_works():
-    provider = ExtensionProvider(resource_provider=_FakeResourceProvider())
-    bundle = await provider.resolve(CapabilityRef("extension-resource", "pkg"), _ctx())
+async def test_fake_content_source_works():
+    provider = ExtensionProvider(content_source=_FakeResourceProvider())
+    bundle = await provider.resolve(CapabilityRef("extension-asset", "pkg"), _ctx())
     read_fn = next(
         md.handler
         for c in bundle.tool_contributions
         for md in c.tools
-        if md.descriptor.name == "read_extension_resource"
+        if md.descriptor.name == "read_extension_content"
     )
     out = await read_fn("pkg", "SKILL.md")
     assert out["size_bytes"] == 3

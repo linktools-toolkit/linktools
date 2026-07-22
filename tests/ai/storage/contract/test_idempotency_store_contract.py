@@ -4,7 +4,7 @@
 same fenced-claim IdempotencyStore contract against both FilesystemIdempotencyStore
 and SqlAlchemyIdempotencyStore (backend parity).
 
-The contract covers (per the WP-10 claim/owner/generation/lease model):
+The contract covers (per the claim/owner/generation/lease model):
 1. claim -> complete(claim) -> get returns COMPLETED with cached result.
 2. claim same (scope, key) with a different request_hash -> CONFLICT.
 3. Two fresh claims with different (scope, key) coexist independently.
@@ -176,7 +176,7 @@ def test_fail_then_retry_claim_can_complete(store_factory):
 
 def test_complete_and_fail_on_missing_or_stale_claim_are_rejected(store_factory):
     """complete/fail against a missing record, or with a stale owner/generation,
-    raise LostIdempotencyClaimError (C-01 §6.7) -- never silently succeed."""
+    raise LostIdempotencyClaimError -- never silently succeed."""
     from linktools.ai.errors import LostIdempotencyClaimError
     from linktools.ai.tool.idempotency import IdempotencyClaim
 
@@ -243,7 +243,7 @@ def test_path_traversal_in_scope_or_key_is_rejected(tmp_path):
 
 
 def test_completed_record_cannot_be_reclaimed(store_factory):
-    """C-01 §6.8: a COMPLETED record must never be flipped back to CLAIMED/
+    """a COMPLETED record must never be flipped back to CLAIMED/
     RESERVED. A later claim returns REPLAY (the cached result), not ACQUIRED --
     even though the CAS only pins generation, the status clause in the WHERE
     blocks the re-claim."""

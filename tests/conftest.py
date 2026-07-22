@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pytest
 
-# Make the standalone external_adapter package (AC-15 wheel-only proof, plan
-# §4.11) importable repo-wide without an installed wheel: its src/ dir goes on
+# Make the standalone external_adapter package ( wheel-only proof, plan
+# ) importable repo-wide without an installed wheel: its src/ dir goes on
 # sys.path here so test modules under tests/ai/ that import ``external_adapter``
 # resolve it. When the package IS installed (isolated-venv wheel proof), this
 # insert is a harmless no-op (the installed package is found first).
@@ -39,13 +39,19 @@ _EXTERNAL_ADAPTER_SRC = Path(__file__).parent / "external_adapter" / "src"
 if str(_EXTERNAL_ADAPTER_SRC) not in sys.path:
     sys.path.insert(0, str(_EXTERNAL_ADAPTER_SRC))
 
-# The storage conformance testkit (``linktools-ai/testing/``) is test-support
-# code, not library code -- it is never packaged into the linktools-ai wheel.
-# Putting the linktools-ai/ package root on sys.path makes it importable as
-# ``testing`` repo-wide without shipping it in the wheel.
-_LINKTOOLS_AI_ROOT = Path(__file__).parent.parent / "linktools-ai"
-if str(_LINKTOOLS_AI_ROOT) not in sys.path:
-    sys.path.insert(0, str(_LINKTOOLS_AI_ROOT))
+# The storage conformance testkit ships from an INDEPENDENT distribution
+# (``linktools-ai-testing``) at import path ``linktools.ai.testing``;
+# it is never packaged into the core linktools-ai wheel. Putting the testing
+# wheel's src dir on sys.path makes it importable repo-wide without an installed
+# wheel. When the wheel IS installed (isolated-venv gold-standard proof), this
+# insert is a harmless no-op (the installed package resolves first); the
+# ``linktools.ai`` namespace is stitched across both wheels via
+# ``pkgutil.extend_path`` in linktools-ai's ``__init__.py``.
+_LINKTOOLS_AI_TESTING_SRC = (
+    Path(__file__).parent.parent / "linktools-ai-testing" / "src"
+)
+if str(_LINKTOOLS_AI_TESTING_SRC) not in sys.path:
+    sys.path.insert(0, str(_LINKTOOLS_AI_TESTING_SRC))
 
 
 @pytest.fixture(autouse=True)

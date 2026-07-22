@@ -97,13 +97,13 @@ def test_file_storage_runs_end_to_end(tmp_path):
         await storage.assets.put(
             path, b"hello", options=WriteOptions(content_type="text/plain", metadata={})
         )
-        resource = await storage.assets.get(path)
-        return fetched, run, resource
+        asset = await storage.assets.get(path)
+        return fetched, run, asset
 
-    fetched, run, resource = asyncio.run(_run())
+    fetched, run, asset = asyncio.run(_run())
     assert fetched is not None and fetched.id == "session-1"
     assert run is not None and run.id == "run-1"
-    assert resource is not None and resource.content == b"hello"
+    assert asset is not None and asset.content == b"hello"
 
 
 def test_file_storage_transaction_raises_storage_capability_error(tmp_path):
@@ -119,7 +119,7 @@ def test_file_storage_transaction_raises_storage_capability_error(tmp_path):
 
 def test_file_storage_transaction_raises_storage_feature_error(tmp_path):
     """FilesystemStorage.transaction() must fail as a StorageFeatureError (the
-    §4.5 contract: features.transactions is NONE, so the call raises
+     contract: features.transaction_scope is NONE, so the call raises
     StorageTransactionNotSupportedError, which IS-A StorageFeatureError IS-A
     StorageCapabilityError). Asserting the specific subclass locks the contract
     -- a backend that raised the broad parent directly, or silently no-op-ed,
@@ -127,7 +127,7 @@ def test_file_storage_transaction_raises_storage_feature_error(tmp_path):
     from linktools.ai.errors import StorageFeatureError
 
     storage = FilesystemStorage(root=tmp_path)
-    assert storage.features.transactions is TransactionScope.NONE  # honest: no tx
+    assert storage.features.transaction_scope is TransactionScope.NONE  # honest: no tx
 
     async def _run():
         async with storage.transaction():
@@ -202,7 +202,8 @@ def test_sqlalchemy_storage_transaction_yields_a_unit_of_work(tmp_path):
 def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
     """All tx.* stores bind to the same AsyncSession in UoW mode. artifact_records
     is a real session-bound SqlAlchemyArtifactRecordStore sharing the UoW session;
-    assets is still honestly None (no session-bound asset backend yet)."""
+    assets is a real session-bound AssetStore whose backend shares that session
+    too, so asset mutations join the cross-store atomic scope."""
     storage, _ = _sqlalchemy_storage(tmp_path)
 
     async def _run():
@@ -210,6 +211,7 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
             return {
                 "session": tx.session,
                 "assets": tx.assets,
+                "assets_session": tx.assets._primary._session,
                 "artifact_records": tx.artifact_records,
                 "artifact_records_session": tx.artifact_records._session,
                 "runs": tx.runs._session,
@@ -222,16 +224,22 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
             }
 
     bound = asyncio.run(_run())
-    # assets has no session-bound backend yet: MUST be None (honest), not a
-    # self-committing fake pretending to share the UoW atomicity.
-    assert bound["assets"] is None, "tx.assets must be None until a session-bound backend exists"
+    # assets IS session-bound now; its backend must share the UoW session.
+    from linktools.ai.asset.store import AssetStore
+    from linktools.ai.storage.sqlalchemy.asset import SqlAlchemyAssetBackend
+
+    assert isinstance(bound["assets"], AssetStore)
+    assert isinstance(bound["assets"]._primary, SqlAlchemyAssetBackend)
+    shared = bound["session"]
+    assert bound["assets_session"] is shared, (
+        "tx.assets backend must bind to the UoW's shared session"
+    )
     # artifact_records IS session-bound now; it must share the UoW session.
     from linktools.ai.storage.sqlalchemy.artifact_record import (
         SqlAlchemyArtifactRecordStore,
     )
 
     assert isinstance(bound["artifact_records"], SqlAlchemyArtifactRecordStore)
-    shared = bound["session"]
     assert bound["artifact_records_session"] is shared, (
         "tx.artifact_records must bind to the UoW's shared AsyncSession"
     )
@@ -248,7 +256,7 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
 
 
 def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
-    """R3 check method: inject a failure inside the UoW -> the run AND the
+    """check method: inject a failure inside the UoW -> the run AND the
     artifact record are both invisible (rolled back together); the blob (written
     outside the UoW, content-addressed) survives as an orphan candidate."""
     import hashlib

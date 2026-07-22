@@ -20,7 +20,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.run.controller import RunController
 from linktools.ai.model.registry import ModelRegistry
@@ -29,7 +29,7 @@ from linktools.ai.errors import (
     SwarmRunNotFoundError,
 )
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunErrorInfo,
@@ -110,7 +110,7 @@ def _build_compiler(*outputs: str) -> AgentCompiler:
         registry.register(f"model-{i}", model=_make_model(out))
     return AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelGateway(ModelResolver(registry=registry)),
     )
 
 
@@ -295,7 +295,7 @@ def test_run_parallel_fan_out_aggregates_and_marks_succeeded(tmp_path):
 
 
 def test_swarm_run_persists_driving_and_worker_run_definition_snapshots(tmp_path):
-    """§5.11: a swarm run persists a RunDefinitionSnapshot for the driving run
+    """a swarm run persists a RunDefinitionSnapshot for the driving run
     AND for each worker child run, so Runtime.resume(child_run_id) can restore a
     worker that paused on approval. Both prepare_swarm_run (driving) and the
     worker's prepare_agent_run are unconditional -- this fails if either is
@@ -1107,7 +1107,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelGateway(ModelResolver(registry=registry)),
     )
 
     stores = _Stores(tmp_path)
@@ -1164,7 +1164,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelGateway(ModelResolver(registry=registry)),
     )
 
     stores = _Stores(tmp_path)
@@ -1592,7 +1592,7 @@ def test_recover_requeues_task_with_no_run_to_pending_on_sqlalchemy_backend(tmp_
 
 
 def test_resume_refused_for_terminal_swarm(tmp_path):
-    """WP-09 §13.1: a terminal swarm (SUCCEEDED/FAILED/CANCELLED) must not resume
+    """a terminal swarm (SUCCEEDED/FAILED/CANCELLED) must not resume
     -- re-running its strategy could repeat side-effecting tasks."""
     from linktools.ai.swarm.runner import SwarmRunner
     from linktools.ai.errors import InvalidRunTransitionError
@@ -1656,14 +1656,14 @@ def test_resume_refused_for_terminal_swarm(tmp_path):
     ids=["succeeded", "failed", "cancelled"],
 )
 def test_resume_refused_for_terminal_driving_run(tmp_path, driving_status):
-    """v4 §7.8: a PAUSED (non-terminal) swarm whose DRIVING Run is already
+    """v4 : a PAUSED (non-terminal) swarm whose DRIVING Run is already
     terminal must not resume -- re-entering the strategy could re-drive worker
     side effects. The driving Run is rejected before the snapshot is loaded or
     the strategy resumed, so nothing executes.
 
     RUNNING is intentionally NOT rejected: a RECOVERABLE swarm's driving Run is
     legitimately RUNNING mid-flight, and crash-recovery resume must keep working
-    (see test_resume_after_partial_failure_completes). The guide's §7.3 table
+    (see test_resume_after_partial_failure_completes). The guide's table
     lists RunStatus.RECOVERABLE, which does not exist in this codebase; RUNNING
     is the actual non-terminal recoverable driving state, so only the terminal
     states are rejected (per the guide's own note to map names to the project's
@@ -1739,7 +1739,7 @@ def test_resume_refused_for_terminal_driving_run(tmp_path, driving_status):
 
 
 def test_swarm_snapshot_failure_leaves_no_orphan_running(tmp_path):
-    """B-03: when the run-definition snapshot cannot be serialized, the swarm
+    """when the run-definition snapshot cannot be serialized, the swarm
     run must fail BEFORE any Run/SwarmRun is created -- no orphan RUNNING. A set
     in the strategy config is rejected by canonical_json."""
     from linktools.ai.swarm.runner import SwarmRunner
@@ -1764,7 +1764,7 @@ def test_swarm_snapshot_failure_leaves_no_orphan_running(tmp_path):
     agents = {"coord": _agent_spec("coord", "model-0")}
     context = _driving_context("drive-snap", "shared-session")
 
-    # Force the snapshot store write to fail (B-03 §8.7: Snapshot Store write
+    # Force the snapshot store write to fail ( : Snapshot Store write
     # failure). The swarm run must fail BEFORE any Run/SwarmRun is created.
     async def _failing_create(_snapshot):
         raise RuntimeError("injected snapshot store failure")
@@ -1789,7 +1789,7 @@ def test_swarm_snapshot_failure_leaves_no_orphan_running(tmp_path):
 
 
 def test_swarm_worker_runs_have_resumable_snapshots(tmp_path):
-    """A-01: a swarm worker Run (child of the driving swarm run) must persist a
+    """a swarm worker Run (child of the driving swarm run) must persist a
     RunDefinitionSnapshot so Runtime.resume(child_run_id) can restore its spec
     if a worker tool pauses on approval."""
     from linktools.ai.swarm.runner import SwarmRunner

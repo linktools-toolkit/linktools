@@ -14,10 +14,10 @@
    column. Verified behaviorally (result has no .content attribute) and
    structurally (SQL capture).
 
-3. Cursor pagination -- propfind with a small limit pages through every item
+3. Cursor pagination -- list with a small limit pages through every item
    exactly once via successive cursors, terminating with cursor=None. Verified
    across all three backends (memory/file/sqlalchemy) since cursor handling
-   lives in each backend's raw_propfind."""
+   lives in each backend's raw_list."""
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -158,15 +158,15 @@ async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
-    """contract overlay-source MOVE: an overlay-only source cannot use the atomic
-    raw_move (the source lives in a different backend). AssetStore must
-    detect this and fall back to the legacy cross-backend copy path. This is
-    a regression guard: the initial raw_move delegation broke this case by
-    raising 'cannot move missing resource' when the source wasn't in primary."""
+async def test_atomic_move_refuses_overlay_only_source(tmp_path):
+    """contract overlay-source MOVE: an overlay-only source cannot be moved
+    atomically (the source lives in a different backend; a cross-backend copy +
+    whiteout is not an atomic move). AssetStore refuses it with
+    AssetMoveNotSupportedError rather than faking the move via put+delete."""
+    from linktools.ai.errors import AssetMoveNotSupportedError
+
     engine, backend, store = await _make_sqlalchemy_store(tmp_path)
     try:
-        # Stand up a readonly overlay carrying the source.
         overlay_engine = create_async_engine(
             f"sqlite+aiosqlite:///{tmp_path}/overlay.db"
         )
@@ -183,15 +183,10 @@ async def test_atomic_move_preserves_overlay_source_via_legacy_path(tmp_path):
         )
         store_with_overlay = AssetStore(primary=backend, overlays=(overlay,))
 
-        moved = await store_with_overlay.move(
-            AssetPath("/src.md"), AssetPath("/dst.md")
-        )
-        assert moved.content == b"overlay content"
-        # Source is masked in primary -> overlay hidden via whiteout.
-        assert await store_with_overlay.get(AssetPath("/src.md")) is None
-        assert (
-            await store_with_overlay.get(AssetPath("/dst.md"))
-        ).content == b"overlay content"
+        with pytest.raises(AssetMoveNotSupportedError):
+            await store_with_overlay.move(
+                AssetPath("/src.md"), AssetPath("/dst.md")
+            )
         await overlay_engine.dispose()
     finally:
         await engine.dispose()
@@ -269,14 +264,14 @@ async def test_stat_on_sqlalchemy_does_not_select_content_column(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
-    """contract cursor-pagination guard: propfind with a small limit must page
-    through every matching resource exactly once, via successive cursors,
+async def test_list_cursor_pagination_covers_all_items(backend_factory):
+    """contract cursor-pagination guard: list with a small limit must page
+    through every matching asset exactly once, via successive cursors,
     terminating with cursor=None. Catches the regression where cursor was
     accepted but ignored (the initial implementation always returned cursor=None after
     truncating to limit, dropping items past the first page)."""
     store = AssetStore(primary=backend_factory())
-    # Seed 5 resources under /r/. Sorted by path: /r/1.txt ... /r/5.txt.
+    # Seed 5 assets under /r/. Sorted by path: /r/1.txt ... /r/5.txt.
     for i in range(5):
         await store.put(AssetPath(f"/r/{i}.txt"), f"payload-{i}".encode())
 
@@ -284,7 +279,7 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
     cursor: "str | None" = None
     pages = 0
     while True:
-        page = await store.propfind(
+        page = await store.list(
             AssetPath("/r"), depth=Depth.ONE, limit=2, cursor=cursor
         )
         pages += 1
@@ -307,7 +302,7 @@ async def test_propfind_cursor_pagination_covers_all_items(backend_factory):
 
 
 @pytest.mark.asyncio
-async def test_propfind_cursor_none_when_results_fit_one_page(backend_factory):
+async def test_list_cursor_none_when_results_fit_one_page(backend_factory):
     """contract sanity: when the result fits in one page (fewer items than limit),
     next_cursor must be None -- callers must not loop forever thinking more
     pages remain."""
@@ -315,7 +310,7 @@ async def test_propfind_cursor_none_when_results_fit_one_page(backend_factory):
     await store.put(AssetPath("/r/a.txt"), b"a")
     await store.put(AssetPath("/r/b.txt"), b"b")
 
-    page = await store.propfind(
+    page = await store.list(
         AssetPath("/r"), depth=Depth.ONE, limit=100, cursor=None
     )
     assert page.cursor is None

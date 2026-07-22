@@ -14,56 +14,63 @@ class RuntimeInitializationError(LinktoolsAIError):
     """The runtime cannot safely initialize a required component."""
 
 
-class UnsafeExecutionBackendError(RuntimeInitializationError):
+class UnsafeSandboxError(RuntimeInitializationError):
     """A trusted-local backend was used where tenant isolation is required."""
 
 
 class SecurityError(LinktoolsAIError):
     """Security-domain failures: a sensitive operation was attempted without a
     valid Principal, or the Principal lacks the tenant/scope the target
-    resource requires (production-hardening plan §5.1 / §7)."""
+    asset requires."""
 
 
 class PrincipalAccessDeniedError(SecurityError):
     """A sensitive operation was denied because no PrincipalContext was
     supplied, or the supplied Principal's tenant does not own the target
-    resource. Surfaces the §5.4 fail-closed default: when tenant / scope /
+    asset. Surfaces the fail-closed default: when tenant / scope /
     version cannot be confirmed, the operation is rejected rather than
-    allowed on the strength of a guessable id alone (§5.5)."""
+    allowed on the strength of a guessable id alone."""
 
 
-class ResourceError(LinktoolsAIError):
+class AssetError(LinktoolsAIError):
     """Base class for AssetStore-related errors."""
 
 
-class ResourceNotFoundError(ResourceError):
+class AssetNotFoundError(AssetError):
     pass
 
 
-class ResourceConflictError(ResourceError):
+class AssetConflictError(AssetError):
     pass
 
 
-class ResourcePreconditionFailedError(ResourceError):
+class AssetPreconditionFailedError(AssetError):
     pass
 
 
-class ResourceReadOnlyError(ResourceError):
+class AssetReadOnlyError(AssetError):
     pass
 
 
-class ResourceUnsupportedError(ResourceError):
+class AssetUnsupportedError(AssetError):
     pass
 
 
-class InvalidAssetPathError(ResourceError):
+class AssetMoveNotSupportedError(AssetError):
+    """A move was requested for a source that lives only in an overlay backend.
+    Atomic move is defined only for primary-resident sources; copying across
+    backends plus a whiteout is not an atomic move and is refused rather than
+    faked as one."""
+
+
+class InvalidAssetPathError(AssetError):
     pass
 
 
-class SkillResourceAccessError(ResourceError):
-    """A skill-private resource path is forbidden: it is absolute, escapes the
+class SkillAssetAccessError(AssetError):
+    """A skill-private asset path is forbidden: it is absolute, escapes the
     skill's ``agents/`` directory (including via symlink), is not Markdown, or
-    is missing (spec ). Path safety is enforced on the resolved path, so a
+    is missing. Path safety is enforced on the resolved path, so a
     symlink that points outside ``agents/`` is rejected after resolve()."""
 
 
@@ -72,6 +79,25 @@ class SubagentResolutionError(LinktoolsAIError):
     unknown, an ``instruction_path`` was given without an active skill, the
     active skill no longer exists / changed revision, or the request was
     malformed (spec //)."""
+
+
+class ArtifactError(LinktoolsAIError):
+    """Base class for Artifact-domain errors (content-addressed blobs and the
+    immutable records that pin them)."""
+
+
+class ArtifactRecordConflictError(ArtifactError):
+    """An :class:`ArtifactRecord` id already exists with different content.
+    Records are create-only: the same id with byte-identical content is
+    idempotent, but a different sha256 / tenant / provenance is refused rather
+    than overwriting the lineage of the prior write."""
+
+
+class ArtifactRecordCorruptError(ArtifactError):
+    """A stored ArtifactRecord cannot be trusted: it is unparseable, missing
+    required fields, has a sha256 that is not a valid digest, or its id/tenant
+    does not match the path it was filed under. Raised fail-closed so the orphan
+    sweeper never mistakes a broken record for an unreferenced blob."""
 
 
 class StorageError(LinktoolsAIError):
@@ -95,14 +121,14 @@ class StorageFeatureError(StorageCapabilityError):
     """Raised when a Storage's declared StorageFeatures do not match its wired
     objects -- a declared capability that has no backing object (e.g.
     streaming_blobs=True with no ArtifactStore, or a NONE transaction scope
-    where a cross-store UoW was requested). Plan §4.5/§6.6 name this class as
-    the unified signal for feature/behavior mismatch. The more specific
+    where a cross-store UoW was requested). This class is the unified signal
+    for feature/behavior mismatch. The more specific
     :class:`StorageTransactionNotSupportedError` subclasses it so a caller
     catching ``StorageFeatureError`` sees both."""
 
 
 class StorageTransactionNotSupportedError(StorageFeatureError):
-    """features.transactions is TransactionScope.NONE or PROCESS_LOCAL on this
+    """features.transaction_scope is TransactionScope.NONE or PROCESS_LOCAL on this
     Storage (no cross-store UoW available) but a caller requested an atomic
     cross-store write."""
 
@@ -150,15 +176,15 @@ class InvalidRunTransitionError(RunError):
 
 
 class RunNotResumableError(RunError):
-    """A run marked NON_RESUMABLE at creation time cannot be resumed (§13.7).
+    """A run marked NON_RESUMABLE at creation time cannot be resumed.
     Raised at resume entry instead of attempting a resume that could never be
     deterministic (unversioned handler / ephemeral provider / dynamic output /
-    missing resource snapshot)."""
+    missing asset snapshot)."""
 
 
 class ManifestDriftError(RunError):
     """The current environment no longer matches the ExecutionManifest the run
-    was prepared against (§13.6) -- e.g. the resolved model provider's revision
+    was prepared against -- e.g. the resolved model provider's revision
     changed between prepare and resume. Raised by ManifestResolver.resolve;
     resume refuses rather than silently re-resolving against the drifted
     environment."""
@@ -500,12 +526,12 @@ class ExtensionNotFoundError(CapabilityNotFoundError):
     pass
 
 
-class ExtensionResourceNotFoundError(CapabilityNotFoundError):
+class ExtensionContentNotFoundError(CapabilityNotFoundError):
     pass
 
 
-class ExtensionResourceAccessDeniedError(PolicyError):
-    """An extension resource path was outside the allowed scope/extension set."""
+class ExtensionContentAccessDeniedError(PolicyError):
+    """An extension asset path was outside the allowed scope/extension set."""
 
 
 class ExtensionEntrypointNotFoundError(CapabilityNotFoundError):

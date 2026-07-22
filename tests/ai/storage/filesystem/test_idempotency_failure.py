@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""B-01 regression: FilesystemIdempotencyStore.fail() must take the fenced claim token
+"""regression: FilesystemIdempotencyStore.fail() must take the fenced claim token
 (not the old (scope, key, error) signature). A shadowed old signature would
 make GovernedToolInvoker's fail(claim, error) hit the wrong method (TypeError) and
 leave the FAILED transition unwritten."""

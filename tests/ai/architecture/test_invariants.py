@@ -39,9 +39,9 @@ def _registry():
 
 
 def _router():
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
 
-    return ModelRouter(registry=_registry())
+    return ModelResolver(registry=_registry())
 
 
 # --- Runtime has no `assemble` --------------------------------------------------
@@ -49,15 +49,15 @@ def test_invariant_runtime_has_no_assemble():
     assert not hasattr(Runtime, "assemble")
 
 
-# --- Runtime exposes no public capability_assembler -----------------------------
-def test_invariant_runtime_has_no_public_capability_assembler(tmp_path):
+# --- Runtime exposes no public capability_resolver -----------------------------
+def test_invariant_runtime_has_no_public_capability_resolver(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
         model_router=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
-    assert not hasattr(runtime, "capability_assembler")
+    assert not hasattr(runtime, "capability_resolver")
     assert not hasattr(runtime, "assembler")
 
 

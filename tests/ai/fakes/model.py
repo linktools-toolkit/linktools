@@ -9,7 +9,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelResolver
 
 
 def echo_model_fn(text: str = "hello"):
@@ -23,8 +23,8 @@ def echo_model_fn(text: str = "hello"):
     return _fn
 
 
-def make_router(text: str = "hello") -> ModelRouter:
-    """Build a ModelRouter with a single registered FunctionModel."""
+def make_router(text: str = "hello") -> ModelResolver:
+    """Build a ModelResolver with a single registered FunctionModel."""
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(echo_model_fn(text)))
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)

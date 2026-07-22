@@ -28,10 +28,10 @@ optional-dependencies:
     - aiosqlite>=0.20,<1
   tui:
     - textual
-  # test extra: lets a downstream party install the built wheel + pytest, copy
-  # the sibling linktools-ai/conformance/ + linktools-ai/testing/ packages
-  # (test-support code, not shipped in the wheel), and run the external-adapter
-  # conformance suite WITHOUT the rest of the source tree.
+  # test extra: lets a downstream party install the built core wheel + the
+  # separate linktools-ai-testing wheel + pytest, then run the external-adapter
+  # conformance suite WITHOUT the rest of the source tree (the testkit is
+  # consumed from its installed wheel, not copied in).
   test:
     - pytest
     - pytest-asyncio

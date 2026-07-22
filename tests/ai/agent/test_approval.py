@@ -226,7 +226,7 @@ def test_approval_store_stub_methods_are_async():
         assert inspect.iscoroutinefunction(getattr(stub, method_name)), method_name
 
 
-# --- §11.1 / §11.2: argument redaction + identity hash ----------------------
+# --- argument redaction + identity hash ----------------------
 
 
 def test_build_approval_request_redacts_secret_arguments():

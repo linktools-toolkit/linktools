@@ -16,7 +16,7 @@ from .models import (
     ArtifactRecord,
     ArtifactRef,
     ArtifactStagingError,
-    ResourceSnapshotRef,
+    AssetSnapshotRef,
 )
 from .store import ArtifactStore
 
@@ -30,5 +30,5 @@ __all__: "list[str]" = [
     "ArtifactBufferedSizeLimitError",
     "ArtifactStagingError",
     "ANONYMOUS_PROVENANCE",
-    "ResourceSnapshotRef",
+    "AssetSnapshotRef",
 ]

@@ -8,13 +8,13 @@ against."""
 import pytest
 
 from linktools.ai.artifact.models import ArtifactIntegrityError
-from testing import (
+from linktools.ai.testing import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
 )
 
 
-from testing import LeaseCoordinatorContract  # noqa: E402
+from linktools.ai.testing import LeaseCoordinatorContract  # noqa: E402
 
 
 class TestArtifactBlobStoreConformance(ArtifactBlobStoreContract):

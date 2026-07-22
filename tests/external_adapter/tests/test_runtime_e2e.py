@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AC-15 strong-form evidence: a from-scratch in-memory EXTERNAL adapter that
+"""strong-form evidence: a from-scratch in-memory EXTERNAL adapter that
 implements the FULL agent-run storage surface drives real Runtime flows
 (``Runtime.run`` to SUCCEEDED, plus ``Runtime.approve`` / ``Runtime.resume``
 through WAITING_APPROVAL -> SUCCEEDED, plus an approved tool producing an
@@ -108,7 +108,7 @@ from linktools.ai.jobs.store import JobStore, TaskClaimLostError
 from linktools.ai.memory.store import MemoryStore
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelResolver
 from linktools.ai.run.checkpoint import CheckpointStore
 from linktools.ai.run.definition import RunDefinitionStore
 from linktools.ai.run.models import RunStatus
@@ -202,7 +202,7 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
 # adapter. The allowlist check above is the positive set; this is the
 # belt-and-braces negative guarantee called out in the spec.
 _FORBIDDEN_PREFIXES = (
-    "linktools.ai._runtime",
+    "linktools.ai.runtime.builder",
     "linktools.ai.storage.filesystem",
     "linktools.ai.storage.sqlite",
     "linktools.ai.storage.sqlalchemy",
@@ -306,10 +306,10 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart(content='{"response": {"msg": "ok"}}')])
 
 
-def _router() -> ModelRouter:
+def _router() -> ModelResolver:
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)
 
 
 # -- Approval / resume fixtures ---------------------------------------------
@@ -379,13 +379,13 @@ async def _approval_stream_fn(messages, info: AgentInfo):
     yield {0: DeltaToolCall(name=_APPROVAL_TOOL, json_args=json.dumps({"x": 1}))}
 
 
-def _approval_router() -> ModelRouter:
+def _approval_router() -> ModelResolver:
     registry = ModelRegistry()
     registry.register(
         "test-model",
         model=FunctionModel(_approval_model_fn, stream_function=_approval_stream_fn),
     )
-    return ModelRouter(registry=registry)
+    return ModelResolver(registry=registry)
 
 
 def _approval_spec() -> AgentSpec:
@@ -416,7 +416,7 @@ def test_external_adapter_drives_run_to_completion(tmp_path: pathlib.Path) -> No
     assert isinstance(storage, InMemoryExternalStorage)
     assert storage.root == tmp_path
     assert storage.features is FILE_STORAGE_FEATURES
-    assert isinstance(storage.transactions, NoCrossStoreTransactions)
+    assert isinstance(storage._transaction_manager, NoCrossStoreTransactions)
 
     runtime = Runtime.build(
         storage=storage,
@@ -810,7 +810,7 @@ def _root_task(clock_now) -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock_now,
         updated_at=clock_now,
@@ -918,12 +918,12 @@ def test_external_adapter_drives_job_create_claim_commit(
 def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
     tmp_path: pathlib.Path,
 ) -> None:
-    """§4.11 ONE connected chain through the external adapter's public surface:
+    """ONE connected chain through the external adapter's public surface:
     run -> pause (WAITING_APPROVAL) -> approve -> resume -> SUCCEEDED (the
     approved tool produces a content-addressed artifact) -> a Job created with
     that artifact as its input_artifact_id -> claimed -> committed SUCCEEDED.
 
-    The plan §4.11 explicitly forbids substituting 'several disconnected unit
+    The explicitly forbids substituting 'several disconnected unit
     tests' for the connected chain (each of the four slice tests above proves
     ONE segment in isolation; this test proves the segments COMPOSE -- the
     artifact the approved tool produced during resume is the SAME artifact the
@@ -1062,7 +1062,7 @@ def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=None,
-            resource_snapshots=(),
+            asset_snapshots=(),
             version=1,
             created_at=now,
             updated_at=now,
@@ -1090,7 +1090,7 @@ def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
 
         # 7. Persistence breadth: the connected chain wrote EVENTS for the run
         #    AND a CHECKPOINT for the resume through the adapter's public
-        #    EventStore / CheckpointStore -- the plan's "验证 event" + resume
+        # EventStore / CheckpointStore -- 's "验证 event" + resume
         #    checkpoint, asserted here in the connected flow (not only in the
         #    disconnected slice tests).
         run_events = await storage.events.list("run-chain", limit=100)

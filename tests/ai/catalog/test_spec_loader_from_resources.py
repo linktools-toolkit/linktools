@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SpecLoader.from_resources against the real AssetStore API (get/propfind,
+"""SpecLoader.from_assets against the real AssetStore API (get/list,
 no .list/.revision). Prefix sandbox + AssetPath usage."""
 
 import pytest
@@ -26,20 +26,20 @@ async def _store_with(prefix_files: "dict[str, str]") -> AssetStore:
 
 
 @pytest.mark.asyncio
-async def test_from_resources_reads_via_resourcepath():
+async def test_from_assets_reads_via_resourcepath():
     store = await _store_with(
         {
             "/specs/agents/writer.md": "---\nname: writer\n---\nbody\n",
             "/specs/agents/minimal.md": "---\nname: minimal\n---\nbody\n",
         }
     )
-    loader = SpecLoader.from_resources(store, prefix="specs/agents")
+    loader = SpecLoader.from_assets(store, prefix="specs/agents")
     text = await loader.read("writer.md")
     assert "writer" in text
 
 
 @pytest.mark.asyncio
-async def test_from_resources_list_ids_uses_propfind():
+async def test_from_assets_list_ids_uses_list():
     store = await _store_with(
         {
             "/specs/skills/sql.md": "x",
@@ -47,24 +47,24 @@ async def test_from_resources_list_ids_uses_propfind():
             "/specs/skills/sub/ignored.md": "z",  # depth.ONE must not recurse
         }
     )
-    loader = SpecLoader.from_resources(store, prefix="specs/skills")
+    loader = SpecLoader.from_assets(store, prefix="specs/skills")
     ids = await loader.list_ids(".md")
     assert set(ids) == {"audit", "sql"}
 
 
 @pytest.mark.asyncio
-async def test_from_resources_prefix_leading_slash_tolerated():
+async def test_from_assets_prefix_leading_slash_tolerated():
     store = await _store_with({"/specs/agents/a.md": "x"})
-    loader = SpecLoader.from_resources(store, prefix="/specs/agents")
+    loader = SpecLoader.from_assets(store, prefix="/specs/agents")
     assert await loader.list_ids(".md") == ("a",)
 
 
 @pytest.mark.asyncio
-async def test_from_resources_revision_reflects_modify_add_delete():
-    """revision() is a stable hash over live resource metadata, so the registry
+async def test_from_assets_revision_reflects_modify_add_delete():
+    """revision() is a stable hash over live asset metadata, so the registry
     cache refreshes after any change -- not pinned to a constant 0."""
     store = await _store_with({"/specs/agents/a.md": "v1"})
-    loader = SpecLoader.from_resources(store, prefix="specs/agents")
+    loader = SpecLoader.from_assets(store, prefix="specs/agents")
     rev_initial = await loader.revision()
     assert rev_initial != 0, "revision must not be a constant 0"
 
@@ -77,7 +77,7 @@ async def test_from_resources_revision_reflects_modify_add_delete():
     rev_after_modify = await loader.revision()
     assert rev_after_modify != rev_initial, "revision must change on modify"
 
-    # Add: a new resource -> revision changes again.
+    # Add: a new asset -> revision changes again.
     await store.put(
         AssetPath("/specs/agents/b.md"),
         b"x",
@@ -93,11 +93,11 @@ async def test_from_resources_revision_reflects_modify_add_delete():
 
 
 @pytest.mark.asyncio
-async def test_from_resources_revision_stable_across_unchanged_reads():
-    """An unchanged resource set yields the same revision (no spurious cache
+async def test_from_assets_revision_stable_across_unchanged_reads():
+    """An unchanged asset set yields the same revision (no spurious cache
     invalidation), and list_ids tracks adds/deletes."""
     store = await _store_with({"/specs/agents/a.md": "x"})
-    loader = SpecLoader.from_resources(store, prefix="specs/agents")
+    loader = SpecLoader.from_assets(store, prefix="specs/agents")
     first = await loader.revision()
     second = await loader.revision()
     assert first == second, "unchanged set must keep a stable revision"
@@ -112,8 +112,8 @@ async def test_from_resources_revision_stable_across_unchanged_reads():
 
 
 @pytest.mark.asyncio
-async def test_from_resources_rejects_parent_traversal():
+async def test_from_assets_rejects_parent_traversal():
     store = await _store_with({"/specs/agents/a.md": "x"})
-    loader = SpecLoader.from_resources(store, prefix="specs/agents")
+    loader = SpecLoader.from_assets(store, prefix="specs/agents")
     with pytest.raises(Exception):
         await loader.read("../etc/passwd")

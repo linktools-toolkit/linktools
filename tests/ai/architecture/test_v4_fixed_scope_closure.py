@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Architecture locks for the v4 fixed-scope closure (guide §8).
+"""Architecture locks for the v4 fixed-scope closure (guide ).
 
 One representative test per fixed issue, so a future change -- or a deleted
 per-area test file -- cannot silently re-introduce the gap each fix closed:
 
 1. SQL idempotency: a concurrent first-time claim never leaks a raw
-   IntegrityError (§8.1).
+   IntegrityError.
 2. RunDefinitionStore is a required Storage capability; Runtime.build fails
-   fast without it (§8.2).
+   fast without it.
 3. File commit events dedup by commit_id, so recovery does not duplicate and a
-   second legitimate approval keeps its events (§8.3).
-4. Swarm resume rejects a terminal driving Run before strategy.resume (§8.4).
+   second legitimate approval keeps its events.
+4. Swarm resume rejects a terminal driving Run before strategy.resume.
 """
 
 import asyncio
@@ -41,7 +41,7 @@ from linktools.ai.tool.idempotency import ClaimDisposition
 
 
 # --------------------------------------------------------------------------- #
-# §8.1 SQL concurrent first-time claim
+# SQL concurrent first-time claim
 # --------------------------------------------------------------------------- #
 
 
@@ -82,7 +82,7 @@ def _force_fresh_insert_collision(monkeypatch) -> None:
 async def test_v4_sql_concurrent_claim_never_leaks_integrity_error(
     tmp_path, monkeypatch
 ):
-    """§8.1: two concurrent first-time claims on the same (scope, key) yield one
+    """two concurrent first-time claims on the same (scope, key) yield one
     ACQUIRED and one stable IN_PROGRESS -- never a propagated IntegrityError."""
     _force_fresh_insert_collision(monkeypatch)
     engine, session_factory, store = await _make_sql_store(tmp_path)
@@ -111,12 +111,12 @@ async def test_v4_sql_concurrent_claim_never_leaks_integrity_error(
 
 
 # --------------------------------------------------------------------------- #
-# §8.2 RunDefinitionStore is required
+# RunDefinitionStore is required
 # --------------------------------------------------------------------------- #
 
 
 def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_path):
-    """§8.2: run_definitions is a required Storage field (no default) and
+    """run_definitions is a required Storage field (no default) and
     Runtime.build raises RuntimeInitializationError when it is None."""
     from linktools.ai.errors import RuntimeInitializationError
     from linktools.ai.runtime import Runtime
@@ -137,7 +137,7 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
 
 
 # --------------------------------------------------------------------------- #
-# §8.3 File commit events dedup by commit_id
+# File commit events dedup by commit_id
 # --------------------------------------------------------------------------- #
 
 
@@ -195,7 +195,7 @@ async def _count(storage, run_id, payload_type):
 
 
 def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
-    """§8.3: a run that pauses for two distinct approvals keeps both events
+    """a run that pauses for two distinct approvals keeps both events
     (one per commit_id), and recovery does not duplicate RunCompleted."""
 
     async def _run():
@@ -297,7 +297,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# §8.4 Swarm resume rejects a terminal driving Run
+# Swarm resume rejects a terminal driving Run
 # --------------------------------------------------------------------------- #
 
 
@@ -307,11 +307,11 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
     ids=["succeeded", "failed", "cancelled"],
 )
 def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
-    """§8.4: a PAUSED swarm whose driving Run is terminal is rejected before
+    """a PAUSED swarm whose driving Run is terminal is rejected before
     strategy.resume runs (the swarm and driving Run are left untouched)."""
     from decimal import Decimal
 
-    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.agent.engine import AgentEngine
     from linktools.ai.errors import InvalidRunTransitionError
     from linktools.ai.run.controller import RunController
     from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore

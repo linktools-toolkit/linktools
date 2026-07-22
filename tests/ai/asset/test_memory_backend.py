@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_memory_backend.py"""
+"""tests/ai/storage/asset/test_memory_backend.py"""
 
 import pytest
 
@@ -20,8 +20,8 @@ async def test_put_then_get_roundtrip():
 
     lookup = await backend.raw_get(AssetPath("/a/b.txt"))
     assert isinstance(lookup, Found)
-    assert lookup.resource.content == b"hello"
-    assert lookup.resource.info.etag == info.etag
+    assert lookup.asset.content == b"hello"
+    assert lookup.asset.info.etag == info.etag
 
 
 @pytest.mark.asyncio
@@ -76,7 +76,7 @@ async def test_revision_increments_on_write():
 
 
 @pytest.mark.asyncio
-async def test_propfind_lists_under_prefix_with_depth_one():
+async def test_list_lists_under_prefix_with_depth_one():
     backend = MemoryAssetBackend()
     await backend.raw_put(
         AssetPath("/agents/a.md"), b"x", content_type=None, metadata={}
@@ -87,7 +87,7 @@ async def test_propfind_lists_under_prefix_with_depth_one():
     await backend.raw_put(
         AssetPath("/other/c.md"), b"z", content_type=None, metadata={}
     )
-    page = await backend.raw_propfind(
+    page = await backend.raw_list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
     )
     paths = {info.path.value for info in page.items}

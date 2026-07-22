@@ -1,18 +1,12 @@
-# external_adapter -- the AC-15 wheel-only external adapter proof (plan §4.11).
+# external_adapter -- the wheel-only external adapter proof.
 #
 # This is a STANDALONE test package, NOT part of the core linktools-ai wheel.
-# Its sole runtime dependency is `linktools` (the built wheel); it ships no
-# reference-backend code of its own and imports only the public storage
-# Protocols. Installing it in an isolated venv against the built wheel and
-# running its tests is the strong-form AC-15 proof that the public surface
-# suffices to drive the full Runtime chain end-to-end.
-#
-# In environments where `python -m venv` / pip are unavailable, the
-# `tests/test_wheel_isolation.py::test_external_adapter_installs_in_isolated_venv`
-# case SKIPS with an honest reason; the structure-validation and AST
-# import-guard cases still run and are the wheel-only proof in that
-# environment (an adapter that imports only wheel-public paths WILL work
-# wheel-only).
+# It ships no reference-backend code of its own and imports only the public
+# ``linktools.ai.*`` storage Protocols at runtime; its conformance tests
+# additionally import the ``linktools.ai.testing`` testkit. Both are declared
+# here as real dependencies so a strict isolated ``pip install`` pulls them in
+# (the install procedure installs the wheels first, but the pyproject
+# must still be honest about what the package needs).
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
@@ -23,7 +17,14 @@ version = "0.0.0"
 description = "AC-15 wheel-only external storage adapter proof for linktools-ai."
 requires-python = ">=3.10"
 dependencies = [
-    "linktools",
+    "linktools-ai",
+]
+
+[project.optional-dependencies]
+test = [
+    "linktools-ai-testing",
+    "pytest",
+    "pytest-asyncio",
 ]
 
 [tool.setuptools.packages.find]

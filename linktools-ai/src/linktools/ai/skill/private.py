@@ -20,7 +20,7 @@ from pathlib import Path
 import contextvars
 
 from ..agent.spec import ToolRef
-from ..errors import SkillResourceAccessError, SubagentResolutionError
+from ..errors import SkillAssetAccessError, SubagentResolutionError
 from ..catalog.parsing import StrictConfigReader, parse_markdown_text
 from ..tool.codec import parse_tool_refs
 
@@ -112,16 +112,16 @@ def resolve_skill_agent_path(
     (which also rejects a symlink that points outside). Returns the resolved,
     validated absolute path.
 
-    Rejected (each with SkillResourceAccessError): absolute paths; paths whose
+    Rejected (each with SkillAssetAccessError): absolute paths; paths whose
     first segment is not ``agents``; paths that escape ``agents/`` after resolve
     (``../agents/x.md``, symlink-to-outside); non-Markdown; missing files.
     """
     relative = Path(instruction_path)
 
     if relative.is_absolute():
-        raise SkillResourceAccessError("absolute paths are forbidden")
+        raise SkillAssetAccessError("absolute paths are forbidden")
     if not relative.parts or relative.parts[0] != "agents":
-        raise SkillResourceAccessError("skill subagent must be under agents/")
+        raise SkillAssetAccessError("skill subagent must be under agents/")
 
     # resolve(strict=True) follows symlinks AND raises if the target does not
     # exist, so a symlink that escapes agents/ resolves outside and is caught
@@ -130,14 +130,14 @@ def resolve_skill_agent_path(
         agents_root = (skill_root / "agents").resolve(strict=True)
         candidate = (skill_root / relative).resolve(strict=True)
     except FileNotFoundError as exc:
-        raise SkillResourceAccessError("skill agent path is not a file") from exc
+        raise SkillAssetAccessError("skill agent path is not a file") from exc
 
     if not (candidate == agents_root or agents_root in candidate.parents):
-        raise SkillResourceAccessError("skill agent path escapes agents/")
+        raise SkillAssetAccessError("skill agent path escapes agents/")
     if candidate.suffix.lower() != ".md":
-        raise SkillResourceAccessError("skill agent must be Markdown")
+        raise SkillAssetAccessError("skill agent must be Markdown")
     if not candidate.is_file():
-        raise SkillResourceAccessError("skill agent path is not a file")
+        raise SkillAssetAccessError("skill agent path is not a file")
 
     return candidate
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill-private subagent core tests (spec §8/§10/§11/§12/§26).
+"""Skill-private subagent core tests.
 
 Covers the security-critical path resolver (escape/symlink rejection), the
 parser (frontmatter defaults), and the call-subagent request validation. These
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from linktools.ai.errors import SkillResourceAccessError, SubagentResolutionError
+from linktools.ai.errors import SkillAssetAccessError, SubagentResolutionError
 from linktools.ai.skill.private import (
     ActiveSkillContext,
     identity,
@@ -47,24 +47,24 @@ class TestResolveSkillAgentPath(unittest.TestCase):
         self.assertEqual(resolved.name, "grader.md")
 
     def test_absolute_path_rejected(self):
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("/etc/passwd")
 
     def test_non_agents_prefix_rejected(self):
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("references/x.md")
 
     def test_parent_escape_rejected(self):
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("../agents/x.md")
 
     def test_non_markdown_rejected(self):
         (self.skill_root / "agents" / "notes.txt").write_text("x", "utf-8")
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("agents/notes.txt")
 
     def test_missing_file_rejected(self):
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("agents/ghost.md")
 
     def test_symlink_escape_rejected(self):
@@ -77,7 +77,7 @@ class TestResolveSkillAgentPath(unittest.TestCase):
             os.symlink(outside, link)
         except OSError:
             self.skipTest("symlink creation not supported on this fs")
-        with self.assertRaises(SkillResourceAccessError):
+        with self.assertRaises(SkillAssetAccessError):
             self._resolve("agents/link-to-outside.md")
 
 
@@ -161,7 +161,7 @@ class TestParseSkillSubagent(unittest.TestCase):
 
 
 class TestTwoSkillsSameGraderName(unittest.TestCase):
-    """Spec §8: two skills may both have agents/grader.md without colliding --
+    """Spec : two skills may both have agents/grader.md without colliding --
     identity is the (skill_id, instruction_path) pair, never the bare name."""
 
     def test_identity_is_skill_scoped(self):

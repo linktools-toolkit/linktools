@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for ToolInstaller (spec §10.6/§10.8/§10.9)."""
+"""Tests for ToolInstaller."""
 import hashlib
 import json
 import zipfile
@@ -43,12 +43,12 @@ def test_install_extracts_and_writes_manifest(installer, tmp_path):
     assert inst.version == "1.2.3"
     # extracted tree present under <name>/<version>/
     assert (inst.root / "bin" / "run").read_text().startswith("#!/bin/sh")
-    # manifest (§10.8)
+    # manifest
     manifest = json.loads((inst.root / "manifest.json").read_text())
     assert manifest["name"] == "mytool" and manifest["version"] == "1.2.3"
     assert manifest["sha256"] == digest
     assert "bin/run" in manifest["files"]
-    # active pointer (§10.9)
+    # active pointer
     assert installer.active_version("mytool") == "1.2.3"
     # no staging leftover
     assert not list((tmp_path / "tools" / "mytool").glob("*.staging-*"))
@@ -99,7 +99,7 @@ def test_multi_version_layout(installer, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# PR-5: manifest fields + state split (spec §7.2/§7.3/§7.5/§7.9)
+# -5: manifest fields + state split
 # --------------------------------------------------------------------------- #
 
 def test_manifest_records_platform_arch_size_entrypoint(installer, tmp_path):
@@ -126,7 +126,7 @@ def test_version_complete_independent_of_active_pointer(installer, tmp_path):
     archive = _make_archive(tmp_path, {"run": "x"})
     definition = ToolDefinition(name="t", version="1.0")
     installer.install(definition, source_url=str(archive))
-    # removing active.json must NOT make the version dir incomplete (§7.3.1)
+    # removing active.json must NOT make the version dir incomplete
     (tmp_path / "tools" / "t" / "active.json").unlink()
     assert installer.is_installation_complete("t", "1.0") is True
     assert installer.is_active_valid("t") is False  # no active pointer -> invalid

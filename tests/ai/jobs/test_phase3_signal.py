@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 3 / §7.3 WaitSignal timeout: bounded waits persist a deadline,
+"""WaitSignal timeout: bounded waits persist a deadline,
 reconcile_due expires them (retry or terminal cancel), and a matching signal
 wakes the task. Parametrized over the file and sqlalchemy backends."""
 
@@ -102,7 +102,7 @@ def _task(clock, *, retry=None):
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),

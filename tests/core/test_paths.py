@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for :class:`linktools.core._paths.EnvironmentPaths` (spec §5.3).
+"""Tests for :class:`linktools.core._paths.EnvironmentPaths`.
 
 EnvironmentPaths owns the resolved, normalised filesystem layout for an
 Environment. Getters return absolute Paths and never create directories;

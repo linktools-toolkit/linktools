@@ -7,9 +7,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
 from linktools.ai.storage.sqlalchemy.models import (
     Base,
-    ResourceRow,
-    IdempotencyRow,
-    RevisionRow,
+    AssetRow,
+    AssetIdempotencyRow,
+    AssetRevisionRow,
 )
 
 
@@ -21,7 +21,7 @@ async def test_create_all_and_insert_resource_row(tmp_path):
 
     async with AsyncSession(engine) as session:
         session.add(
-            ResourceRow(
+            AssetRow(
                 path="/a.txt",
                 kind="file",
                 etag="e1",
@@ -44,7 +44,7 @@ async def test_create_all_and_insert_resource_row(tmp_path):
 
         row = (
             await session.execute(
-                select(ResourceRow).where(ResourceRow.path == "/a.txt")
+                select(AssetRow).where(AssetRow.path == "/a.txt")
             )
         ).scalar_one()
         assert row.content == b"hello"
@@ -58,14 +58,14 @@ async def test_idempotency_row_unique_key(tmp_path):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSession(engine) as session:
-        session.add(IdempotencyRow(key="put:k1", request_hash="h1", result_json=None))
+        session.add(AssetIdempotencyRow(key="put:k1", request_hash="h1", result_json=None))
         await session.commit()
     async with AsyncSession(engine) as session:
         from sqlalchemy import select
 
         row = (
             await session.execute(
-                select(IdempotencyRow).where(IdempotencyRow.key == "put:k1")
+                select(AssetIdempotencyRow).where(AssetIdempotencyRow.key == "put:k1")
             )
         ).scalar_one()
         assert row.request_hash == "h1"
@@ -78,13 +78,13 @@ async def test_revision_row_single_counter(tmp_path):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSession(engine) as session:
-        session.add(RevisionRow(id=1, value=0))
+        session.add(AssetRevisionRow(id=1, value=0))
         await session.commit()
     async with AsyncSession(engine) as session:
         from sqlalchemy import select
 
         row = (
-            await session.execute(select(RevisionRow).where(RevisionRow.id == 1))
+            await session.execute(select(AssetRevisionRow).where(AssetRevisionRow.id == 1))
         ).scalar_one()
         assert row.value == 0
     await engine.dispose()

@@ -4,7 +4,7 @@
 
 The evaluation plane is an optional quality layer. It runs an Agent / Skill /
 SubAgent target against a set of cases, captures the full run snapshot, and
-scores it with pluggable evaluators. It does NOT block dynamic resource usage
+scores it with pluggable evaluators. It does NOT block dynamic asset usage
 or gate production -- it answers "is this target actually better?".
 """
 

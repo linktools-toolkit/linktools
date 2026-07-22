@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AC-15 wheel-only packaging proof (plan §4.11).
+"""wheel-only packaging proof.
 
-The functional AC-15 proof -- a from-scratch external adapter driving the full
+The functional proof -- a from-scratch external adapter driving the full
 run -> approval -> resume -> artifact -> job chain through public Protocols --
 lives in ``test_runtime_e2e.py``. THIS module proves the PACKAGING half: the
 adapter is structured as a STANDALONE package whose sole dependency is the
@@ -18,7 +18,7 @@ Three cases:
 
 2. ``test_adapter_imports_only_wheel_public_paths`` -- AST-scans the adapter
    submodules and asserts every ``linktools.ai.*`` import resolves to a path
-   the wheel ships. An import of ``linktools.ai._runtime`` or a reference
+   the wheel ships. An import of ``linktools.ai.runtime.builder`` or a reference
    backend (``storage.filesystem`` / ``storage.sqlalchemy`` /
    ``storage.coordination``) would only resolve against the SOURCE tree and
    break wheel-only. This IS the wheel-only proof: an adapter that imports
@@ -57,7 +57,7 @@ _SRC_ROOT = _PKG_ROOT / "src" / "external_adapter"
 # Modules that are NOT part of the public wheel surface: the private runtime
 # kernel and the in-repo reference backends. An adapter importing any of these
 # would only resolve against the source tree, defeating the wheel-only proof.
-# §4.11 names all three reference backends (Filesystem / SQLite / SQLAlchemy)
+# names all three reference backends (Filesystem / SQLite / SQLAlchemy)
 # plus the coordination impl as forbidden adapter imports.
 _FORBIDDEN_PREFIXES = (
     "linktools.ai._",  # private kernel + underscore modules

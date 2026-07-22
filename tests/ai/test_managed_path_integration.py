@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Integration test: the full compat chain from CapabilityAssembler through
+"""Integration test: the full compat chain from CapabilityResolver through
 auto-generated ToolContributions to ManagedToolAdapter governance. Proves the
 execution path is wired (contract core loop)."""
 
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.builtin import BuiltinProvider
 from linktools.ai.errors import ToolDeniedError
-from linktools.ai.execution.local import LocalExecutionBackend
+from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.governance.security.pipeline import (
     PipelineAction,
     PipelineDecision,
@@ -47,8 +47,8 @@ class _DenyAllPipeline:
 @pytest.mark.asyncio
 async def test_assembler_returns_explicit_managed_definitions(tmp_path):
     """Providers return explicit descriptors and handlers at the boundary."""
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
-    asm = CapabilityAssembler({"builtin": BuiltinProvider()})
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
+    asm = CapabilityResolver({"builtin": BuiltinProvider()})
     spec = AgentSpec(
         id="a1",
         name="a1",
@@ -75,8 +75,8 @@ async def test_assembler_returns_explicit_managed_definitions(tmp_path):
 async def test_managed_adapter_from_assembler_output_deny(tmp_path):
     """End-to-end: assembler → tool_contributions → ManagedToolAdapter with a
     deny pipeline → tool call blocked."""
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
-    asm = CapabilityAssembler({"builtin": BuiltinProvider()})
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
+    asm = CapabilityResolver({"builtin": BuiltinProvider()})
     spec = AgentSpec(
         id="a1",
         name="a1",

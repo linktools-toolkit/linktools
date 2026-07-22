@@ -192,10 +192,10 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
     ancestor adds one. Guards against malformed cycles by capping the walk at a
     parent that is missing or already seen.
 
-    Used by  max_depth enforcement. The current built-in
+    Used by max_depth enforcement. The current built-in
     strategies (``_make_task``) always set ``parent_task_id=None``, so every
     programmatically-created task is depth 1; this guard only fires for nested
-    delegations (coordinator chains, future hierarchical strategies).
+    delegations (coordinator chains, hierarchical strategies).
     """
     if task.parent_task_id is None:
         return 1

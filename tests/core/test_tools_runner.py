@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for ToolRunner + subprocess_env (spec §10.11, §5.1)."""
+"""Tests for ToolRunner + subprocess_env."""
 import sys
 
 import pytest

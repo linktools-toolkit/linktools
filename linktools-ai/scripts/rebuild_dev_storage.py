@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""One-click dev-storage rebuild CLI (plan Phase 9 op 11).
+"""One-click dev-storage rebuild CLI.
 
 A developer-facing tool (NOT part of the installable core) that wipes +
 reconstructs the Filesystem data dir and the SQLite dev DB from scratch,
 constructing the SQLAlchemy engine itself (the core rebuild helpers in
-``linktools.ai.storage.rebuild`` never construct engines -- §6.4 adapter
+``linktools.ai.storage.rebuild`` never construct engines -- adapter
 boundary). Run::
 
     python linktools-ai/scripts/rebuild_dev_storage.py \\

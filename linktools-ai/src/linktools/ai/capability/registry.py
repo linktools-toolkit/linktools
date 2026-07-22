@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 """CapabilityProviderRegistry: the runtime kind -> CapabilityProvider store.
 
-This is the single runtime registry the capability domain keeps (plan §4.3:
-"只保留 CapabilityProviderRegistry 作为运行时 Registry"). What counts as a
+This is the single runtime registry the capability domain keeps. What counts as a
 valid capability kind is entirely determined by which providers are registered
 here -- there is no separate hardcoded allowlist to keep in sync with the
 actual provider set.
 
 Registration lives here; per-spec *resolution* (turning an AgentSpec's tool
 refs into one merged bundle, against this registry) is owned by the internal
-:class:`~linktools.ai.capability.assembler.CapabilityAssembler`.
+:class:`~linktools.ai.capability.resolver.CapabilityResolver`.
 """
 
 from typing import Mapping

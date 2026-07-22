@@ -140,7 +140,7 @@
 | Idempotency Store | tests/ai/storage/contract/test_idempotency_store_contract.py::test_reserve_complete_get_roundtrip | tests/ai/storage/contract/test_idempotency_store_contract.py::test_reserve_same_scope_key_with_different_hash_raises_conflict |
 | Memory Store | tests/ai/storage/contract/test_memory_store_contract.py::test_remember_then_get_roundtrip | tests/ai/storage/contract/test_memory_store_contract.py::test_search_filters_substring_and_limit |
 | Swarm Store | tests/ai/storage/contract/test_swarm_store_contract.py::test_create_run_then_get_run_roundtrip | tests/ai/storage/contract/test_swarm_store_contract.py::test_claim_task_marks_claimed_and_assigns_agent |
-| Resource Store | tests/ai/storage/resource/test_store.py::test_primary_only_put_get_roundtrip | tests/ai/storage/resource/test_store.py::test_overlay_fallback_when_primary_missing |
+| Asset Store | tests/ai/asset/test_store.py::test_primary_only_put_get_roundtrip | tests/ai/asset/test_store.py::test_overlay_fallback_when_primary_missing |
 | Event round-trip | tests/ai/architecture/test_event_round_trip.py::test_all_event_payloads_round_trip_through_file_store | tests/ai/architecture/test_event_round_trip.py::test_every_standard_payload_is_covered |
 
 ---

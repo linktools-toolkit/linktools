@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Characterization tests for Tool.prepare (fix-plan §5.4 prerequisite).
+"""Characterization tests for Tool.prepare (fix- prerequisite).
 
 These lock the CURRENT main-path install behaviour so the ToolInstaller
 takeover can be verified against it. They exercise the real Tool/Tools code

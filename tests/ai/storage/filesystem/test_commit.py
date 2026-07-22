@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """tests/ai/storage/filesystem/test_commit.py — FilesystemRunCommitCoordinator contract.
 
-WP-01: the coordinator's ``complete()`` path imports ``mark_completed`` from
+: the coordinator's ``complete()`` path imports ``mark_completed`` from
 ``...run.lifecycle``. Before the fix the relative import had the wrong depth
 (``..run.lifecycle`` resolves to ``storage.run.lifecycle``, which does not
 exist), so the ImportError only surfaced at run-completion time -- after the
@@ -23,7 +23,7 @@ from linktools.ai.storage.facade import FilesystemStorage
 
 
 # The approval store enforces a complete execution binding as a security
-# invariant (plan §4.2/§6.5): every persisted approval must bind the tool
+# invariant: every persisted approval must bind the tool
 # descriptor + handler/provider/policy/capability/result-processor revisions
 # and the arguments hash. Production code fills these via the governed tool
 # executor; storage-level commit tests synthesize the request directly, so
@@ -74,7 +74,7 @@ def _context(run_id: str, session_id: str) -> RunContext:
 
 
 def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
-    """complete() must import mark_completed (the WP-01 bug) and transition the
+    """complete() must import mark_completed (the bug) and transition the
     run to SUCCEEDED, persisting exactly one session turn + one checkpoint."""
 
     async def _run():
@@ -245,7 +245,7 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
 
 
 def test_recovery_marks_run_failed_when_complete_did_not_reach_commit_point(tmp_path):
-    """§9.6 failure injection: a crash leaves an incomplete COMPLETE journal and
+    """failure injection: a crash leaves an incomplete COMPLETE journal and
     the run never reached SUCCEEDED. Recovery must mark the run FAILED
     (fail-closed) so the orphan session/checkpoint writes are not surfaced as a
     successful run, then discard the journal."""
@@ -291,7 +291,7 @@ def test_recovery_marks_run_failed_when_complete_did_not_reach_commit_point(tmp_
 
 
 def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
-    """§9.6: a crash leaves an incomplete PAUSE journal but the run DID reach
+    """a crash leaves an incomplete PAUSE journal but the run DID reach
     WAITING_APPROVAL (the commit point). Recovery treats it as durable: the run
     stays WAITING_APPROVAL and the journal is discarded (best-effort events
     re-appended)."""

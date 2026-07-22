@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Build-kernel concrete-backend boundary guard.
 
-The Runtime build kernel (``linktools.ai._runtime.build``) must NOT import any
+The Runtime build kernel (``linktools.ai.runtime.builder``) must NOT import any
 concrete Storage backend module. The coordinator is injected by the
 composition root (the caller that constructs ``RuntimeBuildConfig``); the
 build kernel accepts it as an opaque Protocol and never branches on Storage
@@ -34,8 +34,8 @@ _BUILD_KERNEL = (
     / "src"
     / "linktools"
     / "ai"
-    / "_runtime"
-    / "build.py"
+    / "runtime"
+    / "builder.py"
 )
 
 # Concrete backend module roots the build kernel must not import. Any import
@@ -57,9 +57,9 @@ def _resolved_imports(path: Path) -> "set[str]":
     form that the absolute-only check would miss."""
     text = path.read_text(encoding="utf-8")
     tree = ast.parse(text)
-    # Each file is at ``linktools/ai/_runtime/build.py``; relative imports
-    # resolve against the file's package (``linktools.ai._runtime``).
-    file_pkg_parts = ("linktools", "ai", "_runtime")
+    # Each file is at ``linktools/ai/runtime/builder.py``; relative imports
+    # resolve against the file's package (``linktools.ai.runtime.builder``).
+    file_pkg_parts = ("linktools", "ai", "runtime")
     out: "set[str]" = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -154,12 +154,12 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
     contract)."""
     import sys
 
-    from linktools.ai._runtime.build import (
+    from linktools.ai.runtime.builder import (
         RuntimeBuildConfig,
         RuntimeSettings,
         build_runtime_components,
     )
-    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.runtime.dependencies import RuntimeDependencies
     from linktools.ai.storage.filesystem.commit import (
         FilesystemRunCommitCoordinator,
     )
@@ -226,12 +226,12 @@ def test_missing_commit_coordinator_fails_fast(tmp_path):
     # The build kernel no longer selects a coordinator from Storage type, so a
     # caller that forgets to inject one must fail fast at build time (not
     # silently degrade to a no-op commit path). Pins the fail-fast contract.
-    from linktools.ai._runtime.build import (
+    from linktools.ai.runtime.builder import (
         RuntimeBuildConfig,
         RuntimeSettings,
         build_runtime_components,
     )
-    from linktools.ai._runtime.dependencies import RuntimeDependencies
+    from linktools.ai.runtime.dependencies import RuntimeDependencies
     from linktools.ai.errors import RuntimeInitializationError
     from linktools.ai.storage.facade import FilesystemStorage
 

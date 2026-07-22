@@ -15,13 +15,13 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -126,7 +126,7 @@ def test_run_cancelled_mid_lifecycle_transitions_to_cancelled(tmp_path):
 
         compiler = AgentCompiler(
             tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-            model_router=ModelRouter(registry=_registry()),
+            model_router=ModelGateway(ModelResolver(registry=_registry())),
         )
         compiled = await compiler.compile(
             AgentSpec(

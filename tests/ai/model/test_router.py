@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/model/test_router.py"""
+"""ModelResolver (single-type config resolution) and ModelGateway (retry +
+fallback policy) -- the two concerns separates."""
 
 import pytest
 
@@ -12,7 +13,7 @@ from linktools.ai.model.registry import (
 )
 from linktools.ai.errors import ModelRoutingError
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 
 
 def _config(model_type: str) -> RuntimeModelConfig:
@@ -47,59 +48,73 @@ class _FlakyRegistry:
         return self._inner.get(model_type)
 
 
+# --- ModelResolver: single-type config resolution, no retry/fallback --------
+
+
 @pytest.mark.asyncio
-async def test_resolve_primary_when_available_async():
+async def test_resolver_resolves_a_registered_model_type():
     registry = ModelRegistry()
     registry.register("primary-model", config=_config("primary-model"))
-    router = ModelRouter(registry=registry)
-    bundle = await router.resolve(ModelPolicy(primary="primary-model"))
+    resolver = ModelResolver(registry=registry)
+    bundle = await resolver.resolve("primary-model")
     assert isinstance(bundle, ModelBundle)
     assert bundle.config.model_type == "primary-model"
 
 
 @pytest.mark.asyncio
-async def test_resolve_falls_back_when_primary_missing():
+async def test_resolver_raises_when_type_unregistered_no_fallback():
+    """ModelResolver resolves ONE type only: it does not walk fallbacks (that is
+    the gateway's job) -- an unregistered type raises ModelClientUnavailable."""
     registry = ModelRegistry()
     registry.register("fallback-model", config=_config("fallback-model"))
-    router = ModelRouter(registry=registry)
-    bundle = await router.resolve(
+    resolver = ModelResolver(registry=registry)
+    with pytest.raises(ModelClientUnavailable):
+        await resolver.resolve("missing-model")
+
+
+# --- ModelGateway: primary/fallback walk + per-candidate retry --------------
+
+
+@pytest.mark.asyncio
+async def test_gateway_resolves_primary_when_available():
+    registry = ModelRegistry()
+    registry.register("primary-model", config=_config("primary-model"))
+    gateway = ModelGateway(ModelResolver(registry=registry))
+    bundle = await gateway.resolve(ModelPolicy(primary="primary-model"))
+    assert bundle.config.model_type == "primary-model"
+
+
+@pytest.mark.asyncio
+async def test_gateway_falls_back_when_primary_missing():
+    registry = ModelRegistry()
+    registry.register("fallback-model", config=_config("fallback-model"))
+    gateway = ModelGateway(ModelResolver(registry=registry))
+    bundle = await gateway.resolve(
         ModelPolicy(primary="missing-model", fallbacks=("fallback-model",))
     )
     assert bundle.config.model_type == "fallback-model"
 
 
 @pytest.mark.asyncio
-async def test_resolve_raises_when_all_exhausted():
+async def test_gateway_raises_when_all_exhausted():
     registry = ModelRegistry()
-    router = ModelRouter(registry=registry)
+    gateway = ModelGateway(ModelResolver(registry=registry))
     with pytest.raises(ModelRoutingError):
-        await router.resolve(
+        await gateway.resolve(
             ModelPolicy(primary="missing-model", fallbacks=("also-missing",))
         )
 
 
-def test_model_policy_defaults():
-    policy = ModelPolicy(primary="m")
-    assert policy.fallbacks == ()
-    assert policy.max_retries == 0
-    assert policy.timeout_seconds is None
-    assert policy.max_tokens is None
-    assert policy.budget is None
-
-
-# --- max_retries retry behavior ---------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_resolve_retries_within_max_retries_then_succeeds():
+async def test_gateway_retries_within_max_retries_then_succeeds():
     """Primary fails twice (transient), succeeds on the 3rd attempt. With
-    max_retries=2 the router retries in-place and resolves to the primary."""
+    max_retries=2 the gateway retries in-place and resolves to the primary."""
     inner = ModelRegistry()
     inner.register("primary-model", config=_config("primary-model"))
     flaky = _FlakyRegistry(inner, fail_times={"primary-model": 2})
-    router = ModelRouter(registry=flaky)
+    gateway = ModelGateway(ModelResolver(registry=flaky))
 
-    bundle = await router.resolve(ModelPolicy(primary="primary-model", max_retries=2))
+    bundle = await gateway.resolve(ModelPolicy(primary="primary-model", max_retries=2))
 
     assert bundle.config.model_type == "primary-model"
     # 2 failed attempts + 1 successful attempt = 3 total.
@@ -107,16 +122,15 @@ async def test_resolve_retries_within_max_retries_then_succeeds():
 
 
 @pytest.mark.asyncio
-async def test_resolve_exhausts_retries_for_each_model_then_uses_fallback():
-    """Primary is permanently unavailable; fallback is healthy. With
-    max_retries=1 the router attempts primary (1 + 1 retry) = 2 times, then
-    fallback once, and resolves to the fallback."""
+async def test_gateway_exhausts_retries_for_each_model_then_uses_fallback():
+    """Primary permanently unavailable; fallback healthy. With max_retries=1 the
+    gateway attempts primary (1 + 1 retry) = 2 times, then fallback once."""
     inner = ModelRegistry()
     inner.register("fallback-model", config=_config("fallback-model"))
     flaky = _FlakyRegistry(inner, fail_times={"primary-model": 99})
-    router = ModelRouter(registry=flaky)
+    gateway = ModelGateway(ModelResolver(registry=flaky))
 
-    bundle = await router.resolve(
+    bundle = await gateway.resolve(
         ModelPolicy(
             primary="primary-model",
             fallbacks=("fallback-model",),
@@ -125,22 +139,20 @@ async def test_resolve_exhausts_retries_for_each_model_then_uses_fallback():
     )
 
     assert bundle.config.model_type == "fallback-model"
-    # primary tried (1 + max_retries=1) = 2 times before giving up.
     assert flaky.call_counts["primary-model"] == 2
-    # fallback tried once and succeeded.
     assert flaky.call_counts["fallback-model"] == 1
 
 
 @pytest.mark.asyncio
-async def test_resolve_raises_after_retrying_every_model_type():
+async def test_gateway_raises_after_retrying_every_model_type():
     """All model_types permanently unavailable; max_retries=2 -> each is tried
-    3 times (1 + 2 retries) before the router raises ModelRoutingError."""
+    3 times (1 + 2 retries) before the gateway raises ModelRoutingError."""
     inner = ModelRegistry()
     flaky = _FlakyRegistry(inner, fail_times={"primary-model": 99, "fb-model": 99})
-    router = ModelRouter(registry=flaky)
+    gateway = ModelGateway(ModelResolver(registry=flaky))
 
     with pytest.raises(ModelRoutingError):
-        await router.resolve(
+        await gateway.resolve(
             ModelPolicy(
                 primary="primary-model",
                 fallbacks=("fb-model",),
@@ -153,15 +165,15 @@ async def test_resolve_raises_after_retrying_every_model_type():
 
 
 @pytest.mark.asyncio
-async def test_resolve_max_retries_zero_preserves_current_behavior():
-    """max_retries=0 (default) means exactly one attempt per model_type -- no
-    retries. Confirms the new code path preserves the baseline behavior."""
+async def test_gateway_max_retries_zero_is_one_attempt_per_candidate():
+    """max_retries=0 (default) means exactly one attempt per candidate -- no
+    retries, matching the pre-split baseline."""
     inner = ModelRegistry()
     inner.register("fallback-model", config=_config("fallback-model"))
     flaky = _FlakyRegistry(inner, fail_times={"primary-model": 1})
-    router = ModelRouter(registry=flaky)
+    gateway = ModelGateway(ModelResolver(registry=flaky))
 
-    bundle = await router.resolve(
+    bundle = await gateway.resolve(
         ModelPolicy(
             primary="primary-model",
             fallbacks=("fallback-model",),
@@ -169,7 +181,15 @@ async def test_resolve_max_retries_zero_preserves_current_behavior():
         )
     )
 
-    # primary attempted once (failed), fallback once (succeeded).
     assert bundle.config.model_type == "fallback-model"
     assert flaky.call_counts["primary-model"] == 1
     assert flaky.call_counts["fallback-model"] == 1
+
+
+def test_model_policy_defaults():
+    policy = ModelPolicy(primary="m")
+    assert policy.fallbacks == ()
+    assert policy.max_retries == 0
+    assert policy.timeout_seconds is None
+    assert policy.max_tokens is None
+    assert policy.budget is None

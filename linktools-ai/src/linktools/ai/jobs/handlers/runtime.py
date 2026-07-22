@@ -238,9 +238,9 @@ class RuntimeTaskHandler:
                     message="lease was lost before bind_run; task reclaimed",
                 )
 
-        # Validate pinned resource snapshots before running: a stale or missing
+        # Validate pinned asset snapshots before running: a stale or missing
         # snapshot makes the run non-deterministic, so fail fast rather than
-        # execute against resources that may have changed.
+        # execute against assets that may have changed.
         result = await self._run_with_cancellation(spec, inp, run_id, context)
         if isinstance(result, TaskFailure):
             return result
@@ -357,18 +357,18 @@ class RuntimeTaskHandler:
         )
 
     async def _validate_snapshots(self, context: TaskContext) -> "TaskFailure | None":
-        """Fail fast if any pinned resource snapshot is missing or its content
+        """Fail fast if any pinned asset snapshot is missing or its content
         changed since it was pinned -- executing against a stale snapshot would
         make the run non-deterministic."""
         tenant = context.principal.tenant_id
-        for snap in context.resource_snapshots:
+        for snap in context.asset_snapshots:
             record = await self._artifact_store.stat(artifact_id=snap.artifact_id, tenant_id=tenant)
             if record is None or record.ref.sha256 != snap.sha256:
                 return TaskFailure(
                     kind=TaskFailureKind.INVALID_INPUT,
-                    error_type="StaleResourceSnapshot",
+                    error_type="StaleAssetSnapshot",
                     message=(
-                        f"resource snapshot {snap.path} is missing or its "
+                        f"asset snapshot {snap.path} is missing or its "
                         "content changed since it was pinned"
                     ),
                 )

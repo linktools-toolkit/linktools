@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SEC-03 (v5 guide §7): a session is bound to the (user_id, tenant_id) that
+"""(v5 guide ): a session is bound to the (user_id, tenant_id) that
 opened it. resolve_session enforces strict equality on re-open, so a caller who
 knows another tenant's session id cannot load its history.
 
@@ -13,7 +13,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai._runtime.lifecycle import resolve_session
+from linktools.ai.runtime.assembly.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError, SessionError
 from linktools.ai.storage.facade import FilesystemStorage
 

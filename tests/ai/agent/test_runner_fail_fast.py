@@ -14,13 +14,13 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -75,7 +75,7 @@ def _seed(store, session_id) -> None:
 def _compiled_spec_with_tools():
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
     )
     spec = AgentSpec(
         id="agent-1",
@@ -88,7 +88,7 @@ def _compiled_spec_with_tools():
 
 
 def _make_runner(
-    tmp_path, *, capability_assembler, managed_tool_executor
+    tmp_path, *, capability_resolver, managed_tool_executor
 ) -> AgentEngine:
     from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
@@ -102,7 +102,7 @@ def _make_runner(
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        capability_assembler=capability_assembler,
+        capability_resolver=capability_resolver,
         managed_tool_executor=managed_tool_executor,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
@@ -117,8 +117,8 @@ def _make_runner(
 @pytest.mark.parametrize(
     "assembler,executor,match",
     [
-        (None, None, "CapabilityAssembler"),
-        (CapabilityAssembler({}), None, "GovernedToolInvoker"),
+        (None, None, "CapabilityResolver"),
+        (CapabilityResolver({}), None, "GovernedToolInvoker"),
     ],
     ids=["no-assembler", "no-executor"],
 )
@@ -127,7 +127,7 @@ def test_eager_fail_fast_when_tools_declared(tmp_path, assembler, executor, matc
     (before any capability resolution work)."""
     runner = _make_runner(
         tmp_path,
-        capability_assembler=assembler,
+        capability_resolver=assembler,
         managed_tool_executor=executor,
     )
     _seed(runner._session_store, "session-1")
@@ -141,13 +141,13 @@ def test_empty_tools_never_raises_even_without_assembler_or_executor(tmp_path):
     """tools=() is a model-only run and does not require tool wiring."""
     runner = _make_runner(
         tmp_path,
-        capability_assembler=None,
+        capability_resolver=None,
         managed_tool_executor=None,
     )
     _seed(runner._session_store, "session-1")
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
     )
     spec = AgentSpec(
         id="agent-1",

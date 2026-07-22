@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for :class:`linktools.types.Timeout` -- spec §6.2 (TYP-002).
+"""Tests for :class:`linktools.types.Timeout` -- (TYP-002).
 
 Semantics under test:
 * uses ``time.monotonic`` (never wall-clock);
@@ -22,7 +22,7 @@ from linktools.types import Timeout
 # --------------------------------------------------------------------------- #
 
 def test_default_clock_is_monotonic():
-    """§6.2: process timeouts must not use wall time."""
+    """process timeouts must not use wall time."""
     assert lt_types._now is time.monotonic
 
 

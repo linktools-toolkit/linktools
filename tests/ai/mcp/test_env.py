@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCP ``${ENV}`` expansion tests (spec §17)."""
+"""MCP ``${ENV}`` expansion tests."""
 
 import os
 import unittest

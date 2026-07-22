@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Tests for the LoggingManager redaction + context (spec §5.6 LOG-003,
-§5.7 LOG-004, §22.3).
+"""Tests for the LoggingManager redaction + context ( LOG-003,
+ LOG-004).
 
 The manager is the single place log records are scrubbed of secrets and
 annotated with thread-local context. Business modules must never call
-``logging.basicConfig``/``addHandler``/``setLevel`` themselves (§3.2/§5.8) --
+``logging.basicConfig``/``addHandler``/``setLevel`` themselves --
 those go through the manager.
 """
 import logging
@@ -22,7 +22,7 @@ def manager():
 
 
 # --------------------------------------------------------------------------- #
-# §5.6 Secret redaction -- the built-in scrubbers must cover the categories
+# Secret redaction -- the built-in scrubbers must cover the categories
 # listed in the spec without any registration.
 # --------------------------------------------------------------------------- #
 
@@ -128,7 +128,7 @@ def test_redact_does_not_touch_clean_text(manager):
 
 
 # --------------------------------------------------------------------------- #
-# §5.7 Context -- thread-local, scoped via a context manager.
+# Context -- thread-local, scoped via a context manager.
 # --------------------------------------------------------------------------- #
 
 def test_context_attaches_fields_and_pops_on_exit(manager):

@@ -12,7 +12,7 @@ import pytest
 from linktools.ai.agent.spec import AgentSpec
 from linktools.ai.errors import RegistryNotFoundError
 from linktools.ai.extension.entrypoint import EntrypointRef
-from linktools.ai.extension.resource import ResourceRef
+from linktools.ai.extension.content import ExtensionContentRef
 from linktools.ai.extension.scope import ExtensionScope
 
 
@@ -51,20 +51,20 @@ async def assert_tool_policy_provider_contract(provider, *, sample_name):
         assert hasattr(meta, field), f"ToolPolicyMetadata missing {field}"
 
 
-async def assert_extension_resource_provider_contract(
+async def assert_extension_content_source_contract(
     provider, *, extension_id, sample_path
 ):
-    """list_resources paginates (limit/cursor); read_resource honors max_bytes;
+    """list_entries paginates (limit/cursor); read_content honors max_bytes;
     parent-traversal is rejected."""
     scope = ExtensionScope(extension_id)
-    page = await provider.list_resources(scope, "", limit=1)
+    page = await provider.list_entries(scope, "", limit=1)
     assert hasattr(page, "next_cursor")
-    content = await provider.read_resource(
-        ResourceRef(scope, sample_path), max_bytes=1 << 20
+    content = await provider.read_content(
+        ExtensionContentRef(scope, sample_path), max_bytes=1 << 20
     )
     assert hasattr(content, "content") and hasattr(content, "size_bytes")
     with pytest.raises(Exception):
-        await provider.read_resource(ResourceRef(scope, "../escape"))
+        await provider.read_content(ExtensionContentRef(scope, "../escape"))
 
 
 async def assert_entrypoint_resolver_contract(resolver, *, extension_id, agent_name):

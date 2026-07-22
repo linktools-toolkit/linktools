@@ -1101,7 +1101,7 @@ class FilesystemJobStore:
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=cmd.timeout_seconds,
-            resource_snapshots=parent.resource_snapshots,
+            asset_snapshots=parent.asset_snapshots,
             version=1,
             created_at=now,
             updated_at=now,

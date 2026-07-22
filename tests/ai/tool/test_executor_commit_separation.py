@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Executor execution/commit separation (§9.1 / §9.3): a Handler that succeeds
+"""Executor execution/commit separation: a Handler that succeeds
 must never be re-invoked because the fenced result commit failed.
 
 The legacy executor ran ``complete()`` inside the Handler retry loop, so a
 commit failure was caught like a transient handler error and the Handler was
-re-run -- re-executing any side effect. The §9 fix records an EXECUTED receipt
+re-run -- re-executing any side effect. The fix records an EXECUTED receipt
 between the Handler and the commit, and moves the commit out of the retry loop.
 """
 
@@ -142,7 +142,7 @@ def test_successful_idempotent_execution_persists_receipt_artifact(tmp_path):
 
 
 def test_handler_runs_once_when_complete_fails(tmp_path):
-    # §9.1: a commit failure after the Handler returned must never re-invoke it.
+    # : a commit failure after the Handler returned must never re-invoke it.
     calls = {"n": 0}
 
     async def handler(**kwargs):
@@ -210,7 +210,7 @@ def test_handler_failure_marks_failed_without_receipt(tmp_path):
 
 
 def test_executed_record_replays_without_re_running_handler(tmp_path):
-    # §9.6 / §9.7 precondition: an EXECUTED record (crash between mark_executed
+    # precondition: an EXECUTED record (crash between mark_executed
     # and complete) is safe to replay on a later claim -- the Handler is NOT
     # invoked again; the stored receipt is returned.
     from linktools.ai.tool.idempotency import compute_request_hash

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for EventBus (spec §15.2)."""
+"""Tests for EventBus."""
 import pytest
 
 from linktools.runtime.events import (
@@ -7,7 +7,7 @@ from linktools.runtime.events import (
 )
 
 
-# §15.2 RUN-EVT-001 subscription ----------------------------------------------
+# RUN-EVT-001 subscription ----------------------------------------------
 
 def test_on_returns_cancellable_subscription():
     bus = EventBus()
@@ -32,7 +32,7 @@ def test_off_removes_handler():
     assert hits == []
 
 
-# §15.2 RUN-EVT-003 once ------------------------------------------------------
+# RUN-EVT-003 once ------------------------------------------------------
 
 def test_once_fires_only_once():
     bus = EventBus()
@@ -53,7 +53,7 @@ def test_on_times_n():
     assert hits == [(1,), (2,)]
 
 
-# §15.2 RUN-EVT-002 exception policies ---------------------------------------
+# RUN-EVT-002 exception policies ---------------------------------------
 
 def test_policy_log_and_continue_keeps_going():
     bus = EventBus(exception_policy=LOG_AND_CONTINUE)
@@ -97,7 +97,7 @@ def test_unknown_policy_rejected():
         EventBus(exception_policy="bogus")
 
 
-# §15.2 RUN-EVT-004 thread-safety / self-cancel ------------------------------
+# RUN-EVT-004 thread-safety / self-cancel ------------------------------
 
 def test_callback_can_cancel_self_during_emit():
     bus = EventBus()

@@ -15,7 +15,7 @@ from linktools.ai.run.manifest import (
     MCPManifest,
     ManifestResolver,
     ResolvedExecution,
-    ResourceRevision,
+    CapabilityRevision,
     Resumability,
     SCHEMA_VERSION,
     ToolManifest,
@@ -168,7 +168,7 @@ def test_build_manifest_records_provider_revision_when_supplied():
     assert manifest.model_provider == "_VersionedProvider"
 
 
-# --- JSON round-trip (§13.8) -------------------------------------------------
+# --- JSON round-trip -------------------------------------------------
 
 
 def test_manifest_round_trips_through_dict():
@@ -185,10 +185,10 @@ def test_manifest_round_trips_through_dict():
             ToolManifest(name="t", descriptor_fingerprint="d", handler_revision="h"),
         ),
         skill_revisions=(
-            ResourceRevision(path="s.md", revision="r", etag="e", sha256="sh", artifact_id="a"),
+            CapabilityRevision(path="s.md", revision="r", etag="e", sha256="sh", artifact_id="a"),
         ),
         subagent_revisions=(
-            ResourceRevision(path="sub.md", revision=None, etag=None, sha256=None, artifact_id="aid"),
+            CapabilityRevision(path="sub.md", revision=None, etag=None, sha256=None, artifact_id="aid"),
         ),
         mcp_servers=(MCPManifest(name="srv", revision="mr"),),
         policy_revision="pol",
@@ -211,7 +211,7 @@ def test_manifest_from_dict_tolerates_partial_legacy_payload():
     assert restored.model_revision is None
 
 
-# --- compute_resumability (§13.7 / §13.8) ------------------------------------
+# --- compute_resumability ------------------------------------
 
 
 def _manifest(**overrides):
@@ -262,7 +262,7 @@ def test_compute_resumability_non_resumable_for_ephemeral_provider():
 def test_compute_resumability_non_resumable_for_missing_resource_snapshot():
     manifest = _manifest(
         skill_revisions=(
-            ResourceRevision(path="s.md", revision=None, etag=None, sha256=None, artifact_id=None),
+            CapabilityRevision(path="s.md", revision=None, etag=None, sha256=None, artifact_id=None),
         ),
     )
     verdict, reasons = compute_resumability(manifest)
@@ -275,7 +275,7 @@ def test_compute_resumability_resumable_when_resource_pinned_by_etag_only():
     # HTTP-served skill that exposes ETag but no content hash) is resumable.
     manifest = _manifest(
         skill_revisions=(
-            ResourceRevision(path="s.md", revision=None, etag="etag-x", sha256=None, artifact_id=None),
+            CapabilityRevision(path="s.md", revision=None, etag="etag-x", sha256=None, artifact_id=None),
         ),
     )
     verdict, reasons = compute_resumability(manifest)
@@ -314,7 +314,7 @@ def test_resolved_execution_default_notes_empty():
     assert resolved.manifest is manifest
 
 
-# --- DefaultManifestResolver (§13.6 drift detection) -------------------------
+# --- DefaultManifestResolver -------------------------
 
 
 def test_default_resolver_accepts_matching_provider_revision():

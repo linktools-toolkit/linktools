@@ -3,7 +3,7 @@
 """RunDefinitionSnapshot: the immutable record of what a Run was launched with
 (spec + identity), persisted at run creation so resume can restore the EXACT
 original definition instead of accepting a caller-supplied spec/identity (the
-R-03 security gap). The snapshot carries a full serialized spec + a
+ security gap). The snapshot carries a full serialized spec + a
 canonical-JSON fingerprint; resume deserializes the spec, recomputes the
 fingerprint, and rejects a mismatch."""
 

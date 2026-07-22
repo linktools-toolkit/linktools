@@ -6,7 +6,7 @@ from linktools.ai.errors import (
 )
 from linktools.ai.mcp.provider import MCPExposedTool
 from linktools.ai.mcp.client import (
-    MCPConnectionManager,
+    MCPConnectionPool,
     MCPConnectionRef,
     MCPToolsetHandle,
 )
@@ -104,7 +104,7 @@ def test_mcp_error_codes_are_stable_and_sanitizer_bounds_secrets_and_payload():
 
 @pytest.mark.asyncio
 async def test_mcp_discovery_uses_list_tools_not_contextual_get_tools():
-    manager = MCPConnectionManager()
+    manager = MCPConnectionPool()
     spec = MCPServerSpec(
         id="srv",
         name="srv",

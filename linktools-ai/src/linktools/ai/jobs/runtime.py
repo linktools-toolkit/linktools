@@ -6,7 +6,7 @@ The runtime is the downstream-facing entry point. A caller registers handlers
 by name, then ``run`` drives a worker loop that claims tasks, builds a
 :class:`TaskContext`, runs the matching :class:`TaskHandler`, and commits the
 outcome. The runtime does NOT execute agents itself -- it only schedules
-``TaskHandler`` implementations, one of which (later phase) wraps the existing
+``TaskHandler`` implementations, one of which wraps the existing
 ``linktools.ai.Runtime``.
 
 ``ensure_recovered`` runs lease-expiry recovery once at startup under a lock
@@ -312,7 +312,7 @@ class JobRuntime:
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=timeout_seconds,
-            resource_snapshots=(),
+            asset_snapshots=(),
             version=1,
             created_at=now,
             updated_at=now,

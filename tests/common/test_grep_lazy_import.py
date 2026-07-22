@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""grep must not import its optional lief/magic deps at module load (spec §6.3).
+"""grep must not import its optional lief/magic deps at module load.
 
 Command discovery imports every command module; if grep imported lief/magic at
 the top level, `ct grep` (and the whole `common` group) would vanish whenever

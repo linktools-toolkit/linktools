@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for :class:`linktools.core._environ.Environ` isolation.
 
-Spec §31 (first-batch checklist) and §5.2 (ENV-001): ``BaseEnviron`` factories
+Spec (first-batch checklist) and (ENV-001): ``BaseEnviron`` factories
 must resolve paths through ``self`` rather than the module-level ``environ``
 singleton, otherwise a custom :class:`Environment` instance silently shares
 state with the default global.

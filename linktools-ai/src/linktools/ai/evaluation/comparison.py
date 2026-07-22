@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Comparison: aggregate and compare Baseline vs Candidate eval results.
 
-aggregate() reduces a sequence of EvalResults into the metric set the plan calls
-out (per-evaluator avg + pass rate, error rate, P50/P95 latency, average tokens
+aggregate() reduces a sequence of EvalResults into the metric set
+(per-evaluator avg + pass rate, error rate, P50/P95 latency, average tokens
 and cost, safety-refusal rate, average retry count). The per-case signals are
 read from each result's ``metrics`` mapping under conventional keys
 (``latency_seconds``, ``total_tokens``, ``total_cost``, ``safety_refusal``,

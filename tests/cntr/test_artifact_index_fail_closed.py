@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ArtifactIndex.record() concurrency safety and Doctor/Plan's handling of
+"""ArtifactIndex.record() concurrency safety and Doctor/ handling of
 a corrupted index (review P1-12).
 """
 import threading

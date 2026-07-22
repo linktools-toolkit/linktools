@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DirectoryExtensionResourceProvider (contract/contract): path sandbox,
+"""DirectoryExtensionContentSource (contract/contract): path sandbox,
 pagination, and max_bytes read clamp."""
 
 import pytest
 
 from linktools.ai.errors import (
-    ExtensionResourceAccessDeniedError,
-    ExtensionResourceNotFoundError,
+    ExtensionContentAccessDeniedError,
+    ExtensionContentNotFoundError,
 )
-from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
-from linktools.ai.extension.resource import ResourceRef
+from linktools.ai.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.extension.content import ExtensionContentRef
 from linktools.ai.extension.scope import ExtensionScope
 
 
@@ -23,19 +23,19 @@ def provider(tmp_path):
     (root / "references" / "a.md").write_text("aaa", encoding="utf-8")
     (root / "references" / "b.md").write_text("bbb", encoding="utf-8")
     (root / "agents" / "grader.md").write_text("# grader", encoding="utf-8")
-    return DirectoryExtensionResourceProvider({"skill-creator": root}), root
+    return DirectoryExtensionContentSource({"skill-creator": root}), root
 
 
 SCOPE = ExtensionScope("skill-creator", "skill")
 
 
 @pytest.mark.asyncio
-async def test_list_resources_paginates(provider):
+async def test_list_entries_paginates(provider):
     p, _ = provider
-    page1 = await p.list_resources(SCOPE, "references", limit=1)
+    page1 = await p.list_entries(SCOPE, "references", limit=1)
     assert len(page1.items) == 1
     assert page1.next_cursor is not None
-    page2 = await p.list_resources(
+    page2 = await p.list_entries(
         SCOPE, "references", limit=1, cursor=page1.next_cursor
     )
     assert len(page2.items) == 1
@@ -44,18 +44,18 @@ async def test_list_resources_paginates(provider):
 
 
 @pytest.mark.asyncio
-async def test_list_resources_unknown_extension_raises(provider):
+async def test_list_entries_unknown_extension_raises(provider):
     p, _ = provider
     from linktools.ai.errors import ExtensionNotFoundError
 
     with pytest.raises(ExtensionNotFoundError):
-        await p.list_resources(ExtensionScope("nope"), "")
+        await p.list_entries(ExtensionScope("nope"), "")
 
 
 @pytest.mark.asyncio
-async def test_read_resource_returns_content(provider):
+async def test_read_content_returns_content(provider):
     p, _ = provider
-    content = await p.read_resource(ResourceRef(scope=SCOPE, path="SKILL.md"))
+    content = await p.read_content(ExtensionContentRef(scope=SCOPE, path="SKILL.md"))
     assert b"skill" in (
         content.content
         if isinstance(content.content, bytes)
@@ -65,11 +65,11 @@ async def test_read_resource_returns_content(provider):
 
 
 @pytest.mark.asyncio
-async def test_read_resource_clamps_to_max_bytes(provider):
+async def test_read_content_clamps_to_max_bytes(provider):
     p, root = provider
     (root / "big.txt").write_text("x" * 1000, encoding="utf-8")
-    content = await p.read_resource(
-        ResourceRef(scope=SCOPE, path="big.txt"), max_bytes=10
+    content = await p.read_content(
+        ExtensionContentRef(scope=SCOPE, path="big.txt"), max_bytes=10
     )
     assert len(content.content) == 10
     assert content.size_bytes == 1000
@@ -77,17 +77,17 @@ async def test_read_resource_clamps_to_max_bytes(provider):
 
 
 @pytest.mark.asyncio
-async def test_read_resource_bounds_io_not_just_payload(tmp_path):
-    # A resource larger than max_bytes must not be fully read into memory just to
+async def test_read_content_bounds_io_not_just_payload(tmp_path):
+    # A asset larger than max_bytes must not be fully read into memory just to
     # be truncated -- size_bytes reflects cap+1 (the read bound), not the file.
-    from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
+    from linktools.ai.extension.provider import DirectoryExtensionContentSource
 
     root = tmp_path / "pkg"
     root.mkdir()
     (root / "huge.txt").write_text("y" * 100_000, encoding="utf-8")
-    prov = DirectoryExtensionResourceProvider({"pkg": root})
-    content = await prov.read_resource(
-        ResourceRef(scope=ExtensionScope("pkg"), path="huge.txt"), max_bytes=16
+    prov = DirectoryExtensionContentSource({"pkg": root})
+    content = await prov.read_content(
+        ExtensionContentRef(scope=ExtensionScope("pkg"), path="huge.txt"), max_bytes=16
     )
     assert len(content.content) == 16  # payload bounded to max_bytes
     assert content.size_bytes == 100_000  # true file size (stat), not bytes read
@@ -95,35 +95,35 @@ async def test_read_resource_bounds_io_not_just_payload(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_read_resource_rejects_parent_traversal(provider):
+async def test_read_content_rejects_parent_traversal(provider):
     p, _ = provider
     with pytest.raises(ValueError):
-        await p.read_resource(ResourceRef(scope=SCOPE, path="../etc/passwd"))
+        await p.read_content(ExtensionContentRef(scope=SCOPE, path="../etc/passwd"))
 
 
 @pytest.mark.asyncio
-async def test_read_resource_rejects_absolute_path(provider):
+async def test_read_content_rejects_absolute_path(provider):
     p, _ = provider
     with pytest.raises(ValueError):
-        await p.read_resource(ResourceRef(scope=SCOPE, path="/etc/passwd"))
+        await p.read_content(ExtensionContentRef(scope=SCOPE, path="/etc/passwd"))
 
 
 @pytest.mark.asyncio
-async def test_read_resource_missing_raises(provider):
+async def test_read_content_missing_raises(provider):
     p, _ = provider
-    with pytest.raises(ExtensionResourceNotFoundError):
-        await p.read_resource(ResourceRef(scope=SCOPE, path="nope.md"))
+    with pytest.raises(ExtensionContentNotFoundError):
+        await p.read_content(ExtensionContentRef(scope=SCOPE, path="nope.md"))
 
 
 @pytest.mark.asyncio
-async def test_read_resource_requires_scope(provider):
+async def test_read_content_requires_scope(provider):
     p, _ = provider
-    with pytest.raises(ExtensionResourceAccessDeniedError):
-        await p.read_resource(ResourceRef(scope=None, path="SKILL.md"))
+    with pytest.raises(ExtensionContentAccessDeniedError):
+        await p.read_content(ExtensionContentRef(scope=None, path="SKILL.md"))
 
 
 def test_sanitize_rejects_null_byte_and_drive():
-    from linktools.ai.extension.resource import sanitize_extension_path
+    from linktools.ai.extension.content import sanitize_extension_path
 
     with pytest.raises(ValueError):
         sanitize_extension_path("a\x00b")
@@ -132,7 +132,7 @@ def test_sanitize_rejects_null_byte_and_drive():
 
 
 def test_sanitize_collapses_dot_and_rejects_parent():
-    from linktools.ai.extension.resource import sanitize_extension_path
+    from linktools.ai.extension.content import sanitize_extension_path
 
     assert sanitize_extension_path("a/./b/") == "a/b"
     with pytest.raises(ValueError):
@@ -140,20 +140,20 @@ def test_sanitize_collapses_dot_and_rejects_parent():
 
 
 @pytest.mark.asyncio
-async def test_read_resource_extension_allow_deny(tmp_path):
-    from linktools.ai.errors import ExtensionResourceAccessDeniedError
-    from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
+async def test_read_content_extension_allow_deny(tmp_path):
+    from linktools.ai.errors import ExtensionContentAccessDeniedError
+    from linktools.ai.extension.provider import DirectoryExtensionContentSource
 
     root = tmp_path / "pkg"
     root.mkdir()
     (root / "a.md").write_text("md", encoding="utf-8")
     (root / "b.bin").write_text("bin", encoding="utf-8")
     # allow only .md
-    prov = DirectoryExtensionResourceProvider({"pkg": root}, allow_extensions=(".md",))
-    await prov.read_resource(ResourceRef(scope=ExtensionScope("pkg"), path="a.md"))
-    with pytest.raises(ExtensionResourceAccessDeniedError):
-        await prov.read_resource(ResourceRef(scope=ExtensionScope("pkg"), path="b.bin"))
+    prov = DirectoryExtensionContentSource({"pkg": root}, allow_extensions=(".md",))
+    await prov.read_content(ExtensionContentRef(scope=ExtensionScope("pkg"), path="a.md"))
+    with pytest.raises(ExtensionContentAccessDeniedError):
+        await prov.read_content(ExtensionContentRef(scope=ExtensionScope("pkg"), path="b.bin"))
     # deny .bin
-    prov2 = DirectoryExtensionResourceProvider({"pkg": root}, deny_extensions=(".bin",))
-    with pytest.raises(ExtensionResourceAccessDeniedError):
-        await prov2.read_resource(ResourceRef(scope=ExtensionScope("pkg"), path="b.bin"))
+    prov2 = DirectoryExtensionContentSource({"pkg": root}, deny_extensions=(".bin",))
+    with pytest.raises(ExtensionContentAccessDeniedError):
+        await prov2.read_content(ExtensionContentRef(scope=ExtensionScope("pkg"), path="b.bin"))

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the ConfigStore (spec §8.5 CFG-005 PersistentStore).
+"""Tests for the ConfigStore.
 
 A user-editable JSON file written atomically under a process lock. This is the
 proper home for persistent user state (e.g. cntr's INSTALLED_CONTAINERS) that
@@ -44,7 +44,7 @@ def test_persists_across_instances(store, tmp_path):
 def test_remove(store):
     store.save(a=1, b=2)
     assert store.remove("a") is True
-    # v4 §3.4: get returns MISSING (not None) for absent keys
+    # v4 : get returns MISSING (not None) for absent keys
     from linktools.types import MISSING
     assert store.get("a") is MISSING
     assert "a" not in store

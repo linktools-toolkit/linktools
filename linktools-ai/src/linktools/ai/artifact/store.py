@@ -79,7 +79,7 @@ async def _stage_and_digest(
     ones roll to disk automatically, and the caller re-streams the file into
     ``put_if_absent`` in bounded chunks.
 
-    Plan §4.2: ``staging_dir`` makes the temp directory caller-configurable;
+    ``staging_dir`` makes the temp directory caller-configurable;
     every file read/write runs on a worker thread (``asyncio.to_thread``) so a
     large artifact's disk I/O never blocks the event loop; an I/O failure on the
     spool (disk-full / ENOSPC, or any OSError) is wrapped as
@@ -296,7 +296,7 @@ class ArtifactStore:
         now: "datetime | None" = None,
     ) -> ArtifactRecord:
         """Streaming put: hash + persist ``source`` without ever holding the
-        whole artifact in a single ``bytes`` (plan §4.2 upload algorithm).
+        whole artifact in a single ``bytes``.
 
         Two branches. (1) Caller provides ``expected_digest`` -- it already
         knows the sha256, so the source is wrapped in a one-pass verifying
@@ -333,7 +333,7 @@ class ArtifactStore:
         expected_digest: str,
         declared_size: "int | None",
     ) -> "tuple[str, int]":
-        """Plan §4.2 'caller provides expected_digest' branch: wrap source in a
+        """'caller provides expected_digest' branch: wrap source in a
         verifying iterator (incremental sha256 + size tally) and stream it
         DIRECTLY into ``put_if_absent`` under the claimed digest -- no staging
         file, because the caller vouches for the digest. The blob store
@@ -381,7 +381,7 @@ class ArtifactStore:
     async def _put_stream_via_staging(
         self, *, source: AsyncIterator[bytes]
     ) -> "tuple[str, int]":
-        """Plan §4.2 'caller does not provide expected_digest' branch: spill
+        """'caller does not provide expected_digest' branch: spill
         source to a spooled temp file (bounded RSS, configurable staging dir,
         threaded file I/O), hash incrementally, then re-stream into
         ``put_if_absent`` under the computed digest. Returns ``(digest, size)``."""
@@ -415,13 +415,13 @@ class ArtifactStore:
     async def open_stream(
         self, *, artifact_id: str, tenant_id: str
     ) -> AsyncIterator[bytes]:
-        """Streaming read (plan §4.2): ``async with store.open_stream(...) as
+        """Streaming read: ``async with store.open_stream(...) as
         chunks: async for chunk in chunks``. Yields the artifact's bytes in
         chunks without buffering the whole blob into RAM. Tenant-gated -- a
         foreign caller learns nothing, not even that the artifact exists (the
         context yields an empty iterator).
 
-        Integrity is verified at stream EXHAUSTION (plan §4.2 step 5): BOTH size
+        Integrity is verified at stream EXHAUSTION: BOTH size
         and sha256 are accumulated as chunks are yielded, and a mismatch raises
         :class:`ArtifactIntegrityError` after the final chunk. A caller that
         stops iterating early forgoes the check (partial reads are not

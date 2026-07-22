@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
-"""RF-04 / plan §6.4 streaming-RSS cap: the headline 1 GiB benchmark.
+"""streaming-RSS cap: the headline 1 GiB benchmark.
 
-The plan §5 R7 op 1-3 requires a REAL RSS measurement on a REAL 1 GiB stream of
+The op 1-3 requires a REAL RSS measurement on a REAL 1 GiB stream of
 NON-REPEATING bytes through ``ArtifactStore.put_stream`` and ``open_stream``
 over a ``FilesystemArtifactBlobStore``, asserting the EXTRA RSS (peak during
 the op minus baseline) is ≤ 64 MiB in both directions. The failure-handling
@@ -11,7 +11,7 @@ section (line 1255) forbids lowering the scale, restricting to the bytes API,
 or removing the RSS assertion to make the test green -- the proof has to be
 honest.
 
-Why non-repeating bytes: §6.2 calls out a constant buffer (e.g. all-zero) as
+Why non-repeating bytes: calls out a constant buffer (e.g. all-zero) as
 forbidden because the OS page cache could compress/dedup it, masking RSS. The
 generator below yields 1 MiB chunks whose contents are derived from a
 per-chunk-index PRNG seed: no two chunks share bytes, and within each chunk the
@@ -24,12 +24,12 @@ work). The peak across the op minus the pre-op baseline is the EXTRA RSS
 attributable to the streaming operation.
 
 This test runs in the default suite (it moves ~1 GiB of I/O but completes in a
-few seconds); a skipped acceptance test is not evidence (§6.8), so this asserts
+few seconds); a skipped acceptance test is not evidence, so this asserts
 the ≤ 64 MiB cap unconditionally rather than only opt-in.
 
 The benchmark writes a JSON + Markdown summary capturing the measured numbers
 under ``PERF_RESULTS_DIR`` (default ``.docs/review-fix``) so a reviewer can
-see the actual RSS rather than just a pass/fail bit (plan §5 op 7)."""
+see the actual RSS rather than just a pass/fail bit."""
 
 import asyncio
 import gc
@@ -54,7 +54,7 @@ from linktools.ai.storage.filesystem.artifact import (
 _GIB = 1024 ** 3
 _MIB = 1024 ** 2
 _KIB = 1024
-# Plan §6.4 / RF-04: extra RSS ceiling for streaming a 1 GiB artifact.
+# / : extra RSS ceiling for streaming a 1 GiB artifact.
 _RSS_LIMIT_MIB = 64
 # Default chunk size yielded by the source generator: 1 MiB. Small enough that
 # peak RSS from a single in-flight chunk is trivially bounded; large enough
@@ -198,8 +198,8 @@ def test_put_stream_and_open_stream_extra_rss_under_64mib(tmp_path: Path) -> Non
 
     The scale is the FULL 1 GiB; the data is NON-REPEATING (per-chunk PRNG
     seed); the RSS is the real peak-during-minus-baseline from a background
-    thread sampling /proc/self/status. The 64 MiB ceiling is the plan §6.4 /
-    RF-04 acceptance threshold; the failure-handling line forbids any cheat
+    thread sampling /proc/self/status. The 64 MiB ceiling is the /
+     acceptance threshold; the failure-handling line forbids any cheat
     (lower scale, bytes-API only, removed assertion) to make it green."""
     if _read_vm_rss_kib() is None:
         pytest.skip("/proc/self/status VmRSS unavailable -- requires Linux")

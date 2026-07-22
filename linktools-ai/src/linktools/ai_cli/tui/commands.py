@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Command palette + slash commands for the TUI (spec §20).
+"""Command palette + slash commands for the TUI.
 
 The command palette (Ctrl+P) is a GUI-style menu of actions; slash commands are
 typed in the composer (/help, /new, /clear, ...). Together they replace the old

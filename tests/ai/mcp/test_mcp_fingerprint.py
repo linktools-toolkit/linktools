@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCP connection fingerprint (WP-12 §17.3): canonical-JSON payload, so the
+"""MCP connection fingerprint: canonical-JSON payload, so the
 governance-relevant config hashes without ambiguous delimiter joins. None vs
 empty allowlist, spaced-vs-split command parts, and a rotated secret must each
 produce a different fingerprint; the secret plaintext never appears in it."""

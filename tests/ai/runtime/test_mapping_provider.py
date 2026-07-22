@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai._runtime.dependencies import MappingProvider
+from linktools.ai.runtime.dependencies import MappingProvider
 
 
 def test_mapping_provider_list_ids():

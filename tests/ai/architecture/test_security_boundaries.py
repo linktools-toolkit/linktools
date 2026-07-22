@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Security-architecture boundary freeze for linktools.ai.
 
-Phase 0 of the production-hardening plan
+of the 
 (``.docs/linktools-ai-production-hardening-plan.md``) snapshots the CURRENT
-security-relevant architecture BEFORE later phases change it. Every assertion
-describes the code as it is on the branch base; when a later phase
+security-relevant architecture BEFORE s change it. Every assertion
+describes the code as it is on the branch base; when a 
 legitimately changes one of these invariants, update the snapshot in the same
 change so the change is intentional and visible rather than silent.
 
@@ -15,18 +15,18 @@ keeps the heavy extension domains out) are already frozen in
 ``test_task_boundaries.py`` and are not duplicated here. This file freezes the
 security-specific surfaces only.
 
-Snapshot invariants (a later phase WILL change these -- update here then):
+Snapshot invariants (a WILL change these -- update here then):
 
 * Approval identity and execution revisions are bound fields; service-level
   approval derives ``resolved_by`` from Principal.
 
 Landed invariants:
 
-* §7.1 / §7.2 -- ``PrincipalContext`` (reusing ``task.models`` ActorRef /
+* -- ``PrincipalContext`` (reusing ``task.models`` ActorRef /
   ScopeSet) + ``AuthorizationService`` / AllowOwner / DenyAll;
-* §7.3 -- ``Runtime.cancel`` / ``resume`` accept ``principal`` and reject a
+* -- ``Runtime.cancel`` / ``resume`` accept ``principal`` and reject a
   missing principal unless ``local_trusted_mode`` (default-strict).
-* §12.3 / §12.4 -- ``MemoryRecord`` is tenant-scoped (tenant_id +
+* -- ``MemoryRecord`` is tenant-scoped (tenant_id +
   user/workspace/session sub-scopes) and ``MemoryStore.search`` takes a
   required ``MemoryScope`` with no ``scope=None`` global-search path.
 """
@@ -42,7 +42,7 @@ import sys
 
 
 def test_linktools_core_does_not_require_redis() -> None:
-    # §5.2: redis is never the source of truth; the core framework must not
+    # : redis is never the source of truth; the core framework must not
     # acquire it as an import-time dependency.
     code = "import sys; import linktools.core; assert 'redis' not in sys.modules"
     result = subprocess.run(
@@ -51,11 +51,11 @@ def test_linktools_core_does_not_require_redis() -> None:
     assert result.returncode == 0, result.stderr
 
 
-# --- Sensitive-operation signatures (§7.3 landed) ---------------------------
+# --- Sensitive-operation signatures ---------------------------
 
 
 def test_runtime_cancel_accepts_principal() -> None:
-    # §7.3 landed: cancel is keyword-gated by ``principal`` (+ ``reason``);
+    # landed: cancel is keyword-gated by ``principal`` (+ ``reason``);
     # run_id is no longer sufficient authorization.
     from linktools.ai.runtime import Runtime
 
@@ -64,18 +64,18 @@ def test_runtime_cancel_accepts_principal() -> None:
 
 
 def test_runtime_resume_accepts_principal() -> None:
-    # §7.3 landed: resume is keyword-gated by ``principal``.
+    # landed: resume is keyword-gated by ``principal``.
     from linktools.ai.runtime import Runtime
 
     params = inspect.signature(Runtime.resume).parameters
     assert {"self", "run_id", "principal"} <= set(params), dict(params)
 
 
-# --- Identity / authorization models (§7.1 / §7.2 landed) -------------------
+# --- Identity / authorization models -------------------
 
 
 def test_principal_context_is_defined_and_reuses_actor_types() -> None:
-    # Phase 1: PrincipalContext/ActorRef/ScopeSet now own by the identity
+    # PrincipalContext/ActorRef/ScopeSet now own by the identity
     # domain -- a standalone package that nothing downstream owns. jobs.models
     # imports them from identity (single definition, no duplicate).
     assert importlib.util.find_spec("linktools.ai.identity.principal") is not None
@@ -93,7 +93,7 @@ def test_principal_context_is_defined_and_reuses_actor_types() -> None:
 
 
 def test_authorization_service_is_defined() -> None:
-    # §7.2 landed: AuthorizationService Protocol + AllowOwner / DenyAll impls.
+    # landed: AuthorizationService Protocol + AllowOwner / DenyAll impls.
     assert importlib.util.find_spec("linktools.ai.governance.security.authorization") is not None
     from linktools.ai.governance.security.authorization import (
         AllowOwnerAuthorization,
@@ -106,11 +106,11 @@ def test_authorization_service_is_defined() -> None:
     assert DenyAllAuthorization is not None
 
 
-# --- Snapshot: approval shape (§11 will change) ------------------------------
+# --- Snapshot: approval shape ------------------------------
 
 
 def test_approval_request_redacts_arguments_snapshot() -> None:
-    # §11.1 / §11.4 landed: ApprovalRequest no longer persists the raw call
+    # landed: ApprovalRequest no longer persists the raw call
     # arguments (they may carry secrets). It stores a redacted audit copy
     # (redacted_arguments) + an identity fingerprint (arguments_hash). The
     # handler still receives the real arguments in memory; this record is for
@@ -129,11 +129,11 @@ def test_approval_request_redacts_arguments_snapshot() -> None:
         assert bound in fields
 
 
-# --- Snapshot: memory identity (§12 landed) ----------------------------------
+# --- Snapshot: memory identity ----------------------------------
 
 
 def test_memory_record_is_tenant_scoped() -> None:
-    # §12.3 landed: MemoryRecord now carries tenant_id (the hard isolation
+    # landed: MemoryRecord now carries tenant_id (the hard isolation
     # boundary) plus optional user_id / workspace_id / session_id sub-scopes.
     # owner_id is retained as a display/compat field but is NOT an authorization
     # boundary.
@@ -147,7 +147,7 @@ def test_memory_record_is_tenant_scoped() -> None:
 
 
 def test_memory_store_search_requires_scope() -> None:
-    # §12.4 landed: search takes a required MemoryScope and has no owner_id
+    # landed: search takes a required MemoryScope and has no owner_id
     # kwarg and no scope=None global-search default.
     from linktools.ai.memory.scope import MemoryScope
     from linktools.ai.memory.store import MemoryStore

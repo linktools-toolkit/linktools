@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SqlNamingStrategy: the plan §4.7 frozen SqlAlchemyStorageAdapter constructor
+"""SqlNamingStrategy: the frozen SqlAlchemyStorageAdapter constructor
 parameter. Holds a SQLAlchemy ``naming_convention`` (the standard SQLAlchemy
 mechanism for deriving constraint/index names) so a downstream can standardize
 them -- e.g. for explicit Alembic migration DDL where stable constraint names

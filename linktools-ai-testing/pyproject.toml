@@ -1,0 +1,32 @@
+# linktools-ai-testing -- the storage conformance testkit, shipped as an
+# INDEPENDENT distribution from the core linktools-ai wheel.
+#
+# This package holds the Protocol conformance contract mixins + fixtures that
+# downstream adapters subclass to prove their backend meets the same observable
+# semantics the in-repo reference backends must pass. It is test-support code:
+# it never ships inside the linktools-ai wheel, and it depends on pytest.
+#
+# Import path: ``from linktools.ai.testing import ...``. The ``linktools.ai``
+# namespace is stitched across both distributions at runtime via
+# ``pkgutil.extend_path`` in linktools-ai's ``__init__.py``.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linktools-ai-testing"
+version = "0.0.0"
+description = "Storage conformance testkit for linktools-ai (external adapter proof)."
+requires-python = ">=3.10"
+dependencies = [
+    "linktools-ai",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["linktools*"]
+
+[tool.setuptools.package-dir]
+"" = "src"

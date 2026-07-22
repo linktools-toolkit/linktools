@@ -38,13 +38,14 @@ def current_depth() -> int:
 
 
 @runtime_checkable
-class SubagentExecutor(Protocol):
+class SubagentExecutorProtocol(Protocol):
     """Executes a resolved child AgentSpec under a parent run. Implementations
     create the child session + run, enforce timeout, and return the result.
     ``parent`` is the single ParentRunIdentity every spawner (subagent
     toolset, extension entrypoint toolset) builds identically -- a downstream
     implementation written strictly to this Protocol must not fail on a call
-    it did not anticipate; there is exactly one call shape."""
+    it did not anticipate; there is exactly one call shape. The in-repo
+    concrete implementation is :class:`~linktools.ai.subagent.executor.SubagentExecutor`."""
 
     async def execute(
         self,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""BUG-05 (v5 guide §12): the USER session message must be exactly the caller's
+"""(v5 guide ): the USER session message must be exactly the caller's
 original prompt -- not the model prompt (which folds in prior history, memory,
 and knowledge). Persisting the model prompt stored internal runtime context as
 the user's words, recursively re-injecting it each turn and leaking context.
@@ -18,11 +18,11 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
@@ -121,7 +121,7 @@ def test_user_message_is_original_prompt_not_history(tmp_path):
     registry.register("test-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelGateway(ModelResolver(registry=registry)),
     )
     compiled = asyncio.run(
         compiler.compile(

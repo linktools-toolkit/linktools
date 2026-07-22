@@ -46,7 +46,7 @@ Status legend: **pending** (not yet implemented this closure), **partial**
 |---|---|---|---|---|---|---|---|
 | File Storage | y | y | y | – | y | y | partial (WP-02) |
 | SQLAlchemy Storage | y | y | – | y | y | y | partial (WP-02) |
-| Resource Registry refresh | y | y | y | y | y | – | partial (WP-11) |
+| Asset Registry refresh | y | y | y | y | y | – | partial (WP-11) |
 | Filesystem Registry refresh | y | y | y | n/a | y | – | partial (WP-11) |
 | Registry null / presence parsing | y | y | n/a | n/a | – | – | done (prior closure) |
 | Domain validation / deep-freeze | y | y | n/a | n/a | – | – | partial (WP-09) |

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Issue 3 (v4 guide §6): the FilesystemRunCommitCoordinator must dedup critical
+"""3 (v4 guide ): the FilesystemRunCommitCoordinator must dedup critical
 events by ``commit_id``, not just by event type.
 
 A run may legitimately pause more than once (one approval per pause), each
@@ -9,13 +9,13 @@ either drops a later legitimate pause's ApprovalRequested/RunPaused (the second
 looks like a duplicate of the first) or, on recovery, duplicates the event
 (recovery bypassed the dedup entirely and re-appended unconditionally).
 
-These tests pin the three behaviors the spec states in §6.10-§6.12:
+These tests pin the three behaviors the spec states in -:
 
 1. Recovery does not duplicate RunCompleted for a complete commit whose event
-   is already written (§6.10).
+   is already written.
 2. Two distinct approvals on the same run each persist their own
-   ApprovalRequested + RunPaused, tagged with their own commit_id (§6.11).
-3. A retried identical pause command does not add a second event (§6.12).
+   ApprovalRequested + RunPaused, tagged with their own commit_id.
+3. A retried identical pause command does not add a second event.
 """
 
 import asyncio
@@ -116,7 +116,7 @@ async def _commit_ids_for(storage, run_id: str, payload_type: str) -> "list[str]
 
 
 def test_recovery_does_not_duplicate_run_completed(tmp_path):
-    """§6.10: complete() already wrote RunCompleted; a crash leaves the journal
+    """complete() already wrote RunCompleted; a crash leaves the journal
     at RUN_TRANSITIONED and recovery re-runs. RunCompleted count must stay 1."""
 
     async def _run():
@@ -190,7 +190,7 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
 
 
 def test_two_distinct_approvals_each_persist_their_events(tmp_path):
-    """§6.11: a run pauses for approval, is resumed, then pauses again for a
+    """a run pauses for approval, is resumed, then pauses again for a
     second approval. Each pause has its own commit_id and must keep its own
     ApprovalRequested + RunPaused -- dedup by event type alone would drop the
     second pause's events."""
@@ -242,7 +242,7 @@ def test_two_distinct_approvals_each_persist_their_events(tmp_path):
 
 
 def test_retried_identical_pause_command_does_not_duplicate(tmp_path):
-    """§6.12: the caller retries the SAME pause command (same commit_id) because
+    """the caller retries the SAME pause command (same commit_id) because
     it missed the first response. Only one ApprovalRequested + one RunPaused may
     exist for that commit."""
 

@@ -13,9 +13,9 @@ _HEADER = (
     "Inspect available skills with list_skills(). "
     "Use read_skill(skill_id) to load full instructions only when needed; "
     "do not assume a skill's full content before reading it. "
-    "Some skills may be extensions -- if extension-resource tools are enabled, "
-    "inspect their references/assets with list_extension_resources() and "
-    "read_extension_resource().\n\nAvailable skill summaries:"
+    "Some skills may be extensions -- if extension-asset tools are enabled, "
+    "inspect their references/assets with list_extension_content() and "
+    "read_extension_content().\n\nAvailable skill summaries:"
 )
 
 

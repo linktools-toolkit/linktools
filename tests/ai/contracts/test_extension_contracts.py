@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """scenario provider + entrypoint resolver contracts (contract),
-exercised against the default DirectoryExtensionResourceProvider /
+exercised against the default DirectoryExtensionContentSource /
 DirectoryEntrypointResolver and reusable for business backends."""
 
 import pytest
 
-from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
+from linktools.ai.extension.provider import DirectoryExtensionContentSource
 from linktools.ai.extension.resolver import DirectoryEntrypointResolver
 
 from ._assertions import (
     assert_entrypoint_resolver_contract,
-    assert_extension_resource_provider_contract,
+    assert_extension_content_source_contract,
 )
 
 
@@ -29,15 +29,15 @@ def env(tmp_path):
         )
     roots = {p: tmp_path / p for p in ("skill-creator", "another-skill")}
     return (
-        DirectoryExtensionResourceProvider(roots),
+        DirectoryExtensionContentSource(roots),
         DirectoryEntrypointResolver(roots),
     )
 
 
 @pytest.mark.asyncio
-async def test_extension_resource_provider_contract(env):
+async def test_extension_content_source_contract(env):
     provider, _ = env
-    await assert_extension_resource_provider_contract(
+    await assert_extension_content_source_contract(
         provider, extension_id="skill-creator", sample_path="SKILL.md"
     )
 

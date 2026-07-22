@@ -25,9 +25,9 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[3]
-# The boundary rules apply to ALL of core (plan §4.4 "核心"), not just the
+# The boundary rules apply to ALL of core, not just the
 # sqlalchemy/ subpackage: a regression that adds `import asyncpg` to
-# _runtime/build.py or storage/facade.py would otherwise slip past. The
+# runtime/builder.py or storage/facade.py would otherwise slip past. The
 # constructor-shape test below still targets SqlAlchemyStorage specifically.
 _AI = _REPO / "linktools-ai" / "src" / "linktools" / "ai"
 
@@ -88,7 +88,7 @@ def test_adapter_parses_no_dsn_or_engine_url() -> None:
     engine from one -- the adapter receives a downstream-built session_factory.
 
     The ONE exemption is the SQLite reference helper
-    (``storage/sqlite/facade.py``): plan §6.5 explicitly allows the SQLite
+    (``storage/sqlite/facade.py``): explicitly allows the SQLite
     helper to construct an engine ('SQLite helper 可以构造 engine'), and SQLite
     is the only in-repo integration dialect. Every other core module is
     forbidden from calling ``create_engine`` / ``create_async_engine`` /
@@ -105,7 +105,7 @@ def test_adapter_parses_no_dsn_or_engine_url() -> None:
     offenders: "list[str]" = []
     for path in _core_py_files():
         # The SQLite reference helper is the single core site allowed to
-        # construct an engine (plan §6.5). Skip it; everywhere else the ban
+        # construct an engine. Skip it; everywhere else the ban
         # holds.
         if "storage" in path.parts and "sqlite" in path.parts:
             continue
@@ -160,7 +160,7 @@ def test_sqlalchemy_storage_constructor_takes_session_factory_not_url() -> None:
 
 
 def test_sqlalchemy_storage_adapter_has_frozen_constructor() -> None:
-    """Plan §4.7 freezes the generic SqlAlchemyStorageAdapter constructor: it
+    """freezes the generic SqlAlchemyStorageAdapter constructor: it
     takes session_factory + the caller's artifact_blobs + coordination +
     features (and must NOT take a url/dsn/engine). This is the positive contract
     a downstream composes against -- the generic adapter must accept injected

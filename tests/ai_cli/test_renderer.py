@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Console renderer tests (spec §24/§27.1).
+"""Console renderer tests.
 
 ``announce_paused`` expands a pause event with the approval request's
 tool/arguments/reason; the request is fetched by the caller through
 ``RuntimeClient.get_approval`` (so this renderer never touches Storage -- spec
-§14). ``print_event`` renders streamed text/tool events and the ``--json`` line
+). ``print_event`` renders streamed text/tool events and the ``--json`` line
 form."""
 
 import contextlib

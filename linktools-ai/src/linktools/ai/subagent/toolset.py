@@ -22,7 +22,7 @@ from ..errors import SubagentExecutionError, SubagentNotFoundError
 from ..extension.entrypoint import EntrypointRef
 from ..extension.scope import ExtensionScope
 from ..run.identity import ParentRunIdentity
-from .runner import SubagentExecutor, enforce_depth
+from .runner import SubagentExecutorProtocol, enforce_depth
 
 
 def _parse_scope(raw: "Mapping[str, Any] | None") -> "ExtensionScope | None":
@@ -63,7 +63,7 @@ def build_subagent_toolset(
     allowed_names: "set[str]",
     subagent_provider,
     entrypoint_resolver,
-    executor: "SubagentExecutor | None",
+    executor: "SubagentExecutorProtocol | None",
     depth_provider: "Callable[[], int]",
     max_depth: int,
     timeout_seconds: "float | None",

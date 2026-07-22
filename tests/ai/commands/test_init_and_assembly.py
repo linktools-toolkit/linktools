@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`lt ai init` + `build_cli_runtime` tests (spec §18/§19/§26)."""
+"""`lt ai init` + `build_cli_runtime` tests."""
 
 import os
 import tempfile

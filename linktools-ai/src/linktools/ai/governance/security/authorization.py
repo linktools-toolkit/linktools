@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AuthorizationService: check a PrincipalContext against an action + resource.
+"""AuthorizationService: check a PrincipalContext against an action + asset.
 
-Production-hardening plan §7.2. The contract is a single ``authorize()`` that
-returns ``None`` on success and raises :class:`PrincipalAccessDeniedError` on
-denial. The first version ships two deliberately simple implementations:
+The contract is a single ``authorize()`` that returns ``None`` on success and
+raises :class:`PrincipalAccessDeniedError` on denial. The first version ships
+two deliberately simple implementations:
 
 * :class:`AllowOwnerAuthorization` -- allow when the principal's tenant owns
-  the resource; deny (fail-closed) when the resource has no tenant.
+  the asset; deny (fail-closed) when the asset has no tenant.
 * :class:`DenyAllAuthorization` -- deny every request; the safe default for a
   Runtime constructed without an explicit authorization service.
 
-A complex RBAC DSL is explicitly out of scope (§7.2): ship the Protocol and
+A complex RBAC DSL is explicitly out of scope: ship the Protocol and
 the two primitives, let downstream callers compose policy on top.
 """
 
@@ -23,10 +23,10 @@ from ...identity.principal import PrincipalContext
 
 
 @dataclass(frozen=True, slots=True)
-class AuthorizationResource:
-    """The target of a sensitive action. ``tenant_id`` is the resource's owner
+class AuthorizationTarget:
+    """The target of a sensitive action. ``tenant_id`` is the asset's owner
     tenant (the only field AllowOwnerAuthorization inspects); ``kind`` and
-    ``id`` carry the resource type + identifier for audit and for any
+    ``id`` carry the asset type + identifier for audit and for any
     finer-grained service layered above."""
 
     kind: str
@@ -40,27 +40,27 @@ class AuthorizationService(Protocol):
         self,
         principal: PrincipalContext,
         action: str,
-        resource: AuthorizationResource,
+        asset: AuthorizationTarget,
     ) -> None:
         """Raise PrincipalAccessDeniedError when the principal may not perform
-        ``action`` on ``resource``; return None otherwise."""
+        ``action`` on ``asset``; return None otherwise."""
         ...
 
 
 class AllowOwnerAuthorization:
-    """Allow when the principal's tenant owns the resource.
+    """Allow when the principal's tenant owns the asset.
 
-    Resources without a tenant are denied (§5.4 fail-closed): without a
-    resource tenant to compare against, ownership cannot be confirmed, so the
-    operation is rejected rather than allowed on a guessable id (§5.5)."""
+    Assets without a tenant are denied (fail-closed): without a
+    asset tenant to compare against, ownership cannot be confirmed, so the
+    operation is rejected rather than allowed on a guessable id."""
 
     async def authorize(
         self,
         principal: PrincipalContext,
         action: str,
-        resource: AuthorizationResource,
+        asset: AuthorizationTarget,
     ) -> None:
-        principal.require_tenant(resource.tenant_id)
+        principal.require_tenant(asset.tenant_id)
 
 
 class SameTenantAuthorization(AllowOwnerAuthorization):
@@ -70,8 +70,8 @@ class SameTenantAuthorization(AllowOwnerAuthorization):
 class ScopeAuthorization:
     """Default scoped policy: tenant match plus an explicit action scope."""
 
-    async def authorize(self, principal, action, resource) -> None:
-        principal.require_tenant(resource.tenant_id)
+    async def authorize(self, principal, action, asset) -> None:
+        principal.require_tenant(asset.tenant_id)
         if not principal.scopes.unrestricted and not principal.scopes.contains(action):
             raise PrincipalAccessDeniedError(
                 f"principal lacks required scope: {action}"
@@ -87,8 +87,8 @@ class DenyAllAuthorization:
         self,
         principal: PrincipalContext,
         action: str,
-        resource: AuthorizationResource,
+        asset: AuthorizationTarget,
     ) -> None:
         raise PrincipalAccessDeniedError(
-            f"DenyAllAuthorization denies {action!r} on {resource.kind}"
+            f"DenyAllAuthorization denies {action!r} on {asset.kind}"
         )

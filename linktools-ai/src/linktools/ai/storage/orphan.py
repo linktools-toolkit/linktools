@@ -5,7 +5,7 @@ implementation.
 
 A blob becomes an orphan candidate when it is written but the record
 transaction that would pin it fails (or the record is later deleted). The core
-contract (plan Storage/Asset/Artifact section): an unreferenced blob is only
+contract: an unreferenced blob is only
 deletable once it is past a safety window (default 24h); the sweep runs no more
 frequently than the sweep interval (default 6h). The window protects a blob
 written by a transaction that has not yet committed its record -- deleting it
@@ -31,10 +31,12 @@ if TYPE_CHECKING:
     from ..observability.metrics import ObservabilityMetrics
     from .protocols import ArtifactBlobStore, ArtifactRecordStore
 
+from ..errors import ArtifactRecordCorruptError
+
 
 @dataclass(frozen=True, slots=True)
 class OrphanSweepConfig:
-    """Core orphan policy. Defaults follow the plan: a 24h grace window before
+    """Core orphan policy. Defaults: a 24h grace window before
     an unreferenced blob is deletable, swept at most every 6h.
 
     ``grace_period`` is enforced by :func:`sweep_orphan_blobs` (a blob inside
@@ -90,10 +92,17 @@ async def sweep_orphan_blobs(
     moment = now if now is not None else datetime.now(timezone.utc)
 
     # The set of digests pinned by at least one record. A blob not in this set
-    # is an orphan candidate.
+    # is an orphan candidate. A corrupt record aborts the whole sweep: deleting
+    # anything with an incomplete reference set could remove a blob the broken
+    # record pins. Fail closed -- nothing is deleted and the error propagates.
     referenced: "set[str]" = set()
-    async for digest in record_store.iter_referenced_digests():
-        referenced.add(digest)
+    try:
+        async for digest in record_store.iter_referenced_digests():
+            referenced.add(digest)
+    except ArtifactRecordCorruptError:
+        if metrics is not None:
+            metrics.counter("artifact_orphan_sweep_failure_total")
+        raise
 
     deleted = 0
     kept_within_grace = 0

@@ -16,11 +16,11 @@ class ApprovalService:
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")
         if self._authorization is not None:
-            from ..governance.security.authorization import AuthorizationResource
+            from ..governance.security.authorization import AuthorizationTarget
             from ..governance.security.actions import SecurityAction
             await self._authorization.authorize(
                 principal, SecurityAction.APPROVAL_APPROVE,
-                AuthorizationResource(kind="approval", id=request.id, tenant_id=request.tenant_id),
+                AuthorizationTarget(kind="approval", id=request.id, tenant_id=request.tenant_id),
             )
         else:
             principal.require_tenant(request.tenant_id)
@@ -35,11 +35,11 @@ class ApprovalService:
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")
         if self._authorization is not None:
-            from ..governance.security.authorization import AuthorizationResource
+            from ..governance.security.authorization import AuthorizationTarget
             from ..governance.security.actions import SecurityAction
             await self._authorization.authorize(
                 principal, SecurityAction.APPROVAL_REJECT,
-                AuthorizationResource(kind="approval", id=request.id, tenant_id=request.tenant_id),
+                AuthorizationTarget(kind="approval", id=request.id, tenant_id=request.tenant_id),
             )
         else:
             principal.require_tenant(request.tenant_id)

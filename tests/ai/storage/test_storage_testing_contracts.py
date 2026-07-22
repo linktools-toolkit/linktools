@@ -12,7 +12,7 @@ StorageTransactionManagerContract) against the in-repo reference backends:
   AssetStore primary+overlay composition).
 * EventStoreContract -> FilesystemStorage.events (FilesystemEventStore).
 * JobStoreContract -> FilesystemStorage.jobs (FilesystemJobStore).
-* StorageTransactionManagerContract -> BOTH SqlAlchemyStorage.transactions
+* StorageTransactionManagerContract -> BOTH SqlAlchemyStorage._transaction_manager
   (the supported cross-store UoW path -- skipped when SQLAlchemy is not
   installed) AND NoCrossStoreTransactions (the unsupported-scope path that
   must raise StorageTransactionNotSupportedError at the call).
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from testing import (
+from linktools.ai.testing import (
     AssetStoreContract,
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
@@ -44,7 +44,7 @@ def test_public_testkit_exports_all_eight_contracts() -> None:
     The eighth, StorageFeaturesContract, pins feature self-consistency: a
     Storage's declared StorageFeatures must match what its stores actually
     support (transactions=DATABASE yields a real UoW; NONE raises)."""
-    import testing
+    import linktools.ai.testing as testing
 
     expected = {
         "AssetStoreContract",
@@ -254,7 +254,7 @@ class TestSqlAlchemyJobStoreConformance(JobStoreContract):
 
 
 class TestSqlAlchemyTransactionManagerConformance(StorageTransactionManagerContract):
-    """The supported-scope path: SqlAlchemyStorage.transactions yields a real
+    """The supported-scope path: SqlAlchemyStorage._transaction_manager yields a real
     UnitOfWork whose stores share one AsyncSession + one transaction. A clean
     exit commits; an exception rolls back with no partial commit.
 
@@ -269,7 +269,7 @@ class TestSqlAlchemyTransactionManagerConformance(StorageTransactionManagerContr
         self._storage = _build_sqlalchemy_storage(tmp_path)
 
     def transaction_manager(self):
-        return self._storage.transactions
+        return self._storage._transaction_manager
 
 
 class TestSqlAlchemyStorageFeaturesConformance(StorageFeaturesContract):

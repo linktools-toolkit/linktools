@@ -42,7 +42,7 @@ async def prepare_run(
     ``context_metadata`` is an optional caller-supplied mapping (e.g. task
     correlation ids) merged onto the RunContext so it flows to RunRecord /
     RunDefinitionSnapshot."""
-    from .._runtime.lifecycle import create_run_context, resolve_session
+    from ..runtime.assembly.lifecycle import create_run_context, resolve_session
     from ..swarm.spec import SwarmSpec
 
     resolved_session = await resolve_session(

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SEC-02 (v5 guide §6): every model security-pipeline decision must be honored
+"""(v5 guide ): every model security-pipeline decision must be honored
 -- MODIFY rewrites the prompt actually sent, MODIFY_RESULT rewrites the output
 the caller sees, DENY/DENY_RESULT stops the call, an invalid action fails
 closed, and a configured pipeline never lets an un-audited token leak through

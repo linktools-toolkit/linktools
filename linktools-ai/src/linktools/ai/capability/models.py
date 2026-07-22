@@ -6,10 +6,10 @@ CapabilityInspection. The exposure policy lives in :mod:`.exposure`, the
 CapabilityProvider Protocol in :mod:`.provider`.
 
 ``CapabilityRef`` is an alias of :class:`~linktools.ai.tool.models.ToolRef`
-(plan §4.2 保留唯一模型 / 统一 CapabilityRef): a spec declaration ref and a
+: a spec declaration ref and a
 resolved capability ref are the same object, not two identical shapes. The
 canonical type lives in the more primitive ``tool`` domain (capability already
-imports tool one-way); aliasing it here keeps the plan's preferred name
+imports tool one-way); aliasing it here keeps the preferred name
 importable from the capability domain without creating a tool<->capability
 cycle."""
 
@@ -21,11 +21,11 @@ from ..utils.freeze import freeze_value
 from .exposure import CapabilityToolExposurePolicy
 
 # The single capability/tool reference type. Defined in ..tool.models (the
-# primitive domain); re-exported here under the plan's preferred name.
+# primitive domain); re-exported here under the preferred name.
 CapabilityRef = ToolRef
 
 
-def requires_capability_assembler(*, tools, execution) -> bool:
+def requires_capability_resolver(*, tools, execution) -> bool:
     # ``None`` and ``()`` both mean no capabilities. Builtins are enabled only
     # by an explicit RuntimeTool/Capability option and are materialized by the
     # caller before reaching this predicate.
@@ -61,7 +61,7 @@ class CapabilityBundle:
     """The output of resolving one (or many) CapabilityRef(s). A bundle
     contributes zero or more of: prompt sections (injected text) and
     tool_contributions (ToolContribution with explicit descriptors). Raw
-    toolsets / middleware / resources / declared pipelines are not accepted --
+    toolsets / middleware / assets / declared pipelines are not accepted --
     providers return explicit ToolContribution entries; the run's security
     pipeline comes from the SecurityBaseline, not from capabilities."""
 

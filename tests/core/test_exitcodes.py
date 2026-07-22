@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the CLI exit-code mapping (spec §16.4 CLI-003)."""
+"""Tests for the CLI exit-code mapping."""
 import pytest
 
 from linktools.cli.exitcodes import (

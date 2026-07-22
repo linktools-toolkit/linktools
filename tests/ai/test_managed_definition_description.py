@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.models import CapabilityRef
-from linktools.ai.mcp.client import MCPConnectionManager
+from linktools.ai.mcp.client import MCPConnectionPool
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.mcp.spec import MCPServerSpecProvider
 from linktools.ai.mcp.codec import parse_mcp_spec
@@ -75,7 +75,7 @@ class _InfoSpecProvider(MCPServerSpecProvider):
 
 class _InfoManager:
     """Returns MCPToolInfo entries (with description + read_only) through the
-    verified discovery path the real MCPConnectionManager exposes."""
+    verified discovery path the real MCPConnectionPool exposes."""
 
     def __init__(self, infos):
         self._infos = tuple(infos)
@@ -167,17 +167,17 @@ def _live_tool(*, name="t", read_only_hint="__absent__"):
 
 
 def test_convert_tool_info_reads_read_only_hint_true():
-    info = MCPConnectionManager._convert_tool_info(_live_tool(read_only_hint=True))
+    info = MCPConnectionPool._convert_tool_info(_live_tool(read_only_hint=True))
     assert info.read_only is True
 
 
 def test_convert_tool_info_reads_read_only_hint_false():
-    info = MCPConnectionManager._convert_tool_info(_live_tool(read_only_hint=False))
+    info = MCPConnectionPool._convert_tool_info(_live_tool(read_only_hint=False))
     assert info.read_only is False
 
 
 def test_convert_tool_info_treats_absent_annotations_as_unknown():
     # No annotations at all -> read_only stays None (unknown), which the provider
     # maps to mutating/high-risk. A read-only-looking name never auto-qualifies.
-    info = MCPConnectionManager._convert_tool_info(_live_tool())
+    info = MCPConnectionPool._convert_tool_info(_live_tool())
     assert info.read_only is None

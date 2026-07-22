@@ -81,14 +81,13 @@ class _UnitOfWork:
     Protocols directly, no ``Any``. ``artifact_records`` is a real
     session-bound ``SqlAlchemyArtifactRecordStore`` sharing this UoW's session
     (flush, not commit) so artifact-record writes join the same atomic scope as
-    run/event/job writes. ``assets`` is ``None``: no session-bound asset backend
-    exists yet, and a per-call-session one would self-commit and break the
-    single-session invariant, so ``None`` is the honest value (not a fake). The
-    Protocol declares ``assets: AssetStore | None`` to match -- the typed
-    contract is honest about the gap, not faking the capability."""
+    run/event/job writes. ``assets`` is a real session-bound ``AssetStore``
+    whose backend reuses this UoW's session for both reads and writes, so asset
+    mutations (put/delete/move, revision, idempotency) commit or roll back with
+    every other store in the unit."""
 
     session: AsyncSession
-    assets: "AssetStore | None"
+    assets: AssetStore
     artifact_records: "ArtifactRecordStore"
     runs: RunStore
     events: EventStore
@@ -103,7 +102,7 @@ class _UnitOfWork:
 
 
 class SqlAlchemyStorageAdapter(Storage):
-    """The generic SQLAlchemy Storage adapter (plan §4.7 frozen constructor).
+    """The generic SQLAlchemy Storage adapter.
 
     This is the thin, backend-neutral surface a DOWNSTREAM composes: it takes a
     caller-constructed ``async_sessionmaker`` (NEVER a URL/engine), the caller's
@@ -158,7 +157,7 @@ class SqlAlchemyStorageAdapter(Storage):
             evaluations=SqlAlchemyEvalStore(session_factory=session_factory),
             features=features,
             coordination=coordination,
-            transactions=_SqlAlchemyTransactionManager(session_factory),
+            _transaction_manager=_SqlAlchemyTransactionManager(session_factory),
             artifacts=ArtifactStore(
                 artifact_blobs,
                 SqlAlchemyArtifactRecordStore(session_factory=session_factory),
@@ -170,7 +169,7 @@ class SqlAlchemyStorage(SqlAlchemyStorageAdapter):
     """Convenience SQLAlchemy composition: a caller hands a session_factory +
     a blobs_root and gets process-local coordination, default DATABASE-scope
     features, and Filesystem-backed artifact blobs. Delegates the real wiring
-    to :class:`SqlAlchemyStorageAdapter` (the §4.7 surface). For a deployment
+    to :class:`SqlAlchemyStorageAdapter`. For a deployment
     that brings its own blob store / coordination / features, use the adapter
     directly."""
 
@@ -198,7 +197,7 @@ class _SqlAlchemyTransactionManager:
     exception, giving true atomicity across stores: either every tx.* write
     persists, or none of them do. Lives here (next to _UnitOfWork) so the
     manager, the UoW, and the bound-store construction stay in one place; the
-    Storage.transactions field holds an instance and Storage.transaction()
+    The internal _transaction_manager holds an instance and Storage.transaction()
     delegates to it."""
 
     def __init__(self, session_factory: "async_sessionmaker[AsyncSession]") -> None:
@@ -210,11 +209,15 @@ class _SqlAlchemyTransactionManager:
             async with session.begin():
                 yield _UnitOfWork(
                     session=session,
-                    # assets: no session-bound backend yet. A per-call-session
-                    # one would self-commit and break the single-session
-                    # atomicity this UoW guarantees, so None is the honest value
-                    # (not a fake) until one is wired.
-                    assets=None,
+                    # assets: session-bound -- the backend reuses this UoW's
+                    # session for reads (no close) and writes (flush only; the
+                    # UoW owns begin/commit/rollback), so an asset mutation
+                    # commits or rolls back with every other store here.
+                    assets=AssetStore(
+                        primary=SqlAlchemyAssetBackend(
+                            session_factory=self._session_factory, session=session
+                        )
+                    ),
                     # artifact_records: session-bound -- joins the UoW's atomic
                     # scope (flush, not commit) so an artifact-record write
                     # rolls back with a run/event write on failure.

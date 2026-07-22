@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
-"""Self-contained skill directory index tests (spec §7)."""
+"""Self-contained skill directory index tests."""
 
 import tempfile
 import unittest

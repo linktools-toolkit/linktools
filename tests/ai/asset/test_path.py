@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_path.py"""
+"""tests/ai/storage/asset/test_path.py"""
 
 import pytest
 

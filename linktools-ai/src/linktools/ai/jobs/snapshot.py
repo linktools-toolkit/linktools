@@ -4,7 +4,7 @@
 retries and replay read the exact bytes that were used, not the latest version.
 
 The snapshot is content-addressed through ArtifactStore (which itself reuses the
-existing AssetStore), and the returned ResourceSnapshotRef records the
+existing AssetStore), and the returned AssetSnapshotRef records the
 original path/version/etag plus the artifact id and sha256 so a later replay can
 validate integrity before re-executing."""
 
@@ -12,37 +12,37 @@ from ..artifact.models import ArtifactProvenance
 from ..artifact.store import ArtifactStore
 from ..asset.path import AssetPath
 from ..asset.store import AssetStore
-from .models import ResourceSnapshotRef
+from .models import AssetSnapshotRef
 
 
-class ResourceSnapshotError(Exception):
-    """Raised when a resource cannot be snapshotted (missing or unreadable)."""
+class AssetSnapshotError(Exception):
+    """Raised when a asset cannot be snapshotted (missing or unreadable)."""
 
 
-async def snapshot_resource(
-    resources: AssetStore,
+async def snapshot_asset(
+    assets: AssetStore,
     artifact_store: ArtifactStore,
     path: str,
     *,
     tenant_id: str,
     run_id: "str | None" = None,
     media_type: "str | None" = None,
-) -> ResourceSnapshotRef:
-    """Read the resource at ``path``, seal its bytes into an ArtifactStore, and
-    return a :class:`ResourceSnapshotRef` pinning the path/version/etag plus the
+) -> AssetSnapshotRef:
+    """Read the asset at ``path``, seal its bytes into an ArtifactStore, and
+    return a :class:`AssetSnapshotRef` pinning the path/version/etag plus the
     content-addressed artifact id and sha256.
 
-    Uses a SINGLE ``resources.get`` so the version/etag and the sealed content
+    Uses a SINGLE ``assets.get`` so the version/etag and the sealed content
     come from one read -- a separate ``stat`` then ``get`` would be a TOCTOU
-    window where the resource changes between the two calls and the snapshot
+    window where the asset changes between the two calls and the snapshot
     pins stale metadata against new bytes."""
     rpath = AssetPath(path)
-    resource = await resources.get(rpath)
-    if resource is None:
-        raise ResourceSnapshotError(f"resource not found: {path}")
-    info = resource.info
+    asset = await assets.get(rpath)
+    if asset is None:
+        raise AssetSnapshotError(f"asset not found: {path}")
+    info = asset.info
     record = await artifact_store.put(
-        content=resource.content,
+        content=asset.content,
         media_type=media_type or info.content_type or "application/octet-stream",
         tenant_id=tenant_id,
         provenance=(
@@ -56,7 +56,7 @@ async def snapshot_resource(
             else ArtifactProvenance(producer_kind="anonymous", producer_id="")
         ),
     )
-    return ResourceSnapshotRef(
+    return AssetSnapshotRef(
         path=path,
         version=info.version,
         etag=info.etag,
@@ -65,4 +65,4 @@ async def snapshot_resource(
     )
 
 
-__all__: "list[str]" = ["ResourceSnapshotError", "snapshot_resource"]
+__all__: "list[str]" = ["AssetSnapshotError", "snapshot_asset"]

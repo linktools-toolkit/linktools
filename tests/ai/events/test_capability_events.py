@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Capability-lifecycle event emission (contract Middleware/EventStore): the
 EventStore wired on a CapabilityContext receives capability.resolve + skill +
-extension-resource + entrypoint events."""
+extension-asset + entrypoint events."""
 
 import pytest
 
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.models import CapabilityRef
@@ -72,7 +72,7 @@ async def test_capability_resolve_events_emitted():
 
             return CapabilityBundle()
 
-    asm = CapabilityAssembler({"skill": _P()})
+    asm = CapabilityResolver({"skill": _P()})
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
     from linktools.ai.model.policy import ModelPolicy
 

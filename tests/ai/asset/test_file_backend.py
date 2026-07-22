@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_file_backend.py"""
+"""tests/ai/storage/asset/test_file_backend.py"""
 
 import pytest
 
@@ -30,8 +30,8 @@ async def test_put_then_get_roundtrip_persists_to_disk(tmp_path):
     reopened = FileAssetBackend(root=tmp_path)
     lookup = await reopened.raw_get(AssetPath("/a/b.txt"))
     assert isinstance(lookup, Found)
-    assert lookup.resource.content == b"hello"
-    assert lookup.resource.info.metadata == {"k": "v"}
+    assert lookup.asset.content == b"hello"
+    assert lookup.asset.info.metadata == {"k": "v"}
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_revision_persists_across_reopen(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_propfind_depth_one(tmp_path):
+async def test_list_depth_one(tmp_path):
     backend = FileAssetBackend(root=tmp_path)
     await backend.raw_put(
         AssetPath("/agents/a.md"), b"1", content_type=None, metadata={}
@@ -91,7 +91,7 @@ async def test_propfind_depth_one(tmp_path):
     await backend.raw_put(
         AssetPath("/other/c.md"), b"3", content_type=None, metadata={}
     )
-    page = await backend.raw_propfind(
+    page = await backend.raw_list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
     )
     assert {i.path.value for i in page.items} == {"/agents/a.md", "/agents/b.md"}
@@ -120,8 +120,8 @@ async def test_paths_with_double_underscore_do_not_collide_with_nested_paths(tmp
     nested = await backend.raw_get(AssetPath("/a/b"))
     flat = await backend.raw_get(AssetPath("/a__b"))
     assert isinstance(nested, Found) and isinstance(flat, Found)
-    assert nested.resource.content == b"nested"
-    assert flat.resource.content == b"flat-with-underscores"
+    assert nested.asset.content == b"nested"
+    assert flat.asset.content == b"flat-with-underscores"
 
 
 @pytest.mark.asyncio
@@ -136,7 +136,7 @@ async def test_symlink_escape_is_denied(tmp_path):
     # AssetPath("/evil__link") would resolve to.
     await backend.raw_put(AssetPath("/a.txt"), b"x", content_type=None, metadata={})
     evil_name = _filename(AssetPath("/evil__link")) + ".json"
-    evil_link = root / ".resource" / "metadata" / evil_name
+    evil_link = root / ".assets" / "metadata" / evil_name
     evil_link.symlink_to(outside / "does-not-exist.json")
     with pytest.raises(InvalidAssetPathError):
         await backend.raw_get(AssetPath("/evil__link"))

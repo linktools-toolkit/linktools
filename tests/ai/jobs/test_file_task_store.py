@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FilesystemJobStore contract -- the reliable-task invariants over the file backend
-(plan section 28 phase-3 acceptance, section 30.4 key invariants).
+.
 
-A fake clock drives lease/retry timing so no real sleep is needed (plan 30.5).
+A fake clock drives lease/retry timing so no real sleep is needed.
 These tests are the contract every JobStore backend must satisfy; the
-SQLAlchemy backend (later phase) is exercised by parameterizing ``task_store``.
+SQLAlchemy backend () is exercised by parameterizing ``task_store``.
 """
 
 import asyncio
@@ -86,7 +86,7 @@ def _task(clock, *, task_id="t1", job_id="j1", handler="runtime") -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),
@@ -314,7 +314,7 @@ def test_two_workers_concurrent_claim_same_task_only_one_wins(
 def test_concurrent_cancel_and_complete_stays_consistent(
     task_store: FilesystemJobStore,
 ) -> None:
-    """§30.2: a request_cancel racing with commit_success must leave a
+    """a request_cancel racing with commit_success must leave a
     consistent state (no crash, no illegal transition) -- fencing + the
     CANCELLING commit-guard decide the outcome deterministically."""
     clock = task_store._clock
@@ -769,7 +769,7 @@ def test_child_task_delegated_scopes_narrow_and_actor_appends(
 
 
 def test_max_depth_exceeded_fails_commit(task_store: FilesystemJobStore) -> None:
-    """Plan 5.1.6: a child beyond max_depth must fail the whole commit (raise
+    """a child beyond max_depth must fail the whole commit (raise
     TaskBudgetExceededError) -- it is never silently dropped. The over-depth
     child is not created AND the parent is not marked successful."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
@@ -816,7 +816,7 @@ def test_max_depth_exceeded_fails_commit(task_store: FilesystemJobStore) -> None
 def test_job_runtime_budget_does_not_leave_ready_task(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Plan 5.1.7: once a job exceeds its runtime cap, a claim does not skip the
+    """once a job exceeds its runtime cap, a claim does not skip the
     READY candidate and leave it as a zombie -- it finalizes the job (tasks
     CANCELLED, job FAILED), so no task is permanently unclaimable-but-READY."""
     clock = task_store._clock
@@ -858,7 +858,7 @@ def test_job_runtime_budget_does_not_leave_ready_task(
 def test_job_attempt_budget_does_not_leave_ready_task(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Plan 5.1.7: once a job's aggregate attempt cap is met, a later claim
+    """once a job's aggregate attempt cap is met, a later claim
     finalizes the job (the still-READY child is CANCELLED, job FAILED) rather
     than leaving it permanently claimable-but-unclaimable."""
     from linktools.ai.jobs.protocols import CreateTask
@@ -943,7 +943,7 @@ def test_bind_run_fences_on_worker_id(task_store: FilesystemJobStore) -> None:
 def test_concurrent_signals_for_same_waiting_task_wake_it_once(
     task_store: FilesystemJobStore,
 ) -> None:
-    """§30.2: two signals for the same WAITING task submitted concurrently must
+    """two signals for the same WAITING task submitted concurrently must
     wake it exactly once -- the second finds it no longer WAITING."""
     from linktools.ai.jobs.models import TaskSignalRecord
     from linktools.ai.jobs.protocols import WaitSignal
@@ -980,7 +980,7 @@ def test_concurrent_signals_for_same_waiting_task_wake_it_once(
 def test_commit_success_write_fault_leaves_parent_claimed_not_half_committed(
     task_store: FilesystemJobStore,
 ) -> None:
-    """§12.5 + §30.3: a write fault mid commit_success (here, while creating the
+    """+ : a write fault mid commit_success (here, while creating the
     child task) must NOT leave the parent SUCCEEDED with its child missing. The
     parent flip is the LAST write, so the task stays CLAIMED and is recoverable."""
     from linktools.ai.jobs.models import TaskRecord as _TR

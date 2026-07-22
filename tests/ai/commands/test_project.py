@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Project discovery/config tests (spec §5/§26)."""
+"""Project discovery/config tests."""
 
 import tempfile
 import unittest

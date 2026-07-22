@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Registry concurrent-read safety (WP-19): 100 concurrent get() calls must
+"""Registry concurrent-read safety: 100 concurrent get() calls must
 never see a mixed snapshot (the refresh lock serializes the cache clear +
 revision read so no reader sees a half-cleared cache)."""
 

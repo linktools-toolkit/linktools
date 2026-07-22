@@ -33,7 +33,7 @@ def test_tool_executor_requires_final_descriptor_and_policy():
 
 
 def test_mcp_provider_requires_connection_manager():
-    """MCPProvider must require an MCPConnectionManager (no default) -- without
+    """MCPProvider must require an MCPConnectionPool (no default) -- without
     one it cannot enumerate live tools, so governance would be silently
     skipped. A missing manager is a configuration error, fail-closed."""
     import dataclasses
@@ -118,7 +118,7 @@ _PARSER = (
 
 
 def test_resource_backed_revision_is_not_constant_zero():
-    """SpecLoader.from_resources must compute a real revision (not ``return 0``)
+    """SpecLoader.from_assets must compute a real revision (not ``return 0``)
     or the registry cache would pin the first read forever."""
     source = _PARSER.read_text(encoding="utf-8")
     assert "return 0" not in source, (
@@ -147,9 +147,9 @@ def test_filesystem_revision_uses_nanosecond_mtime():
 
 @pytest.mark.asyncio
 async def test_resource_backed_registry_refreshes_after_change():
-    """A resource-backed AgentCatalog re-reads after its underlying resource
+    """A asset-backed AgentCatalog re-reads after its underlying asset
     is modified (the cache invalidates on revision change) -- the
-    resource-refresh gain must hold through a real registry."""
+    asset-refresh gain must hold through a real registry."""
     from linktools.ai.agent.catalog import AgentCatalog
     from linktools.ai.catalog.parsing import SpecLoader
     from linktools.ai.asset.memory import MemoryAssetBackend
@@ -163,7 +163,7 @@ async def test_resource_backed_registry_refreshes_after_change():
         b"---\nname: a\nmodel:\n  primary: gpt\n---\nv1",
         options=WriteOptions(content_type="text/markdown"),
     )
-    registry = AgentCatalog.from_specloader(SpecLoader.from_resources(store, prefix="specs/agents"))
+    registry = AgentCatalog.from_specloader(SpecLoader.from_assets(store, prefix="specs/agents"))
     assert "v1" in (await registry.get("a")).instructions.instructions
 
     await store.put(
@@ -172,7 +172,7 @@ async def test_resource_backed_registry_refreshes_after_change():
         options=WriteOptions(content_type="text/markdown"),
     )
     assert "v2" in (await registry.get("a")).instructions.instructions, (
-        "registry must refresh after the resource is modified"
+        "registry must refresh after the asset is modified"
     )
 
 

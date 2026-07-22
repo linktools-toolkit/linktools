@@ -17,7 +17,7 @@ from linktools.ai.errors import (
     MCPServerNotFoundError,
 )
 from linktools.ai.mcp import (
-    MCPConnectionManager,
+    MCPConnectionPool,
     MCPProvider,
     build_mcp_server,
     parse_mcp_spec,
@@ -149,7 +149,7 @@ def test_build_mcp_server_rejects_misconfigured_transport():
 
 class _FakeManager:
     """Well-behaved fake: enumerates tool names via list_tools_result the way a
-    real connected MCPConnectionManager does."""
+    real connected MCPConnectionPool does."""
 
     def __init__(self, tool_names=("query_user",)):
         self._tool_names = tuple(tool_names)
@@ -380,7 +380,7 @@ async def test_mcp_provider_rejects_missing_connection_manager():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    with pytest.raises(RuntimeInitializationError, match="MCPConnectionManager"):
+    with pytest.raises(RuntimeInitializationError, match="MCPConnectionPool"):
         MCPProvider(_FakeSpecProvider({"risk": spec}), None)
 
 
@@ -389,7 +389,7 @@ async def test_connection_manager_closes_toolsets():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    mgr = MCPConnectionManager()
+    mgr = MCPConnectionPool()
     # Use the real manager's close path with an object exposing close(), keyed
     # the way get_toolset actually keys (server.id, fingerprint).
     from linktools.ai.mcp.client import _config_fingerprint
@@ -439,7 +439,7 @@ async def test_connection_manager_cache_keyed_on_config_fingerprint():
 async def test_connection_manager_close_aggregates_errors_and_closes_all():
     """close() must close EVERY connection even if one fails -- a single
     failing close must not leak the remaining connections."""
-    mgr = MCPConnectionManager()
+    mgr = MCPConnectionPool()
     order: "list[str]" = []
 
     class _OK:

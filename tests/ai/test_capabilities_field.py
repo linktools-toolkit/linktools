@@ -27,7 +27,7 @@ def test_capabilities_field_registers_custom_provider():
     bundle = RuntimeDependencies(capabilities=(provider,))
     assert not bundle.is_empty()
 
-    from linktools.ai._runtime.build import _build_capability_registry
+    from linktools.ai.runtime.builder import _build_capability_registry
 
     registry = _build_capability_registry(
         bundle,

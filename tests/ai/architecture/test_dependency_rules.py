@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 0 dependency-direction guards (plan §3.3, §7.6, AC-02).
+"""dependency-direction guards.
 
 The refactor establishes one-way dependency directions between top-level
-packages. Phase 0 records the *current* structure and the rules that already
-hold, plus the one known violation Phase 1 must repair (``task`` reaching into
+packages. records the *current* structure and the rules that already
+hold, plus the one known violation must repair (``task`` reaching into
 ``security`` for the identity value types). As phases land, promote rules from
 ``TARGET_RULES_NOT_YET_ENFORCED`` into ``FORBIDDEN_IMPORTS``.
 
@@ -26,36 +26,50 @@ _REPO = Path(__file__).resolve().parents[3]
 _AI = _REPO / "linktools-ai" / "src" / "linktools" / "ai"
 
 # Importer top-level package -> set of forbidden top-level package names.
-# These hold on the Phase 0 baseline and must continue to hold.
+# These hold on the baseline and must continue to hold.
 FORBIDDEN_IMPORTS: "dict[str, set[str]]" = {
     # identity value types (PrincipalContext/ActorRef/ScopeSet) must not reach
     # into any downstream domain. They are the canonical owner; everything
-    # else imports them. Enforced since Phase 1 (AC-02).
+    # else imports them. Enforced since .
     "identity": {"jobs", "run", "agent", "storage"},
-    # governance (security + policy, converged Phase 6 op 1) must not depend
-    # on the jobs domain (task.py -> jobs, Phase 7). Held since before the
-    # refactor; Phase 1 made it structural by removing the
+    # governance (security + policy, converged ) must not depend
+    # on the jobs domain (task.py -> jobs). Held since before the
+    # refactor; made it structural by removing the
     # security.principal -> task.models link entirely.
     "governance": {"jobs"},
     # jobs must not reach into the runtime build internals -- it only depends
     # on the narrow TaskRunDispatcher Protocol at the handler boundary.
-    # Enforced since Phase 7 (task -> jobs pure rename).
-    "jobs": {"_runtime"},
-    # The artifact and asset domains are fully decoupled (plan §3.3). The
+    # Enforced since (task -> jobs pure rename).
+    "jobs": {"runtime"},
+    # The artifact and asset domains are fully decoupled. The
     # artifact facade depends only on the ArtifactBlobStore /
     # ArtifactRecordStore Protocols; the filesystem + SQLAlchemy reference
     # adapters live in the storage layer, so neither domain names the other.
-    "artifact": {"asset"},
+    "artifact": {"asset", "jobs"},
     "asset": {"artifact"},
+    # : storage is a bottom-layer dependency -- it must not reach up into
+    # runtime (the outermost assembly), catalog, or capability. A backend is
+    # injected INTO storage; storage never imports those layers.
+    "storage": {"runtime", "catalog", "capability"},
+    # : catalog does not depend on runtime (it is a config layer consumed
+    # BY runtime, not the reverse).
+    "catalog": {"runtime"},
+    # NOTE: the rule "capability must not import a concrete storage
+    # backend (filesystem/sqlalchemy/sqlite/coordination)" is NOT here -- this
+    # map's matcher normalizes to top-level packages, and capability legitimately
+    # imports ``storage.protocols`` (top-level ``storage``). That rule is
+    # enforced structurally by test_architecture_section_7_6's
+    # test_domains_do_not_import_concrete_storage_backends, which checks the
+    # concrete subpackages specifically.
 }
 
 
-# Rules the plan defines for the END state (§3.3). They are documented here so
+# Rules defines for the END state. They are documented here so
 # the target is captured in code; each is enforced the moment its phase lands.
 # Format: (importer_pkg, forbidden_pkg, phase_that_enforces).
 TARGET_RULES_NOT_YET_ENFORCED: "list[tuple[str, str, str]]" = [
-    ("asset", "_runtime", "Phase 3"),
-    ("events", "_runtime", "Phase 2"),
+    ("asset", "runtime", "Phase 3"),
+    ("events", "runtime", "Phase 2"),
     ("governance", "agent", "Phase 6"),
 ]
 
@@ -156,7 +170,7 @@ def test_forbidden_dependency_directions_hold(importer: str) -> None:
 def test_target_dependency_rules_are_documented() -> None:
     """The end-state rules are captured so they can be promoted as phases land.
 
-    This always passes at Phase 0; it exists to keep the target visible and to
+    This always passes at ; it exists to keep the target visible and to
     fail loudly if a documented rule is silently dropped. When a phase enforces
     a rule, move its entry into FORBIDDEN_IMPORTS and delete it here.
     """
@@ -187,21 +201,21 @@ def _two_cycles() -> "set[tuple[str, str]]":
 #
 # Tuples are stored in sorted form because ``_two_cycles`` normalizes every
 # cycle via ``tuple(sorted(...))`` -- a non-sorted literal can never match and
-# is silently dead weight. The Phase 4 Catalog migration already retired three
+# is silently dead weight. The Catalog migration already retired three
 # cycles that earlier baselines carried: ``mcp <-> registry`` (domains now
 # import one-way from catalog/*; the registry/*.py shims import the domain
-# homes, not vice-versa), ``storage <-> task`` (the implicit storage.resources
-# fallback was deleted in Phase 3 op 6), and ``policy <-> registry`` (policy
+# homes, not vice-versa), ``storage <-> task`` (the implicit storage.assets
+# fallback was deleted in ), and ``policy <-> registry`` (policy
 # now imports tool.catalog directly instead of registry.tool).
 _BASELINE_TWO_CYCLES: "frozenset[tuple[str, str]]" = frozenset({
-    ("_runtime", "run"),
+    ("run", "runtime"),
     ("agent", "capability"),
     ("agent", "governance"),
     ("agent", "run"),
     ("agent", "tool"),
     ("artifact", "storage"),
-    ("execution", "run"),
     ("extension", "subagent"),
+    ("run", "sandbox"),
     ("governance", "tool"),
     ("run", "storage"),
     ("run", "swarm"),

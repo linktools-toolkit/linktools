@@ -10,7 +10,7 @@ pattern as tool/capability.py's PolicyCapability): the runner passes
 per-Run field, so a single capability instance is safe to reuse across many
 concurrent Runs sharing one CompiledAgent.
 
-Middlewares observe tool calls this phase; they do not mutate args
+Middlewares observe tool calls; they do not mutate args
 (before_tool_execute returns `args` unchanged)."""
 
 from dataclasses import dataclass

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Architecture locks for the v5 bug/security closure (guide §13).
+"""Architecture locks for the v5 bug/security closure (guide ).
 
 One representative check per fixed item (2 security + 1 isolation + 5
 correctness), so a future change -- or a deleted per-area test file -- cannot
@@ -14,9 +14,9 @@ import inspect
 
 import pytest
 
-from linktools.ai._runtime.lifecycle import resolve_session
+from linktools.ai.runtime.assembly.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError
-from linktools.ai.execution.local import _run_file_tool_sync
+from linktools.ai.sandbox.local import _run_file_tool_sync
 from linktools.ai.runtime import Runtime
 from linktools.ai.governance.security.pipeline import validate_model_decision
 from linktools.ai.governance.security.secured_model import SecuredModel
@@ -24,7 +24,7 @@ from linktools.ai.session.models import SessionRecord
 from linktools.ai.storage.facade import FilesystemStorage
 
 
-# --- SEC-01: symlink reads confined to resolved roots -----------------------
+# --- symlink reads confined to resolved roots -----------------------
 
 
 def test_v5_read_path_resolves_and_rejects_symlink_escape(tmp_path):
@@ -41,7 +41,7 @@ def test_v5_read_path_resolves_and_rejects_symlink_escape(tmp_path):
     assert "TOP-SECRET" not in str(result)
 
 
-# --- SEC-02: every model pipeline decision enforced -------------------------
+# --- every model pipeline decision enforced -------------------------
 
 
 def test_v5_secured_model_honors_modify_and_validates():
@@ -61,7 +61,7 @@ def test_v5_secured_model_honors_modify_and_validates():
         )
 
 
-# --- SEC-03: sessions bound to principal/tenant -----------------------------
+# --- sessions bound to principal/tenant -----------------------------
 
 
 def test_v5_session_record_carries_owner_and_resolve_enforces(tmp_path):
@@ -76,7 +76,7 @@ def test_v5_session_record_carries_owner_and_resolve_enforces(tmp_path):
         asyncio.run(resolve_session(storage, sid, user_id="u-a", tenant_id="t-b"))
 
 
-# --- BUG-01: recovery serialized + retryable --------------------------------
+# --- recovery serialized + retryable --------------------------------
 
 
 def test_v5_runtime_recovery_is_serialized():
@@ -97,7 +97,7 @@ def test_v5_runtime_recovery_is_serialized():
     assert hasattr(rt._coordinator, "_recovery_done")
 
 
-# --- BUG-02: file session messages published only after commit -------------
+# --- file session messages published only after commit -------------
 
 
 def test_v5_file_complete_publishes_messages_after_run_transition():
@@ -112,7 +112,7 @@ def test_v5_file_complete_publishes_messages_after_run_transition():
     )
 
 
-# --- BUG-03: critical-event failures are not swallowed ----------------------
+# --- critical-event failures are not swallowed ----------------------
 
 
 def test_v5_file_critical_event_helper_does_not_swallow():
@@ -129,11 +129,11 @@ def test_v5_file_critical_event_helper_does_not_swallow():
     assert "metadata={" in src and "commit_id" in src
 
 
-# --- BUG-04: post-commit hooks isolated from terminal state -----------------
+# --- post-commit hooks isolated from terminal state -----------------
 
 
 def test_v5_runner_runs_after_run_before_complete():
-    from linktools.ai.agent.runner import AgentEngine
+    from linktools.ai.agent.engine import AgentEngine
 
     src = inspect.getsource(AgentEngine.execute)
     pos_after_run = src.index("run_after_run")
@@ -144,11 +144,11 @@ def test_v5_runner_runs_after_run_before_complete():
     )
 
 
-# --- BUG-05: only the original user prompt is persisted ---------------------
+# --- only the original user prompt is persisted ---------------------
 
 
 def test_v5_runner_persists_original_prompt_not_model_prompt():
-    from linktools.ai.agent import runner as runner_mod
+    from linktools.ai.agent import engine as runner_mod
 
     src = inspect.getsource(runner_mod.AgentEngine.execute)
     assert "user_content = prompt" not in src, (
@@ -157,7 +157,7 @@ def test_v5_runner_persists_original_prompt_not_model_prompt():
     )
     # Session history is folded into the MODEL prompt with explicit role
     # prefixes (so an assistant turn is never disguised as user content). The
-    # formatter moved to the prompt domain's PromptBuilder (Phase 8 op 3); the
+    # formatter moved to the prompt domain's PromptBuilder; the
     # runner delegates composition to it. Lock the behavior directly rather
     # than the old "function name in runner source" structural proxy.
     from datetime import datetime, timezone

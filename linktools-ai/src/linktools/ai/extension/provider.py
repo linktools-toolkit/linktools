@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DirectoryExtensionResourceProvider: the default file-backed
-ExtensionResourceProvider. Reads resources from a per-extension root directory with
+"""DirectoryExtensionContentSource: the default file-backed
+ExtensionContentSource. Reads assets from a per-extension root directory with
 the safety guarantees: path sandbox (no ``..`` escape), pagination,
 and a max_bytes read clamp."""
 
@@ -10,15 +10,15 @@ from typing import Mapping
 
 from ..errors import (
     ExtensionNotFoundError,
-    ExtensionResourceAccessDeniedError,
-    ExtensionResourceNotFoundError,
+    ExtensionContentAccessDeniedError,
+    ExtensionContentNotFoundError,
 )
-from .spec import ExtensionResourceProvider
-from .resource import (
-    ResourceContent,
-    ResourceInfo,
-    ResourceListResult,
-    ResourceRef,
+from .spec import ExtensionContentSource
+from .content import (
+    ExtensionContent,
+    ExtensionContentInfo,
+    ExtensionContentPage,
+    ExtensionContentRef,
     sanitize_extension_path,
 )
 from .scope import ExtensionScope
@@ -27,8 +27,8 @@ DEFAULT_MAX_READ_BYTES = 65536
 DEFAULT_LIST_LIMIT = 50
 
 
-class DirectoryExtensionResourceProvider:
-    """ExtensionResourceProvider over a ``extension_id -> root Path`` mapping.
+class DirectoryExtensionContentSource:
+    """ExtensionContentSource over a ``extension_id -> root Path`` mapping.
 
     ``from_base(base_dir)`` builds a provider whose roots are discovered lazily
     as ``<base_dir>/<extension_id>``; ``(roots=...)`` takes an explicit mapping
@@ -43,7 +43,7 @@ class DirectoryExtensionResourceProvider:
     ) -> None:
         self._roots: "dict[str, Path]" = {pid: Path(p) for pid, p in roots.items()}
         # Extension allow/deny lists, normalized lowercase with
-        # a leading dot. When set, read_resource refuses disallowed extensions.
+        # a leading dot. When set, read_content refuses disallowed extensions.
         self._allow_ext = (
             tuple(e.lower() for e in allow_extensions) if allow_extensions else None
         )
@@ -65,31 +65,31 @@ class DirectoryExtensionResourceProvider:
         return True
 
     @classmethod
-    def from_base(cls, base_dir: "Path | str") -> "DirectoryExtensionResourceProvider":
+    def from_base(cls, base_dir: "Path | str") -> "DirectoryExtensionContentSource":
         # Roots resolve lazily on demand; store a single base and look extensions
         # up under it. Implemented by subclassing-style via a sentinel-free
         # mapping populated on first access is avoided -- instead we treat the
         # base dir as the roots provider by overriding _root_for.
-        return _BaseDirExtensionResourceProvider(Path(base_dir))
+        return _BaseDirExtensionContentSource(Path(base_dir))
 
     def _root_for(self, extension_id: str) -> "Path | None":
         return self._roots.get(extension_id)
 
-    async def list_resources(
+    async def list_entries(
         self,
         scope: ExtensionScope,
         path: str = "",
         *,
         limit: int = DEFAULT_LIST_LIMIT,
         cursor: "str | None" = None,
-    ) -> ResourceListResult:
+    ) -> ExtensionContentPage:
         root = self._root_for(scope.extension_id)
         if root is None:
             raise ExtensionNotFoundError(f"extension not found: {scope.extension_id}")
         rel = sanitize_extension_path(path)
         target = root / rel if rel else root
         if not target.exists() or not target.is_dir():
-            return ResourceListResult(items=[], next_cursor=None)
+            return ExtensionContentPage(items=[], next_cursor=None)
 
         root_resolved = root.resolve()
         # Defense-in-depth: rglob may follow symlinked directories (pre-3.13),
@@ -113,28 +113,28 @@ class DirectoryExtensionResourceProvider:
             str(offset + len(page)) if offset + len(page) < len(files) else None
         )
         items = [
-            ResourceInfo(path=p, kind="file", size_bytes=(root / p).stat().st_size)
+            ExtensionContentInfo(path=p, kind="file", size_bytes=(root / p).stat().st_size)
             for p in page
         ]
-        return ResourceListResult(items=items, next_cursor=next_cursor)
+        return ExtensionContentPage(items=items, next_cursor=next_cursor)
 
-    async def read_resource(
+    async def read_content(
         self,
-        ref: ResourceRef,
+        ref: ExtensionContentRef,
         *,
         max_bytes: "int | None" = None,
-    ) -> ResourceContent:
+    ) -> ExtensionContent:
         if ref.scope is None:
-            raise ExtensionResourceAccessDeniedError("resource ref has no extension scope")
+            raise ExtensionContentAccessDeniedError("asset ref has no extension scope")
         root = self._root_for(ref.scope.extension_id)
         if root is None:
             raise ExtensionNotFoundError(f"extension not found: {ref.scope.extension_id}")
         rel = sanitize_extension_path(ref.path)
         if not rel:
-            raise ExtensionResourceAccessDeniedError("empty resource path")
+            raise ExtensionContentAccessDeniedError("empty asset path")
         if not self._ext_ok(rel, self._allow_ext, self._deny_ext):
-            raise ExtensionResourceAccessDeniedError(
-                f"resource extension not allowed: {ref.path!r}"
+            raise ExtensionContentAccessDeniedError(
+                f"asset extension not allowed: {ref.path!r}"
             )
         target = (root / rel).resolve()
         # Defense-in-depth: confirm the resolved target stays under root even
@@ -142,21 +142,21 @@ class DirectoryExtensionResourceProvider:
         try:
             target.relative_to(root.resolve())
         except ValueError:
-            raise ExtensionResourceAccessDeniedError(
+            raise ExtensionContentAccessDeniedError(
                 f"path escapes extension root: {ref.path!r}"
             )
         if not target.is_file():
-            raise ExtensionResourceNotFoundError(f"resource not found: {ref.path!r}")
+            raise ExtensionContentNotFoundError(f"asset not found: {ref.path!r}")
 
         cap = max_bytes if max_bytes is not None else DEFAULT_MAX_READ_BYTES
         true_size = target.stat().st_size
         # Bound the read itself (read one byte past the cap to detect truncation)
-        # so a multi-GB resource cannot OOM the process regardless of max_bytes.
+        # so a multi-GB asset cannot OOM the process regardless of max_bytes.
         with target.open("rb") as fh:
             data = fh.read(cap + 1)
         truncated = len(data) > cap
         payload: "bytes | str" = data[:cap] if truncated else data
-        return ResourceContent(
+        return ExtensionContent(
             path=rel,
             content=payload,
             content_type="application/octet-stream",
@@ -165,7 +165,7 @@ class DirectoryExtensionResourceProvider:
         )
 
 
-class _BaseDirExtensionResourceProvider(DirectoryExtensionResourceProvider):
+class _BaseDirExtensionContentSource(DirectoryExtensionContentSource):
     """Roots resolve as ``<base>/<extension_id>`` on demand."""
 
     def __init__(self, base: Path) -> None:
@@ -183,8 +183,8 @@ class _BaseDirExtensionResourceProvider(DirectoryExtensionResourceProvider):
 
 # Re-export the Protocol alongside the default implementation.
 __all__ = [
-    "ExtensionResourceProvider",
-    "DirectoryExtensionResourceProvider",
+    "ExtensionContentSource",
+    "DirectoryExtensionContentSource",
     "DEFAULT_MAX_READ_BYTES",
     "DEFAULT_LIST_LIMIT",
 ]

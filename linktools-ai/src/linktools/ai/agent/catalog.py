@@ -5,12 +5,12 @@
 Composes a CatalogSource (the raw {name}.md origin), an AgentSpecCodec (strict
 decode), and a RevisionCache[AgentSpec] (revision-keyed, atomic invalidation,
 single-flight refresh). This is the agent-domain instance of the pattern the
-plan (§4.3) prescribes; it replaces the old monolithic per-domain registry that
+design prescribes; it replaces the old monolithic per-domain registry that
 coupled Source + cache + parse.
 
 ``SpecLoaderSource`` adapts the existing ``SpecLoader`` (catalog/parsing) to the
 CatalogSource Protocol -- the loader's revision is an int monotonic clock; the
-adapter stringifies it (CatalogSource.revision() returns str per §4.3). The
+adapter stringifies it (CatalogSource.revision() returns str). The
 source and codec propagate their native errors (RegistryNotFoundError /
 InvalidSpecError / RegistryParseError), so the agent domain keeps its existing
 rich error hierarchy after the migration.
@@ -53,7 +53,7 @@ class AgentCatalog:
         cls, loader: SpecLoader, *, suffix: str = ".md"
     ) -> "AgentCatalog":
         """Build an AgentCatalog over a SpecLoader (the common case: filesystem
-        or resource-backed loader)."""
+        or asset-backed loader)."""
         return cls(SpecLoaderSource(loader), suffix=suffix)
 
     async def list_ids(self) -> "tuple[str, ...]":

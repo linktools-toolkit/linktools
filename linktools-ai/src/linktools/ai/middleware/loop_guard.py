@@ -3,7 +3,7 @@
 """LoopGuardMiddleware: blocks a tool call whose (tool_name, arguments) signature
 has failed max_repeats times in a row. Ports stuck_loop/capability.py's
 StuckLoopCapability logic to the new Middleware Protocol (that pre-vNext module
-is untouched by this plan)."""
+is untouched)."""
 
 import json
 from typing import Any

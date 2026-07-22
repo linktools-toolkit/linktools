@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AssetBackend: the narrow, "dumb" raw-CRUD contract every backend implements.
-All idempotency-key and conditional-write decision logic lives in AssetStore, not
-here -- backends only store/retrieve idempotency records verbatim via get_idempotency/
-put_idempotency."""
+"""Asset backend Protocols, split by capability.
 
-from typing import Mapping, Protocol, runtime_checkable
+:class:`AssetReaderBackend` is the read surface every backend implements
+(raw_get / raw_stat / raw_list / revision / get_idempotency). Overlay backends
+are readers. :class:`AssetWriterBackend` extends it with the atomic checked
+operations (raw_put_checked / raw_delete_checked / raw_move / put_idempotency)
+and declares ``readonly: Literal[False]``. The AssetStore primary is always a
+Writer; overlays are Readers.
+
+Splitting the Protocols (and typing the primary as ``AssetWriterBackend``,
+overlays as ``tuple[AssetReaderBackend, ...]``) removes the former
+``hasattr(backend, "raw_...")`` probing: a backend either is a Writer (and the
+checked ops exist by Protocol) or it is not (and it cannot be a primary).
+Read-only backends simply do not implement the Writer Protocol -- ``readonly``
+is a declared marker, not a runtime-guessable flag."""
+
+from typing import Literal, Protocol, runtime_checkable
 
 from .models import (
     Depth,
     IdempotencyRecord,
-    MoveResult,
     Asset,
     AssetInfo,
     AssetLookupInfo,
@@ -21,12 +31,15 @@ from .path import AssetPath
 
 
 @runtime_checkable
-class AssetBackend(Protocol):
-    readonly: bool
+class AssetReaderBackend(Protocol):
+    """Read surface. Every backend (including read-only overlays) implements
+    these."""
 
     async def raw_get(self, path: AssetPath, *, include_content: bool = True): ...
 
-    async def raw_propfind(
+    async def raw_stat(self, path: AssetPath) -> "AssetLookupInfo | None": ...
+
+    async def raw_list(
         self,
         path: AssetPath,
         *,
@@ -35,35 +48,26 @@ class AssetBackend(Protocol):
         cursor: "str | None",
     ) -> AssetPage: ...
 
-    async def raw_put(
-        self,
-        path: AssetPath,
-        content: bytes,
-        *,
-        content_type: "str | None",
-        metadata: "Mapping[str, object]",
-    ) -> AssetInfo: ...
-
-    async def raw_delete(self, path: AssetPath) -> "AssetInfo | None": ...
-
     async def revision(self) -> int: ...
 
     async def get_idempotency(self, key: str) -> "IdempotencyRecord | None": ...
 
-    async def put_idempotency(self, record: IdempotencyRecord) -> None: ...
 
-    # -- OPTIONAL atomic checked operations (TOCTOU fix) --
-    # These fold precondition-check + idempotency-reservation + mutate into ONE
-    # backend call so the three steps cannot be interleaved by a concurrent
-    # writer (the TOCTOU race the split AssetStore orchestration has). A
-    # backend that has a real transaction primitive (SqlAlchemy) implements them
-    # to run all three steps inside a single transaction. The File backend
-    # implements them under an in-process lock (the best a non-transactional
-    # filesystem can do). The Memory backend does NOT implement them:
-    # AssetStore probes with hasattr() and, when absent, falls back to its
-    # own 3-step orchestration.
-    # `request_hash` is computed by AssetStore (which owns the hash recipe)
-    # and passed in so the backend can do the idempotency comparison atomically.
+@runtime_checkable
+class AssetWriterBackend(AssetReaderBackend, Protocol):
+    """Write surface. The checked operations fold precondition-check +
+    idempotency-reservation + mutate into ONE atomic call so the three steps
+    cannot be interleaved by a concurrent writer (the TOCTOU race a split
+    orchestration has). A backend that has a real transaction primitive
+    (SqlAlchemy) runs all three inside one transaction; File and Memory
+    serialize with a process-local lock. ``raw_move`` is a single atomic
+    operation (load-source + write-target + whiteout-source + bump-revision);
+    it never decomposes into a public put + delete.
+
+    ``readonly`` is ``Literal[False]``: a read-only backend does not implement
+    this Protocol at all, so it cannot be supplied as a primary."""
+
+    readonly: Literal[False]
 
     async def raw_put_checked(
         self,
@@ -82,31 +86,16 @@ class AssetBackend(Protocol):
         request_hash: str,
     ) -> None: ...
 
-    # -- OPTIONAL atomic MOVE --
-    # MOVE is a single domain operation: the backend must NOT decompose it into
-    # a public put() + delete() pair, which would expose intermediate state
-    # (target written while source still live, or source gone while target not
-    # yet written) and would bump the revision twice instead of once. A backend
-    # that has a real transaction primitive (SqlAlchemy) implements raw_move as
-    # ONE transaction. The File backend implements it under self._lock with an
-    # os.replace for the data file. The Memory backend does NOT implement it:
-    # AssetStore probes with hasattr() and, when absent, falls back to its
-    # own put+delete orchestration.
-
-    async def raw_move(
+    async def raw_move_checked(
         self,
         source: AssetPath,
         target: AssetPath,
         *,
         options: WriteOptions,
-    ) -> MoveResult: ...
+        request_hash: str,
+    ) -> Asset: ...
 
-    # -- OPTIONAL metadata-only stat --
-    # Returns the resource metadata (path/version/etag/content_type/metadata/
-    # state) WITHOUT loading the content blob. A backend that can select only
-    # metadata columns (SqlAlchemy) or read only the sidecar (File) implements
-    # this to avoid pulling potentially-large content into memory for callers
-    # that only need metadata. AssetStore.stat() delegates when available
-    # and otherwise falls back to get() + .info.
+    async def put_idempotency(self, record: IdempotencyRecord) -> None: ...
 
-    async def raw_stat(self, path: AssetPath) -> "AssetLookupInfo | None": ...
+
+__all__: "list[str]" = ["AssetReaderBackend", "AssetWriterBackend"]

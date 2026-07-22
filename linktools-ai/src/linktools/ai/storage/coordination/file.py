@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FileResourceCoordinator: provides real cross-process mutual exclusion via
+"""FileAssetCoordinator: provides real cross-process mutual exclusion via
 POSIX advisory file locks (fcntl.flock) when every instance shares the same
-filesystem. Only meaningful under that condition; never stores Resource
+filesystem. Only meaningful under that condition; never stores Asset
 content; never replaces the database transaction as the source of correctness."""
 
 import asyncio
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 
-class FileResourceCoordinator:
+class FileAssetCoordinator:
     def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)

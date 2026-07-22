@@ -9,7 +9,7 @@ implement both this and ObservabilitySink -- LoggingObservabilitySink does."""
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 
-# Stable low-cardinality instrument names used by the hardening paths. IDs and
+# Stable low-cardinality instrument names used across the observability floor. IDs and
 # user data must remain event/log fields, never metric labels.
 HARDENING_METRICS = (
     "run_cancellation_requested_total",
@@ -25,8 +25,7 @@ HARDENING_METRICS = (
     "memory_index_pending_total",
     "memory_index_failed_total",
     "context_injection_flagged_total",
-    # Production-hardening observability floor (audit gap C1). Each name is a
-    # category the hardening plan requires the runtime to count. Names stay
+    # Observability floor. Each name is a category the runtime counts. Names stay
     # flat (no labels); attributes carry the bounded low-cardinality dimensions
     # (which capability fell short, which codec phase failed, etc.).
     "runtime_build_failure_total",

@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from ..artifact.models import ResourceSnapshotRef
+from ..artifact.models import AssetSnapshotRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +16,7 @@ class RunSnapshot:
     input_artifact_id: str
     output_artifact_id: "str | None" = None
     event_artifact_ids: "tuple[str, ...]" = ()
-    resource_snapshots: "tuple[ResourceSnapshotRef, ...]" = ()
+    asset_snapshots: "tuple[AssetSnapshotRef, ...]" = ()
     task_attempt_id: "str | None" = None
     model_usage: "Mapping[str, object]" = field(default_factory=dict)
     metadata: "Mapping[str, object]" = field(default_factory=dict)

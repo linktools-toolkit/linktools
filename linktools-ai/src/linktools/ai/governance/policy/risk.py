@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RiskRule + ResourceLimitRule.
+"""RiskRule + UsageLimitRule.
 
 RiskRule: denies a tool whose declared RiskLevel exceeds the configured cap.
-ResourceLimitRule: denies a call once a usage counter in ToolContext.metadata
+UsageLimitRule: denies a call once a usage counter in ToolContext.metadata
 exceeds a configured ceiling. Reads these context.metadata keys:
 
   - "tokens_used"   compared against limits["max_tokens"]
@@ -58,7 +58,7 @@ class RiskRule:
         )
 
 
-class ResourceLimitRule:
+class UsageLimitRule:
     def __init__(self, *, limits: "Mapping[str, int]") -> None:
         self._limits = limits
 
@@ -73,9 +73,9 @@ class ResourceLimitRule:
             if used > ceiling:
                 return PolicyDecision(
                     kind=PolicyDecisionKind.DENY,
-                    rule_id="resource-limit-rule",
+                    rule_id="asset-limit-rule",
                     reason=f"{usage_key} {used} exceeds {limit_key} {ceiling}",
                 )
         return PolicyDecision(
-            kind=PolicyDecisionKind.ALLOW, rule_id="resource-limit-rule", reason=None
+            kind=PolicyDecisionKind.ALLOW, rule_id="asset-limit-rule", reason=None
         )

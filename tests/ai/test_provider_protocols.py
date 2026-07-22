@@ -7,7 +7,7 @@ import pytest
 
 from linktools.ai.agent.spec import AgentSpecProvider
 from linktools.ai.mcp.spec import MCPServerSpecProvider
-from linktools.ai.extension.spec import ExtensionResourceProvider, ExtensionSpecProvider
+from linktools.ai.extension.spec import ExtensionContentSource, ExtensionSpecProvider
 from linktools.ai.skill.models import SkillSpecProvider
 from linktools.ai.subagent.models import (
     AgentBackedSubagentSpecProvider,
@@ -26,7 +26,7 @@ def test_protocols_importable_and_distinct():
         SwarmSpecProvider,
         SubagentSpecProvider,
         ExtensionSpecProvider,
-        ExtensionResourceProvider,
+        ExtensionContentSource,
     }
     assert len(protos) == 8
 

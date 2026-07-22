@@ -6,7 +6,7 @@
 Wires ``.linktools/{agents,skills,mcp}`` into ``Runtime.build`` via a real
 ``RuntimeDependencies`` (AgentCatalog / SkillCatalog / MCPCatalog built from the
 project directories), a project-scoped ``FilesystemStorage`` (state isolation), an
-``MCPConnectionManager`` (so ``aclose`` can release connections), and
+``MCPConnectionPool`` (so ``aclose`` can release connections), and
 ``CapabilityRuntimeOptions``. Also builds the directory skill index +
 skill-private subagent resolver for the CLI's own use (inspect/list/doctor and
 the live ``call_subagent(instruction_path=...)`` routing).
@@ -22,8 +22,8 @@ from pathlib import Path
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.models import CapabilityRuntimeOptions
-from linktools.ai.execution.local import LocalExecutionBackend
-from linktools.ai.mcp.client import MCPConnectionManager
+from linktools.ai.sandbox.local import LocalSandbox
+from linktools.ai.mcp.client import MCPConnectionPool
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.agent.catalog import AgentCatalog
@@ -208,7 +208,7 @@ def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
         storage=storage,
         commit_coordinator=commit_coordinator,
         model_router=model_router,
-        execution=LocalExecutionBackend(runtime_dir=project.root),
+        execution=LocalSandbox(runtime_dir=project.root),
         providers=providers,
         skill_subagent=skill_subagent,
         options=CapabilityRuntimeOptions(
@@ -222,7 +222,7 @@ def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
             allow_mcp_wildcard=project.allow_mcp_wildcard,
         ),
         allow_mcp_wildcard=project.allow_mcp_wildcard,
-        mcp_connection_manager=MCPConnectionManager(),
+        mcp_connection_pool=MCPConnectionPool(),
     )
     return CliRuntimeBundle(
         project=project,

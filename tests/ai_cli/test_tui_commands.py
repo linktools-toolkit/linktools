@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Command palette + slash command tests (spec §20/§32).
+"""Command palette + slash command tests.
 
 Slash commands (/help, /new, /clear, ...) are dispatched from the composer and
 must not be sent to the agent. The command palette (Ctrl+P) provider is

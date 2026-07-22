@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 9 op 11: the one-click dev-storage rebuild. Verifies BOTH the
+"""the one-click dev-storage rebuild. Verifies BOTH the
 Filesystem data dir and the SQLite dev DB can be wiped and reconstructed from
 scratch (a RunStore round-trip succeeds on the fresh stores). The SQLite
 engine is constructed by the CALLER (this test / the one-click script), never
-by the core rebuild module -- honoring the §6.4 adapter-boundary invariant."""
+by the core rebuild module -- honoring the adapter-boundary invariant."""
 
 import asyncio
 import subprocess

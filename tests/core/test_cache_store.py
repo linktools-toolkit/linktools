@@ -26,7 +26,7 @@ def ns(store):
 
 
 # --------------------------------------------------------------------------- #
-# §7.5 value semantics -- falsy values round-trip; existence by row presence.
+# value semantics -- falsy values round-trip; existence by row presence.
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("value", [None, False, True, 0, 0.0, "", "x", [1], {"a": 1}])
@@ -50,7 +50,7 @@ def test_stored_none_is_distinguishable_from_missing(ns):
 
 
 # --------------------------------------------------------------------------- #
-# §7.4 TTL
+# TTL
 # --------------------------------------------------------------------------- #
 
 def test_ttl_none_never_expires(ns):
@@ -82,7 +82,7 @@ def test_ttl_expires_after_time(ns, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# §7.7 atomic increment
+# atomic increment
 # --------------------------------------------------------------------------- #
 
 def test_incr_missing_uses_initial_plus_delta(ns):
@@ -117,7 +117,7 @@ def test_incr_concurrent_same_key_is_lossless(store):
 
 
 # --------------------------------------------------------------------------- #
-# §7.5/§7.7 transactions
+# transactions
 # --------------------------------------------------------------------------- #
 
 def test_transaction_commits_atomically(ns):
@@ -167,7 +167,7 @@ def test_namespaces_are_isolated(store):
 
 
 # --------------------------------------------------------------------------- #
-# codecs (§7.4)
+# codecs
 # --------------------------------------------------------------------------- #
 
 def test_bytes_codec(store):

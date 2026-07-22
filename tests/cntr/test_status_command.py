@@ -131,7 +131,7 @@ def test_json_schema_version_is_stable(fresh_manager, monkeypatch, with_nginx_se
     json.dumps(payload)  # must be JSON-serializable as-is
 
 
-# -- name pre-validation must happen before any Docker query (spec §40) -----
+# -- name pre-validation must happen before any Docker query -----
 
 def test_unknown_container_name_never_queries_docker(fresh_manager, monkeypatch):
     def fail(*a, **k):
@@ -165,7 +165,7 @@ def test_select_status_containers_unit(fresh_manager):
         select_status_containers(containers, ["nginx", "unknown-one", "unknown-two"])
 
 
-# -- richer aggregation rules (spec §43) -------------------------------------
+# -- richer aggregation rules -------------------------------------
 
 def _svc(state, health=None, service="nginx", logical_container="nginx"):
     return ServiceRuntimeState(logical_container=logical_container, service=service, runtime_name="rt",

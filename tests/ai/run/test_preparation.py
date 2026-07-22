@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tests for run.preparation: RunPreparationCoordinator builds + persists a real
-ExecutionManifest (§13.1/§13.2) into RunDefinitionSnapshot, and records a
-resumability verdict (§13.7). The persisted manifest must deserialize to a
+ExecutionManifest into RunDefinitionSnapshot, and records a
+resumability verdict. The persisted manifest must deserialize to a
 valid ExecutionManifest carrying the spec's runnable id / model / tool
 descriptor fingerprints -- not the old placeholder shape."""
 

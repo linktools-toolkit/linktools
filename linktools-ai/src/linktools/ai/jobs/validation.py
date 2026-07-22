@@ -3,7 +3,7 @@
 """Payload and input validation.
 
 Enforces size/depth/count limits before a task or signal enters the store, so
-malicious or runaway handlers cannot exhaust resources. Returns normally if
+malicious or runaway handlers cannot exhaust assets. Returns normally if
 valid; raises ValueError with a clear message on violation.
 """
 

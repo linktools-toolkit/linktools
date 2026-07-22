@@ -14,12 +14,12 @@ from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinato
 
 
 def _runtime(tmp_path, **kw):
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
     return Runtime.build(
         storage=storage,
-        model_router=ModelRouter(),
+        model_router=ModelResolver(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
         **kw,
     )
@@ -51,7 +51,7 @@ def test_build_accepts_providers_bundle(tmp_path):
     rt = _runtime(tmp_path, providers=bundle)
     assert rt is not None
     # An empty provider bundle does not expose an MCP capability publicly.
-    assert not hasattr(rt, "mcp_connection_manager")
+    assert not hasattr(rt, "mcp_connection_pool")
 
 
 @pytest.mark.asyncio
@@ -72,11 +72,11 @@ async def test_assemble_empty_without_providers(tmp_path):
 
 @pytest.mark.asyncio
 async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
-    # Agent #2 defect #1: extension-resource / extension-entrypoint refs must resolve
+    # Agent #2 defect #1: extension-asset / extension-entrypoint refs must resolve
     # (ExtensionProvider registered under all three kinds).
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.extension.provider import DirectoryExtensionResourceProvider
+    from linktools.ai.extension.provider import DirectoryExtensionContentSource
     from linktools.ai.extension.resolver import DirectoryEntrypointResolver
 
     root = tmp_path / "skill-creator"
@@ -85,17 +85,17 @@ async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
     (root / "agents" / "grader.md").write_text(
         "---\nname: grader\nmodel:\n  primary: gpt-4o\n---\nGrade.\n", encoding="utf-8"
     )
-    rp = DirectoryExtensionResourceProvider({"skill-creator": root})
+    rp = DirectoryExtensionContentSource({"skill-creator": root})
     er = DirectoryEntrypointResolver({"skill-creator": root})
     # entrypoints is bundle-only (contract has no expanded entrypoints param).
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        providers=RuntimeDependencies(extension_resources=rp, entrypoints=er),
+        providers=RuntimeDependencies(extension_content=rp, entrypoints=er),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
 
-    for kind in ("extension-resource", "extension-entrypoint"):
+    for kind in ("extension-asset", "extension-entrypoint"):
         spec = AgentSpec(
             id="a",
             name="a",
@@ -106,7 +106,7 @@ async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
         inspection = await rt.inspect(spec)
         # The ref resolved to a non-empty contribution (tools form for
         # introspectable toolsets). extension-entrypoint with no expose_call_tool
-        # contributes only a discovery tool; extension-resource contributes read tools.
+        # contributes only a discovery tool; extension-asset contributes read tools.
         assert inspection.tools, f"{kind} ref did not resolve"
 
 
@@ -168,7 +168,7 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
     from linktools.ai.mcp.spec import MCPServerSpec
 
     class _McpSrc:
@@ -222,9 +222,9 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=registry),
+        model_router=ModelResolver(registry=registry),
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
-        mcp_connection_manager=manager,
+        mcp_connection_pool=manager,
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
@@ -302,7 +302,7 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
     rt = Runtime.build(
         storage=storage,
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
-        mcp_connection_manager=_Manager(),
+        mcp_connection_pool=_Manager(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     async with rt:
@@ -311,11 +311,11 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_dependencies_from_resources_builds_registries(tmp_path):
-    # contract: RuntimeDependencies.from_resources constructs the default
-    # Spec-backed registries from a resource store + prefixes.
+async def test_runtime_dependencies_from_assets_builds_registries(tmp_path):
+    # contract: RuntimeDependencies.from_assets constructs the default
+    # Spec-backed registries from a asset store + prefixes.
     from linktools.ai.runtime import RuntimeDependencies
-    from linktools.ai._runtime.dependencies import ProviderPrefixes
+    from linktools.ai.runtime.dependencies import ProviderPrefixes
 
     class _Store:
         def __init__(self, files):
@@ -337,7 +337,7 @@ async def test_runtime_dependencies_from_resources_builds_registries(tmp_path):
             "specs/skills/sql.md": "---\nname: sql\n---\nx\n",
         }
     )
-    bundle = RuntimeDependencies.from_resources(store, prefixes=ProviderPrefixes())
+    bundle = RuntimeDependencies.from_assets(store, prefixes=ProviderPrefixes())
     assert bundle.agents is not None
     assert bundle.skills is not None
     assert bundle.mcp_servers is not None

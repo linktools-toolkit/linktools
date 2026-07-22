@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Cross-backend reliability contract (fix-plan sections 4.5, 9.1).
+"""Cross-backend reliability contract (fix-).
 
 The reliable-task state-machine and command-scope invariants must hold for BOTH
 backends. This module parametrizes the same behavioral tests over the file and
-sqlalchemy TaskStores so any divergence is a bug. It covers the plan's Phase 1
+sqlalchemy TaskStores so any divergence is a bug. It covers 's 
 fixes: budget judgment (5.1), terminal-job claim gating (5.2) and cross-job
 command scope (5.3).
 
@@ -136,7 +136,7 @@ def _task(
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock.now(),
         updated_at=clock.now(),
@@ -227,7 +227,7 @@ def test_store_rejects_invalid_job_budget(task_store) -> None:
 
 
 def test_max_tasks_one_allows_root_task(task_store) -> None:
-    """Plan 5.1.1 / 5.1.4: with max_tasks=1 the root task (which makes the count
+    """with max_tasks=1 the root task (which makes the count
     1) must still be claimable. The old Claim check (count >= max_tasks)
     permanently blocked the root of a max_tasks=1 job."""
     clock = task_store._clock
@@ -246,7 +246,7 @@ def test_max_tasks_one_allows_root_task(task_store) -> None:
 
 
 def test_task_at_budget_limit_is_still_claimable(task_store) -> None:
-    """Plan 5.1: an existing task at the budget limit remains claimable; the cap
+    """an existing task at the budget limit remains claimable; the cap
     only restricts CREATION of further tasks."""
     clock = task_store._clock
 
@@ -269,7 +269,7 @@ def test_task_at_budget_limit_is_still_claimable(task_store) -> None:
 
 
 def test_child_creation_rejected_when_max_tasks_exhausted(task_store) -> None:
-    """Plan 5.1.5: creating a child beyond max_tasks raises (checked at the
+    """creating a child beyond max_tasks raises (checked at the
     count, not at claim), and no child is created."""
     clock = task_store._clock
 
@@ -290,7 +290,7 @@ def test_child_creation_rejected_when_max_tasks_exhausted(task_store) -> None:
 
 
 def test_multiple_child_commands_are_budget_checked_atomically(task_store) -> None:
-    """Plan 5.1.5: when a single success creates several children, the budget
+    """when a single success creates several children, the budget
     check is atomic -- either all are created or none. Requesting more children
     than the cap allows rejects the whole batch; zero partial children."""
     clock = task_store._clock
@@ -323,7 +323,7 @@ def test_multiple_child_commands_are_budget_checked_atomically(task_store) -> No
 
 
 def test_complete_job_rejected_with_live_sibling(task_store) -> None:
-    """Plan 5.2.3: CompleteJob is rejected (InvalidTaskCommandError) while a
+    """CompleteJob is rejected (InvalidTaskCommandError) while a
     sibling task is still live, so a task cannot finish the job out from under
     running work."""
     clock = task_store._clock
@@ -355,7 +355,7 @@ def test_complete_job_rejected_with_live_sibling(task_store) -> None:
 
 
 def test_complete_job_allowed_when_current_is_only_live_task(task_store) -> None:
-    """Plan 5.2.3: CompleteJob succeeds when the committing task is the only
+    """CompleteJob succeeds when the committing task is the only
     non-terminal task; the job then lands SUCCEEDED."""
     clock = task_store._clock
 
@@ -381,7 +381,7 @@ def test_complete_job_allowed_when_current_is_only_live_task(task_store) -> None
     "terminal", [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED]
 )
 def test_terminal_job_cannot_claim_task(task_store, terminal) -> None:
-    """Plan 5.2.2: a task whose job is terminal (SUCCEEDED/FAILED) is never
+    """a task whose job is terminal (SUCCEEDED/FAILED) is never
     claimed, even if a leftover READY task somehow exists. Defense-in-depth for
     the claim whitelist -- the API cannot reach this state once 5.2.3 holds."""
     clock = task_store._clock
@@ -402,7 +402,7 @@ def test_terminal_job_cannot_claim_task(task_store, terminal) -> None:
 
 
 def test_cancel_job_command_has_no_job_id_field() -> None:
-    """Plan 5.3.2: a handler CancelJob cannot even express another job -- the
+    """a handler CancelJob cannot even express another job -- the
     command carries only a reason, never a job_id."""
     fields = {f.name for f in dataclasses.fields(CancelJob)}
     assert "job_id" not in fields
@@ -410,7 +410,7 @@ def test_cancel_job_command_has_no_job_id_field() -> None:
 
 
 def test_handler_cancel_job_only_targets_current_job(task_store) -> None:
-    """Plan 5.3.2: a CancelJob command affects only the job whose task produced
+    """a CancelJob command affects only the job whose task produced
     it; a concurrent job is untouched and remains claimable."""
     clock = task_store._clock
 
@@ -474,7 +474,7 @@ def test_cancel_task_same_job_records_legal_transition_edges(task_store) -> None
 
 
 def test_handler_cannot_cancel_foreign_task(task_store) -> None:
-    """Plan 5.3.3: CancelTask is scoped to the current job. Naming a task that
+    """CancelTask is scoped to the current job. Naming a task that
     belongs to another job raises InvalidTaskCommandError and never touches the
     foreign task."""
     clock = task_store._clock
@@ -503,7 +503,7 @@ def test_handler_cannot_cancel_foreign_task(task_store) -> None:
 
 
 def test_cross_tenant_cancel_task_is_rejected(task_store) -> None:
-    """Plan 5.3.4 / 5.3.5: tenant isolation follows from job scoping. A task in
+    """tenant isolation follows from job scoping. A task in
     a job owned by tenant B cannot be canceled from within tenant A's job."""
     clock = task_store._clock
 
@@ -542,7 +542,7 @@ def test_cross_tenant_cancel_task_is_rejected(task_store) -> None:
 
 
 def test_two_workers_claim_same_task_only_one_wins(task_store) -> None:
-    """Plan §13 (concurrency): two workers claiming concurrently against one
+    """(concurrency): two workers claiming concurrently against one
     READY task cannot both win -- exactly one ClaimedTask comes back."""
     clock = task_store._clock
 
@@ -561,7 +561,7 @@ def test_two_workers_claim_same_task_only_one_wins(task_store) -> None:
 def test_complete_job_combined_with_create_task_is_rejected_atomically(
     task_store,
 ) -> None:
-    """Plan 5.1.5 (all-or-none) + 5.2.3: a contradictory batch that both creates a
+    """(all-or-none) + 5.2.3: a contradictory batch that both creates a
     child and completes the job is rejected BEFORE any child is written, so no
     partial child survives the failed commit."""
     clock = task_store._clock
@@ -587,7 +587,7 @@ def test_complete_job_combined_with_create_task_is_rejected_atomically(
 
 
 def test_budget_exhausted_does_not_orphan_running_attempt(task_store) -> None:
-    """Plan §13 ('no Attempt RUNNING permanently残留'): when aggregate-budget
+    """('no Attempt RUNNING permanently残留'): when aggregate-budget
     finalization cancels a CLAIMED task mid-flight, its active RUNNING attempt
     is closed (CANCELLED), not orphaned. A READY sibling is injected so a claim
     has a candidate to trigger finalization while the root is still CLAIMED."""
@@ -629,7 +629,7 @@ def test_budget_exhausted_does_not_orphan_running_attempt(task_store) -> None:
     _run(run())
 
 
-# ----------------------------------------------------- Phase 5 concurrency --
+# ----------------------------------------------------- concurrency --
 
 
 def test_bind_runnable_pins_and_rejects_drift(task_store) -> None:
@@ -689,7 +689,7 @@ def test_bind_runnable_fences_on_stale_worker(task_store) -> None:
 
 
 def test_stale_worker_commit_after_reclaim_is_rejected(task_store) -> None:
-    """Plan §9.2 fencing invariant: worker A's lease expires, the task is
+    """fencing invariant: worker A's lease expires, the task is
     recovered and reclaimed by worker B; A's later commit is rejected with
     TaskClaimLostError -- a stale worker can never overwrite the new owner's
     result. Holds on both backends."""

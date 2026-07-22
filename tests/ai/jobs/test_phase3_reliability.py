@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 3/4 reliability fixes: SQL task envelope determinism (7.1), resource
+"""4 reliability fixes: SQL task envelope determinism (7.1), asset
 snapshot TOCTOU (7.4), complete claim-ownership checking (8.1), and the
 Clock-driven run_one_task with TaskRunTimeoutError (8.3)."""
 
@@ -91,7 +91,7 @@ def _envelope_task(clock, *, depth=2) -> TaskRecord:
         fencing_token=0,
         active_attempt_id=None,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=1,
         created_at=clock,
         updated_at=clock,
@@ -180,7 +180,7 @@ def test_unknown_task_schema_is_rejected(tmp_path) -> None:
             "dependencies": [],
             "retry_policy": {"max_attempts": 1},
             "side_effect_policy": {"mode": "none"},
-            "resource_snapshots": [],
+            "asset_snapshots": [],
             "depth": 0,
             "delegated_scopes": None,
             "actor_chain": None,
@@ -207,7 +207,7 @@ def test_v1_envelope_missing_security_field_fails_closed(tmp_path) -> None:
             "dependencies": [],
             "retry_policy": {"max_attempts": 1},
             "side_effect_policy": {"mode": "none"},
-            "resource_snapshots": [],
+            "asset_snapshots": [],
             "depth": 0,
             "actor_chain": None,
             "metadata": {},
@@ -234,7 +234,7 @@ def test_v1_envelope_null_security_field_fails_closed(tmp_path) -> None:
             "dependencies": [],
             "retry_policy": {"max_attempts": 1},
             "side_effect_policy": {"mode": "none"},
-            "resource_snapshots": [],
+            "asset_snapshots": [],
             "depth": 0,
             "wait_conditions": [],
             "wait_deadline_at": None,
@@ -318,28 +318,28 @@ class _CountingResource:
 
 
 def test_snapshot_uses_single_resource_read(tmp_path) -> None:
-    """The snapshot reads the resource ONCE (get), never stat+get, so the pinned
+    """The snapshot reads the asset ONCE (get), never stat+get, so the pinned
     version/etag and the sealed content come from the same read (no TOCTOU)."""
 
     async def run() -> None:
         from linktools.ai.asset.models import WriteOptions
 
-        from linktools.ai.jobs.snapshot import snapshot_resource
+        from linktools.ai.jobs.snapshot import snapshot_asset
 
-        resources = AssetStore(primary=MemoryAssetBackend())
-        await resources.put(
+        assets = AssetStore(primary=MemoryAssetBackend())
+        await assets.put(
             AssetPath("/data/file.txt"),
             b"snapshot-me",
             options=WriteOptions(content_type="text/plain"),
         )
-        counter = _CountingResource(resources)
+        counter = _CountingResource(assets)
         # Separate store for the sealed blob: the artifact domain decouples from
-        # the resource store, so the snapshot is pinned into its own backend.
+        # the asset store, so the snapshot is pinned into its own backend.
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
         )
-        snap = await snapshot_resource(
+        snap = await snapshot_asset(
             counter, artifacts, "/data/file.txt", tenant_id="t1"
         )
         assert counter.get_calls == 1
@@ -352,14 +352,14 @@ def test_snapshot_uses_single_resource_read(tmp_path) -> None:
 def test_snapshot_picks_consistent_revision_under_concurrent_change(
     tmp_path,
 ) -> None:
-    """If the resource changes between a hypothetical stat and get, the snapshot
+    """If the asset changes between a hypothetical stat and get, the snapshot
     still pins the version/etag that matches the bytes it actually sealed (the
     single get's info), never a stale stat revision against new content."""
 
     async def run() -> None:
         import hashlib
 
-        from linktools.ai.jobs.snapshot import snapshot_resource
+        from linktools.ai.jobs.snapshot import snapshot_asset
 
         class _MutatingResource:
             async def get(self, path):
@@ -378,13 +378,13 @@ def test_snapshot_picks_consistent_revision_under_concurrent_change(
                 )
 
             async def stat(self, path):
-                raise AssertionError("snapshot_resource must not call stat")
+                raise AssertionError("snapshot_asset must not call stat")
 
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
         )
-        snap = await snapshot_resource(
+        snap = await snapshot_asset(
             _MutatingResource(), artifacts, "/data/x", tenant_id="t1"
         )
         assert snap.version == 7
@@ -418,7 +418,7 @@ def _task_with(*, status, lease_owner="w1", attempt_id="a1", fencing=5) -> TaskR
         fencing_token=fencing,
         active_attempt_id=attempt_id,
         timeout_seconds=None,
-        resource_snapshots=(),
+        asset_snapshots=(),
         version=2,
         created_at=now,
         updated_at=now,
@@ -513,7 +513,7 @@ def test_root_task_inherits_job_scopes_at_creation(tmp_path) -> None:
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=None,
-            resource_snapshots=(),
+            asset_snapshots=(),
             version=1,
             created_at=now,
             updated_at=now,
@@ -609,7 +609,7 @@ def test_run_one_task_timeout_raises_and_cancels(tmp_path) -> None:
             fencing_token=0,
             active_attempt_id=None,
             timeout_seconds=None,
-            resource_snapshots=(),
+            asset_snapshots=(),
             version=1,
             created_at=now,
             updated_at=now,

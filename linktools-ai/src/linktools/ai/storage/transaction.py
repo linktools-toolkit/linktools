@@ -4,26 +4,24 @@
 
 The :class:`StorageTransactionManager` Protocol lives in
 :mod:`linktools.ai.storage.protocols`; this module holds the in-repo reference
-managers. ``Storage.transactions`` is the canonical cross-store-UoW surface:
-``storage.transactions.transaction()`` yields a :class:`StorageUnitOfWork` whose
-stores share one atomic scope (a SqlAlchemy AsyncSession + its transaction).
+managers. ``storage.transaction()`` is the single public cross-store-UoW
+entry: it yields a :class:`StorageUnitOfWork` whose stores share one atomic
+scope (a SqlAlchemy AsyncSession + its transaction). The manager object itself
+is an internal Storage dependency (``_transaction_manager``), not a public
+surface; callers go through ``storage.transaction()``.
 
 A backend whose stores are independent (FilesystemStorage -- separate file
 backends, no shared transaction provider) CANNOT offer a cross-store UoW; its
-``features.transactions`` is ``TransactionScope.NONE`` (each store is
+``features.transaction_scope`` is ``TransactionScope.NONE`` (each store is
 independently durable, but there is no general cross-store transaction), and its
-``transactions`` field is a
-:class:`NoCrossStoreTransactions` manager whose ``transaction()`` raises
+manager is a :class:`NoCrossStoreTransactions` whose ``transaction()`` raises
 :class:`StorageTransactionNotSupportedError` at the call. That is the honest
 declaration: the capability is not faked -- it fails explicitly. A backend with
 a shared transaction provider (SqlAlchemyStorage -- one AsyncSession across
-stores) sets ``features.transactions = TransactionScope.DATABASE`` and supplies
-a real manager (see :mod:`linktools.ai.storage.sqlalchemy.facade`).
+stores) sets ``features.transaction_scope = TransactionScope.DATABASE`` and
+supplies a real manager (see :mod:`linktools.ai.storage.sqlalchemy.facade`).
 
-The legacy ``Storage.transaction()`` method is retained as a thin delegator to
-``self.transactions.transaction()`` so existing call sites (the run commit
-coordinators, tests) keep working; the field is the canonical surface for new
-code. Raising at the call (not inside ``__aenter__``) means
+Raising at the call (not inside ``__aenter__``) means
 ``async with storage.transaction()`` fails at the call with the concrete error,
 not with a confusing coroutine TypeError.
 """
@@ -43,7 +41,7 @@ class NoCrossStoreTransactions:
     UoW (e.g. FilesystemStorage, whose stores are independent files with no
     shared transaction provider). ``transaction()`` raises at the call rather
     than yielding a fake atomic scope. This matches
-    ``features.transactions = TransactionScope.NONE`` (each store independently
+    ``features.transaction_scope = TransactionScope.NONE`` (each store independently
     durable, but no general cross-store UoW)."""
 
     def __init__(self, backend_name: str = "FilesystemStorage") -> None:
@@ -52,7 +50,7 @@ class NoCrossStoreTransactions:
     def transaction(self) -> "StorageUnitOfWork":
         raise StorageTransactionNotSupportedError(
             f"{self._backend_name} does not provide a cross-store UnitOfWork "
-            "(its stores are independent; features.transactions is NONE -- no "
+            "(its stores are independent; features.transaction_scope is NONE -- no "
             "general cross-store transaction). Use a Storage with "
             "TransactionScope.DATABASE for cross-store atomic writes."
         )

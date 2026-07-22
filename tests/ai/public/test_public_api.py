@@ -16,6 +16,18 @@ def test_top_level_runtime_import():
     assert "Runtime" in ai_pkg.__all__
 
 
+def test_build_runtime_is_public_importable():
+    # : ``from linktools.ai.runtime import Runtime, build_runtime`` is the
+    # public build entry. build_runtime is the module-level handle for the
+    # public builder (equivalent to Runtime.build).
+    from linktools.ai.runtime import Runtime, build_runtime
+
+    assert callable(build_runtime)
+    # Same underlying classmethod (accessing a classmethod twice yields distinct
+    # bound-method objects, so compare the underlying function).
+    assert build_runtime.__func__ is Runtime.build.__func__
+
+
 def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
     import importlib.util
 
@@ -31,9 +43,8 @@ def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
     )
     assert not hasattr(runtime, "runner")
     assert not hasattr(runtime, "compiler")
-    assert not hasattr(runtime, "capability_assembler")
+    assert not hasattr(runtime, "capability_resolver")
     for module_name in (
-        "linktools.ai.capability.resolver",
         "linktools.ai.tool.policy_adapter",
         "linktools.ai.tool.idempotency_key",
         "linktools.ai.tool.legacy",

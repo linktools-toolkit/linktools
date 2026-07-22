@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Issue 2 (v4 guide §5): RunDefinitionStore is a required capability, not
-optional. These tests pin the two guarantees the spec states in §12:
+"""2 (v4 guide ): RunDefinitionStore is a required capability, not
+optional. These tests pin the two guarantees the spec states in :
 
-1. Runtime.build fails fast when Storage has no RunDefinitionStore (§5.9) --
+1. Runtime.build fails fast when Storage has no RunDefinitionStore --
    the error surfaces at build time, not when a subagent/worker tool first
    pauses on approval and Runtime.resume(child_run_id) cannot find a snapshot.
 2. A subagent run always persists a RunDefinitionSnapshot for its child run
-   (§5.10) -- the unconditional prepare_agent_run in the subagent executor.
+ -- the unconditional prepare_agent_run in the subagent executor.
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from linktools.ai._runtime.build import _make_runtime_subagent_executor
+from linktools.ai.subagent.executor import SubagentExecutor
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
@@ -26,7 +26,7 @@ from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinato
 
 
 def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
-    """§5.9: a Storage whose run_definitions is None must be rejected at build
+    """a Storage whose run_definitions is None must be rejected at build
     time with RuntimeInitializationError, before any run/resume is attempted."""
     storage = FilesystemStorage(root=tmp_path)
     # run_definitions is a required field now, but a caller can still pass None
@@ -57,12 +57,12 @@ class _FakeRunner:
 
 
 def test_subagent_run_persists_child_run_definition_snapshot(tmp_path):
-    """§5.10: a subagent (child) run persists a RunDefinitionSnapshot so a later
+    """a subagent (child) run persists a RunDefinitionSnapshot so a later
     Runtime.resume(child_run_id) can restore its spec + identity after an
     approval pause. The subagent executor must call prepare_agent_run for every
     child run -- this test fails if that call is re-gated behind an Optional."""
     storage = FilesystemStorage(root=tmp_path)
-    execute = _make_runtime_subagent_executor(
+    executor = SubagentExecutor(
         storage=storage,
         compiler=_FakeCompiler(),
         dispatcher=_FakeRunner(),
@@ -77,7 +77,7 @@ def test_subagent_run_persists_child_run_definition_snapshot(tmp_path):
     async def _run():
         # parent=None -> the child run is its own root. The executor mints the
         # child run id and returns it on SubagentResult.run_id.
-        result = await execute(
+        result = await executor.execute(
             agent_spec=spec,
             task="hi",
             context=None,

@@ -3,7 +3,7 @@
 """linktools.ai.asset: the asset domain's public model.
 AssetStore is the Primary+Overlay composition; AssetPath is the
 normalized path value type; Found/Masked/Missing are the three-state
-resource lookup result, and WriteOptions carries conditional-write
+asset lookup result, and WriteOptions carries conditional-write
 preconditions."""
 
 from .models import Found, Masked, Missing, WriteOptions

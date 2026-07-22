@@ -147,13 +147,12 @@ class StorageUnitOfWork(Protocol):
     hides the capability gap from type-checking).
     """
 
-    # assets is Optional in the UoW scope: a session-bound asset backend is not
-    # yet wired (the SQLAlchemy asset backend takes a session_factory, not a
-    # per-call AsyncSession, so it cannot join the UoW's single session without
-    # self-committing and breaking the atomicity guarantee). None is the honest
-    # value until one exists -- not a fake. A consumer that needs assets inside
-    # a transaction must check for None.
-    assets: "AssetStore | None"
+    # assets is a session-bound AssetStore in every transactional UoW: the
+    # backend reuses the UoW's session so asset mutations commit or roll back
+    # with every other store. A backend that cannot bind assets to the
+    # transaction does not offer a cross-store UoW at all (it declares
+    # TransactionScope.NONE and its transaction() raises).
+    assets: AssetStore
     artifact_records: "ArtifactRecordStore"
     sessions: "SessionStore"
     runs: "RunStore"

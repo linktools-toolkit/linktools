@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime cancel / resume principal enforcement (§7.3) + cancel-audit (§8.2).
+"""Runtime cancel / resume principal enforcement + cancel-audit.
 
-Phase 2 of the production-hardening plan: sensitive operations no longer act
+of the : sensitive operations no longer act
 on a bare ``run_id``. Default (production-safe) Runtime rejects cancel / resume
 without a Principal; ``local_trusted_mode`` is the explicit single-tenant
 escape (with a DeprecationWarning). When a Principal is presented and the run
@@ -75,7 +75,7 @@ def _principal(tenant_id: str = "t1", actor_id: str = "alice") -> PrincipalConte
     )
 
 
-# --- §7.3 default-strict gate ------------------------------------------------
+# --- default-strict gate ------------------------------------------------
 
 
 def test_cancel_without_principal_denied_by_default(tmp_path):
@@ -142,7 +142,7 @@ def test_cancel_with_principal_proceeds_and_audits(tmp_path):
     record = asyncio.run(storage.runs.get("run-4"))
     assert record is not None
     assert record.status is RunStatus.CANCELLED
-    # §8.2 audit: identity derived from the trusted Principal, not caller-supplied.
+    # audit: identity derived from the trusted Principal, not caller-supplied.
     assert record.cancel_requested_by == "user:alice"
     assert record.cancel_reason == "user-requested"
     assert record.cancel_requested_at is not None
@@ -199,7 +199,7 @@ def test_resume_without_principal_denied_by_default(tmp_path):
             asyncio.run(_drive())
 
 
-# --- §5.5 cross-tenant denial ----------------------------------------------
+# --- cross-tenant denial ----------------------------------------------
 
 
 def test_cancel_cross_tenant_denied(tmp_path):
@@ -213,7 +213,7 @@ def test_cancel_cross_tenant_denied(tmp_path):
     )
     _seed_run(storage, "run-6", RunStatus.RUNNING)
     # Seed the run's definition owning it for "owner-tenant" so the principal's
-    # tenant can be compared against a real resource tenant.
+    # tenant can be compared against a real asset tenant.
     asyncio.run(
         storage.run_definitions.create(
             RunDefinitionSnapshot(

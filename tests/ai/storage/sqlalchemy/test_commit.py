@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/sqlalchemy/test_commit.py — SqlAlchemyRunCommitCoordinator
-contract (WP-04).
+contract.
 
 pause() and complete() each run inside one SqlAlchemyStorage.transaction():
 every store writes through the same AsyncSession + same transaction, so the
@@ -147,7 +147,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
         assert commit.result is result
         record = await storage.runs.get("run-1")
         assert record.status is RunStatus.SUCCEEDED
-        # §8.3 step 5: the SUCCEEDED transition persists the RunResult.
+        # step 5: the SUCCEEDED transition persists the RunResult.
         assert record.result is not None
         assert record.result.output == result.output
         messages = await storage.sessions.list_messages("sess-1")
@@ -195,7 +195,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
         checkpoint = await storage.checkpoints.latest("run-2")
         assert checkpoint is not None
         assert checkpoint.sequence == 1
-        # §6.7: exactly one of each critical artifact for a single pause.
+        # : exactly one of each critical artifact for a single pause.
         approvals_for_run = await storage.approvals.list_for_run("run-2")
         assert len(approvals_for_run) == 1
         page = await storage.events.list("run-2", limit=100)
@@ -208,7 +208,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
 
 
 def test_complete_rolls_back_when_transition_fails(tmp_path):
-    """Failure injection (WP-04 §8.5): if the SUCCEEDED transition raises, the
+    """Failure injection: if the SUCCEEDED transition raises, the
     session messages + checkpoint written earlier in the SAME txn must roll
     back -- the run stays RUNNING and no partial turn is persisted."""
     storage = _storage(tmp_path)
@@ -294,7 +294,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
 
 
 def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
-    """Failure injection (WP-04 §8.2/§8.5): the pause path writes approval ->
+    """Failure injection: the pause path writes approval ->
     checkpoint -> transition -> events in one txn. If the checkpoint append
     (step 2) raises, the approval written in step 1 must roll back too -- no
     orphan approval, no WAITING_APPROVAL transition, run stays RUNNING."""

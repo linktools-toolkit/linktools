@@ -42,7 +42,7 @@ class ToolRef:
     agent-specific one. agent.spec re-exports it for back-comat.
 
     It is the SINGLE reference type: ``linktools.ai.capability.models.CapabilityRef``
-    is an alias of this class (plan §4.2 保留唯一模型), so a spec declaration and
+    is an alias of this class, so a spec declaration and
     a resolved capability ref are the same object, not two identical shapes."""
 
     kind: str

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """TOCTOU + lost-update regression tests for AssetStore on SqlAlchemyAssetBackend.
 
-The atomic ``raw_put_checked`` (spec section 16) folds precondition-check +
+The atomic ``raw_put_checked`` folds precondition-check +
 idempotency-reservation + mutate into ONE transaction. The conditional UPDATE
 WHERE version=expected (contract) and If-Match in the UPDATE WHERE (spec
 contract) make lost updates impossible at the DB level. The atomic revision
@@ -20,7 +20,7 @@ import asyncio
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.errors import ResourcePreconditionFailedError
+from linktools.ai.errors import AssetPreconditionFailedError
 from linktools.ai.asset.models import WriteOptions
 from linktools.ai.asset.path import AssetPath
 from linktools.ai.asset.store import AssetStore
@@ -47,10 +47,10 @@ async def _make_store(tmp_path, db_name: str = "concurrency.db"):
 @pytest.mark.asyncio
 async def test_concurrent_put_if_none_match_exactly_one_succeeds(tmp_path):
     """Two concurrent puts with if_none_match=True on a fresh path: exactly one
-    succeeds, the other raises ResourcePreconditionFailedError. This is the
+    succeeds, the other raises AssetPreconditionFailedError. This is the
     TOCTOU guarantee -- without the atomic check+put the second could also pass
     the precondition (both read empty) and then one would hit a raw
-    IntegrityError (or, pre-fix, both believe they created the resource)."""
+    IntegrityError (or, pre-fix, both believe they created the asset)."""
     engine, backend, store = await _make_store(tmp_path)
     path = AssetPath("/concurrent.txt")
 
@@ -60,7 +60,7 @@ async def test_concurrent_put_if_none_match_exactly_one_succeeds(tmp_path):
         try:
             await store.put(path, payload, options=WriteOptions(if_none_match=True))
             results["success"] += 1
-        except ResourcePreconditionFailedError:
+        except AssetPreconditionFailedError:
             results["conflict"] += 1
 
     await asyncio.gather(attempt(b"payload-a"), attempt(b"payload-b"))
@@ -68,10 +68,10 @@ async def test_concurrent_put_if_none_match_exactly_one_succeeds(tmp_path):
     assert results["success"] == 1, "exactly one concurrent put must succeed"
     assert results["conflict"] == 1, "the loser must surface as a precondition conflict"
 
-    # Final state: the resource exists with exactly one of the two payloads.
-    resource = await store.get(path)
-    assert resource is not None
-    assert resource.content in (b"payload-a", b"payload-b")
+    # Final state: the asset exists with exactly one of the two payloads.
+    asset = await store.get(path)
+    assert asset is not None
+    assert asset.content in (b"payload-a", b"payload-b")
 
     await engine.dispose()
 
@@ -90,7 +90,7 @@ async def test_concurrent_unconditional_puts_produce_distinct_versions(tmp_path)
     engine, backend, store = await _make_store(tmp_path)
     path = AssetPath("/counter.txt")
 
-    # Seed the resource at version 1.
+    # Seed the asset at version 1.
     first = await store.put(path, b"v0")
     assert first.info.version == 1
 
@@ -106,10 +106,10 @@ async def test_concurrent_unconditional_puts_produce_distinct_versions(tmp_path)
     )
 
     # Final content matches one of the two payloads; final version is the max.
-    resource = await store.get(path)
-    assert resource is not None
-    assert resource.info.version == 3
-    assert resource.content in (b"a", b"b")
+    asset = await store.get(path)
+    assert asset is not None
+    assert asset.info.version == 3
+    assert asset.content in (b"a", b"b")
 
     await engine.dispose()
 
@@ -117,8 +117,8 @@ async def test_concurrent_unconditional_puts_produce_distinct_versions(tmp_path)
 @pytest.mark.asyncio
 async def test_concurrent_put_with_same_if_match_exactly_one_succeeds(tmp_path):
     """contract If-Match-in-WHERE guard: two concurrent puts carrying the SAME
-    If-Match (etag of the current resource) on an EXISTING resource -- exactly
-    one succeeds, the other raises ResourcePreconditionFailedError.
+    If-Match (etag of the current asset) on an EXISTING asset -- exactly
+    one succeeds, the other raises AssetPreconditionFailedError.
 
     Under the pre-fix Python pre-read check, both writers would SELECT the row,
     both see etag=X, both pass the Python check, and both UPDATE -- last write
@@ -140,7 +140,7 @@ async def test_concurrent_put_with_same_if_match_exactly_one_succeeds(tmp_path):
             r = await store.put(path, payload, options=WriteOptions(if_match=etag))
             results["success"] += 1
             final_versions.append(r.info.version)
-        except ResourcePreconditionFailedError:
+        except AssetPreconditionFailedError:
             results["conflict"] += 1
 
     await asyncio.gather(attempt(b"payload-a"), attempt(b"payload-b"))
@@ -156,11 +156,11 @@ async def test_concurrent_put_with_same_if_match_exactly_one_succeeds(tmp_path):
         f"winner must produce version 2 (one bump from v=1), got {final_versions}"
     )
 
-    # Final state: the resource exists with the winner's payload at version 2.
-    resource = await store.get(path)
-    assert resource is not None
-    assert resource.info.version == 2
-    assert resource.content in (b"payload-a", b"payload-b")
+    # Final state: the asset exists with the winner's payload at version 2.
+    asset = await store.get(path)
+    assert asset is not None
+    assert asset.info.version == 2
+    assert asset.content in (b"payload-a", b"payload-b")
 
     await engine.dispose()
 
@@ -199,7 +199,7 @@ async def test_concurrent_puts_produce_distinct_revisions(tmp_path):
         "atomic UPDATE...RETURNING was bypassed by a Python read-then-write"
     )
 
-    # Sanity: all N resources exist, each at version 1.
+    # Sanity: all N assets exist, each at version 1.
     for p in paths:
         r = await store.get(p)
         assert r is not None and r.info.version == 1
@@ -221,7 +221,7 @@ async def test_revision_increments_monotonically_under_sequential_puts(tmp_path)
     assert await backend.revision() == 1
     await store.put(AssetPath("/b.txt"), b"b")
     assert await backend.revision() == 2
-    # Update an existing resource -- still bumps the revision (contract: a real
+    # Update an existing asset -- still bumps the revision (contract: a real
     # change is a change).
     await store.put(AssetPath("/a.txt"), b"a2")
     assert await backend.revision() == 3
@@ -232,9 +232,9 @@ async def test_revision_increments_monotonically_under_sequential_puts(tmp_path)
 @pytest.mark.asyncio
 async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_path):
     """contract If-Match guard on DELETE: two concurrent deletes of the same live
-    resource, both with the same If-Match -- exactly one wins. The loser's
+    asset, both with the same If-Match -- exactly one wins. The loser's
     conditional UPDATE...WHERE etag=:if_match AND deleted_at IS NULL misses
-    (the row is now masked) and raises ResourcePreconditionFailedError."""
+    (the row is now masked) and raises AssetPreconditionFailedError."""
     engine, backend, store = await _make_store(tmp_path)
     path = AssetPath("/del.txt")
 
@@ -247,7 +247,7 @@ async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_pat
         try:
             await store.delete(path, options=WriteOptions(if_match=etag))
             results["success"] += 1
-        except ResourcePreconditionFailedError:
+        except AssetPreconditionFailedError:
             results["conflict"] += 1
 
     await asyncio.gather(attempt(), attempt())
@@ -259,7 +259,7 @@ async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_pat
         f"the loser must surface as a precondition conflict, got {results}"
     )
 
-    # Final state: the resource is gone from the reader's view.
+    # Final state: the asset is gone from the reader's view.
     assert await store.get(path) is None
 
     await engine.dispose()
@@ -268,9 +268,12 @@ async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_pat
 @pytest.mark.asyncio
 async def test_revision_bump_uses_atomic_update_returning(tmp_path):
     """contract structural guard: the revision counter bump must emit a single
-    server-side ``UPDATE ... SET value = value + 1 ... RETURNING value`` --
-    NOT a Python read-then-write (``row.value += 1`` then flush an unconditional
-    ``UPDATE ... SET value = ?``).
+    server-side atomic increment with RETURNING -- either an ``UPDATE ... SET
+    value = value + 1 ... RETURNING value`` or an ``INSERT ... ON CONFLICT DO
+    UPDATE SET value = value + 1 RETURNING value`` (the upsert form folds the
+    first-ever seed into the same atomic statement, and avoids a SAVEPOINT).
+    Either way, NOT a Python read-then-write (``row.value += 1`` then flush an
+    unconditional ``UPDATE ... SET value = ?``).
 
     SQLite's deferred-transaction snapshot isolation masks the lost-update bug
     behaviorally (a concurrent reader's SELECT blocks behind a writer's lock, so
@@ -292,23 +295,22 @@ async def test_revision_bump_uses_atomic_update_returning(tmp_path):
     captured.clear()
     await store.put(AssetPath("/bump.txt"), b"y")
 
-    revision_updates = [
+    revision_bumps = [
         s
         for s in captured
-        if "ai_resource_revision" in s and s.upper().startswith("UPDATE")
+        if "ai_asset_revision" in s
+        and ("value + " in s.lower() or "value+" in s.lower())
     ]
-    assert revision_updates, "expected at least one UPDATE on ai_resource_revision"
-    # Every revision UPDATE must be the server-side atomic increment: the SET
-    # clause references the column itself (``value = value + ?``), not a literal.
-    for stmt in revision_updates:
-        assert "value" in stmt.lower() and (
-            "value + " in stmt.lower() or "value+" in stmt.lower()
-        ), (
+    assert revision_bumps, "expected at least one atomic increment on ai_asset_revision"
+    # Every revision bump must be server-side atomic (``value = value + 1``) and
+    # read the new value back via RETURNING.
+    for stmt in revision_bumps:
+        assert "value + " in stmt.lower() or "value+" in stmt.lower(), (
             f"revision bump must use server-side atomic increment (value = value + 1), "
             f"got: {stmt!r}"
         )
         assert "returning" in stmt.lower(), (
-            f"revision bump must use UPDATE ... RETURNING value to read the new "
+            f"revision bump must use ... RETURNING value to read the new "
             f"value atomically, got: {stmt!r}"
         )
 
@@ -316,9 +318,9 @@ async def test_revision_bump_uses_atomic_update_returning(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_resource_update_uses_conditional_where_on_version(tmp_path):
+async def test_asset_update_uses_conditional_where_on_version(tmp_path):
     """contract structural guard: an update-existing PUT must emit a single
-    ``UPDATE ai_resources SET ... WHERE path = :path AND version = :expected``
+    ``UPDATE ai_assets SET ... WHERE path = :path AND version = :expected``
     -- NOT an unconditional ``UPDATE ... SET version = ?`` computed in Python.
 
     The behavioral test (test_concurrent_unconditional_puts_produce_distinct_versions)
@@ -339,13 +341,13 @@ async def test_resource_update_uses_conditional_where_on_version(tmp_path):
     captured.clear()
     await store.put(AssetPath("/u.txt"), b"v2")
 
-    resource_updates = [
-        s for s in captured if "ai_resources" in s and s.upper().startswith("UPDATE")
+    asset_updates = [
+        s for s in captured if "ai_assets" in s and s.upper().startswith("UPDATE")
     ]
-    assert resource_updates, "expected at least one UPDATE on ai_resources"
-    stmt = resource_updates[-1]
+    assert asset_updates, "expected at least one UPDATE on ai_assets"
+    stmt = asset_updates[-1]
     assert "version" in stmt.lower() and "path" in stmt.lower(), (
-        f"resource UPDATE must condition on path AND version, got: {stmt!r}"
+        f"asset UPDATE must condition on path AND version, got: {stmt!r}"
     )
     # The WHERE clause must reference version (the optimistic-concurrency guard),
     # not just path. We check for the column name appearing in the WHERE region
@@ -353,7 +355,7 @@ async def test_resource_update_uses_conditional_where_on_version(tmp_path):
     # to an unconditional UPDATE-by-path.
     where_clause = stmt.split("WHERE", 1)[-1] if "WHERE" in stmt.upper() else ""
     assert "version" in where_clause.lower(), (
-        f"resource UPDATE WHERE clause must include version, got: {stmt!r}"
+        f"asset UPDATE WHERE clause must include version, got: {stmt!r}"
     )
 
     await engine.dispose()

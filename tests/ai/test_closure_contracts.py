@@ -44,7 +44,7 @@ def _md(name, category="discovery", mutating=False):
 async def test_tools_only_contribution_partial_filter():
     """A tools-only contribution (toolset=None) filtered to a subset must not
     crash on None.filtered and must keep exactly the allowed tools."""
-    from linktools.ai.capability.assembler import filter_contribution
+    from linktools.ai.capability.resolver import filter_contribution
 
     contrib = ToolContribution(
         tools=(_md("keep"), _md("drop", category="file-write", mutating=True))
@@ -59,7 +59,7 @@ async def test_tools_only_contribution_partial_filter():
 async def test_tools_only_contribution_fully_filtered_returns_none():
     """When every tool is denied, the contribution is dropped (None), not an
     error."""
-    from linktools.ai.capability.assembler import filter_contribution
+    from linktools.ai.capability.resolver import filter_contribution
 
     contrib = ToolContribution(
         tools=(
@@ -190,10 +190,10 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     from linktools.ai.governance.policy.rule import PolicyDecision, PolicyDecisionKind
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.tool.executor import GovernedToolInvoker
-    from linktools.ai.execution.local import LocalExecutionBackend
+    from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 
@@ -224,9 +224,9 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=reg),
+        model_router=ModelResolver(registry=reg),
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=(_CountingRule(),))),
-        execution=LocalExecutionBackend(runtime_dir=tmp_path),
+        execution=LocalSandbox(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
@@ -301,11 +301,11 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     from linktools.ai.runtime import RuntimeDependencies
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.execution.local import LocalExecutionBackend
+    from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
 
     class _IdemPolicySrc:
         async def get_metadata_map(self):
@@ -342,8 +342,8 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=reg),
-        execution=LocalExecutionBackend(runtime_dir=tmp_path),
+        model_router=ModelResolver(registry=reg),
+        execution=LocalSandbox(runtime_dir=tmp_path),
         providers=RuntimeDependencies(tool_policies=_IdemPolicySrc()),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)

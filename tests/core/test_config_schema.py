@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Tests for the new Config Schema/Sources/Resolver (spec §8.2-§8.9).
+"""Tests for the new Config Schema/Sources/Resolver.
 
-Standalone build (PR 07); the legacy Config stays until cntr's DSL migrates to it
-(PR 08). Exercises source precedence, casting/validation, cycle detection,
+Standalone build ( 07); the legacy Config stays until cntr's DSL migrates to it
+( 08). Exercises source precedence, casting/validation, cycle detection,
 secret masking in explain, and multi-instance isolation.
 """
 import os
@@ -69,7 +69,7 @@ def test_runtime_override_beats_environment(monkeypatch):
 
 
 def test_precedence_order_is_first_wins(monkeypatch):
-    # §8.2: EnvironmentSource > RuntimeOverride > Persistent > File > Default.
+    # : EnvironmentSource > RuntimeOverride > Persistent > File > Default.
     monkeypatch.setenv("LT_K", "from-env")
     schema = ConfigSchema().define(ConfigField(name="K", default="def"))
     ro = RuntimeOverrideSource(); ro.set("K", "from-runtime")
@@ -193,7 +193,7 @@ def test_validator_failure_raises(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# explain (§8.9) -- secret never exposed
+# explain -- secret never exposed
 # --------------------------------------------------------------------------- #
 
 def test_explain_reports_source_and_candidates(monkeypatch):
@@ -208,7 +208,7 @@ def test_explain_reports_source_and_candidates(monkeypatch):
 
 
 def test_explain_masks_secret_value(monkeypatch):
-    # §8.9: a secret field must not expose its raw value in explain.
+    # : a secret field must not expose its raw value in explain.
     monkeypatch.setenv("LT_TOKEN", "supersecret")
     schema = ConfigSchema().define(ConfigField(name="TOKEN", secret=True, default="x"))
     r = ConfigResolver(schema, sources=[EnvironmentSource((os.environ, "LT_")), DefaultSource(schema)])
@@ -240,7 +240,7 @@ def test_explain_masks_every_secret_candidate_not_just_the_selected_one(monkeypa
 
 
 # --------------------------------------------------------------------------- #
-# Cycle detection (§8.10) via Alias provider
+# Cycle detection via Alias provider
 # --------------------------------------------------------------------------- #
 
 def test_alias_cycle_detected():
@@ -265,7 +265,7 @@ def test_runtime_override_clear():
 
 
 # --------------------------------------------------------------------------- #
-# PR-4: explain unknown/missing keys + get/require semantics (spec §6)
+# -4: explain unknown/missing keys + get/require semantics
 # --------------------------------------------------------------------------- #
 
 def test_explain_unknown_persistent_key():

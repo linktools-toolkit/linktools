@@ -10,7 +10,7 @@ persisted for resume is rejected here rather than silently resuming from a
 caller-supplied spec later.
 
 The snapshot carries an :class:`ExecutionManifest` -- revisions / fingerprints
-of the runnable, model, tools, and resources the run was prepared against. The
+of the runnable, model, tools, and assets the run was prepared against. The
 agent-run path compiles FIRST and threads the resolved model bundle in, so the
 manifest's provider revision is populated; tool-handler revisions are still
 None (handlers resolve at execution time, not prepare time). The resume path

@@ -4,7 +4,7 @@
 
 The reliable-task domain's data shapes: jobs, tasks, attempts, transitions and
 signals, plus the policies (retry, side-effect), principal/actor/budget context
-and resource-snapshot references. Models are frozen ``slots=True`` dataclasses
+and asset-snapshot references. Models are frozen ``slots=True`` dataclasses
 so a record, once written, cannot be mutated in place -- the store is the only
 thing that moves them between states.
 
@@ -19,7 +19,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from ..artifact.models import ArtifactRef, ResourceSnapshotRef
+from ..artifact.models import ArtifactRef, AssetSnapshotRef
 from ..identity.principal import ActorRef, ScopeSet
 
 
@@ -147,9 +147,9 @@ class TaskBudget:
     max_total_cost: "str | None" = None
 
 
-# ResourceSnapshotRef is defined in ..artifact.models (the shared low layer) and
+# AssetSnapshotRef is defined in ..artifact.models (the shared low layer) and
 # re-exported here so existing ``from linktools.ai.jobs.models import
-# ResourceSnapshotRef`` references keep working.
+# AssetSnapshotRef`` references keep working.
 
 
 # ----------------------------------------------------------- record types --
@@ -202,7 +202,7 @@ class TaskRecord:
     fencing_token: int
     active_attempt_id: "str | None"
     timeout_seconds: "float | None"
-    resource_snapshots: "tuple[ResourceSnapshotRef, ...]"
+    asset_snapshots: "tuple[AssetSnapshotRef, ...]"
     version: int
     created_at: datetime
     updated_at: datetime
@@ -455,7 +455,7 @@ __all__: "list[str]" = [
     "ActorChain",
     "ScopeSet",
     "TaskBudget",
-    "ResourceSnapshotRef",
+    "AssetSnapshotRef",
     "JobRecord",
     "TaskRecord",
     "TaskWaitCondition",

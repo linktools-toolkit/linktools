@@ -3,7 +3,7 @@
 """FileAssetBackend: filesystem-backed AssetBackend. Flat filename mapping
 (path segments joined with "__") avoids managing nested directories; atomic writes
 via temp-file-then-os.replace; whiteouts/idempotency/revision are separate small
-JSON files under .resource/ so a crash mid-write cannot corrupt unrelated resources.
+JSON files under .asset/ so a crash mid-write cannot corrupt unrelated assets.
 
 Each public async method delegates to a ``_*_sync`` private method via
 ``asyncio.to_thread`` so blocking file I/O never runs on the event loop.
@@ -41,7 +41,7 @@ from .path import AssetPath
 from ..errors import (
     IdempotencyConflictError,
     InvalidAssetPathError,
-    ResourcePreconditionFailedError,
+    AssetPreconditionFailedError,
 )
 
 
@@ -72,10 +72,10 @@ class FileAssetBackend:
         self._symlink_policy = symlink_policy
         self._root = Path(root)
         self._data_dir = self._root / "data"
-        self._meta_dir = self._root / ".resource" / "metadata"
-        self._whiteout_dir = self._root / ".resource" / "whiteouts"
-        self._idempotency_dir = self._root / ".resource" / "idempotency"
-        self._revision_file = self._root / ".resource" / "revision"
+        self._meta_dir = self._root / ".assets" / "metadata"
+        self._whiteout_dir = self._root / ".assets" / "whiteouts"
+        self._idempotency_dir = self._root / ".assets" / "idempotency"
+        self._revision_file = self._root / ".assets" / "revision"
         # In-process lock serializing the checked (precondition+idempotency+
         # mutate) operations. The filesystem itself is not transactional, so
         # this lock is the best atomicity FileAssetBackend can offer: it
@@ -177,7 +177,7 @@ class FileAssetBackend:
             content = b""
             if include_content:
                 content = self._data_path(path).read_bytes()
-            return Found(resource=Asset(info=info, content=content))
+            return Found(asset=Asset(info=info, content=content))
         whiteout_path = self._whiteout_path(path)
         if whiteout_path.exists():
             version = json.loads(whiteout_path.read_text())["version"]
@@ -196,7 +196,7 @@ class FileAssetBackend:
         without touching the (potentially large) content blob."""
         return await asyncio.to_thread(self._load_info, path)
 
-    def _raw_propfind_sync(
+    def _raw_list_sync(
         self, path: AssetPath, *, depth: Depth, limit: int, cursor: "str | None"
     ) -> AssetPage:
         """Keyset pagination: metadata files are iterated in sorted
@@ -221,11 +221,11 @@ class FileAssetBackend:
         next_cursor = items[limit].path.value if len(items) > limit else None
         return AssetPage(items=tuple(items[:limit]), cursor=next_cursor)
 
-    async def raw_propfind(
+    async def raw_list(
         self, path: AssetPath, *, depth: Depth, limit: int, cursor: "str | None"
     ) -> AssetPage:
         return await asyncio.to_thread(
-            self._raw_propfind_sync,
+            self._raw_list_sync,
             path,
             depth=depth,
             limit=limit,
@@ -382,12 +382,12 @@ class FileAssetBackend:
                     return Asset(info=cached_info, content=content_bytes)
             info = self._load_info(path)
             if options.if_none_match and info is not None:
-                raise ResourcePreconditionFailedError(
-                    f"resource already exists: {path}"
+                raise AssetPreconditionFailedError(
+                    f"asset already exists: {path}"
                 )
             if options.if_match is not None:
                 if info is None or info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(
+                    raise AssetPreconditionFailedError(
                         f"if-match precondition failed: {path}"
                     )
             if info is not None:
@@ -463,7 +463,7 @@ class FileAssetBackend:
             info = self._load_info(path)
             if options.if_match is not None:
                 if info is None or info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(
+                    raise AssetPreconditionFailedError(
                         f"if-match precondition failed: {path}"
                     )
             self._raw_delete_sync(path)
@@ -488,12 +488,14 @@ class FileAssetBackend:
         target: AssetPath,
         *,
         options: WriteOptions,
+        request_hash: str,
     ) -> MoveResult:
         """Atomic MOVE on the same filesystem via ``os.replace`` for the data
-        file. The whole operation runs under self._lock so two
-        in-process callers cannot interleave the steps; cross-process races
-        remain (a documented limitation -- true cross-process atomicity
-        requires the SqlAlchemy backend).
+        file. The whole operation -- idempotency check, precondition, move,
+        idempotency-record save -- runs under self._lock so two in-process
+        callers cannot interleave the steps; cross-process races remain (a
+        documented limitation -- true cross-process atomicity requires the
+        SqlAlchemy backend).
 
         Cross-device source/target would raise OSError(EXDEV) from os.replace;
         we do not catch it. Within one filesystem os.replace is atomic: at no
@@ -509,10 +511,25 @@ class FileAssetBackend:
         Revision bumps exactly once (observable proof the move was not
         decomposed into a put+delete pair, which would bump twice)."""
         with self._lock:
+            idem_key = (
+                f"move:{options.idempotency_key}" if options.idempotency_key else None
+            )
+            if idem_key is not None:
+                record = self._read_idempotency_sync(idem_key)
+                if record is not None:
+                    if record.request_hash != request_hash:
+                        raise IdempotencyConflictError(
+                            f"idempotency key {options.idempotency_key!r} reused with a different request"
+                        )
+                    cached_info = record.result
+                    if cached_info is not None:
+                        content = self._data_path(target)
+                        bytes_ = content.read_bytes() if content.exists() else b""
+                        return Asset(info=cached_info, content=bytes_)
             source_info = self._load_info(source)
             if source_info is None:
-                raise ResourcePreconditionFailedError(
-                    f"cannot move missing resource: {source}"
+                raise AssetPreconditionFailedError(
+                    f"cannot move missing asset: {source}"
                 )
             source_data_path = self._data_path(source)
             source_content = source_data_path.read_bytes()
@@ -520,12 +537,12 @@ class FileAssetBackend:
             # Target precondition check (mirror raw_put_checked's logic).
             target_info = self._load_info(target)
             if options.if_none_match and target_info is not None:
-                raise ResourcePreconditionFailedError(
-                    f"resource already exists: {target}"
+                raise AssetPreconditionFailedError(
+                    f"asset already exists: {target}"
                 )
             if options.if_match is not None:
                 if target_info is None or target_info.etag != options.if_match:
-                    raise ResourcePreconditionFailedError(
+                    raise AssetPreconditionFailedError(
                         f"if-match precondition failed: {target}"
                     )
 
@@ -580,15 +597,26 @@ class FileAssetBackend:
 
             # One revision bump for the whole move.
             self._bump_revision()
+            if idem_key is not None:
+                self._write_idempotency_sync(
+                    IdempotencyRecord(
+                        key=idem_key, request_hash=request_hash, result=new_info
+                    )
+                )
             return Asset(info=new_info, content=source_content)
 
-    async def raw_move(
+    async def raw_move_checked(
         self,
         source: AssetPath,
         target: AssetPath,
         *,
         options: WriteOptions,
+        request_hash: str,
     ) -> MoveResult:
         return await asyncio.to_thread(
-            self._raw_move_sync, source, target, options=options
+            self._raw_move_sync,
+            source,
+            target,
+            options=options,
+            request_hash=request_hash,
         )

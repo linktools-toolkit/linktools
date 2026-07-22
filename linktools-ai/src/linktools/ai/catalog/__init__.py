@@ -6,7 +6,7 @@ SwarmCatalog, ExtensionCatalog) composes.
 
 These were previously inlined per-domain (each registry coupled Source +
 cache + parse). Extracting them here gives every Catalog the same observable
-semantics for free (plan §4.3):
+semantics for free:
 
 - cache key includes the source revision;
 - a revision change atomically invalidates the cache and the id listing;

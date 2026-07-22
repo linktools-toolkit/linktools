@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ExtensionScope: identifies an extension for scoped resolution. Two
 extensions may both contain ``agents/grader.md``; the scope keeps their scoped
-entrypoints and resources from colliding (internal key ``extension:<id>:...``)."""
+entrypoints and assets from colliding (internal key ``extension:<id>:...``)."""
 
 from dataclasses import dataclass
 

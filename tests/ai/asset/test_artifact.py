@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_artifact.py"""
+"""tests/ai/storage/asset/test_artifact.py"""
 
 import pytest
 
@@ -19,11 +19,11 @@ async def test_put_then_get_roundtrip():
         content=b'{"ok": true}',
         content_type="application/json",
     )
-    resource = await service.get(
+    asset = await service.get(
         tenant_id="acme", run_id="run-1", artifact_name="report.json"
     )
-    assert resource.content == b'{"ok": true}'
-    assert resource.info.content_type == "application/json"
+    assert asset.content == b'{"ok": true}'
+    assert asset.info.content_type == "application/json"
 
 
 @pytest.mark.asyncio

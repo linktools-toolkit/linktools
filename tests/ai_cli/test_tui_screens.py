@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resources/Runs/Doctor screen + navigation tests (spec §17.2/§17.3/§17.4/§32).
+"""Resources/Runs/Doctor screen + navigation tests.
 
 Each screen fetches its data through ``RuntimeClient`` (no registry/storage
 access from the UI). Ctrl+R/O/D push the screens; Esc pops back to chat."""

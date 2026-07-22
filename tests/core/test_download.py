@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for the Download module (spec §9)."""
+"""Tests for the Download module."""
 import hashlib
 import http.server
 import os
@@ -32,7 +32,7 @@ def manager(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# §9.7 validators
+# validators
 # --------------------------------------------------------------------------- #
 
 def test_size_validator_passes_and_fails(tmp_path):
@@ -62,7 +62,7 @@ def test_composite_validator(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# §9.4 atomic landing + reuse-valid + lock, via FileTransport
+# atomic landing + reuse-valid + lock, via FileTransport
 # --------------------------------------------------------------------------- #
 
 def test_file_transport_downloads_atomically(manager, tmp_path):
@@ -111,7 +111,7 @@ def test_hash_mismatch_after_download_raises_and_leaves_no_dst(manager, tmp_path
 
 
 # --------------------------------------------------------------------------- #
-# §9.9 resume metadata lands in the cache store
+# resume metadata lands in the cache store
 # --------------------------------------------------------------------------- #
 
 def test_resume_metadata_stored_in_cache(manager, tmp_path):
@@ -205,7 +205,7 @@ def test_http_gzip_and_content_disposition(manager, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# PR-3: resume / 416 state machine (spec §5.7)
+# -3: resume / 416 state machine
 # --------------------------------------------------------------------------- #
 
 class _RangeServer:
@@ -380,7 +380,7 @@ def _HttpTransport():
 
 
 # --------------------------------------------------------------------------- #
-# PR-3 (fix-plan §3.3): hash-mismatch retry-once / second-fail semantics
+# -3 (fix-): hash-mismatch retry-once / second-fail semantics
 # --------------------------------------------------------------------------- #
 
 class _ScriptedTransport:

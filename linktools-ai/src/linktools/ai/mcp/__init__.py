@@ -13,7 +13,7 @@ the tool list -- advertising it would promise capability that is not wired in.""
 from .spec import MCPServerSpec
 from .codec import parse_mcp_spec
 from .client import (
-    MCPConnectionManager,
+    MCPConnectionPool,
     MCPConnectionRef,
     MCPToolsetHandle,
     build_mcp_server,
@@ -23,7 +23,7 @@ from .provider import MCPProvider, MCPDiscoveryResult, MCPToolInfo, MCPExposedTo
 __all__ = [
     "MCPServerSpec",
     "parse_mcp_spec",
-    "MCPConnectionManager",
+    "MCPConnectionPool",
     "MCPConnectionRef",
     "MCPToolsetHandle",
     "build_mcp_server",

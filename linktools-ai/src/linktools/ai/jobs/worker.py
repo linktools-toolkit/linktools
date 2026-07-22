@@ -74,7 +74,7 @@ class JobWorker:
         self._artifact_store = artifact_store
         # Optional ObservabilityMetrics sink (distinct from TaskMetrics): when
         # wired, records ``job_lease_expiry_total`` / ``job_recovery_total`` /
-        # ``job_stale_fence_total`` for the production-hardening metric floor.
+        # ``job_stale_fence_total`` (the stale-fence metric).
         # Default None keeps existing callers no-op.
         self._obs_metrics = observability_metrics
 
@@ -260,7 +260,7 @@ class JobWorker:
             ),
             delegated_scopes=task.delegated_scopes,
             budget=job.budget,
-            resource_snapshots=task.resource_snapshots,
+            asset_snapshots=task.asset_snapshots,
             cancellation=cancellation,
         )
         heartbeat = asyncio.create_task(

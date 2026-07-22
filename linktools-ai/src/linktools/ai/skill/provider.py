@@ -7,8 +7,8 @@
 - skill:<id>-> expose list_skills/read_skill authorized for that one skill only;
                no full content is injected into the prompt.
 
-Extension skills surface their extension_id in summaries; deeper extension-resource
-access is a separate ``extension-resource`` capability, not auto-enabled here."""
+Extension skills surface their extension_id in summaries; deeper extension-asset
+access is a separate ``extension-asset`` capability, not auto-enabled here."""
 
 from dataclasses import dataclass
 from typing import Any, ClassVar

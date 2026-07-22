@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Tests for safe_remove/safe_rmtree (§17.5) and verify_file (§17.3)."""
+"""Tests for safe_remove/safe_rmtree and verify_file."""
 import pytest
 
 from linktools import utils
 from linktools.errors import LinktoolsError
 
 
-# §17.5 ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 def test_safe_remove_file(tmp_path):
     f = tmp_path / "a.txt"
@@ -45,7 +45,7 @@ def test_safe_remove_default_root_is_parent(tmp_path):
     assert utils.safe_remove(f) is True
 
 
-# §17.3 ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 def test_verify_file_matches(tmp_path):
     f = tmp_path / "f"

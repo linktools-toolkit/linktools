@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EventCriticality classification (WP-17)."""
+"""EventCriticality classification."""
 
 from linktools.ai.events.criticality import EventCriticality, classify_event
 from linktools.ai.events.payloads import (

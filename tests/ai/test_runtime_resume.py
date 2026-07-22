@@ -44,7 +44,7 @@ from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import InvalidRunTransitionError, RunNotFoundError
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
@@ -143,7 +143,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FilesystemStorage]":
     )
     runtime = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelResolver(registry=_registry()),
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
@@ -325,7 +325,7 @@ def test_resume_no_checkpoint_raises(tmp_path):
 
 
 def test_resume_refused_when_snapshot_marked_non_resumable(tmp_path):
-    """A run whose persisted snapshot is marked NON_RESUMABLE (§13.7) is refused
+    """A run whose persisted snapshot is marked NON_RESUMABLE is refused
     at resume entry -- the guard fires right after the snapshot is read, before
     the checkpoint/approval checks."""
     from linktools.ai.errors import RunNotResumableError
@@ -385,7 +385,7 @@ def test_resume_refused_when_snapshot_marked_non_resumable(tmp_path):
 
 
 def test_resume_refused_when_provider_revision_drifted(tmp_path):
-    """§13.6: if the resolved model provider's revision changed between prepare
+    """if the resolved model provider's revision changed between prepare
     and resume, resume refuses (ManifestDriftError) instead of silently
     re-resolving against the drifted environment. The snapshot is seeded with a
     manifest that pins a STALE provider revision; the runtime's current
@@ -464,7 +464,7 @@ def test_resume_refused_when_provider_revision_drifted(tmp_path):
 
 
 def test_resume_refused_when_approval_still_pending(tmp_path):
-    """WP-08 §12.6: a run whose approval is still PENDING must not resume -- the
+    """a run whose approval is still PENDING must not resume -- the
     run stays WAITING_APPROVAL (resume is fail-closed until explicitly approved)."""
 
     async def _drive():
@@ -504,7 +504,7 @@ def test_resume_refused_when_approval_still_pending(tmp_path):
 
 
 def test_resume_refused_when_approval_rejected(tmp_path):
-    """WP-08 §12.6: a REJECTED approval must not resume -- fail-closed, run stays
+    """a REJECTED approval must not resume -- fail-closed, run stays
     WAITING_APPROVAL."""
 
     async def _drive():
@@ -545,7 +545,7 @@ def test_resume_refused_when_approval_rejected(tmp_path):
 
 
 def test_resume_persists_non_empty_user_message(tmp_path):
-    """WP-11 §15.2: a resumed run's complete commit must persist the ORIGINAL
+    """a resumed run's complete commit must persist the ORIGINAL
     user message (carried through record.input.prompt), not an empty string."""
 
     async def _drive():
@@ -587,7 +587,7 @@ def test_resume_persists_non_empty_user_message(tmp_path):
 
 class _PromptedRiskyProvider(_RiskyProvider):
     """Same risky tool as _RiskyProvider, but ALSO injects a capability prompt
-    section -- reproduces B-02 (resume with capability_prompt non-empty used to
+    section -- reproduces (resume with capability_prompt non-empty used to
     do ``str + None`` and crash)."""
 
     async def resolve(self, ref, context):
@@ -599,7 +599,7 @@ class _PromptedRiskyProvider(_RiskyProvider):
 
 
 def test_resume_with_capability_prompt_does_not_crash(tmp_path):
-    """B-02: a capability-enabled agent (with a prompt section) that pauses on
+    """a capability-enabled agent (with a prompt section) that pauses on
     approval and then resumes must not TypeError on ``capability_prompt + None``."""
 
     async def _drive():
@@ -612,7 +612,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
         )
         runtime = Runtime.build(
             storage=storage,
-            model_router=ModelRouter(registry=_registry()),
+            model_router=ModelResolver(registry=_registry()),
             tool_executor=executor,
             providers=RuntimeDependencies(capabilities=(_PromptedRiskyProvider(),)),
             local_trusted_mode=True,

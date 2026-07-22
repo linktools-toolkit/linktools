@@ -18,13 +18,13 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.controller import RunController
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
@@ -154,7 +154,7 @@ async def test_controller_cancel_drives_cancelling_then_cancelled(tmp_path):
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
     )
     compiled = await compiler.compile(
         AgentSpec(
@@ -249,7 +249,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     # must carry the test FunctionModel so spec compilation resolves.
     runtime = Runtime.build(
         storage=storage,
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelResolver(registry=_registry()),
         middleware_pipeline=MiddlewarePipeline(middlewares=(_BlockingMiddleware(),)),
         local_trusted_mode=True,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -329,7 +329,7 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
     )
     compiled = await compiler.compile(
         AgentSpec(

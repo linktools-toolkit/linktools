@@ -181,8 +181,7 @@ def check_dedupe_conflict(
 class ApprovalStore(Protocol):
     """Persistence contract for ApprovalRequest.
 
-    Method signatures are this phase's concrete resolution of the spec's
-    ``(...)`` ellipses . ``approve``/``reject`` carry
+    ``approve``/``reject`` carry
     ``expected_version`` for optimistic-concurrency control; conflict /
     not-found / invalid-transition cases raise the corresponding errors from
     ``linktools.ai.errors`` (ApprovalConflictError / ApprovalNotFoundError /

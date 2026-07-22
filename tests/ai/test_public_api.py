@@ -22,7 +22,7 @@ def test_old_root_exports_are_gone():
         "ToolRef",
         "MiddlewareRef",
         "ModelPolicy",
-        "ModelRouter",
+        "ModelResolver",
         "RuntimeModelConfig",
         "Storage",
         "FilesystemStorage",
@@ -36,11 +36,11 @@ def test_domain_imports_succeed():
     from linktools.ai.agent import AgentSpec
     from linktools.ai.capability import CapabilityRuntimeOptions
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelRouter
+    from linktools.ai.model.router import ModelResolver
     from linktools.ai.storage import FilesystemStorage, Storage
     from linktools.ai.swarm import SwarmSpec
 
-    assert AgentSpec and CapabilityRuntimeOptions and ModelPolicy and ModelRouter
+    assert AgentSpec and CapabilityRuntimeOptions and ModelPolicy and ModelResolver
     assert Storage and FilesystemStorage and SwarmSpec
 
 

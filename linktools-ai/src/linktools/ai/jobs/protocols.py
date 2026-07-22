@@ -5,7 +5,7 @@
 A downstream plugs work into the task runtime by implementing
 :class:`TaskHandler`. The runtime hands it a :class:`TaskRequest` plus a
 :class:`TaskContext` carrying the full per-execution state (principal, actor
-chain, budget, resource snapshots, cancellation); the handler returns a
+chain, budget, asset snapshots, cancellation); the handler returns a
 :class:`TaskOutcome` (success with commands, or a typed failure). Handlers
 never read tenant / user / workspace / budget from globals -- only from the
 context.
@@ -25,7 +25,7 @@ from .models import (
     ScopeSet,
     ActorChain,
     ArtifactRef,
-    ResourceSnapshotRef,
+    AssetSnapshotRef,
     TaskBudget,
     TaskFailureKind,
     TaskPrincipal,
@@ -74,7 +74,7 @@ class TaskContext:
     actor_chain: ActorChain
     delegated_scopes: "ScopeSet"
     budget: TaskBudget
-    resource_snapshots: "tuple[ResourceSnapshotRef, ...]"
+    asset_snapshots: "tuple[AssetSnapshotRef, ...]"
     cancellation: CancellationToken
 
     def __post_init__(self) -> None:

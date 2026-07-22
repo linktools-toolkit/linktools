@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""R2a streaming API: ArtifactStore.put_stream / open_stream + the 16 MiB
+"""streaming API: ArtifactStore.put_stream / open_stream + the 16 MiB
 buffered-size cap that forces large content off the whole-bytes put/get path
-(plan §5 ops 1-3; RF-02, RF-04).
+.
 
 A self-contained in-memory streaming backend exercises the facade WITHOUT
 buffering the whole artifact (the blob ``open`` yields fixed-size chunks, so a
@@ -315,7 +315,7 @@ def test_put_stream_propagates_source_error_and_stays_usable() -> None:
 
 
 def test_put_stream_with_expected_digest_skips_staging_and_verifies() -> None:
-    # Plan §4.2 'caller provides expected_digest' branch: the source streams
+    # 'caller provides expected_digest' branch: the source streams
     # straight into put_if_absent under the claimed digest (no staging file --
     # the caller vouches for the digest), and a WRONG expected_digest is caught
     # by the blob store's re-verification with no record written.
@@ -347,7 +347,7 @@ def test_put_stream_with_expected_digest_skips_staging_and_verifies() -> None:
 
 
 def test_open_stream_detects_size_mismatch_at_exhaustion() -> None:
-    # Plan §4.2 step 5: open_stream verifies BOTH size and sha256. Replacing the
+    # step 5: open_stream verifies BOTH size and sha256. Replacing the
     # stored blob with fewer bytes makes the recorded size (100) wrong even
     # before the digest check; ArtifactIntegrityError surfaces at exhaustion.
     store, blob = _store()

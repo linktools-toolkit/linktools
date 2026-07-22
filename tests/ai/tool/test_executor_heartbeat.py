@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GovernedToolInvoker idempotency heartbeat (§10.2): a long-running Handler keeps its
+"""GovernedToolInvoker idempotency heartbeat: a long-running Handler keeps its
 claim alive via periodic renew, and stops (Handler cancelled) the moment the
 claim can no longer be renewed (stolen / lost) so it never keeps producing
 side effects under a lost claim."""

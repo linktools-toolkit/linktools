@@ -10,7 +10,7 @@ from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
 from linktools.ai.capability.provider import CapabilityContext
 from linktools.ai.capability.models import CapabilityRef
 from linktools.ai.errors import CapabilityNotFoundError, CapabilityResolutionError
-from linktools.ai.execution.local import LocalExecutionBackend
+from linktools.ai.sandbox.local import LocalSandbox
 
 
 def _ctx(execution, agent_id="a1"):
@@ -23,7 +23,7 @@ def _ctx(execution, agent_id="a1"):
 
 @pytest.mark.asyncio
 async def test_builtin_file_exposes_only_file_tools(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "file"), _ctx(backend)
     )
@@ -41,7 +41,7 @@ async def test_builtin_file_exposes_only_file_tools(tmp_path):
 
 @pytest.mark.asyncio
 async def test_builtin_terminal_exposes_only_bash(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "terminal"), _ctx(backend)
     )
@@ -52,7 +52,7 @@ async def test_builtin_terminal_exposes_only_bash(tmp_path):
 
 @pytest.mark.asyncio
 async def test_builtin_wildcard_exposes_both(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "*"), _ctx(backend)
     )
@@ -68,14 +68,14 @@ async def test_builtin_without_execution_backend_raises(tmp_path):
 
 @pytest.mark.asyncio
 async def test_builtin_unknown_name_raises(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     with pytest.raises(CapabilityNotFoundError, match="unknown builtin"):
         await BuiltinProvider().resolve(CapabilityRef("builtin", "nope"), _ctx(backend))
 
 
 @pytest.mark.asyncio
 async def test_builtin_file_read_exposes_only_read_tools(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "file-read"), _ctx(backend)
     )
@@ -88,7 +88,7 @@ async def test_builtin_file_read_exposes_only_read_tools(tmp_path):
 
 @pytest.mark.asyncio
 async def test_builtin_file_write_exposes_only_write_tools(tmp_path):
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "file-write"), _ctx(backend)
     )
@@ -103,7 +103,7 @@ async def test_builtin_file_write_exposes_only_write_tools(tmp_path):
 async def test_builtin_file_maps_to_read_plus_write(tmp_path):
     """builtin:file is a legitimate ref mapping to read + write tools (subject
     to Exposure Policy)."""
-    backend = LocalExecutionBackend(runtime_dir=str(tmp_path))
+    backend = LocalSandbox(runtime_dir=str(tmp_path))
     bundle = await BuiltinProvider().resolve(
         CapabilityRef("builtin", "file"), _ctx(backend)
     )

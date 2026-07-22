@@ -4,7 +4,7 @@
 
 This is the process-local reference implementation of the
 :class:`linktools.ai.storage.protocols.LeaseCoordinator` Protocol -- the
-"process-local coordination reference implementation" the plan (§4.4, §4.11)
+"process-local coordination reference implementation"
 requires the core to ship. It is correct within a single process: acquires are
 mutually exclusive per key, the fencing token is monotonic across
 (re)acquisitions, and an expired lease can be reclaimed. It is NOT correct
@@ -107,7 +107,7 @@ class ProcessLocalLeaseCoordinator:
             current = self._holders.get(token.key)
             # Release is idempotent: releasing a token that no longer matches
             # the holder (already released / reclaimed) is a no-op, not an
-            # error -- the resource is already free.
+            # error -- the asset is already free.
             if current is not None and current.lease_id == token.lease_id:
                 self._holders.pop(token.key, None)
 

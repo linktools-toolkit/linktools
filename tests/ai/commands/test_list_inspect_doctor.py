@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`lt ai doctor` tests (spec §21).
+"""`lt ai doctor` tests.
 
 The `list`/`inspect` commands were removed when the command surface was frozen
-to the five `lt ai` commands (spec §1/§28); their capability coverage now lives
+to the five `lt ai` commands; their capability coverage now lives
 on `RuntimeClient` and is tested in ``tests/ai_cli/test_client.py``. ``doctor``
 stays as a top-level command, so its end-to-end check against a scaffolded
 project is kept here.

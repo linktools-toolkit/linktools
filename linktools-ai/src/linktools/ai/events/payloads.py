@@ -218,8 +218,8 @@ class SwarmCancelled:
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceChanged:
-    event_type: ClassVar[str] = 'ResourceChanged'
+class AssetChanged:
+    event_type: ClassVar[str] = 'AssetChanged'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     path: str
     revision: int
@@ -266,8 +266,8 @@ class SkillRead:
 
 
 @dataclass(frozen=True, slots=True)
-class ExtensionResourceListed:
-    event_type: ClassVar[str] = 'ExtensionResourceListed'
+class ExtensionContentListed:
+    event_type: ClassVar[str] = 'ExtensionContentListed'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     extension_id: str = ""
     path: str = ""
@@ -275,8 +275,8 @@ class ExtensionResourceListed:
 
 
 @dataclass(frozen=True, slots=True)
-class ExtensionResourceRead:
-    event_type: ClassVar[str] = 'ExtensionResourceRead'
+class ExtensionContentRead:
+    event_type: ClassVar[str] = 'ExtensionContentRead'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     extension_id: str = ""
     path: str = ""
@@ -507,13 +507,13 @@ EventPayload = Union[
     SwarmTaskCompleted,
     SwarmTaskFailed,
     SwarmCompleted,
-    ResourceChanged,
+    AssetChanged,
     CapabilityResolveStarted,
     CapabilityResolveCompleted,
     SkillListed,
     SkillRead,
-    ExtensionResourceListed,
-    ExtensionResourceRead,
+    ExtensionContentListed,
+    ExtensionContentRead,
     ExtensionEntrypointListed,
     ExtensionEntrypointResolved,
     McpConnectStarted,

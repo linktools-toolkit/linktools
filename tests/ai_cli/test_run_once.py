@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""``run_once`` exit-code contract (spec §22/§27.1).
+"""``run_once`` exit-code contract.
 
 0 = completed; 4 = paused for approval (run_id/approval_id printed); 130 =
 Ctrl+C after cancelling the run through the runtime (not just the process).

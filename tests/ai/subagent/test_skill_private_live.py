@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Live skill-private subagent routing tests (spec §9/§10/§15).
+"""Live skill-private subagent routing tests.
 
 Exercises the wired chain end-to-end at the tool layer: ``read_skill`` sets the
 active-skill contextvar; ``call_subagent(instruction_path=...)`` resolves through
@@ -159,7 +159,7 @@ class TestCallSubagentInstructionPath(unittest.IsolatedAsyncioTestCase):
 
 
 class TestPermissionIntersection(unittest.TestCase):
-    """A skill-private agent keeps only the tools the parent can delegate (§15)."""
+    """A skill-private agent keeps only the tools the parent can delegate."""
 
     def _spec(self, tools):
         return SkillSubagentSpec(

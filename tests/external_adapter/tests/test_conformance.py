@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Phase 9 op 4 / op 5: run the public conformance testkit against a from-
+"""op 5: run the public conformance testkit against a from-
 scratch EXTERNAL adapter that imports ONLY public ``linktools.ai`` paths.
 
-This proves two things the plan §9 acceptance criteria depend on:
+This proves two things the acceptance criteria depend on:
 
 1. The storage Protocols are SUFFICIENT -- a conformant adapter can be built
    against ``linktools.ai.storage.protocols`` + ``linktools.ai.artifact.models``
@@ -13,13 +13,13 @@ This proves two things the plan §9 acceptance criteria depend on:
    in-repo reference backends pass (``test_conformance_testkit.py``) also pass
    against this independent in-memory implementation (op 5 / op 7 reuse).
 
-Plan §9 failure handling: if this adapter ever NEEDS a private import to
-conform, the Protocol design is inadequate and the work returns to Phase 3."""
+ failure handling: if this adapter ever NEEDS a private import to
+conform, the Protocol design is inadequate and the work returns to ."""
 
 import ast
 import pathlib
 
-from testing import (
+from linktools.ai.testing import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
     LeaseCoordinatorContract,
@@ -41,6 +41,7 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
     {
         "linktools.ai.storage.protocols",
         "linktools.ai.artifact.models",
+        "linktools.ai.errors",
     }
 )
 

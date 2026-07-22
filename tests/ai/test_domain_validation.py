@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Domain-model invariants enforced at construction (WP-09). A custom provider
+"""Domain-model invariants enforced at construction. A custom provider
 can build these directly, bypassing the registry parser, so each model validates
 its own contract + deep-freezes its mappings."""
 

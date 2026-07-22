@@ -50,7 +50,7 @@ async def authorize_sensitive_operation(
         return
     # Principal presented: enforce ownership when the run has a tenant. A run
     # with no tenant (local / unscoped) passes on the strength of the
-    # presented Principal; cross-tenant denial applies only where a resource
+    # presented Principal; cross-tenant denial applies only where a asset
     # tenant exists to compare against.
     definition = await storage.run_definitions.get(run_id)
     run_tenant = definition.tenant_id if definition is not None else None
@@ -62,7 +62,7 @@ async def authorize_sensitive_operation(
         bound_attempt = run.metadata.get("task_attempt_id") if run is not None else None
         if bound_attempt != principal.actor.id:
             raise PrincipalAccessDeniedError("task attempt is not bound to this run")
-    from ..governance.security.authorization import AuthorizationResource
+    from ..governance.security.authorization import AuthorizationTarget
     from ..governance.security.actions import SecurityAction
 
     authorization_action = {"cancel": SecurityAction.RUN_CANCEL,
@@ -72,5 +72,5 @@ async def authorize_sensitive_operation(
     await authorization.authorize(
         principal,
         authorization_action,
-        AuthorizationResource(kind="run", id=run_id, tenant_id=run_tenant),
+        AuthorizationTarget(kind="run", id=run_id, tenant_id=run_tenant),
     )

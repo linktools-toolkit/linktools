@@ -27,15 +27,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.events.payloads import RunPaused as RunPausedPayload
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
@@ -172,7 +172,7 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, GovernedToolInvoker]
         approval_store=storage.approvals,
     )
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -204,7 +204,7 @@ def _sqla_runner(storage) -> AgentEngine:
         event_store=storage.events,
         checkpoint_store=storage.checkpoints,
         commit_coordinator=SqlAlchemyRunCommitCoordinator(storage),
-        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=GovernedToolInvoker(
             policy=PolicyEngine(
                 rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)
@@ -492,7 +492,7 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
 def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     """File mode (``uow_factory=None``): cross-store transactions are
     unavailable. A failure in the RunPaused event append now PROPAGATES (v5
-    BUG-03) so the journal is retained for recovery -- but the pause commit
+    ) so the journal is retained for recovery -- but the pause commit
     point (checkpoint + WAITING_APPROVAL transition + approval) is NOT rolled
     back, and no contradictory RunFailed event is written. This is the
     non-atomic shape the contract documents -- the inverse of the SqlAlchemy
@@ -520,7 +520,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         approval_store=approval_store,
     )
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -545,7 +545,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=executor,
         # File coordinator: event appends are best-effort, so a RunPaused event
         # failure does NOT roll back the checkpoint or the transition.
@@ -571,7 +571,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         )
     )
 
-    # v5 BUG-03: a critical-event append failure is no longer swallowed -- it
+    # v5 : a critical-event append failure is no longer swallowed -- it
     # propagates so the journal is retained and recovery re-attempts it. The
     # pause commit point (WAITING_APPROVAL + checkpoint + approval) is NOT
     # rolled back; only the audit event is missing until recovery.
@@ -603,7 +603,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
 
 
 def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
-    """R-02 (WP-02 §7.4): in File mode, a failed ApprovalRequest write must
+    """in File mode, a failed ApprovalRequest write must
     PROPAGATE -- the run must never enter WAITING_APPROVAL without its approval
     persisted (it could not then be approved or resumed). The failure ends the
     run FAILED; no checkpoint is orphaned (the approval write precedes the
@@ -627,7 +627,7 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         ),
     )
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -651,7 +651,7 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=executor,
         # The coordinator owns the approval write; a failure propagates so the
         # run ends FAILED (not WAITING_APPROVAL) with no orphan checkpoint.

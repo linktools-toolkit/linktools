@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CommandGroupRef fallback semantics (spec §10.1-§10.5).
+"""CommandGroupRef fallback semantics.
 
 A command may declare ``parent = CommandGroupRef(...)`` to attach under a group
 that is auto-materialised only when no real group with that id is registered.

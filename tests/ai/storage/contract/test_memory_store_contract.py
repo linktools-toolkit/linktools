@@ -379,14 +379,14 @@ def test_path_traversal_in_memory_id_is_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Tenant isolation (§12.10): cross-tenant隔离 with a SHARED owner_id, plus
+# 8. Tenant isolation: cross-tenant隔离 with a SHARED owner_id, plus
 #    user / workspace / session sub-scope narrowing. owner_id is display-only;
 #    tenant_id is the hard boundary. Parametrized over both backends.
 # ---------------------------------------------------------------------------
 
 
 def test_search_isolates_tenants_with_same_owner(store_factory):
-    # §12.10: tenant-a/alice and tenant-b/alice share an owner_id but must not
+    # : tenant-a/alice and tenant-b/alice share an owner_id but must not
     # see each other's memories. (owner_id is display-only; tenant_id is the
     # authorization boundary.)
     store = store_factory()

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
-"""Plan §5 R7 op 7: benchmark summary. Runs every §6.4 threshold in a single
+"""op 7: benchmark summary. Runs every threshold in a single
 process, captures each row's measured value + pass/fail state, and writes a
 JSON + Markdown summary to ``PERF_RESULTS_DIR`` (default ``.docs/review-fix``)
-so a reviewer can see the actual numbers behind AC-16 rather than just a
+so a reviewer can see the actual numbers behind rather than just a
 pytest pass bit.
 
 This is a separate test from ``test_thresholds.py`` (which has the load-bearing
@@ -20,7 +20,7 @@ in their own tests; this test only fails if the summary could not be written.
 
 The 1 GiB RSS benchmark itself runs unconditionally in the default suite (see
 ``test_artifact_streaming_rss.py`` -- a skipped acceptance test is not
-evidence, §6.8). This summary's OWN inline re-measurement of it is still
+evidence). This summary's OWN inline re-measurement of it is still
 opt-in via ``RUN_PERF_RSS=1`` (set ``skipped: true`` otherwise) purely to
 avoid duplicating the ~8s I/O cost in a report generator that is not itself
 an acceptance gate; the load-bearing assertion lives in the dedicated test."""
@@ -342,7 +342,7 @@ def _measure_job_recovery_threshold(tmp_path: Path) -> "dict[str, Any]":
                 fencing_token=0,
                 active_attempt_id=None,
                 timeout_seconds=None,
-                resource_snapshots=(),
+                asset_snapshots=(),
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -456,9 +456,9 @@ def _measure_streaming_rss_if_enabled(tmp_path: Path) -> "dict[str, Any]":
 
 
 def test_thresholds_summary(tmp_path: Path) -> None:
-    """Run every §6.4 threshold inline, collect the measured numbers + pass/fail
+    """Run every threshold inline, collect the measured numbers + pass/fail
     state, and write a JSON + Markdown summary. The summary is the artifact a
-    reviewer reads to confirm AC-16; the load-bearing assertions stay in their
+    reviewer reads to confirm ; the load-bearing assertions stay in their
     own tests (this test only fails if the summary could not be written).
 
     The summary is written to ``PERF_RESULTS_DIR`` (default

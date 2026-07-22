@@ -4,7 +4,7 @@
 
 Holds the EvalRun lifecycle (PENDING -> RUNNING -> SUCCEEDED/FAILED/CANCELLED)
 and the per-case EvalResult rows. The Protocol lets the runner depend on a
-domain-semantic interface; concrete backends (in-memory here, file/SQL later)
+domain-semantic interface; concrete backends (in-memory here; file/SQL variants)
 satisfy it. Mirrors the JobStore shape: create/transition/append, not generic
 CRUD."""
 

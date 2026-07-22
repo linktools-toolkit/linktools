@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
-"""Phase 9 AC-16: the §6.4 absolute performance/usability thresholds, as
+"""the absolute performance/usability thresholds, as
 measurable checks. Each assertion pins a fixed acceptance threshold from the
 plan; the reference env is 4 vCPU / 8 GiB RAM / Linux / Python 3.10 / SSD
-(§6.4). These run in the default suite so a regression past a threshold is
+. These run in the default suite so a regression past a threshold is
 caught immediately -- the thresholds carry generous headroom (an in-process
 lock op at p95 <= 5ms; a Runtime.build at p95 <= 1s), so they do not flake on
 a normally-loaded machine.
 
-Coverage of the §6.4 table: RuntimeBuilder.build p95 <= 1s; Catalog cache get
+Coverage of the table: RuntimeBuilder.build p95 <= 1s; Catalog cache get
 p95 <= 5ms / cold-load 100 specs <= 500ms; Event single append p95 <= 20ms;
 Asset list 1000 items p95 <= 200ms; Artifact integrity 10k r/w 0 mismatch; Job
 defaults (heartbeat 5s / lease 30s / poll 1s); Job recovery worker-reclaim
 <= 35s; process-local coordination p95 <= 5ms; stability stress 10k ops <
 0.1% non-injected error. The 1 GiB streaming-RSS cap is asserted in
 test_artifact_streaming_rss.py (also in the default suite -- a skipped
-acceptance test is not evidence, §6.8). Not asserted here: the SQLite-specific
+acceptance test is not evidence). Not asserted here: the SQLite-specific
 Event batch rate (>=500/s, asserted in this module) and SQLite Asset-list
 number (p95 <= 300ms), which need the optional SQLAlchemy extra (the
 Filesystem baseline numbers are asserted here as the always-installed
 baseline); and the relative-regression half (see below).
 
-The plan's relative-regression half ("<= 20% vs Phase 0 hot path") is not
-asserted here: no Phase-0 baseline was captured. Per §6.4 ("若阶段 0 已优于
+The relative-regression half ("<= 20% vs hot path") is not
+asserted here: no Phase-0 baseline was captured. Per ("若阶段 0 已优于
 表中目标 ... 取 ... 绝对门槛"), when no Phase-0 baseline exists the absolute
 thresholds govern, which is what this module checks."""
 
@@ -55,7 +55,7 @@ def _p95_ms(samples_s: "list[float]") -> float:
     return s[idx] * 1000.0
 
 
-# --- §6.4 Job defaults (heartbeat 5s, lease TTL 30s, worker claim poll 1s) ---
+# --- Job defaults (heartbeat 5s, lease TTL 30s, worker claim poll 1s) ---
 
 
 def test_job_defaults_match_section_6_4():
@@ -65,7 +65,7 @@ def test_job_defaults_match_section_6_4():
     assert opts.poll_interval_seconds == 1.0, "§6.4: worker claim poll default 1s"
 
 
-# --- §6.4 Job recovery: worker exits, task re-claimed or terminal <= 35s ---
+# --- Job recovery: worker exits, task re-claimed or terminal <= 35s ---
 #
 # The threshold: after a worker exits holding a task at default lease settings,
 # the task is re-claimed or terminal within 35s. The bound decomposes as
@@ -80,7 +80,7 @@ class _FakeRecoveryClock:
     """Deterministic clock for the recovery-threshold test. The recovery +
     claim sequence runs synchronously when the clock is advanced past the lease
     TTL; no wall-clock waiting, but the test still asserts the bound in
-    clock-time (which is what the §6.4 threshold actually measures)."""
+    clock-time (which is what the threshold actually measures)."""
 
     def __init__(self, start: "datetime | None" = None) -> None:
         from datetime import datetime, timezone
@@ -97,7 +97,7 @@ class _FakeRecoveryClock:
 
 
 def test_job_recovery_worker_reclaim_under_35_seconds(tmp_path):
-    """§6.4: 'Job recovery: worker exits -> re-claimed or terminal within 35s.'
+    """'Job recovery: worker exits -> re-claimed or terminal within 35s.'
     Drives the real FilesystemJobStore recover_expired + claim sequence with
     default lease settings (30s). The 30s lease TTL is modeled on a fake clock
     (you cannot accelerate real time, and waiting 30s would make the test
@@ -162,7 +162,7 @@ def test_job_recovery_worker_reclaim_under_35_seconds(tmp_path):
                 fencing_token=0,
                 active_attempt_id=None,
                 timeout_seconds=None,
-                resource_snapshots=(),
+                asset_snapshots=(),
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -177,7 +177,7 @@ def test_job_recovery_worker_reclaim_under_35_seconds(tmp_path):
         assert a.claim.fencing_token >= 1
 
         # Simulate worker A crashing mid-task: it stops heartbeating and the
-        # lease silently burns down. The §6.4 bound gives the system 35s from
+        # lease silently burns down. The bound gives the system 35s from
         # the crash to a re-claim; advancing the clock to t=30s is the worst
         # case (lease just barely expired), then t=35s is the latest a
         # recovery sweep could run and still meet the bound. We advance past
@@ -231,7 +231,7 @@ def test_job_recovery_worker_reclaim_under_35_seconds(tmp_path):
     asyncio.run(_run())
 
 
-# --- §6.4 process-local coordination: acquire/renew/release p95 <= 5ms ---
+# --- process-local coordination: acquire/renew/release p95 <= 5ms ---
 
 
 @pytest.mark.asyncio
@@ -262,7 +262,7 @@ async def test_coordination_acquire_renew_release_p95_under_5ms():
     assert _p95_ms(release_s) <= 5.0, f"release p95 {_p95_ms(release_s):.3f}ms > 5ms"
 
 
-# --- §6.4 RuntimeBuilder.build: p95 <= 1s (no MCP network discovery) ---
+# --- RuntimeBuilder.build: p95 <= 1s (no MCP network discovery) ---
 
 
 def test_runtime_build_p95_under_1s(tmp_path):
@@ -287,7 +287,7 @@ def test_runtime_build_p95_under_1s(tmp_path):
     assert p95 <= 1000.0, f"Runtime.build p95 {p95:.1f}ms > 1000ms"
 
 
-# --- §6.4 Catalog: cache get p95 <= 5ms / 10k, cold-load 100 specs <= 500ms ---
+# --- Catalog: cache get p95 <= 5ms / 10k, cold-load 100 specs <= 500ms ---
 
 
 class _StaticCatalogSource:
@@ -360,7 +360,7 @@ async def test_catalog_cold_load_100_specs_under_500ms():
     assert elapsed_ms <= 500.0, f"cold load 100 specs {elapsed_ms:.1f}ms > 500ms"
 
 
-# --- §6.4 Event: single append p95 <= 20ms, batch >= 500 events/s (Filesystem) ---
+# --- Event: single append p95 <= 20ms, batch >= 500 events/s (Filesystem) ---
 
 
 async def _append_run_started(store, *, stream_id: str = "r") -> None:
@@ -408,15 +408,15 @@ def _has_sqlite() -> bool:
 )
 @pytest.mark.asyncio
 async def test_event_batch_append_sqlite_at_least_500_per_second(tmp_path):
-    """§7.5 Event batch row: 'Event 批量 append SQLite ≥ 500 events/s'. Appends
+    """Event batch row: 'Event 批量 append SQLite ≥ 500 events/s'. Appends
     1,000 events to a real SqlAlchemyEventStore over a sqlite+aiosqlite engine
-    and asserts the sustained rate meets the §7.5 500/s gate (NOT relaxed).
+    and asserts the sustained rate meets the 500/s gate (NOT relaxed).
 
-    HONEST ENV NOTE: the §7.5 reference env is 4 vCPU / 8 GiB RAM / SSD. The
+    HONEST ENV NOTE: the reference env is 4 vCPU / 8 GiB RAM / SSD. The
     engine is tuned with the production WAL pragmas
     (``configure_wal_pragmas`` -- journal_mode=WAL, synchronous=NORMAL) so the
     measurement reflects what ``SqliteStorage`` delivers out of the box, not a
-    default-rollback-journal baseline. The assertion enforces the §7.5 gate
+    default-rollback-journal baseline. The assertion enforces the gate
     as-written; run on demand; the measured rate is printed for evidence."""
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -452,7 +452,7 @@ async def test_event_batch_append_sqlite_at_least_500_per_second(tmp_path):
         await engine.dispose()
 
 
-# --- §6.4 Asset list: 1000-item single-level list, Filesystem p95 <= 200ms ---
+# --- Asset list: 1000-item single-level list, Filesystem p95 <= 200ms ---
 
 
 @pytest.mark.asyncio
@@ -468,10 +468,10 @@ async def test_asset_list_1000_filesystem_p95_under_200ms(tmp_path):
 
     async def _list_all() -> list:
         seen: list = []
-        page = await store.propfind(AssetPath("/ns"), depth=Depth.ONE, limit=100)
+        page = await store.list(AssetPath("/ns"), depth=Depth.ONE, limit=100)
         seen.extend(page.items)
         while page.cursor is not None:
-            page = await store.propfind(
+            page = await store.list(
                 AssetPath("/ns"), depth=Depth.ONE, limit=100, cursor=page.cursor
             )
             seen.extend(page.items)
@@ -490,7 +490,7 @@ async def test_asset_list_1000_filesystem_p95_under_200ms(tmp_path):
     )
 
 
-# --- §6.4 Artifact integrity: 10,000 r/w with 0 digest mismatch ---
+# --- Artifact integrity: 10,000 r/w with 0 digest mismatch ---
 
 
 @pytest.mark.asyncio
@@ -510,7 +510,7 @@ async def test_artifact_integrity_10000_rw_zero_mismatch():
         assert blob == content, f"digest mismatch at iteration {i}"
 
 
-# --- §6.4 stability stress: 10,000 core store ops, < 0.1% non-injected error ---
+# --- stability stress: 10,000 core store ops, < 0.1% non-injected error ---
 
 
 @pytest.mark.asyncio

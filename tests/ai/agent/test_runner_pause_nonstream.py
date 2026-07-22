@@ -22,15 +22,15 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.models import CompiledAgent
-from linktools.ai.agent.runner import AgentEngine
+from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability.assembler import CapabilityAssembler
+from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import RunPaused
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelRouter
+from linktools.ai.model.router import ModelGateway, ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
@@ -136,7 +136,7 @@ def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentE
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        capability_assembler=CapabilityAssembler({"test": _RiskyProvider()}),
+        capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=tool_executor,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=approval_store,
@@ -157,7 +157,7 @@ def _compile(
         approval_store=approval_store,
     )
     compiler = AgentCompiler(
-        model_router=ModelRouter(registry=_registry()),
+        model_router=ModelGateway(ModelResolver(registry=_registry())),
         tool_executor=executor,
     )
     compiled = asyncio.run(

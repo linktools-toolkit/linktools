@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryStore Protocol: persistence + search contract for MemoryRecord.
-Method signatures resolve the spec's `(...)` ellipses, mirroring
-the optimistic-concurrency shape of RunStore/SwarmStore. update/forget take
+Method signatures mirror the optimistic-concurrency shape of
+RunStore/SwarmStore. update/forget take
 expected_version because both backends advertise optimistic_concurrency=True.
 
 ``search`` is tenant-scoped: it takes a required :class:`MemoryScope` and no

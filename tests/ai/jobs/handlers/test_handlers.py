@@ -36,7 +36,7 @@ def _ctx() -> TaskContext:
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
         delegated_scopes=ScopeSet.allow_all(),
         budget=TaskBudget(),
-        resource_snapshots=(),
+        asset_snapshots=(),
         cancellation=CancellationToken(),
     )
 
@@ -295,10 +295,10 @@ def test_runtime_handler_rejects_oversized_output_before_writing(tmp_path) -> No
 
 
 def test_runtime_handler_rejects_stale_resource_snapshot(tmp_path) -> None:
-    """A pinned resource snapshot whose artifact is missing fails fast with
+    """A pinned asset snapshot whose artifact is missing fails fast with
     INVALID_INPUT -- the runtime is never invoked against possibly-changed
-    resources."""
-    from linktools.ai.jobs.models import ResourceSnapshotRef
+    assets."""
+    from linktools.ai.jobs.models import AssetSnapshotRef
 
     rt = _FakeRuntime()
     _, artifacts = _stores(tmp_path)
@@ -317,8 +317,8 @@ def test_runtime_handler_rejects_stale_resource_snapshot(tmp_path) -> None:
         actor_chain=ActorChain(actors=(ActorRef("user", "alice"),)),
         delegated_scopes=ScopeSet.allow_all(),
         budget=TaskBudget(),
-        resource_snapshots=(
-            ResourceSnapshotRef(
+        asset_snapshots=(
+            AssetSnapshotRef(
                 path="/data/x",
                 version=1,
                 etag="e",

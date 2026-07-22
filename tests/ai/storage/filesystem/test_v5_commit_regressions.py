@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""BUG-02 (v5 guide §9): a File complete commit must publish session messages
+"""(v5 guide ): a File complete commit must publish session messages
 only AFTER the run reaches SUCCEEDED (the commit point).
 
 Before the reorder the session messages were written first, so a crash before
@@ -243,7 +243,7 @@ def _count_events(storage, run_id, payload_type) -> int:
 
 
 def test_complete_event_failure_retains_journal_then_retry_writes_once(tmp_path):
-    """BUG-03: a critical-event write failure during complete() must NOT be
+    """a critical-event write failure during complete() must NOT be
     swallowed -- the journal stays un-committed, the caller sees the error, and
     a retry writes the RunCompleted event exactly once."""
     import pytest
@@ -284,7 +284,7 @@ def test_complete_event_failure_retains_journal_then_retry_writes_once(tmp_path)
 
 
 def test_recovery_event_failure_retains_journal_for_retry(tmp_path):
-    """BUG-03: when recovery cannot re-append the critical event, the journal is
+    """when recovery cannot re-append the critical event, the journal is
     retained (not discarded) so the next recovery reatries -- the event is not
     permanently lost."""
     storage = FilesystemStorage(root=tmp_path)
@@ -329,7 +329,7 @@ def test_recovery_event_failure_retains_journal_for_retry(tmp_path):
 
 
 def test_recovery_pause_event_failure_retains_journal(tmp_path):
-    """BUG-03 covers the PAUSE critical events (ApprovalRequested / RunPaused),
+    """covers the PAUSE critical events (ApprovalRequested / RunPaused),
     not only RunCompleted. A failure re-appending them retains the journal."""
     storage = FilesystemStorage(root=tmp_path)
     asyncio.run(

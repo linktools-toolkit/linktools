@@ -6,7 +6,7 @@ symbols were only reachable via the deep submodule paths. This test proves
 the shallow re-export resolves to the exact same object, not a copy."""
 
 
-def test_resource_store_reexport_identity():
+def test_asset_store_reexport_identity():
     from linktools.ai.asset import AssetStore as Shallow
     from linktools.ai.asset.store import AssetStore as Deep
     assert Shallow is Deep

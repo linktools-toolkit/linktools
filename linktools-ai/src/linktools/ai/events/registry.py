@@ -93,7 +93,7 @@ class EventRegistry:
     """Frozen map of ``event_type`` -> ``EventDescriptor`` plus the reverse
     ``payload_type`` -> ``event_type`` lookup the codec uses to encode.
 
-    Built once (at Runtime construction per §6.4: "EventCodec registry 在
+    Built once (at Runtime construction: "EventCodec registry 在
     Runtime 构造时冻结"); mutation after ``freeze()`` raises.
     """
 
@@ -143,7 +143,7 @@ class EventRegistry:
             ) from None
 
     def criticality_of(self, payload: EventPayload) -> EventCriticality:
-        """The single source of criticality (plan §4.5)."""
+        """The single source of criticality."""
         event_type = self._by_payload.get(type(payload))
         if event_type is None:
             return EventCriticality.OBSERVABILITY

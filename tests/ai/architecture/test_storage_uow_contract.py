@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RF-09 architecture gate: the StorageUnitOfWork Protocol shape is frozen by
-contract (plan §4.5) and Storage.transaction() returns the PUBLIC UoW type.
+"""architecture gate: the StorageUnitOfWork Protocol shape is frozen by
+contract and Storage.transaction() returns the PUBLIC UoW type.
 
 This test exists because an earlier round silently weakened the contract:
 artifact_records was relaxed to ``| None`` (the spec marks it REQUIRED), a
 store field was faked with a self-committing backend, and transaction() kept
 returning the private ``_UnitOfWork``. Those slipped past the implementer's own
-tests because the tests checked what was built, not what §4.5 demanded. The
+tests because the tests checked what was built, not what demanded. The
 checks below make the frozen shape a merge gate."""
 
 import ast
@@ -48,7 +48,7 @@ def _transaction_return(module_path: Path, class_name: str) -> str:
 
 
 def test_uow_field_set_matches_the_frozen_contract():
-    # §4.5 fixed interface: exactly these nine stores, no more, no fewer.
+    # fixed interface: exactly these nine stores, no more, no fewer.
     ann = _uow_annotations()
     assert set(ann) == {
         "assets",
@@ -64,28 +64,26 @@ def test_uow_field_set_matches_the_frozen_contract():
 
 
 def test_uow_required_stores_are_not_optional():
-    # §4.5: artifact_records is REQUIRED (no ``| None``); assets + jobs are
-    # optional. assets is Optional because a session-bound asset backend is not
-    # yet wired (the SQLAlchemy asset backend takes a session_factory, not a
-    # per-call AsyncSession, so it cannot join the UoW's single session without
-    # self-committing and breaking atomicity) -- None is the honest value, not a
-    # fake. jobs is Optional for backward compatibility. Relaxing
-    # artifact_records to optional would be a regression.
+    # assets + artifact_records are REQUIRED (no ``| None``): the asset backend
+    # binds to the UoW session, and the artifact-record store is session-bound.
+    # jobs is Optional (a backend may not wire one; JobRuntime rejects None at
+    # build). Relaxing assets or artifact_records to optional would be a
+    # regression.
     ann = _uow_annotations()
-    assert ann["assets"] == "AssetStore | None", ann["assets"]
+    assert ann["assets"] == "AssetStore", ann["assets"]
     assert ann["artifact_records"] == "ArtifactRecordStore", ann["artifact_records"]
     assert ann["jobs"] == "JobStore | None", ann["jobs"]
 
 
 def test_uow_store_fields_carry_no_any():
-    # §4.5 / RF-09: no store field is typed ``Any``.
+    # / : no store field is typed ``Any``.
     ann = _uow_annotations()
     offenders = [name for name, value in ann.items() if "Any" in value]
     assert not offenders, f"UoW store fields use Any: {offenders}"
 
 
 def test_storage_transaction_returns_public_uow():
-    # §4.5: Storage.transaction() returns the PUBLIC StorageUnitOfWork, never the
+    # : Storage.transaction() returns the PUBLIC StorageUnitOfWork, never the
     # private _UnitOfWork concrete class.
     ret = _transaction_return(_SRC / "storage" / "facade.py", "Storage")
     assert "StorageUnitOfWork" in ret, (

@@ -209,7 +209,7 @@ def test_parse_agent_spec_supports_dict_middleware():
     assert dict(spec.middleware[0].config) == {"limit": 5}
 
 
-# -- WP-10: explicit null vs missing for tools/middleware -------------------
+# -- explicit null vs missing for tools/middleware -------------------
 
 
 def test_parse_agent_spec_tools_null_rejected_missing_ok():
@@ -235,7 +235,7 @@ def test_parse_agent_spec_middleware_null_rejected():
 
 
 def test_parse_agent_spec_rejects_empty_name(tmp_path):
-    """WP-16 §20.1: an explicit empty/whitespace 'name' is a config error, not a
+    """an explicit empty/whitespace 'name' is a config error, not a
     silent fall-back to the agent id. Missing 'name' still falls back."""
     from linktools.ai.errors import InvalidSpecError
 

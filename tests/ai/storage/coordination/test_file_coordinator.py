@@ -4,20 +4,20 @@
 
 import pytest
 
-from linktools.ai.storage.coordination.file import FileResourceCoordinator
+from linktools.ai.storage.coordination.file import FileAssetCoordinator
 
 
 @pytest.mark.asyncio
 async def test_revision_hint_starts_none(tmp_path):
-    coord = FileResourceCoordinator(root=tmp_path)
+    coord = FileAssetCoordinator(root=tmp_path)
     assert await coord.revision_hint() is None
 
 
 @pytest.mark.asyncio
 async def test_publish_then_hint_roundtrip(tmp_path):
-    coord = FileResourceCoordinator(root=tmp_path)
+    coord = FileAssetCoordinator(root=tmp_path)
     await coord.publish_revision(5)
-    reopened = FileResourceCoordinator(root=tmp_path)
+    reopened = FileAssetCoordinator(root=tmp_path)
     assert await reopened.revision_hint() == 5
 
 
@@ -25,7 +25,7 @@ async def test_publish_then_hint_roundtrip(tmp_path):
 async def test_lock_is_exclusive_within_process(tmp_path):
     import asyncio
 
-    coord = FileResourceCoordinator(root=tmp_path)
+    coord = FileAssetCoordinator(root=tmp_path)
     order = []
 
     async def holder():
@@ -47,8 +47,8 @@ async def test_lock_is_exclusive_within_process(tmp_path):
 async def test_lock_provides_exclusion_across_separate_coordinator_instances(tmp_path):
     import asyncio
 
-    coord_a = FileResourceCoordinator(root=tmp_path)
-    coord_b = FileResourceCoordinator(root=tmp_path)
+    coord_a = FileAssetCoordinator(root=tmp_path)
+    coord_b = FileAssetCoordinator(root=tmp_path)
     order = []
 
     async def holder():

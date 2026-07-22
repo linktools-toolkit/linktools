@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SEC-01 (v5 guide §5): file reads must follow symlinks to their real target
+"""(v5 guide ): file reads must follow symlinks to their real target
 and reject any whose resolved path leaves every allowed root.
 
 A symlink that *lives* inside ``runtime/`` but points at ``/etc/passwd`` (or any
@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.execution.local import LocalExecutionBackend, _run_file_tool_sync
+from linktools.ai.sandbox.local import LocalSandbox, _run_file_tool_sync
 
 
 def _run(tool: str, args: dict, runtime) -> dict:
@@ -128,7 +128,7 @@ def test_write_file_rejects_parent_symlink_to_outside_dir(tmp_path):
     outside.mkdir()
     (runtime / "out").symlink_to(outside)
 
-    backend = LocalExecutionBackend(runtime_dir=runtime, base_dirs=[])
+    backend = LocalSandbox(runtime_dir=runtime, base_dirs=[])
     result = asyncio.run(backend.write_file("out/secret.txt", content="x"))
 
     assert "error" in result, result

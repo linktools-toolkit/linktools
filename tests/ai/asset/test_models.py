@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/resource/test_models.py"""
+"""tests/ai/storage/asset/test_models.py"""
 
 import json
 from datetime import datetime, timezone
@@ -53,7 +53,7 @@ def test_resource_json_and_from_json():
 
 
 def test_lookup_variants_are_distinct_types():
-    found = Found(resource=Asset.from_text(_info(), "abc"))
+    found = Found(asset=Asset.from_text(_info(), "abc"))
     missing = Missing()
     masked = Masked(path=AssetPath("/a/b.txt"), version=2)
     assert isinstance(found, Found)
@@ -68,7 +68,7 @@ def test_depth_values():
     assert Depth.INFINITY == "infinity"
 
 
-def test_depth_infinity_propfind_returns_all_descendants(tmp_path):
+def test_depth_infinity_list_returns_all_descendants(tmp_path):
     # INFINITY: target + every descendant (the full subtree).
     import asyncio
 
@@ -81,7 +81,7 @@ def test_depth_infinity_propfind_returns_all_descendants(tmp_path):
     async def _run():
         for p in ("/r/a", "/r/a/b", "/r/a/b/c", "/r/c"):
             await store.put(AssetPath(p), b"x")
-        return await store.propfind(
+        return await store.list(
             AssetPath("/r"), depth=Depth.INFINITY, limit=100, cursor=None
         )
 

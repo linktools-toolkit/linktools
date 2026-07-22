@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Unified subagent resolution tests (spec §9/§13/§14)."""
+"""Unified subagent resolution tests."""
 
 import tempfile
 import unittest

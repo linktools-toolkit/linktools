@@ -19,8 +19,8 @@ read-check-mutate-commit transactions. The reliable-task semantics live in SQL:
   write does not leave the job stuck.
 
 Complex policy/context fields are stored as a JSON envelope (``data_json``)
-alongside the indexed query columns. Command application lands in a later
-phase; for now a completed root task completes the job.
+alongside the indexed query columns. Command application is not modeled
+here; a completed root task completes the job.
 """
 
 import json
@@ -37,7 +37,7 @@ from ...jobs.models import (
     JobStatus,
     JOB_TRANSITIONS,
     JOB_TERMINAL,
-    ResourceSnapshotRef,
+    AssetSnapshotRef,
     RetryPolicy,
     ScopeSet,
     SideEffectMode,
@@ -137,7 +137,7 @@ def _task_envelope(task: TaskRecord) -> str:
             "dependencies": list(task.dependencies),
             "retry_policy": to_jsonable(task.retry_policy),
             "side_effect_policy": to_jsonable(task.side_effect_policy),
-            "resource_snapshots": to_jsonable(task.resource_snapshots),
+            "asset_snapshots": to_jsonable(task.asset_snapshots),
             "depth": task.depth,
             "delegated_scopes": to_jsonable(task.delegated_scopes),
             "actor_chain": to_jsonable(task.actor_chain),
@@ -261,8 +261,8 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         fencing_token=row.fencing_token,
         active_attempt_id=row.active_attempt_id,
         timeout_seconds=row.timeout_seconds,
-        resource_snapshots=tuple(
-            from_jsonable(ResourceSnapshotRef, s) for s in env["resource_snapshots"]
+        asset_snapshots=tuple(
+            from_jsonable(AssetSnapshotRef, s) for s in env["asset_snapshots"]
         ),
         version=row.version,
         created_at=_as_utc(row.created_at),
@@ -1907,7 +1907,7 @@ class SqlAlchemyJobStore:
             "dependencies": list(cmd.dependencies),
             "retry_policy": to_jsonable(cmd.retry_policy),
             "side_effect_policy": to_jsonable(cmd.side_effect_policy),
-            "resource_snapshots": to_jsonable(parent_rec.resource_snapshots),
+            "asset_snapshots": to_jsonable(parent_rec.asset_snapshots),
             "depth": child_depth,
             "delegated_scopes": to_jsonable(child_scopes),
             "actor_chain": to_jsonable(child_chain),

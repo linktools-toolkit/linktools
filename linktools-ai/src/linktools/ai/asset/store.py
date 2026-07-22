@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Any
 
-from .backend import AssetBackend
+from .backend import AssetReaderBackend, AssetWriterBackend
 from .models import (
     Depth,
     Found,
@@ -23,9 +23,10 @@ from .models import (
 )
 from .path import AssetPath
 from ..errors import (
+    AssetMoveNotSupportedError,
     IdempotencyConflictError,
-    ResourcePreconditionFailedError,
-    ResourceReadOnlyError,
+    AssetPreconditionFailedError,
+    AssetReadOnlyError,
 )
 
 
@@ -41,10 +42,19 @@ class AssetStore:
     def __init__(
         self,
         *,
-        primary: AssetBackend,
-        overlays: "tuple[AssetBackend, ...]" = (),
+        primary: AssetWriterBackend,
+        overlays: "tuple[AssetReaderBackend, ...]" = (),
         metrics: Any = None,
     ) -> None:
+        # A readonly backend is a Reader, not a Writer -- it cannot serve as a
+        # primary (writes would silently no-op or raise mid-flight). Reject it
+        # at construction so the misconfiguration surfaces immediately, not on
+        # the first write.
+        if getattr(primary, "readonly", False):
+            raise AssetReadOnlyError(
+                "a readonly backend cannot be the AssetStore primary; supply a "
+                "Writer as primary and the readonly backend as an overlay"
+            )
         self._primary = primary
         self._overlays = overlays
         # Optional ObservabilityMetrics sink. When wired, an idempotency-key
@@ -69,41 +79,31 @@ class AssetStore:
 
     async def get(self, path: AssetPath) -> "Asset | None":
         lookup = await self._lookup_chain(path)
-        return lookup.resource if isinstance(lookup, Found) else None
+        return lookup.asset if isinstance(lookup, Found) else None
 
     async def stat(self, path: AssetPath) -> "AssetLookupInfo | None":
-        """Metadata-only stat: delegate to backend.raw_stat when
-        available so the content blob is never loaded. Falls back to get()+info
-        only for backends that don't implement raw_stat (Memory).
+        """Metadata-only stat: delegate to backend.raw_stat so the content blob
+        is never loaded. Every Reader backend implements raw_stat.
 
         Three-state resolution mirrors _lookup_chain: a Masked primary result
-        stops the overlay search. The masked check
-        uses raw_get(include_content=False) -- only invoked in the rare case
-        where raw_stat returned None and overlays exist that might otherwise
-        resurrect a masked path."""
-        if hasattr(self._primary, "raw_stat"):
-            info = await self._primary.raw_stat(path)
-            if info is not None:
-                return info
-            # raw_stat returns None for both Missing and Masked. Distinguish
-            # them so a primary whiteout hides overlays (no resurrection).
-            primary_lookup = await self._primary.raw_get(path, include_content=False)
-            if isinstance(primary_lookup, Masked):
-                return None
-            for overlay in self._overlays:
-                if hasattr(overlay, "raw_stat"):
-                    overlay_info = await overlay.raw_stat(path)
-                    if overlay_info is not None:
-                        return overlay_info
-                else:
-                    overlay_lookup = await overlay.raw_get(path, include_content=False)
-                    if isinstance(overlay_lookup, Found):
-                        return overlay_lookup.resource.info
+        stops the overlay search. The masked check uses
+        raw_get(include_content=False) -- only invoked when raw_stat returned
+        None and overlays exist that might otherwise resurrect a masked path."""
+        info = await self._primary.raw_stat(path)
+        if info is not None:
+            return info
+        # raw_stat returns None for both Missing and Masked. Distinguish them so
+        # a primary whiteout hides overlays (no resurrection).
+        primary_lookup = await self._primary.raw_get(path, include_content=False)
+        if isinstance(primary_lookup, Masked):
             return None
-        resource = await self.get(path)
-        return resource.info if resource is not None else None
+        for overlay in self._overlays:
+            overlay_info = await overlay.raw_stat(path)
+            if overlay_info is not None:
+                return overlay_info
+        return None
 
-    async def propfind(
+    async def list(
         self,
         path: AssetPath,
         *,
@@ -111,7 +111,7 @@ class AssetStore:
         limit: int = 100,
         cursor: "str | None" = None,
     ) -> AssetPage:
-        """List resources under `path`, merging Primary and Overlay results.
+        """List assets under `path`, merging Primary and Overlay results.
 
         Cursor pagination: each backend is asked for limit+1 items
         past the cursor; the (limit+1)th item from any backend signals "more
@@ -157,13 +157,13 @@ class AssetStore:
                     max_scanned = info.path.value
 
         for overlay in reversed(self._overlays):
-            page = await overlay.raw_propfind(
+            page = await overlay.raw_list(
                 path, depth=depth, limit=fetch_limit, cursor=cursor
             )
             _note_page(page)
             for info in page.items:
                 merged[info.path.value] = info
-        primary_page = await self._primary.raw_propfind(
+        primary_page = await self._primary.raw_list(
             path, depth=depth, limit=fetch_limit, cursor=cursor
         )
         _note_page(primary_page)
@@ -194,7 +194,7 @@ class AssetStore:
 
     def _require_writable_primary(self) -> None:
         if self._primary.readonly:
-            raise ResourceReadOnlyError("primary backend is read-only")
+            raise AssetReadOnlyError("primary backend is read-only")
 
     async def _check_idempotency(
         self, operation: str, key: "str | None", request_hash: str
@@ -252,67 +252,20 @@ class AssetStore:
             str(options.if_none_match).encode(),
             (options.actor or "").encode(),
         )
-        # TOCTOU fix: when the primary backend implements the
-        # atomic checked operation, delegate precondition + idempotency + mutate
-        # to it as a single atomic call so a concurrent writer cannot interleave
-        # the three steps. The Memory backend does not implement it, so the
-        # 3-step orchestration below is the fallback.
-        if hasattr(self._primary, "raw_put_checked"):
-            try:
-                return await self._primary.raw_put_checked(
-                    path, content, options=options, request_hash=req_hash
-                )
-            except IdempotencyConflictError:
-                if self._metrics is not None:
-                    self._metrics.counter(
-                        "asset_cas_conflict_total",
-                        attributes={"operation": "put"},
-                    )
-                raise
-
-        existing_record = await self._check_idempotency(
-            "put", options.idempotency_key, req_hash
-        )
-        if existing_record is not None:
-            info = existing_record.result
-            current_lookup = await self._primary.raw_get(path)
-            content_bytes = (
-                current_lookup.resource.content
-                if isinstance(current_lookup, Found)
-                else content
+        # The primary is an AssetWriterBackend: precondition + idempotency +
+        # mutate run as ONE atomic call inside the backend so a concurrent
+        # writer cannot interleave the three steps.
+        try:
+            return await self._primary.raw_put_checked(
+                path, content, options=options, request_hash=req_hash
             )
-            return Asset(info=info, content=content_bytes)
-
-        current = await self._lookup_chain(path)
-        if options.if_none_match and isinstance(current, Found):
-            raise ResourcePreconditionFailedError(f"resource already exists: {path}")
-        if options.if_match is not None:
-            if (
-                not isinstance(current, Found)
-                or current.resource.info.etag != options.if_match
-            ):
-                raise ResourcePreconditionFailedError(
-                    f"if-match precondition failed: {path}"
+        except IdempotencyConflictError:
+            if self._metrics is not None:
+                self._metrics.counter(
+                    "asset_cas_conflict_total",
+                    attributes={"operation": "put"},
                 )
-
-        primary_state = await self._primary.raw_get(path)
-        if (
-            isinstance(primary_state, Found)
-            and primary_state.resource.content == content
-            and dict(primary_state.resource.info.metadata) == dict(options.metadata)
-            and primary_state.resource.info.content_type == options.content_type
-        ):
-            info = primary_state.resource.info
-        else:
-            info = await self._primary.raw_put(
-                path,
-                content,
-                content_type=options.content_type,
-                metadata=options.metadata,
-            )
-
-        await self._save_idempotency("put", options.idempotency_key, req_hash, info)
-        return Asset(info=info, content=content)
+            raise
 
     async def delete(
         self, path: AssetPath, *, options: WriteOptions = WriteOptions()
@@ -327,49 +280,20 @@ class AssetStore:
             (options.if_match or "").encode(),
             (options.actor or "").encode(),
         )
-        # TOCTOU fix: delegate to the atomic checked op when available (see put).
-        if hasattr(self._primary, "raw_delete_checked"):
-            try:
-                await self._primary.raw_delete_checked(
-                    path, options=options, request_hash=req_hash
+        # The primary is an AssetWriterBackend: precondition + idempotency +
+        # mutate run as ONE atomic call inside the backend.
+        try:
+            await self._primary.raw_delete_checked(
+                path, options=options, request_hash=req_hash
+            )
+        except IdempotencyConflictError:
+            if self._metrics is not None:
+                self._metrics.counter(
+                    "asset_cas_conflict_total",
+                    attributes={"operation": "delete"},
                 )
-            except IdempotencyConflictError:
-                if self._metrics is not None:
-                    self._metrics.counter(
-                        "asset_cas_conflict_total",
-                        attributes={"operation": "delete"},
-                    )
-                raise
-            return
-
-        existing_record = await self._check_idempotency(
-            "delete", options.idempotency_key, req_hash
-        )
-        if existing_record is not None:
-            return
-
-        reader_lookup = await self._lookup_chain(path)
-        primary_raw = await self._primary.raw_get(path)
-        if options.if_match is not None:
-            if (
-                not isinstance(reader_lookup, Found)
-                or reader_lookup.resource.info.etag != options.if_match
-            ):
-                raise ResourcePreconditionFailedError(
-                    f"if-match precondition failed: {path}"
-                )
-
-        result_info = None
-        already_masked = isinstance(reader_lookup, Missing) and isinstance(
-            primary_raw, Masked
-        )
-        never_existed = isinstance(reader_lookup, Missing) and not already_masked
-        if not (already_masked or never_existed):
-            result_info = await self._primary.raw_delete(path)
-
-        await self._save_idempotency(
-            "delete", options.idempotency_key, req_hash, result_info
-        )
+            raise
+        return
 
     async def move(
         self,
@@ -378,79 +302,46 @@ class AssetStore:
         *,
         options: WriteOptions = WriteOptions(),
     ) -> Asset:
-        """MOVE: a single domain operation. When the primary
-        backend implements raw_move AND the source lives in primary, delegate
-        to it -- the backend folds load-source + write-target + whiteout-source
-        + bump-revision into ONE transaction, so a concurrent reader never sees
-        the intermediate states (target written while source still live, or
-        source masked while target missing) that a put+delete decomposition
-        would expose. The revision counter bumps exactly once for the whole
-        move.
+        """MOVE: a single atomic domain operation. The primary Writer folds
+        load-source + write-target + whiteout-source + bump-revision into ONE
+        transaction/locked section, so a concurrent reader never sees the
+        intermediate states (target written while source still live, or source
+        masked while target missing) that a put+delete decomposition would
+        expose, and the revision counter bumps exactly once.
 
-        Two cases use the put+delete orchestration: (1) the Memory
-        backend has no transaction primitive, so it never implements raw_move;
-        (2) an OVERLAY-only source must be copied across backends, which
-        cannot be made fully atomic -- this path copies the overlay
-        resource into primary and writes a primary whiteout to mask the
-        overlay source.
+        Move supports only primary-resident sources. A source that lives only
+        in an overlay cannot be moved atomically (copying across backends plus a
+        whiteout is not an atomic move); it is refused with
+        :class:`AssetMoveNotSupportedError` rather than faked.
 
-        Idempotency: the atomic path keys the idempotency record under
-        ``move:{key}``. The
-        move path inherits put's ``put:{key}`` keying via the delegated put
-        call."""
+        Idempotency: folded into the backend's atomic ``raw_move_checked`` (the
+        precondition + move + idempotency-record save run in one locked
+        section/transaction), mirroring put/delete."""
         self._require_writable_primary()
-        if hasattr(self._primary, "raw_move"):
-            # Atomic raw_move handles only primary-resident sources. An
-            # overlay-only source falls through to the cross-backend copy path.
-            source_in_primary = (
-                await self._primary.raw_stat(src) is not None
-                if hasattr(self._primary, "raw_stat")
-                else isinstance(
-                    await self._primary.raw_get(src, include_content=False), Found
-                )
-            )
-            if source_in_primary:
-                req_hash = _request_hash(
-                    b"move",
-                    src.value.encode(),
-                    dst.value.encode(),
-                    (options.if_match or "").encode(),
-                    str(options.if_none_match).encode(),
-                    (options.actor or "").encode(),
-                )
-                existing = await self._check_idempotency(
-                    "move", options.idempotency_key, req_hash
-                )
-                if existing is not None:
-                    # Replay: re-fetch the target content so the caller gets a
-                    # complete Asset, not just the cached info.
-                    current = await self._primary.raw_get(dst)
-                    content = (
-                        current.resource.content if isinstance(current, Found) else b""
-                    )
-                    return Asset(info=existing.result, content=content)
-                result = await self._primary.raw_move(src, dst, options=options)
-                await self._save_idempotency(
-                    "move", options.idempotency_key, req_hash, result.info
-                )
-                return result
-        # Non-atomic fallback (Memory backend, or overlay-source move): put+delete.
-        source = await self.get(src)
-        if source is None:
-            raise ResourcePreconditionFailedError(
-                f"cannot move missing resource: {src}"
-            )
-        result = await self.put(
-            dst,
-            source.content,
-            options=WriteOptions(
-                content_type=source.info.content_type,
-                metadata=source.info.metadata,
-                idempotency_key=options.idempotency_key,
-                actor=options.actor,
-                if_match=options.if_match,
-                if_none_match=options.if_none_match,
-            ),
+        req_hash = _request_hash(
+            b"move",
+            src.value.encode(),
+            dst.value.encode(),
+            (options.if_match or "").encode(),
+            str(options.if_none_match).encode(),
+            (options.actor or "").encode(),
         )
-        await self.delete(src)
-        return result
+        # Delegate to the backend's atomic checked op: it handles idempotency
+        # replay, the move itself, and a missing-source precondition. Only when
+        # the backend reports the source missing do we classify WHY: an
+        # overlay-only source is refused (AssetMoveNotSupportedError), anything
+        # else re-raises the backend's precondition failure.
+        try:
+            return await self._primary.raw_move_checked(
+                src, dst, options=options, request_hash=req_hash
+            )
+        except AssetPreconditionFailedError:
+            if await self._primary.raw_stat(src) is None:
+                for overlay in self._overlays:
+                    if isinstance(
+                        await overlay.raw_get(src, include_content=False), Found
+                    ):
+                        raise AssetMoveNotSupportedError(
+                            f"cannot move overlay-only source atomically: {src}"
+                        ) from None
+            raise

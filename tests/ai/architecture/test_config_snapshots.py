@@ -3,7 +3,7 @@
 """Final config-format snapshots.
 
 Each fixture under ``tests/ai/fixtures/config/`` is loaded through its registry
-so the canonical config format is locked: a later phase that silently renames a
+so the canonical config format is locked: a that silently renames a
 field or reintroduces an alias fails here. Agent/Skill are markdown + YAML
 frontmatter (``.md``); Tool/MCP/Swarm are YAML (``.yaml``) -- the native
 formats each registry reads. No deprecated alias is used in any fixture.

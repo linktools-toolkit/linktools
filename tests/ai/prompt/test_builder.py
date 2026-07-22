@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """PromptBuilder (contract): pure model-prompt template composition. Owned by
-the prompt domain per plan §4.2; the runner hands in already-fetched sections
+the prompt domain per ; the runner hands in already-fetched sections
 and the builder only composes."""
 
 from datetime import datetime, timezone
