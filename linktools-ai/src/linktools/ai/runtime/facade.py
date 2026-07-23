@@ -36,7 +36,7 @@ from ..agent.spec import AgentSpec
 from ..capability.models import CapabilityRuntimeOptions
 from ..sandbox.protocols import Sandbox
 from ..middleware.pipeline import MiddlewarePipeline
-from ..model.router import ModelResolver
+from ..model.resolver import ModelResolver
 from ..mcp.client import MCPConnectionPool
 from ..observability.metrics import ObservabilityMetrics
 from ..run.commit import RunCommitCoordinator
@@ -71,10 +71,10 @@ class Runtime:
         storage: Storage,
         commit_coordinator: "RunCommitCoordinator | None" = None,
         topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS,
-        model_router: "ModelResolver | None" = None,
+        model_resolver: "ModelResolver | None" = None,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
         retriever: "Retriever | None" = None,
-        execution: "Sandbox | None" = None,
+        sandbox: "Sandbox | None" = None,
         tool_executor: "GovernedToolInvoker | None" = None,
         mcp_connection_pool: "MCPConnectionPool | None" = None,
         providers: "RuntimeDependencies | None" = None,
@@ -117,10 +117,10 @@ class Runtime:
             storage=storage,
             commit_coordinator=commit_coordinator,
             providers=providers or RuntimeDependencies(),
-            model_router=model_router,
+            model_resolver=model_resolver,
             middleware_pipeline=middleware_pipeline,
             retriever=retriever,
-            execution=execution,
+            sandbox=sandbox,
             tool_executor=tool_executor,
             security=security,
             capability_options=options,
@@ -149,10 +149,10 @@ class Runtime:
         from ..runtime.assembly.inspection import inspect_capabilities
 
         return await inspect_capabilities(
-            assembler=self._components.capability_resolver,
+            resolver=self._components.capability_resolver,
             options=self._components.options,
             spec=spec,
-            execution=self._components.execution,
+            sandbox=self._components.sandbox,
         )
 
     async def __aenter__(self) -> "Runtime":

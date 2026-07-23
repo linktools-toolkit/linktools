@@ -19,7 +19,7 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
-from linktools.ai.events.context import EventContext, append_event
+from linktools.ai.events.context import EventStreamContext, append_event
 from linktools.ai.events.payloads import (
     ApprovalRequested,
     RunCompleted,
@@ -200,7 +200,7 @@ class InMemoryRunCommitCoordinator:
             return CompletedRunCommit(result=command.result)
 
     async def _append_event_tagged(
-        self, *, context: EventContext, commit_id: str, payload: Any
+        self, *, context: EventStreamContext, commit_id: str, payload: Any
     ) -> None:
         event_type = default_codec.registry.event_type_for(payload)
         page = await self._events.list(context.stream_id, after_sequence=0, limit=10000)

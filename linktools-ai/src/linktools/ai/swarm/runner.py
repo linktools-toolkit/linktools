@@ -45,7 +45,7 @@ from ..errors import (
 )
 
 from ..events.payloads import SwarmCompleted, SwarmStarted
-from ..events.context import EventContext, append_event
+from ..events.context import EventStreamContext, append_event
 from ..events.store import EventStore
 from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
@@ -229,7 +229,7 @@ class SwarmRunner:
             # 3. SwarmStarted event (store assigns the next sequence).
             await append_event(
                 self._event_store,
-                EventContext.from_run_context(context),
+                EventStreamContext.from_run_context(context),
                 SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
             )
 
@@ -318,7 +318,7 @@ class SwarmRunner:
             # 7. SwarmCompleted event (store assigns the next sequence).
             await append_event(
                 self._event_store,
-                EventContext.from_run_context(context),
+                EventStreamContext.from_run_context(context),
                 SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
@@ -411,7 +411,7 @@ class SwarmRunner:
 
                 await append_event(
                     self._event_store,
-                    EventContext.from_run_context(context),
+                    EventStreamContext.from_run_context(context),
                     SwarmFailed(
                         swarm_run_id=swarm_run.id,
                         error=f"{type(exc).__name__}: {redact_exception(exc)}",
@@ -577,7 +577,7 @@ class SwarmRunner:
             # (events from the original run already occupy the low ones).
             await append_event(
                 self._event_store,
-                EventContext.from_run_context(parent_context),
+                EventStreamContext.from_run_context(parent_context),
                 SwarmCompleted(swarm_run_id=swarm_run.id),
             )
             return result
@@ -750,7 +750,7 @@ class SwarmRunner:
         self, driving_run_id: str, swarm_run_id: str, payload_name: str
     ) -> None:
         """Best-effort terminal swarm event (SwarmCancelled/SwarmFailed). Builds
-        the EventContext from the driving run's lineage; a failure here is an
+        the EventStreamContext from the driving run's lineage; a failure here is an
         observability gap, not state corruption."""
         try:
             from ..events.payloads import SwarmCancelled, SwarmFailed
@@ -758,7 +758,7 @@ class SwarmRunner:
             driving = await self._run_store.get(driving_run_id)
             if driving is None:
                 return
-            ctx = EventContext(
+            ctx = EventStreamContext(
                 stream_id=driving.id,
                 run_id=driving.id,
                 root_run_id=driving.root_run_id or driving.id,

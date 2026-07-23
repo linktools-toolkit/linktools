@@ -37,13 +37,13 @@ class BuiltinProvider:
         ref: CapabilityRef,
         context: CapabilityContext,
     ) -> CapabilityBundle:
-        if context.execution is None:
+        if context.sandbox is None:
             raise CapabilityResolutionError(
-                f"agent {context.agent_id}: builtin:{ref.name} requires an execution backend"
+                f"agent {context.agent_id}: builtin:{ref.name} requires a sandbox"
             )
         enabled = _enabled_for(ref.name, agent_id=context.agent_id)
         toolset = build_builtin_toolset(
-            BuiltinToolContext(backend=context.execution, enabled_tools=enabled)
+            BuiltinToolContext(backend=context.sandbox, enabled_tools=enabled)
         )
         descriptors = _builtin_descriptors(enabled, ref)
         contribution = ToolContribution(

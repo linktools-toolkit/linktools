@@ -12,7 +12,7 @@ and ``complete()`` directly so the import is exercised at test time."""
 import asyncio
 from datetime import datetime, timezone
 
-from linktools.ai.events.context import EventContext
+from linktools.ai.events.context import EventStreamContext
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus
@@ -122,7 +122,7 @@ def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
                 ),
                 checkpoint_payload=b'{"messages": []}',
                 result=result,
-                event_context=EventContext.from_run_context(
+                event_context=EventStreamContext.from_run_context(
                     _context("run-1", "sess-1")
                 ),
             )
@@ -174,7 +174,7 @@ def test_pause_persists_approval_checkpoint_and_transition(tmp_path):
                     **_APPROVAL_BINDING,
                 },
                 checkpoint_payload=b'{"messages": []}',
-                event_context=EventContext.from_run_context(
+                event_context=EventStreamContext.from_run_context(
                     _context("run-2", "sess-2")
                 ),
             )
@@ -233,7 +233,7 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
-                event_context=EventContext.from_run_context(
+                event_context=EventStreamContext.from_run_context(
                     _context("run-j", "sess-j")
                 ),
             )

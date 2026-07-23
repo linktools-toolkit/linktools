@@ -378,7 +378,7 @@ class RunCoordinator:
                 # missing primary surfaces as "unresolvable" rather than
                 # silently resolving to a fallback and reporting "drifted".
                 try:
-                    bundle = await self._components.model_router.resolve(
+                    bundle = self._components.model_resolver.resolve(
                         ModelPolicy(primary=name, fallbacks=())
                     )
                 except Exception:

@@ -42,7 +42,7 @@ from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext
 from linktools.ai.run.context import RunContext as AiRunContext
 from linktools.ai.run.models import RunInput, RunnableType
@@ -126,7 +126,7 @@ async def _compiled(pipeline: MiddlewarePipeline):
     ToolContext. The compiled agent carries an extra ``ping`` tool so the model
     has something to call (driving the ``before_tool`` hook)."""
     compiler = AgentCompiler(tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), 
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
         middleware_pipeline=pipeline,
     )
     spec = AgentSpec(

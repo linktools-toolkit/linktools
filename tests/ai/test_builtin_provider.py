@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BuiltinProvider (contract): resolves builtin:file/terminal into the file/
-terminal FunctionToolset, and rejects resolution without an execution backend."""
+terminal FunctionToolset, and rejects resolution without a sandbox."""
 
 import pytest
 
@@ -13,11 +13,11 @@ from linktools.ai.errors import CapabilityNotFoundError, CapabilityResolutionErr
 from linktools.ai.sandbox.local import LocalSandbox
 
 
-def _ctx(execution, agent_id="a1"):
+def _ctx(sandbox, agent_id="a1"):
     return CapabilityContext(
         agent_id=agent_id,
         exposure_policy=CapabilityToolExposurePolicy(),
-        execution=execution,
+        sandbox=sandbox,
     )
 
 
@@ -62,7 +62,7 @@ async def test_builtin_wildcard_exposes_both(tmp_path):
 
 @pytest.mark.asyncio
 async def test_builtin_without_execution_backend_raises(tmp_path):
-    with pytest.raises(CapabilityResolutionError, match="execution backend"):
+    with pytest.raises(CapabilityResolutionError, match="requires a sandbox"):
         await BuiltinProvider().resolve(CapabilityRef("builtin", "file"), _ctx(None))
 
 

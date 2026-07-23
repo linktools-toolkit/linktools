@@ -15,7 +15,7 @@ from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.governance.security.baseline import SecurityBaseline
 from linktools.ai.governance.security.pipeline import PipelineAction, PipelineDecision
@@ -142,7 +142,7 @@ async def test_runtime_runs_mcp_through_managed_execution(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         providers=RuntimeDependencies(capabilities=(provider,)),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -173,7 +173,7 @@ async def test_runtime_mcp_governance_executes_exactly_once(tmp_path):
     pipeline = _CountingPipeline()
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         tool_executor=executor,
         security=SecurityBaseline(pipeline=pipeline),
         providers=RuntimeDependencies(capabilities=(provider,)),
@@ -222,7 +222,7 @@ async def test_runtime_empty_mcp_allowlist_exposes_and_calls_no_tools(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_text_router(),
+        model_resolver=_text_router(),
         providers=RuntimeDependencies(capabilities=(provider,)),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )

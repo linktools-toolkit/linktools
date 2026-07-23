@@ -3,8 +3,12 @@
 """AssetPath: a normalized, absolute, POSIX-style asset path value type."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..errors import InvalidAssetPathError
+
+if TYPE_CHECKING:
+    from .models import Depth
 
 
 def _normalize(value: str) -> str:
@@ -19,7 +23,9 @@ def _normalize(value: str) -> str:
         raise InvalidAssetPathError(f"asset path must be absolute: {value!r}")
     segments = [seg for seg in text.split("/") if seg != ""]
     if not segments:
-        raise InvalidAssetPathError(f"asset path must not be empty: {value!r}")
+        # "/" alone is the root namespace: a valid path whose direct children
+        # a ONE-depth list enumerates and against which every path matches.
+        return "/"
     for seg in segments:
         if seg in (".", ".."):
             raise InvalidAssetPathError(f"path traversal not allowed: {value!r}")
@@ -49,3 +55,40 @@ class AssetPath:
 
     def __truediv__(self, name: str) -> "AssetPath":
         return self.child(name)
+
+
+def _relative_depth(base_value: str, candidate_value: str) -> "int | None":
+    """String-level relative-depth computation. Split out from
+    :func:`relative_asset_depth` so the root-namespace case (``base_value ==
+    "/"``) is unit-testable without constructing an ``AssetPath("/")``, which
+    normalization currently rejects."""
+    if candidate_value == base_value:
+        return 0
+    prefix = "/" if base_value == "/" else base_value + "/"
+    if not candidate_value.startswith(prefix):
+        return None
+    return candidate_value[len(prefix) :].count("/") + 1
+
+
+def relative_asset_depth(base: AssetPath, candidate: AssetPath) -> "int | None":
+    """Depth of ``candidate`` relative to ``base``: ``0`` when identical, ``1``
+    for a direct child, ``2+`` for a deeper descendant, ``None`` when
+    ``candidate`` is not under ``base``. Shared by every asset backend so
+    Depth.ZERO/ONE/INFINITY resolve identically across Memory, Filesystem, and
+    SqlAlchemy."""
+    return _relative_depth(base.value, candidate.value)
+
+
+def matches_asset_depth(
+    base: AssetPath, candidate: AssetPath, depth: "Depth"
+) -> bool:
+    from .models import Depth
+
+    relative = relative_asset_depth(base, candidate)
+    if relative is None:
+        return False
+    if depth is Depth.ZERO:
+        return relative == 0
+    if depth is Depth.ONE:
+        return relative <= 1
+    return True

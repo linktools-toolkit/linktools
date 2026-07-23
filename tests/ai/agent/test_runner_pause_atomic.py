@@ -35,7 +35,7 @@ from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.events.payloads import RunPaused as RunPausedPayload
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
@@ -172,7 +172,7 @@ def _compile_with_storage(storage) -> "tuple[CompiledAgent, GovernedToolInvoker]
         approval_store=storage.approvals,
     )
     compiler = AgentCompiler(
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -260,7 +260,7 @@ def test_sqla_pause_writes_all_three_operations_atomically_on_success(tmp_path):
 
 
 def test_sqla_pause_persists_approval_request_atomically(tmp_path):
-    """P0-6/G1 (review3 contract): the ApprovalRequest itself now commits through
+    """the ApprovalRequest itself now commits through
     the SAME UoW as checkpoint/transition/event -- GovernedToolInvoker no longer
     persists it directly. Verifies the approval is actually queryable through
     storage.approvals after the pause completes."""
@@ -292,7 +292,7 @@ def test_sqla_pause_persists_approval_request_atomically(tmp_path):
 
 
 def test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval(tmp_path):
-    """G2: pausing twice for the SAME (run_id, tool_call_id) -- e.g. a retried
+    """pausing twice for the SAME (run_id, tool_call_id) -- e.g. a retried
     lifecycle re-entering the pause path for the same tool call -- must reuse
     the existing PENDING approval rather than creating a second one."""
     storage = _sqlalchemy_storage(tmp_path)
@@ -479,7 +479,7 @@ def test_sqla_pause_rolls_back_checkpoint_and_transition_when_event_append_fails
     # The outer handler's RunFailed append (not a RunPaused payload) succeeded.
     assert "RunFailed" in payload_types
 
-    # P0-6/G1: the ApprovalRequest write shares the SAME UoW, so it must also
+    # the ApprovalRequest write shares the SAME UoW, so it must also
     # roll back -- no orphaned PENDING approval left behind after the run
     # ended up FAILED.
     pending = asyncio.run(storage.approvals.list_pending("run-r1"))
@@ -520,7 +520,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         approval_store=approval_store,
     )
     compiler = AgentCompiler(
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -627,7 +627,7 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         ),
     )
     compiler = AgentCompiler(
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
     )
     compiled = asyncio.run(

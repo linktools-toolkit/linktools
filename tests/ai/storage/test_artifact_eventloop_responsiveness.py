@@ -18,6 +18,7 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.storage.filesystem.artifact import (
     FilesystemArtifactBlobStore,
     FilesystemArtifactRecordStore,
@@ -125,6 +126,7 @@ def test_orphan_scan_does_not_block_event_loop(tmp_path: Path) -> None:
             await sweep_orphan_blobs(
                 blob,
                 record_store,
+                InProcessArtifactDigestCoordinator(),
                 OrphanSweepConfig(
                     grace_period=__import__("datetime").timedelta(seconds=0)
                 ),

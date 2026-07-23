@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent as PydanticAgent
 
-from ..model.registry import ModelBundle
+from ..model.resolver import ResolvedModel
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
 
@@ -26,6 +26,6 @@ if TYPE_CHECKING:
 class CompiledAgent:
     spec: AgentSpec
     pydantic_agent: PydanticAgent
-    model_bundle: ModelBundle
+    model_bundle: ResolvedModel
     policy_capability: PolicyCapability
     middleware_capability: "MiddlewareCapability | None" = None

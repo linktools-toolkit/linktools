@@ -135,7 +135,7 @@ def declared_tool_definitions(
     """Build explicit definitions at a Provider boundary.
 
     Providers own the mapping from declared descriptors to handlers; the
-    assembler deliberately has no toolset introspection fallback.
+    resolver deliberately has no toolset introspection fallback.
     """
     tools = getattr(toolset, "tools", None)
     if not isinstance(tools, dict):

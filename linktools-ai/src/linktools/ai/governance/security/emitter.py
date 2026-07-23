@@ -155,12 +155,12 @@ class EventStoreSecurityEventEmitter:
             return
         ctx = self._context
         run_id = getattr(ctx, "run_id", None) if ctx else None
-        from ...events.context import EventContext, append_event
+        from ...events.context import EventStreamContext, append_event
 
         try:
             await append_event(
                 self._store,
-                EventContext(
+                EventStreamContext(
                     stream_id=run_id or "",
                     run_id=run_id,
                     root_run_id=(getattr(ctx, "root_run_id", None) or run_id)

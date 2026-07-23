@@ -8,6 +8,15 @@ preconditions."""
 
 from .models import Found, Masked, Missing, WriteOptions
 from .path import AssetPath
+from .readonly import ReadOnlyAssetBackend
 from .store import AssetStore
 
-__all__ = ["AssetStore", "AssetPath", "Found", "Masked", "Missing", "WriteOptions"]
+__all__ = [
+    "AssetStore",
+    "AssetPath",
+    "ReadOnlyAssetBackend",
+    "Found",
+    "Masked",
+    "Missing",
+    "WriteOptions",
+]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime capability wiring (contract/contract): RuntimeDependencies + options types,
-provider/expanded-param mixing rejection, custom providers feed the assembler,
+provider/expanded-param mixing rejection, custom providers feed the resolver,
 and async-context close releases MCP connections."""
 
 import pytest
@@ -14,12 +14,12 @@ from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinato
 
 
 def _runtime(tmp_path, **kw):
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
     return Runtime.build(
         storage=storage,
-        model_router=ModelResolver(),
+        model_resolver=ModelResolver(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
         **kw,
     )
@@ -168,7 +168,7 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.mcp.spec import MCPServerSpec
 
     class _McpSrc:
@@ -222,7 +222,7 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
+        model_resolver=ModelResolver(registry=registry),
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         mcp_connection_pool=manager,
         options=CapabilityRuntimeOptions(

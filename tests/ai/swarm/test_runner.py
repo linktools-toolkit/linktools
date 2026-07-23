@@ -29,7 +29,7 @@ from linktools.ai.errors import (
     SwarmRunNotFoundError,
 )
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunErrorInfo,
@@ -110,7 +110,7 @@ def _build_compiler(*outputs: str) -> AgentCompiler:
         registry.register(f"model-{i}", model=_make_model(out))
     return AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
 
 
@@ -1008,7 +1008,7 @@ def test_run_timeout_transitions_driving_run_and_swarm_to_failed(tmp_path):
 
 
 def test_run_cancelled_while_already_cancelling_still_reaches_cancelled(tmp_path):
-    """P1-1 (current-review-actionable-fix-contract): reproduces the exact
+    """reproduces the exact
     race Runtime.cancel(run_id) creates -- it transitions the driving Run to
     CANCELLING BEFORE calling run_controller.cancel(), which is what actually
     delivers the CancelledError into SwarmRunner.run(). Before the fix,
@@ -1107,7 +1107,7 @@ def test_run_max_total_tokens_exceeded_raises_and_marks_failed(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
 
     stores = _Stores(tmp_path)
@@ -1164,7 +1164,7 @@ def test_run_under_max_total_tokens_succeeds(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
 
     stores = _Stores(tmp_path)

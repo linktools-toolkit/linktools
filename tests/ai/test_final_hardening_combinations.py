@@ -12,7 +12,7 @@ from linktools.ai.events.payloads import TruncatedSecurityEvent
 from linktools.ai.mcp.client import MCPConnectionRef
 from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.mcp.spec import MCPServerSpecProvider
 from linktools.ai.runtime import RuntimeDependencies
@@ -124,7 +124,7 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(),
+        model_resolver=ModelResolver(),
         providers=RuntimeDependencies(capabilities=(provider,)),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )

@@ -38,7 +38,7 @@ name: default
 
 model:
   primary: standard
-  max_retries: 1
+  request_retries: 1
   timeout_seconds: 120
 
 tools:
@@ -65,7 +65,7 @@ name: reviewer
 
 model:
   primary: standard
-  max_retries: 1
+  request_retries: 1
   timeout_seconds: 120
 
 tools:

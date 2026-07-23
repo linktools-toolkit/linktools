@@ -37,10 +37,10 @@ def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, .
 
 
 async def _assemble_internal(
-    assembler: "CapabilityResolver | None",
+    resolver: "CapabilityResolver | None",
     options: CapabilityRuntimeOptions,
     spec: AgentSpec,
-    execution: "Sandbox | None",
+    sandbox: "Sandbox | None",
     security_event_emitter: Any,
 ) -> "CapabilityBundle":
     """Resolve ``spec.tools`` into a CapabilityBundle under the runtime's
@@ -51,31 +51,31 @@ async def _assemble_internal(
     from ...capability.provider import CapabilityContext
     from ...capability.models import CapabilityBundle, requires_capability_resolver
 
-    if assembler is None and requires_capability_resolver(
-        tools=spec.tools, execution=execution
+    if resolver is None and requires_capability_resolver(
+        tools=spec.tools, sandbox=sandbox
     ):
         from ...errors import RuntimeInitializationError
 
         raise RuntimeInitializationError(
             "Runtime cannot inspect tools without CapabilityResolver"
         )
-    if assembler is None:
+    if resolver is None:
         return CapabilityBundle.empty()
     context = CapabilityContext(
         agent_id=spec.id,
         exposure_policy=options.tool_exposure,
-        execution=execution,
+        sandbox=sandbox,
         security_event_emitter=security_event_emitter,
     )
-    return await assembler.assemble(spec, context)
+    return await resolver.assemble(spec, context)
 
 
 async def inspect_capabilities(
     *,
-    assembler: "CapabilityResolver | None",
+    resolver: "CapabilityResolver | None",
     options: CapabilityRuntimeOptions,
     spec: AgentSpec,
-    execution: "Sandbox | None",
+    sandbox: "Sandbox | None",
 ) -> "CapabilityInspection":
     """A stable, immutable view of what ``spec`` resolves to: exposed tool
     descriptors, merged prompt sections, and any warnings. Leaks no mutable
@@ -91,7 +91,7 @@ async def inspect_capabilities(
         sanitizer=DefaultSecurityEventSanitizer()
     )
     bundle = await _assemble_internal(
-        assembler, options, spec, execution, security_event_emitter=collector
+        resolver, options, spec, sandbox, security_event_emitter=collector
     )
     inspection = CapabilityInspection.from_bundle(
         bundle, exposure_policy=options.tool_exposure

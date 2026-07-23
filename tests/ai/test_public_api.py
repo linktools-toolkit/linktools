@@ -36,7 +36,7 @@ def test_domain_imports_succeed():
     from linktools.ai.agent import AgentSpec
     from linktools.ai.capability import CapabilityRuntimeOptions
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.storage import FilesystemStorage, Storage
     from linktools.ai.swarm import SwarmSpec
 

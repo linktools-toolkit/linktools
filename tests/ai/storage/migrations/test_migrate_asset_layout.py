@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.storage.migrate import (
+from linktools.ai.storage.migrations import (
     migrate_asset_layout,
     migrate_sql_asset_tables,
     migrate_sql_asset_tables_downgrade,

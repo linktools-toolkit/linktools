@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentCompiler: resolves an AgentSpec's model via the ModelGateway and builds
-the underlying pydantic-ai Agent. Entirely stateless -- never touches Session,
-Run, or the filesystem. The compiler accepts no working-directory
-or Sandbox parameter and never constructs ``LocalSandbox``:
+"""AgentCompiler: resolves an AgentSpec's ModelPolicy to a ResolvedModel and
+builds the underlying pydantic-ai Agent on that real model. Entirely stateless
+-- never touches Session, Run, or the filesystem. The compiler accepts no
+working-directory or Sandbox parameter and never constructs ``LocalSandbox``:
 builtin file/terminal tools are constructed at EXECUTION TIME from
-``AgentDependencies.execution`` and passed to ``agent.iter(prompt, toolsets=)``.
+``AgentDependencies.sandbox`` and passed to ``agent.iter(prompt, toolsets=)``.
 The compiled Agent carries model + capabilities (policy + middleware) + the
 spec's static instructions (``PromptSpec.instructions``) only.
 
@@ -19,7 +19,7 @@ than silently governing nothing."""
 from ..errors import RuntimeInitializationError
 from ..middleware.capability import build_middleware_capability
 from ..middleware.pipeline import MiddlewarePipeline
-from ..model.router import ModelGateway
+from ..model.resolver import ModelResolver, ResolvedModel
 from ..tool.pydantic import build_policy_capability
 from ..tool.executor import GovernedToolInvoker
 from .dependencies import AgentDependencies
@@ -33,7 +33,7 @@ class AgentCompiler:
     def __init__(
         self,
         *,
-        model_router: ModelGateway,
+        model_resolver: ModelResolver,
         tool_executor: GovernedToolInvoker,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
     ) -> None:
@@ -42,12 +42,12 @@ class AgentCompiler:
                 "AgentCompiler requires a GovernedToolInvoker; Runtime.build is the "
                 "single source of the baseline-governed executor"
             )
-        self._model_router = model_router
+        self._model_resolver = model_resolver
         self._tool_executor = tool_executor
         self._middleware_pipeline = middleware_pipeline
 
     async def compile(self, spec: AgentSpec) -> CompiledAgent:
-        bundle = await self._model_router.resolve(spec.model)
+        resolved: ResolvedModel = self._model_resolver.resolve(spec.model)
         capability = build_policy_capability(self._tool_executor)
         capabilities = [capability]
         if self._middleware_pipeline is not None:
@@ -58,7 +58,7 @@ class AgentCompiler:
         else:
             middleware_capability = None
         pydantic_agent = PydanticAgent(
-            bundle.model,
+            resolved.model,
             output_type=spec.output_schema or str,
             capabilities=capabilities,
             deps_type=AgentDependencies,
@@ -67,7 +67,7 @@ class AgentCompiler:
         return CompiledAgent(
             spec=spec,
             pydantic_agent=pydantic_agent,
-            model_bundle=bundle,
+            model_bundle=resolved,
             policy_capability=capability,
             middleware_capability=middleware_capability,
         )

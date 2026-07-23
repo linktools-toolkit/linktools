@@ -387,7 +387,7 @@ def test_reserved_record_blocks_second_call_with_in_progress_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 9. schema_version is folded into the request hash (P1-5): the SAME
+# 9. schema_version is folded into the request hash: the SAME
 #    tool_name/arguments/scope but a DIFFERENT schema_version must hash
 #    differently, so a stale idempotency record from before a tool's input
 #    contract changed is never mistaken for a match against the new shape.
@@ -407,7 +407,7 @@ def test_schema_version_changes_the_request_hash():
 
 def test_executor_schema_version_bump_is_detected_as_a_distinct_request(tmp_path):
     """Same (scope, key, tool_name, arguments) but a bumped schema_version
-    changes the request hash (P1-5), so the executor correctly detects it as
+    changes the request hash, so the executor correctly detects it as
     a DIFFERENT request under the SAME idempotency_key -- the same outcome as
     changing the arguments (test #2 above), not a silent cache replay. This is
     the safe behavior: without schema_version in the hash, the second call

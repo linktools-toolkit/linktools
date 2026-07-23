@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.events.context import EventContext
+from linktools.ai.events.context import EventStreamContext
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -141,7 +141,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
                 messages=_messages("run-1"),
                 checkpoint_payload=b'{"messages": []}',
                 result=result,
-                event_context=EventContext.from_run_context(_ctx("run-1", "sess-1")),
+                event_context=EventStreamContext.from_run_context(_ctx("run-1", "sess-1")),
             )
         )
         assert commit.result is result
@@ -185,7 +185,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
                     **_APPROVAL_BINDING,
                 },
                 checkpoint_payload=b'{"messages": []}',
-                event_context=EventContext.from_run_context(_ctx("run-2", "sess-2")),
+                event_context=EventStreamContext.from_run_context(_ctx("run-2", "sess-2")),
             )
         )
         record = await storage.runs.get("run-2")
@@ -273,7 +273,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
                     messages=_messages("run-3"),
                     checkpoint_payload=b'{"messages": []}',
                     result=RunResult(output="x"),
-                    event_context=EventContext.from_run_context(
+                    event_context=EventStreamContext.from_run_context(
                         _ctx("run-3", "sess-3")
                     ),
                 )
@@ -357,7 +357,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                         **_APPROVAL_BINDING,
                     },
                     checkpoint_payload=b'{"messages": []}',
-                    event_context=EventContext.from_run_context(
+                    event_context=EventStreamContext.from_run_context(
                         _ctx("run-4", "sess-4")
                     ),
                 )

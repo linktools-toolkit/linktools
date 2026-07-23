@@ -115,6 +115,11 @@ class InMemoryArtifactRecordStore:
     async def delete(self, artifact_id: str, *, tenant_id: str) -> bool:
         return self._records.pop((artifact_id, tenant_id), None) is not None
 
+    async def is_digest_referenced(self, digest: str) -> bool:
+        # Not tenant-scoped: orphan status is a global property of the
+        # content-addressed blob.
+        return any(rec.ref.sha256 == digest for rec in self._records.values())
+
 
 class InMemoryLeaseCoordinator:
     """In-memory LeaseCoordinator with monotonic fencing. Correct within one

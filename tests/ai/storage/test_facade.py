@@ -430,7 +430,7 @@ def test_sqlalchemy_storage_uow_rolls_back_all_stores_on_failure(tmp_path):
 
 
 def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_path):
-    """Revised from the original P0-7 SAVEPOINT-based fix (see
+    """Revised from the original SAVEPOINT-based fix (see
     storage/sqlalchemy/idempotency.py's reserve() docstring/comment): a
     session.begin_nested() SAVEPOINT that releases cleanly was measured to
     NOT reliably participate in a LATER, unrelated failure's rollback of the

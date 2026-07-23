@@ -71,7 +71,7 @@ from ..events.payloads import (
     RunFailed,
     RunStarted,
 )
-from ..events.context import EventContext, append_event
+from ..events.context import EventStreamContext, append_event
 from ..events.store import EventStore
 from ..middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
@@ -139,7 +139,7 @@ class AgentEngine:
         observability: "ObservabilitySink | None" = None,
         metrics: "ObservabilityMetrics | None" = None,
         run_controller: "RunController | None" = None,
-        execution: "Sandbox | None" = None,
+        sandbox: "Sandbox | None" = None,
         capability_resolver: "CapabilityResolver | None" = None,
         capability_options: "CapabilityRuntimeOptions | None" = None,
         security_pipeline: Any = None,
@@ -169,18 +169,18 @@ class AgentEngine:
         # execution points. Default-None preserves every existing test.
         self._run_controller = run_controller
         # The per-Runtime Sandbox. execute()
-        # publishes this to AgentDependencies.execution and constructs the
+        # publishes this to AgentDependencies.sandbox and constructs the
         # builtin file/terminal FunctionToolset from it at execution time,
         # passing it via ``agent.iter(prompt, toolsets=[...])``. ``None``
         # (default) means the compiled agent exposes no builtin tools -- a
         # conversational-only run. Holding the backend on the runner (not the
         # compiler) is what decouples AgentCompiler from the filesystem.
-        self._execution = execution
+        self._sandbox = sandbox
         # Capability Runtime: when an AgentSpec declares non-
-        # empty tools and an assembler is wired, execute() resolves those tools
+        # empty tools and an resolver is wired, execute() resolves those tools
         # into prompt sections + toolsets via the capability providers. Default
-        # None means empty tools resolve to the default builtin toolset when an
-        # execution backend is present.
+        # None means empty tools resolve to the default builtin toolset when a
+        # sandbox is present.
         self._capability_resolver = capability_resolver
         self._capability_options = capability_options
         self._security_pipeline = security_pipeline
@@ -407,7 +407,7 @@ class AgentEngine:
                 if message_history is None:
                     await append_event(
                         self._event_store,
-                        EventContext.from_run_context(context),
+                        EventStreamContext.from_run_context(context),
                         RunStarted(
                             run_id=context.run_id, runnable_id=context.runnable_id
                         ),
@@ -437,7 +437,7 @@ class AgentEngine:
                     )
                     await append_event(
                         self._event_store,
-                        EventContext.from_run_context(context),
+                        EventStreamContext.from_run_context(context),
                         PromptWindowApplied(
                             policy=type(window_policy).__name__,
                             before=before_count,
@@ -504,36 +504,36 @@ class AgentEngine:
                 # is what makes AgentCompiler stateless (no filesystem surface):
                 # the same CompiledAgent can be reused across Runs that target
                 # different working directories, and a conversational-only run
-                # (no execution backend) simply passes ``toolsets=[]`` so the
-                # model has no file/terminal tools available. ``deps.execution``
+                # (no sandbox wired) simply passes ``toolsets=[]`` so the
+                # model has no file/terminal tools available. ``deps.sandbox``
                 # is the same backend -- capabilities that need it read
-                # ``ctx.deps.execution``.
+                # ``ctx.deps.sandbox``.
                 deps = AgentDependencies(
                     tool_context=tool_context,
-                    execution=self._execution,
+                    sandbox=self._sandbox,
                 )
                 toolsets: "list[AbstractToolset]" = []
                 cap_bundle = None
-                # All tools go through the capability assembler + ManagedToolAdapter.
-                # tools=None + execution -> default builtin via assembler (no raw bypass).
+                # All tools go through the capability resolver + ManagedToolAdapter.
+                # tools=None + sandbox -> default builtin via resolver (no raw bypass).
                 # tools=() -> no tools. tools explicit -> only declared.
                 has_resolver = self._capability_resolver is not None
                 builtin_flag = getattr(self._capability_options, "enable_builtin_tools", None)
                 needs_default = (
                     agent.spec.tools is None
-                    and deps.execution is not None
+                    and deps.sandbox is not None
                     and builtin_flag is not False
                 )
                 # Eager fail-fast: a spec that needs tools -- default builtin
-                # when an execution backend is present, or explicitly declared
-                # tools -- must have BOTH an assembler and a managed executor
+                # when a sandbox is present, or explicitly declared
+                # tools -- must have BOTH an resolver and a managed executor
                 # wired before any resolution work. tools=() needs neither and
-                # never raises; tools=None without execution is a model-only run.
+                # never raises; tools=None without a sandbox is a model-only run.
                 from ..capability.models import requires_capability_resolver
 
                 requires_tools = requires_capability_resolver(
                     tools=(agent.spec.tools if not needs_default else ("builtin",)),
-                    execution=deps.execution,
+                    sandbox=deps.sandbox,
                 )
                 if requires_tools and not has_resolver:
                     from ..errors import RuntimeInitializationError
@@ -561,7 +561,7 @@ class AgentEngine:
                     cap_ctx = CapabilityContext(
                         agent_id=agent.spec.id,
                         exposure_policy=exposure,
-                        execution=deps.execution,
+                        sandbox=deps.sandbox,
                         run_id=context.run_id,
                         root_run_id=context.root_run_id,
                         parent_run_id=context.parent_run_id,
@@ -657,7 +657,7 @@ class AgentEngine:
                                 )
                             # empty contribution (no tools) -> nothing to expose
                 # ToolExposureApplied + PromptCatalog events only fire when the
-                # capability assembler ran (cap_bundle exists).
+                # capability resolver ran (cap_bundle exists).
                 if cap_bundle is not None:
                     from ..events.payloads import (
                         PromptCatalogInjected,
@@ -665,20 +665,20 @@ class AgentEngine:
                     )
 
                     # Descriptor-only tool count (no toolset introspection): the
-                    # same source the assembler used for conflict/cap checks.
+                    # same source the resolver used for conflict/cap checks.
                     total = 0
                     for c in cap_bundle.tool_contributions:
                         total += len(c.tools)
                     await append_event(
                         self._event_store,
-                        EventContext.from_run_context(context),
+                        EventStreamContext.from_run_context(context),
                         ToolExposureApplied(agent_id=agent.spec.id, total_tools=total),
                     )
                     if cap_bundle.prompt_sections:
                         for section in cap_bundle.prompt_sections:
                             await append_event(
                                 self._event_store,
-                                EventContext.from_run_context(context),
+                                EventStreamContext.from_run_context(context),
                                 PromptCatalogInjected(
                                     agent_id=agent.spec.id, section=section
                                 ),
@@ -952,7 +952,7 @@ class AgentEngine:
                                         checkpoint_payload=serialize_messages(
                                             run.all_messages()
                                         ),
-                                        event_context=EventContext.from_run_context(
+                                        event_context=EventStreamContext.from_run_context(
                                             context
                                         ),
                                         commit_id=f"pause:{context.run_id}:{paused.approval_id}",
@@ -1128,7 +1128,7 @@ class AgentEngine:
                             messages=tuple(messages_to_append),
                             checkpoint_payload=checkpoint_payload,
                             result=run_result,
-                            event_context=EventContext.from_run_context(context),
+                            event_context=EventStreamContext.from_run_context(context),
                             commit_id=f"complete:{context.run_id}:{running_version}",
                         )
                     )
@@ -1245,7 +1245,7 @@ class AgentEngine:
             try:
                 await append_event(
                     self._event_store,
-                    EventContext.from_run_context(context),
+                    EventStreamContext.from_run_context(context),
                     RunFailed(
                         run_id=context.run_id,
                         error_type=type(exc).__name__,

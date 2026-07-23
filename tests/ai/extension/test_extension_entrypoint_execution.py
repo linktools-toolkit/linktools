@@ -58,7 +58,7 @@ def test_no_reserved_marker_in_source():
 @pytest.mark.asyncio
 async def test_call_without_resolver_raises_not_nameerror():
     # resolver=None must raise ExtensionEntrypointNotFoundError, not NameError
-    # from a missing import (the bug the review caught). Exercise the toolset
+    # from a missing import. Exercise the toolset
     # directly since ExtensionProvider guards resolver=None -> empty bundle.
     from linktools.ai.errors import ExtensionEntrypointNotFoundError
     from linktools.ai.extension.scope import ExtensionScope

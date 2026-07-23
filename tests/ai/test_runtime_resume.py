@@ -44,7 +44,7 @@ from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import InvalidRunTransitionError, RunNotFoundError
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
@@ -143,7 +143,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FilesystemStorage]":
     )
     runtime = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=_registry()),
+        model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
@@ -612,7 +612,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
         )
         runtime = Runtime.build(
             storage=storage,
-            model_router=ModelResolver(registry=_registry()),
+            model_resolver=ModelResolver(registry=_registry()),
             tool_executor=executor,
             providers=RuntimeDependencies(capabilities=(_PromptedRiskyProvider(),)),
             local_trusted_mode=True,

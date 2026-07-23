@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/events/test_payloads_approval_swarm_resource.py"""
+"""tests/ai/events/test_payloads_approval_swarm_asset.py"""
 
 from linktools.ai.events.payloads import (
     ApprovalApproved,
@@ -53,5 +53,5 @@ def test_swarm_payloads():
     assert SwarmCompleted(swarm_run_id="sr1").swarm_run_id == "sr1"
 
 
-def test_resource_changed_payload():
+def test_asset_changed_payload():
     assert AssetChanged(path="/a.txt", revision=5).revision == 5

@@ -5,18 +5,18 @@
 :class:`AssetReaderBackend` is the read surface every backend implements
 (raw_get / raw_stat / raw_list / revision / get_idempotency). Overlay backends
 are readers. :class:`AssetWriterBackend` extends it with the atomic checked
-operations (raw_put_checked / raw_delete_checked / raw_move / put_idempotency)
-and declares ``readonly: Literal[False]``. The AssetStore primary is always a
-Writer; overlays are Readers.
+operations (raw_put_checked / raw_delete_checked / raw_move / put_idempotency).
+The AssetStore primary is always a Writer; overlays are Readers.
 
 Splitting the Protocols (and typing the primary as ``AssetWriterBackend``,
 overlays as ``tuple[AssetReaderBackend, ...]``) removes the former
 ``hasattr(backend, "raw_...")`` probing: a backend either is a Writer (and the
 checked ops exist by Protocol) or it is not (and it cannot be a primary).
-Read-only backends simply do not implement the Writer Protocol -- ``readonly``
-is a declared marker, not a runtime-guessable flag."""
+Read-only-ness is structural -- :class:`~linktools.ai.asset.readonly.ReadOnlyAssetBackend`
+implements only AssetReaderBackend (no write methods), so it does not satisfy
+AssetWriterBackend and cannot be a primary. There is no ``readonly`` flag."""
 
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .models import (
     Depth,
@@ -64,10 +64,10 @@ class AssetWriterBackend(AssetReaderBackend, Protocol):
     operation (load-source + write-target + whiteout-source + bump-revision);
     it never decomposes into a public put + delete.
 
-    ``readonly`` is ``Literal[False]``: a read-only backend does not implement
-    this Protocol at all, so it cannot be supplied as a primary."""
-
-    readonly: Literal[False]
+    A read-only backend (``ReadOnlyAssetBackend``) implements only
+    :class:`AssetReaderBackend` -- it lacks these write methods, so it does not
+    satisfy this Protocol and cannot be supplied as a primary. Read-only-ness is
+    structural (which methods exist), not a runtime flag."""
 
     async def raw_put_checked(
         self,

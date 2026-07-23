@@ -38,11 +38,11 @@ async def _emit(context: CapabilityContext, payload) -> None:
     run_id = context.run_id
     if store is None or run_id is None:
         return
-    from ..events.context import EventContext, append_event
+    from ..events.context import EventStreamContext, append_event
 
     await append_event(
         store,
-        EventContext(
+        EventStreamContext(
             stream_id=run_id,
             run_id=run_id,
             root_run_id=context.root_run_id or run_id,
@@ -60,7 +60,7 @@ class CapabilityResolver:
     :class:`CapabilityProviderRegistry`.
 
     The provider store (kind -> provider, plus register/replace) lives on the
-    registry -- the single runtime registry. The assembler holds a
+    registry -- the single runtime registry. The resolver holds a
     registry reference and owns per-spec resolution only. Constructed from either
     an existing registry or a raw kind -> provider mapping (convenience: the
     mapping is wrapped in a registry). What counts as a valid capability kind is

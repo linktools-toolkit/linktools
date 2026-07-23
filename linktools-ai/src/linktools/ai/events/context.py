@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EventContext + append_event. Bundles the six lineage fields every
+"""EventStreamContext + append_event. Bundles the six lineage fields every
 event-store append needs, so callers stop repeating ``stream_id=...,
 run_id=..., root_run_id=..., parent_run_id=..., session_id=...,
 runnable_id=...`` at each call site. ``append_event(store, context, payload)``
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class EventContext:
+class EventStreamContext:
     stream_id: str
     run_id: str
     root_run_id: str
@@ -26,8 +26,8 @@ class EventContext:
     @classmethod
     def from_run_context(
         cls, ctx: "RunContext", *, stream_id: "str | None" = None
-    ) -> "EventContext":
-        """Build an EventContext from a RunContext. ``stream_id`` defaults to the
+    ) -> "EventStreamContext":
+        """Build an EventStreamContext from a RunContext. ``stream_id`` defaults to the
         run_id (the common case -- every current caller passes stream_id ==
         run_id)."""
         run_id = ctx.run_id
@@ -44,12 +44,12 @@ class EventContext:
 
 async def append_event(
     store: "EventStore",
-    context: EventContext,
+    context: EventStreamContext,
     payload: Any,
     *,
     metadata: "Mapping[str, Any] | None" = None,
 ) -> None:
-    """Append ``payload`` to ``store`` under the EventContext's lineage.
+    """Append ``payload`` to ``store`` under the EventStreamContext's lineage.
 
     ``metadata`` is optional free-form per-event metadata (e.g. a ``commit_id``
     used for commit-scoped dedup of critical events); backends persist it

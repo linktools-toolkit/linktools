@@ -137,7 +137,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
     """A FilesystemRunCommitCoordinator recovery that hits an event-store
     failure during critical-event reappend records the metric instead of
     silently dropping the journal."""
-    from linktools.ai.events.context import EventContext
+    from linktools.ai.events.context import EventStreamContext
     from linktools.ai.run.commit import CompleteRunCommand
     from linktools.ai.run.context import RunContext
     from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus, RunnableType
@@ -220,7 +220,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
-                event_context=EventContext.from_run_context(
+                event_context=EventStreamContext.from_run_context(
                     RunContext(
                         run_id="run-x",
                         root_run_id="run-x",
@@ -367,6 +367,7 @@ def test_artifact_orphan_total_fires_when_sweep_deletes_orphan(tmp_path):
         FilesystemArtifactBlobStore,
         FilesystemArtifactRecordStore,
     )
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.storage.orphan import (
         OrphanSweepConfig,
         sweep_orphan_blobs,
@@ -391,6 +392,7 @@ def test_artifact_orphan_total_fires_when_sweep_deletes_orphan(tmp_path):
         stats = await sweep_orphan_blobs(
             blobs,
             records,
+            InProcessArtifactDigestCoordinator(),
             OrphanSweepConfig(grace_period=timedelta(seconds=0)),
             now=datetime.now(timezone.utc) + timedelta(days=2),
             metrics=metrics,
@@ -878,6 +880,7 @@ def test_artifact_orphan_cleanup_failure_total_fires_on_delete_error(tmp_path):
         FilesystemArtifactBlobStore,
         FilesystemArtifactRecordStore,
     )
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.storage.orphan import (
         OrphanSweepConfig,
         sweep_orphan_blobs,
@@ -902,6 +905,7 @@ def test_artifact_orphan_cleanup_failure_total_fires_on_delete_error(tmp_path):
         stats = await sweep_orphan_blobs(
             blobs,
             records,
+            InProcessArtifactDigestCoordinator(),
             OrphanSweepConfig(grace_period=timedelta(seconds=0)),
             now=datetime.now(timezone.utc) + timedelta(days=2),
             metrics=metrics,

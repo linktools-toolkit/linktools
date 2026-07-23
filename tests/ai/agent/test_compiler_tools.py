@@ -3,7 +3,7 @@
 """tests/ai/agent/test_compiler_tools.py — verifies the contract contract: the
 AgentCompiler NO LONGER wires builtin file/terminal tools into the compiled
 pydantic-ai Agent. Those tools are constructed at EXECUTION TIME from
-``AgentDependencies.execution`` (set by AgentEngine from its ``execution``
+``AgentDependencies.sandbox`` (set by AgentEngine from its ``sandbox``
 kwarg) and passed via ``agent.iter(prompt, toolsets=[...])``.
 
 Three angles:
@@ -31,7 +31,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -69,7 +69,7 @@ def _user_function_toolsets(compiled) -> "list[FunctionToolset]":
     ]
 
 
-def _make_runner(tmp_path, *, execution=None) -> AgentEngine:
+def _make_runner(tmp_path, *, sandbox=None) -> AgentEngine:
     from linktools.ai.capability.resolver import CapabilityResolver
     from linktools.ai.capability.builtin import BuiltinProvider
     from linktools.ai.governance.policy.engine import PolicyEngine
@@ -86,7 +86,7 @@ def _make_runner(tmp_path, *, execution=None) -> AgentEngine:
         session_store=session_store,
         event_store=event_store,
         checkpoint_store=checkpoint_store,
-        execution=execution,
+        sandbox=sandbox,
         capability_resolver=CapabilityResolver({"builtin": BuiltinProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         commit_coordinator=FilesystemRunCommitCoordinator(
@@ -134,11 +134,11 @@ def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
     # Those tools are constructed at execution time, not compile time.
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(
+        model_resolver=ModelResolver(
             registry=_registry(
                 lambda m, i: ModelResponse(parts=[TextPart(content="ok")])
             )
-        )),
+        ),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
 
@@ -169,10 +169,10 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
+        model_resolver=ModelResolver(registry=_registry(model_fn)),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
-    runner = _make_runner(tmp_path)  # execution=None -> no builtin tools
+    runner = _make_runner(tmp_path)  # sandbox=None -> no builtin tools
     _seed_session(runner._session_store, "session-1")
 
     async def _collect():
@@ -231,11 +231,11 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
+        model_resolver=ModelResolver(registry=_registry(model_fn)),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
     backend = LocalSandbox(runtime_dir=tmp_path)
-    runner = _make_runner(tmp_path, execution=backend)
+    runner = _make_runner(tmp_path, sandbox=backend)
     _seed_session(runner._session_store, "session-1")
 
     async def _drive():

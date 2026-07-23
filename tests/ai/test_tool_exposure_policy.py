@@ -86,7 +86,7 @@ def test_non_discovery_non_mutating_tool_always_exposed():
     assert is_descriptor_exposable(d, off) is True
 
 
-# --- Assembler-level enforcement for providers other than Builtin (MCP, subagent) ---
+# --- Resolver-level enforcement for providers other than Builtin (MCP, subagent) ---
 
 import pytest  # noqa: E402
 

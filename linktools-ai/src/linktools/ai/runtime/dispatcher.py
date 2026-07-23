@@ -3,7 +3,7 @@
 """LateBoundRunDispatcher: the runtime's dispatch binding seam.
 
 The subagent executor is built before the AgentEngine it eventually delegates
-to exists -- the runner depends on the capability assembler, which depends on
+to exists -- the runner depends on the capability resolver, which depends on
 the subagent executor: a genuine self-reference, not an accidental cycle. This
 handle confines that one-time forward reference to a single bind-once seam
 instead of a bare closure; every caller only ever sees the narrow

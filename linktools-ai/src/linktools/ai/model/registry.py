@@ -197,16 +197,33 @@ def _resolve_base_url(config: RuntimeModelConfig) -> str:
     raise ModelClientUnavailable(f"{config.model_type}: invalid base_url_mode {mode!r}")
 
 
-def _bundle_from_config(config: RuntimeModelConfig) -> ModelBundle:
+def _bundle_from_config(
+    config: RuntimeModelConfig, *, request_retries: int = 0
+) -> ModelBundle:
     """Build an `OpenAIChatModel` (+ settings/limits) for an already-resolved
     `RuntimeModelConfig`. Callers resolve configuration however they want (file,
     env vars, secrets manager, hardcoded for tests) and hand in the config directly
-    — this function only does the pydantic-ai model/provider/settings construction."""
+    — this function only does the pydantic-ai model/provider/settings construction.
+
+    ``request_retries`` configures the provider HTTP client's own retry of
+    transient HTTP failures (passed to ``AsyncOpenAI`` as ``max_retries``); it is
+    a REQUEST-layer retry, not a registry-lookup retry, and is applied at resolve
+    time from the ModelPolicy."""
     if config.protocol != "openai":
         raise ModelClientUnavailable(
             f"{config.model_type}: unsupported protocol '{config.protocol}' (use 'openai')"
         )
-    provider = OpenAIProvider(base_url=_resolve_base_url(config), api_key=config.token)
+    if request_retries:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            base_url=_resolve_base_url(config),
+            api_key=config.token,
+            max_retries=request_retries,
+        )
+        provider = OpenAIProvider(openai_client=client)
+    else:
+        provider = OpenAIProvider(base_url=_resolve_base_url(config), api_key=config.token)
     # The gateway routes to various OpenAI-compatible models, including reasoning/
     # "thinking mode" models (e.g. deepseek-v4-flash) that reject `tool_choice:
     # "required"` with HTTP 400. Disabling this lets pydantic-ai fall back to

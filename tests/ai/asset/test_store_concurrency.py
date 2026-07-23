@@ -266,14 +266,14 @@ async def test_concurrent_delete_with_same_if_match_exactly_one_succeeds(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_revision_bump_uses_atomic_update_returning(tmp_path):
-    """contract structural guard: the revision counter bump must emit a single
-    server-side atomic increment with RETURNING -- either an ``UPDATE ... SET
-    value = value + 1 ... RETURNING value`` or an ``INSERT ... ON CONFLICT DO
-    UPDATE SET value = value + 1 RETURNING value`` (the upsert form folds the
-    first-ever seed into the same atomic statement, and avoids a SAVEPOINT).
-    Either way, NOT a Python read-then-write (``row.value += 1`` then flush an
-    unconditional ``UPDATE ... SET value = ?``).
+async def test_revision_bump_uses_server_side_atomic_increment(tmp_path):
+    """contract structural guard: the revision counter bump must be a single
+    server-side atomic increment ``UPDATE ai_asset_revision SET value = value +
+    1 WHERE id = ?`` (NOT a Python read-then-write like ``row.value += 1`` then
+    an unconditional ``UPDATE ... SET value = ?``). The new value is read back
+    with a separate SELECT rather than RETURNING, because MySQL lacks
+    UPDATE...RETURNING -- the read-back runs inside the same transaction (the
+    row lock is held), so it observes exactly this writer's increment.
 
     SQLite's deferred-transaction snapshot isolation masks the lost-update bug
     behaviorally (a concurrent reader's SELECT blocks behind a writer's lock, so
@@ -302,16 +302,14 @@ async def test_revision_bump_uses_atomic_update_returning(tmp_path):
         and ("value + " in s.lower() or "value+" in s.lower())
     ]
     assert revision_bumps, "expected at least one atomic increment on ai_asset_revision"
-    # Every revision bump must be server-side atomic (``value = value + 1``) and
-    # read the new value back via RETURNING.
     for stmt in revision_bumps:
+        assert stmt.lower().startswith("update"), (
+            f"revision bump must be an UPDATE (not a Python-computed write), "
+            f"got: {stmt!r}"
+        )
         assert "value + " in stmt.lower() or "value+" in stmt.lower(), (
             f"revision bump must use server-side atomic increment (value = value + 1), "
             f"got: {stmt!r}"
-        )
-        assert "returning" in stmt.lower(), (
-            f"revision bump must use ... RETURNING value to read the new "
-            f"value atomically, got: {stmt!r}"
         )
 
     await engine.dispose()

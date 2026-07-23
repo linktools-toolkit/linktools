@@ -37,7 +37,7 @@ from .models import (
     AssetPage,
     WriteOptions,
 )
-from .path import AssetPath
+from .path import AssetPath, matches_asset_depth
 from ..errors import (
     IdempotencyConflictError,
     InvalidAssetPathError,
@@ -65,10 +65,8 @@ class FileAssetBackend:
         self,
         *,
         root: Path,
-        readonly: bool = False,
         symlink_policy: SymlinkPolicy = SymlinkPolicy.DENY,
     ) -> None:
-        self.readonly = readonly
         self._symlink_policy = symlink_policy
         self._root = Path(root)
         self._data_dir = self._root / "data"
@@ -199,26 +197,28 @@ class FileAssetBackend:
     def _raw_list_sync(
         self, path: AssetPath, *, depth: Depth, limit: int, cursor: "str | None"
     ) -> AssetPage:
-        """Keyset pagination: metadata files are iterated in sorted
-        order (so the global path order is stable), filtered by prefix, by
-        ``path > cursor`` (resume point), and by depth, collecting limit+1 items
-        so the (limit+1)th path becomes next_cursor. The cursor is the literal
-        normalized path string of the last item returned."""
-        prefix = path.value.rstrip("/") + "/"
-        items = []
-        for meta_file in sorted(self._meta_dir.glob("*.json")):
+        """Depth-filtered keyset pagination. Candidate metadata files are
+        gathered, filtered by :func:`matches_asset_depth` and by
+        ``path > cursor`` (resume point), then sorted by normalized path so the
+        global order is stable regardless of filename encoding, collecting
+        limit+1 items so the limit-th path becomes next_cursor. The cursor is
+        the literal normalized path string of the last item returned."""
+        if depth is Depth.ZERO:
+            info = self._load_info(path)
+            return AssetPage(
+                items=(info,) if info is not None else (), cursor=None
+            )
+        candidates = []
+        for meta_file in self._meta_dir.glob("*.json"):
             candidate = _path_from_filename(meta_file.stem)
-            if not candidate.value.startswith(prefix):
+            if not matches_asset_depth(path, candidate, depth):
                 continue
             if cursor is not None and candidate.value <= cursor:
                 continue
-            rest = candidate.value[len(prefix) :]
-            if depth == Depth.ONE and "/" in rest:
-                continue
-            items.append(self._load_info(candidate))
-            if len(items) > limit:
-                break  # collected limit+1; enough to signal "more available"
-        next_cursor = items[limit].path.value if len(items) > limit else None
+            candidates.append(candidate)
+        candidates.sort(key=lambda c: c.value)
+        items = [self._load_info(c) for c in candidates[: limit + 1]]
+        next_cursor = items[limit - 1].path.value if len(items) > limit else None
         return AssetPage(items=tuple(items[:limit]), cursor=next_cursor)
 
     async def raw_list(

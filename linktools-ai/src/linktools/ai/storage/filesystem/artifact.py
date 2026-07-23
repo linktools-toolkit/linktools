@@ -307,6 +307,16 @@ class FilesystemArtifactRecordStore:
         async for record in self._iter_records():
             yield record.ref.sha256
 
+    async def is_digest_referenced(self, digest: str) -> bool:
+        """Whether any record pins ``digest`` (across tenants). Scans records
+        fail-closed: a corrupt record aborts (raises) so the orphan sweeper
+        cannot mistake a pinned blob for an orphan. Returns on the first
+        matching record."""
+        async for record in self._iter_records():
+            if record.ref.sha256 == digest:
+                return True
+        return False
+
     async def _iter_records(
         self, *, tenant_id: "str | None" = None
     ) -> AsyncIterator[ArtifactRecord]:

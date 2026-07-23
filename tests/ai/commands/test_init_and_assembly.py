@@ -82,7 +82,7 @@ class TestBuildCliRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             proj_root = self._project(tmp)
             project = load_project(data_root=Path(tmp) / "data", start=proj_root)
-            bundle = build_cli_runtime(project=project, model_router=None)
+            bundle = build_cli_runtime(project=project, model_resolver=None)
             self.assertIsInstance(bundle.runtime, Runtime)
             self.assertEqual(bundle.project, project)
             # Agents loaded from .linktools/agents.

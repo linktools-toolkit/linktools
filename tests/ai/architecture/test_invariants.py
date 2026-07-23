@@ -39,7 +39,7 @@ def _registry():
 
 
 def _router():
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     return ModelResolver(registry=_registry())
 
@@ -54,11 +54,11 @@ def test_invariant_runtime_has_no_public_capability_resolver(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     assert not hasattr(runtime, "capability_resolver")
-    assert not hasattr(runtime, "assembler")
+    assert not hasattr(runtime, "resolver")
 
 
 # --- CapabilityBundle carries no raw toolset ------------------------------------
@@ -73,14 +73,14 @@ def test_invariant_tool_contribution_has_only_tools_field():
     assert field_names == ["tools"]
 
 
-# --- AgentEngine requires an Assembler when tools are needed --------------------
+# --- AgentEngine requires an Resolver when tools are needed --------------------
 def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
     from linktools.ai.errors import RuntimeInitializationError
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
@@ -98,7 +98,7 @@ def test_invariant_runner_empty_tools_does_not_require_assembler(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
@@ -164,7 +164,7 @@ def test_invariant_inspect_returns_no_handler(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(

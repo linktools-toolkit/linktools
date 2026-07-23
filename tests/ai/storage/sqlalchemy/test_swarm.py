@@ -400,7 +400,7 @@ def test_fail_task_missing_raises_not_found(tmp_path):
 
 
 def test_complete_task_with_fencing_token_requires_claimed_status(tmp_path):
-    """G9: complete_task's fencing-token path (expected_version supplied) must
+    """complete_task's fencing-token path (expected_version supplied) must
     also require status='claimed' -- a task already completed/failed by a
     racing writer must not be silently re-completed just because the version
     it was claimed under still matches (it won't, since a real transition
@@ -556,7 +556,7 @@ def test_complete_and_fail_concurrent_only_one_wins(tmp_path):
 
 
 def test_reclaim_expired_tasks_is_atomic_under_concurrent_races(tmp_path):
-    """G9: reclaim_expired_tasks must not re-reclaim a task whose lease a
+    """reclaim_expired_tasks must not re-reclaim a task whose lease a
     concurrent renew_lease just pushed into the future -- the bulk UPDATE's
     WHERE clause re-evaluates lease_expires_at at UPDATE time, not at an
     earlier SELECT time."""

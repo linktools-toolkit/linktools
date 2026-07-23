@@ -6,7 +6,7 @@
 The handler resolves a :class:`RunnableRef` to an ``AgentSpec`` / ``SwarmSpec``
 via a :class:`RunnableResolver`, mints a ``run_id``, binds it to the attempt,
 and calls ``dispatcher.run`` using the context's principal (tenant / user).
-The existing Runtime's Security Pipeline, Capability Assembler, Tool Executor,
+The existing Runtime's Security Pipeline, Capability Resolver, Tool Executor,
 Policy, MCP and SubAgent paths all run unchanged because the call goes through
 the public ``Runtime.run`` API -- the handler depends only on the narrow
 ``TaskRunDispatcher`` surface (run + cancel), not the full Runtime.

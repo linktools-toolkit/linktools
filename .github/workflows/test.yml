@@ -1,0 +1,63 @@
+name: test
+
+on:
+  push:
+    branches: [master, master-*]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: linktools
+          MYSQL_DATABASE: linktools_ai
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -plinktools"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: linktools
+          POSTGRES_DB: linktools_ai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      LINKTOOLS_AI_TEST_MYSQL_DSN: mysql+aiomysql://root:linktools@127.0.0.1:3306/linktools_ai
+      LINKTOOLS_AI_TEST_POSTGRESQL_DSN: postgresql+asyncpg://postgres:linktools@127.0.0.1:5432/linktools_ai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # The linktools-ai wheel is intentionally driver-neutral (a deployment
+          # brings its own DB driver); CI installs the SQLite/MySQL/PostgreSQL
+          # drivers directly so the dialect contracts parametrize over all three.
+          pip install \
+            ./linktools \
+            "./linktools-ai[test]" \
+            ./linktools-ai-testing \
+            -e ./tests/external_adapter \
+            aiosqlite aiomysql asyncpg
+
+      - name: Run the suite (all three dialects via the DSN env vars above)
+        run: |
+          python -m pytest tests/ai tests/external_adapter -q

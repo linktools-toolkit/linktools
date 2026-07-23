@@ -29,11 +29,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ...errors import MemoryConflictError, MemoryNotFoundError
-from ...memory.models import MemoryRecord
+from ...memory.models import MemoryMatch, MemoryRecord
 from ...memory.scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
 from ...memory.store import _UNSET
 from .run import _atomic_write, _validate_id_segment
-from ...memory.index import MemoryIndexEvent
 
 
 def _record_to_json(record: MemoryRecord) -> dict:
@@ -51,9 +50,6 @@ def _record_to_json(record: MemoryRecord) -> dict:
         "user_id": record.user_id,
         "workspace_id": record.workspace_id,
         "session_id": record.session_id,
-        "index_status": record.index_status,
-        "index_version": record.index_version,
-        "indexed_at": record.indexed_at.isoformat() if record.indexed_at else None,
     }
 
 
@@ -76,9 +72,6 @@ def _record_from_json(raw: dict) -> MemoryRecord:
         user_id=raw.get("user_id"),
         workspace_id=raw.get("workspace_id"),
         session_id=raw.get("session_id"),
-        index_status=raw.get("index_status", "pending"),
-        index_version=int(raw.get("index_version", 0)),
-        indexed_at=(datetime.fromisoformat(raw["indexed_at"]) if raw.get("indexed_at") else None),
     )
 
 
@@ -112,11 +105,10 @@ class FilesystemMemoryStore:
     ``update``/``forget`` so that optimistic-concurrency invariants hold within
     one process."""
 
-    def __init__(self, *, root: Path, outbox=None) -> None:
+    def __init__(self, *, root: Path) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
-        self._outbox = outbox
 
     # -- paths ---------------------------------------------------------
 
@@ -167,10 +159,11 @@ class FilesystemMemoryStore:
         scope: MemoryScope,
         category: "str | None",
         limit: int,
-    ) -> "tuple[MemoryRecord, ...]":
+    ) -> "tuple[MemoryMatch, ...]":
         # The tenant isolation boundary: scan ONLY this scope's tenant subdir.
         # A real tenant never sees the flat legacy layout; only an explicit
-        # legacy scope does (migration quarantine).
+        # legacy scope does (migration quarantine). Keyword search carries no
+        # ranking signal, so every hit is returned with score=None.
         needle = query.lower()
         paths: list = list(self._tenant_subdir(scope.tenant_id).glob("*.json"))
         if is_legacy_tenant(scope.tenant_id):
@@ -186,7 +179,7 @@ class FilesystemMemoryStore:
                 continue
             out.append(record)
         out.sort(key=lambda r: r.created_at)
-        return tuple(out[:limit])
+        return tuple(MemoryMatch(record=r, score=None) for r in out[:limit])
 
     async def search(
         self,
@@ -195,7 +188,7 @@ class FilesystemMemoryStore:
         scope: MemoryScope,
         limit: int = 10,
         category: "str | None" = None,
-    ) -> "tuple[MemoryRecord, ...]":
+    ) -> "tuple[MemoryMatch, ...]":
         return await asyncio.to_thread(
             self._search_sync,
             query,
@@ -215,10 +208,7 @@ class FilesystemMemoryStore:
         return record
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord:
-        result = await asyncio.to_thread(self._remember_sync, record)
-        if self._outbox is not None:
-            await self._outbox.append(MemoryIndexEvent(record.id, "upsert", record.version))
-        return result
+        return await asyncio.to_thread(self._remember_sync, record)
 
     def _update_sync(
         self,
@@ -283,8 +273,6 @@ class FilesystemMemoryStore:
                 confidence=confidence,
                 metadata=metadata,
             )
-        if self._outbox is not None:
-            await self._outbox.append(MemoryIndexEvent(updated.id, "upsert", updated.version))
         return updated
 
     def _forget_sync(self, memory_id: str, *, expected_version: int) -> None:
@@ -303,5 +291,3 @@ class FilesystemMemoryStore:
             await asyncio.to_thread(
                 self._forget_sync, memory_id, expected_version=expected_version
             )
-        if self._outbox is not None:
-            await self._outbox.append(MemoryIndexEvent(memory_id, "delete", expected_version + 1))

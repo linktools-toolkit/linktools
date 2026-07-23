@@ -14,7 +14,7 @@ from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -98,7 +98,7 @@ def _make_runner(tmp_path, pipeline=None):
 def test_run_succeeds_persists_session_run_events_and_checkpoint(tmp_path):
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -141,7 +141,7 @@ def test_run_transitions_to_failed_and_appends_run_failed_on_model_error(tmp_pat
 
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_boom))),
+        model_resolver=ModelResolver(registry=_registry(_boom)),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -206,7 +206,7 @@ def test_middleware_runner_hooks_fire_in_order_on_success(tmp_path):
     pipeline = MiddlewarePipeline(middlewares=(_RecordingMiddleware(log),))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_model_fn())),
         middleware_pipeline=pipeline,
     )
     compiled = asyncio.run(
@@ -250,7 +250,7 @@ def test_capabilities_have_no_mutable_state_before_or_after_run(tmp_path):
     # CompiledAgent byte-for-byte unchanged (the concurrency-safety invariant).
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -376,7 +376,7 @@ def _make_runner_with_memory(tmp_path):
 def test_memory_store_injection_prepends_memory_section_to_prompt(tmp_path):
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_echo_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -419,7 +419,7 @@ def test_memory_store_none_default_leaves_prompt_unchanged(tmp_path):
     # prompt is exactly the user prompt (no history seeded -> no history text).
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_echo_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -476,7 +476,7 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_echo_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -506,7 +506,7 @@ def test_empty_memory_store_injects_no_memory_section(tmp_path):
     # baseline.
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_echo_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_echo_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -550,7 +550,7 @@ def test_run_model_timeout_transitions_run_to_failed(tmp_path):
     registry.register("test-model", model=FunctionModel(_slow_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -607,7 +607,7 @@ def test_run_max_tokens_exceeded_transitions_run_to_failed(tmp_path):
     registry.register("test-model", model=FunctionModel(_heavy_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -663,7 +663,7 @@ def test_run_under_max_tokens_succeeds_and_records_usage(tmp_path):
     registry.register("test-model", model=FunctionModel(_light_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -709,7 +709,7 @@ def test_run_without_timeout_or_max_tokens_preserves_current_behavior(tmp_path):
     baseline lifecycle byte-for-byte -- no wait_for wrapper, no usage check."""
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(_model_fn()))),
+        model_resolver=ModelResolver(registry=_registry(_model_fn())),
     )
     compiled = asyncio.run(
         compiler.compile(
@@ -786,7 +786,7 @@ def test_cost_budget_exceeded_raises(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(compiler.compile(spec))
 
@@ -818,7 +818,7 @@ def test_budget_without_pricing_fails_closed(tmp_path):
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(compiler.compile(spec))
 

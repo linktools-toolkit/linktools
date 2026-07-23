@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.artifact.models import (
     ArtifactProvenance,
     ArtifactRecord,
@@ -31,7 +32,8 @@ def _stores(tmp_path):
     record_store = FilesystemArtifactRecordStore(
         records_root=tmp_path / "records"
     )
-    return blob_store, record_store
+    coordinator = InProcessArtifactDigestCoordinator()
+    return blob_store, record_store, coordinator
 
 
 async def _aiter(content: bytes):
@@ -52,7 +54,7 @@ def _record(artifact_id: str, sha: str, tenant: str = "t1") -> ArtifactRecord:
 
 
 def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
-    blob_store, record_store = _stores(tmp_path)
+    blob_store, record_store, coordinator = _stores(tmp_path)
 
     async def _seed():
         # A referenced blob: written AND pinned by a record.
@@ -75,7 +77,7 @@ def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
     # Sweep 25h later: the orphan is past the 24h grace -> deleted; the
     # referenced blob is in use -> kept.
     future = datetime.now(timezone.utc) + timedelta(hours=25)
-    stats = _run(sweep_orphan_blobs(blob_store, record_store, now=future))
+    stats = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, now=future))
 
     assert stats.deleted == 1
     assert stats.in_use == 1
@@ -88,7 +90,7 @@ def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
 def test_orphan_blob_within_grace_is_kept(tmp_path):
     """An unreferenced blob inside the grace window must NOT be deleted -- the
     transaction that wrote it may still commit a pinning record."""
-    blob_store, record_store = _stores(tmp_path)
+    blob_store, record_store, coordinator = _stores(tmp_path)
 
     async def _seed():
         orphan_content = b"fresh-orphan"
@@ -102,7 +104,7 @@ def test_orphan_blob_within_grace_is_kept(tmp_path):
 
     # Sweep only 1h later (well inside the 24h window).
     soon = datetime.now(timezone.utc) + timedelta(hours=1)
-    stats = _run(sweep_orphan_blobs(blob_store, record_store, now=soon))
+    stats = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, now=soon))
 
     assert stats.deleted == 0
     assert stats.kept_within_grace == 1
@@ -112,7 +114,7 @@ def test_orphan_blob_within_grace_is_kept(tmp_path):
 def test_sweep_is_idempotent(tmp_path):
     """Re-running the sweep over already-swept state deletes nothing more and
     raises no error."""
-    blob_store, record_store = _stores(tmp_path)
+    blob_store, record_store, coordinator = _stores(tmp_path)
 
     async def _seed():
         orphan_content = b"gone"
@@ -125,8 +127,8 @@ def test_sweep_is_idempotent(tmp_path):
     _ = _run(_seed())
     future = datetime.now(timezone.utc) + timedelta(hours=25)
 
-    first = _run(sweep_orphan_blobs(blob_store, record_store, now=future))
-    second = _run(sweep_orphan_blobs(blob_store, record_store, now=future))
+    first = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, now=future))
+    second = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, now=future))
 
     assert first.deleted == 1
     assert second.deleted == 0  # nothing left to delete
@@ -135,7 +137,7 @@ def test_sweep_is_idempotent(tmp_path):
 def test_custom_grace_period_governs_deletion(tmp_path):
     """A caller may narrow the grace window; a blob just past the custom window
     is deletable even though it would be within the default."""
-    blob_store, record_store = _stores(tmp_path)
+    blob_store, record_store, coordinator = _stores(tmp_path)
 
     async def _seed():
         content = b"short-fuse"
@@ -150,7 +152,7 @@ def test_custom_grace_period_governs_deletion(tmp_path):
 
     # 5 minutes later: past the 1-minute custom window -> deleted.
     future = datetime.now(timezone.utc) + timedelta(minutes=5)
-    stats = _run(sweep_orphan_blobs(blob_store, record_store, config, now=future))
+    stats = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, config, now=future))
     assert stats.deleted == 1
     assert _run(blob_store.stat(digest=sha)) is None
 
@@ -165,7 +167,7 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
     """A corrupt record file must abort the sweep and delete nothing -- the
     sweeper cannot know whether the broken record pins a blob, so it fails
     closed rather than risk deleting a referenced blob."""
-    blob_store, record_store = _stores(tmp_path)
+    blob_store, record_store, coordinator = _stores(tmp_path)
 
     async def _seed():
         # A referenced blob pinned by a valid record.
@@ -192,7 +194,7 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
 
     future = datetime.now(timezone.utc) + timedelta(hours=25)
     with pytest.raises(ArtifactRecordCorruptError):
-        _run(sweep_orphan_blobs(blob_store, record_store, now=future))
+        _run(sweep_orphan_blobs(blob_store, record_store, coordinator, now=future))
 
     # Nothing was deleted: the orphan survives because the scan aborted, and the
     # referenced blob is untouched.

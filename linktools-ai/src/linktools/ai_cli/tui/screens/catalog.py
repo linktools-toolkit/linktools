@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""The resources screen.
+"""The catalog screen.
 
 Read-only listing of the project's agents / skills / MCP servers, fetched
 through ``RuntimeClient`` (no registry access from the UI). Esc returns to
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from linktools.ai_cli.client import RuntimeClient
 
 
-class ResourcesScreen(Screen):
+class CatalogScreen(Screen):
     """Agents / skills / MCP overview."""
 
     BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
@@ -29,13 +29,13 @@ class ResourcesScreen(Screen):
         self.client = client
 
     def compose(self) -> ComposeResult:
-        yield RichLog(id="resources-log", wrap=True, markup=True)
+        yield RichLog(id="catalog-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:
         self.run_worker(self._load())
 
     async def _load(self) -> None:
-        log = self.query_one("#resources-log", RichLog)
+        log = self.query_one("#catalog-log", RichLog)
 
         async def section(title: str, fetch) -> None:
             log.write(f"[b]{title}[/b]")

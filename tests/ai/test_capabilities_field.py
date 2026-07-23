@@ -31,7 +31,7 @@ def test_capabilities_field_registers_custom_provider():
 
     registry = _build_capability_registry(
         bundle,
-        execution=None,
+        sandbox=None,
         options=CapabilityToolExposurePolicy().__class__(),
         mcp_manager=None,
     )

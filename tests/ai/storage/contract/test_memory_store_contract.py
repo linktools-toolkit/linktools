@@ -233,13 +233,13 @@ def test_search_filters_substring_and_limit(store_factory):
         alice_hello = await store.search(
             "hello", scope=MemoryScope(tenant_id="t1", user_id="alice")
         )
-        assert {r.id for r in alice_hello} == {"m1"}
+        assert {r.record.id for r in alice_hello} == {"m1"}
         # Category filter (tenant-wide, no user) covers both users' "fact" rows
         # containing "hello".
         facts = await store.search(
             "hello", scope=MemoryScope(tenant_id="t1"), category="fact"
         )
-        assert {r.id for r in facts} == {"m1", "m3"}
+        assert {r.record.id for r in facts} == {"m1", "m3"}
         # No matcher -> empty tuple (not None, not list).
         assert await store.search("zzz", scope=MemoryScope(tenant_id="t1")) == ()
         # limit caps results: "world" matches m1 + m2, limit=1 returns one.
@@ -249,7 +249,7 @@ def test_search_filters_substring_and_limit(store_factory):
         )
         # Default limit (10) returns every matcher when fewer than limit.
         all_world = await store.search("world", scope=MemoryScope(tenant_id="t1"))
-        assert {r.id for r in all_world} == {"m1", "m2"}
+        assert {r.record.id for r in all_world} == {"m1", "m2"}
 
     asyncio.run(_run())
 
@@ -411,9 +411,9 @@ def test_search_isolates_tenants_with_same_owner(store_factory):
             )
         )
         a_hits = await store.search("secret", scope=MemoryScope(tenant_id="tenant-a"))
-        assert {r.id for r in a_hits} == {"a1"}
+        assert {r.record.id for r in a_hits} == {"a1"}
         b_hits = await store.search("secret", scope=MemoryScope(tenant_id="tenant-b"))
-        assert {r.id for r in b_hits} == {"b1"}
+        assert {r.record.id for r in b_hits} == {"b1"}
 
     asyncio.run(_run())
 
@@ -459,7 +459,7 @@ def test_search_narrows_by_user_workspace_session_subscope(store_factory):
         )
         # tenant-wide (no sub-scope) sees every record.
         all_hits = await store.search("alpha", scope=MemoryScope(tenant_id="t1"))
-        assert {r.id for r in all_hits} == {
+        assert {r.record.id for r in all_hits} == {
             "shared",
             "u1",
             "u2",
@@ -470,7 +470,7 @@ def test_search_narrows_by_user_workspace_session_subscope(store_factory):
         }
         # user=u1 excludes u2 (records with no user stay visible).
         u1_ids = {
-            r.id
+            r.record.id
             for r in await store.search(
                 "alpha", scope=MemoryScope(tenant_id="t1", user_id="u1")
             )
@@ -478,7 +478,7 @@ def test_search_narrows_by_user_workspace_session_subscope(store_factory):
         assert "u1" in u1_ids and "u2" not in u1_ids and "shared" in u1_ids
         # workspace=ws-1 excludes ws2.
         ws_ids = {
-            r.id
+            r.record.id
             for r in await store.search(
                 "alpha", scope=MemoryScope(tenant_id="t1", workspace_id="ws-1")
             )
@@ -486,7 +486,7 @@ def test_search_narrows_by_user_workspace_session_subscope(store_factory):
         assert "ws1" in ws_ids and "ws2" not in ws_ids and "shared" in ws_ids
         # session=sess-1 excludes s2.
         sess_ids = {
-            r.id
+            r.record.id
             for r in await store.search(
                 "alpha", scope=MemoryScope(tenant_id="t1", session_id="sess-1")
             )

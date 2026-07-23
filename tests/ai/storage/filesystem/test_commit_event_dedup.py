@@ -21,7 +21,7 @@ These tests pin the three behaviors the spec states in -:
 import asyncio
 from datetime import datetime, timezone
 
-from linktools.ai.events.context import EventContext
+from linktools.ai.events.context import EventStreamContext
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -93,8 +93,8 @@ def _make_coordinator(storage, tmp_path):
     )
 
 
-def _event_ctx(run_id: str, session_id: str) -> EventContext:
-    return EventContext.from_run_context(_context(run_id, session_id))
+def _event_ctx(run_id: str, session_id: str) -> EventStreamContext:
+    return EventStreamContext.from_run_context(_context(run_id, session_id))
 
 
 async def _count(storage, run_id: str, payload_type: str) -> int:

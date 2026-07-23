@@ -59,7 +59,7 @@ def serialize_agent_spec(spec: Any) -> "dict[str, Any]":
         "model": {
             "primary": spec.model.primary,
             "fallbacks": list(spec.model.fallbacks),
-            "max_retries": spec.model.max_retries,
+            "request_retries": spec.model.request_retries,
             "timeout_seconds": spec.model.timeout_seconds,
             "max_tokens": spec.model.max_tokens,
             "budget": (
@@ -95,7 +95,7 @@ def deserialize_agent_spec(data: "dict[str, Any]", *, schema_registry: Any = Non
     model = ModelPolicy(
         primary=md["primary"],
         fallbacks=tuple(md.get("fallbacks", [])),
-        max_retries=md.get("max_retries", 0),
+        request_retries=md.get("request_retries", 0),
         timeout_seconds=md.get("timeout_seconds"),
         max_tokens=md.get("max_tokens"),
         budget=budget,

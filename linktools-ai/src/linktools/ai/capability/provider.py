@@ -5,7 +5,7 @@
 A CapabilityProvider resolves one CapabilityRef into a CapabilityBundle. Each
 concrete provider owns its own strong dependencies (a skill store, an MCP
 connection manager, an entrypoint resolver, ...); the CapabilityContext carries
-only the per-Run/per-spec dynamic state a provider may need (the execution
+only the per-Run/per-spec dynamic state a provider may need (the sandbox
 backend, the active exposure policy, identity for diagnostics)."""
 
 from dataclasses import dataclass
@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class CapabilityContext:
     """Per-resolution dynamic state handed to every CapabilityProvider. Fields
-    are added as providers need them; the exposure policy and execution backend
+    are added as providers need them; the exposure policy and sandbox backend
     cover the builtin path. Identity fields make resolution failures precise.
     ``event_store`` (optional) lets providers emit capability-lifecycle events."""
 
     agent_id: str
     exposure_policy: CapabilityToolExposurePolicy
-    execution: "Sandbox | None" = None
+    sandbox: "Sandbox | None" = None
     run_id: "str | None" = None
     root_run_id: "str | None" = None
     parent_run_id: "str | None" = None
@@ -88,9 +88,9 @@ def make_event_emitter(context: "CapabilityContext | None"):
         return context.security_event_emitter.emit_observability
     store = context.event_store
     run_id = context.run_id
-    from ..events.context import EventContext, append_event
+    from ..events.context import EventStreamContext, append_event
 
-    evt_ctx = EventContext(
+    evt_ctx = EventStreamContext(
         stream_id=run_id,
         run_id=run_id,
         root_run_id=context.root_run_id or run_id,

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for MemoryManager domain facade and KeywordMemoryIndex adapter.
-Drives both against an in-process dict-backed _StubStore implementing the
-full MemoryStore Protocol (5 methods, including the _UNSET update sentinel)."""
+"""Tests for the MemoryManager domain facade. Drives it against an in-process
+dict-backed _StubStore implementing the full MemoryStore Protocol (5 methods,
+including the _UNSET update sentinel). search returns scored MemoryMatch
+results (score=None for the keyword stub)."""
 
 import asyncio
 import uuid
@@ -10,15 +11,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from linktools.ai.errors import MemoryConflictError
-from linktools.ai.memory.index import KeywordMemoryIndex, MemorySearchHit
 from linktools.ai.memory.manager import MemoryManager
-from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.models import MemoryMatch, MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.memory.store import _UNSET
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _scope(*, tenant_id: str = "t1", user_id: "str | None" = "u1") -> MemoryScope:
@@ -28,7 +24,8 @@ def _scope(*, tenant_id: str = "t1", user_id: "str | None" = "u1") -> MemoryScop
 class _StubStore:
     """Dict-backed in-process MemoryStore: `remember` stores by id (raising on
     duplicate), `search` is tenant-scoped (hard tenant filter + NULL-or-equal
-    sub-scope narrowing), mirroring the real backends."""
+    sub-scope narrowing) and returns MemoryMatch with score=None, mirroring the
+    real keyword backends."""
 
     def __init__(self):
         self._records: "dict[str, MemoryRecord]" = {}
@@ -43,7 +40,7 @@ class _StubStore:
         scope: MemoryScope,
         category: "str | None" = None,
         limit: int = 10,
-    ) -> "tuple[MemoryRecord, ...]":
+    ) -> "tuple[MemoryMatch, ...]":
         out = []
         for r in self._records.values():
             if r.tenant_id != scope.tenant_id:
@@ -71,7 +68,7 @@ class _StubStore:
             if query and query not in r.content:
                 continue
             out.append(r)
-        return tuple(out[:limit])
+        return tuple(MemoryMatch(record=r, score=None) for r in out[:limit])
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord:
         if record.id in self._records:
@@ -134,8 +131,23 @@ def test_remember_then_recall_substring():
 
         hits = await mgr.recall(_scope(), "hello")
         assert len(hits) == 1
-        assert hits[0].id == record.id
-        assert hits[0].content == "hello world"
+        assert hits[0].record.id == record.id
+        assert hits[0].record.content == "hello world"
+
+    asyncio.run(_run())
+
+
+def test_recall_returns_memory_match_with_none_score():
+    # The keyword stub carries no ranking signal: every hit is a MemoryMatch
+    # whose score is None (never a fabricated 1.0).
+    async def _run():
+        store = _StubStore()
+        mgr = MemoryManager(store=store)
+        await mgr.remember(_scope(), "hello world")
+        hits = await mgr.recall(_scope(), "hello")
+        assert len(hits) == 1
+        assert isinstance(hits[0], MemoryMatch)
+        assert hits[0].score is None
 
     asyncio.run(_run())
 
@@ -176,77 +188,8 @@ def test_remember_round_trips_metadata():
     asyncio.run(_run())
 
 
-# --- KeywordMemoryIndex ------------------------------------------------------
-
-
-def test_keyword_index_search_returns_uniform_score():
-    async def _run():
-        store = _StubStore()
-        mgr = MemoryManager(store=store)
-        record = await mgr.remember(_scope(), "hello world")
-
-        idx = KeywordMemoryIndex(store)
-        hits = await idx.search("hello", scope=_scope())
-        assert len(hits) == 1
-        assert hits[0] == MemorySearchHit(memory_id=record.id, score=1.0)
-
-    asyncio.run(_run())
-
-
-def test_keyword_index_search_no_match_returns_empty():
-    async def _run():
-        store = _StubStore()
-        mgr = MemoryManager(store=store)
-        await mgr.remember(_scope(), "hello world")
-
-        idx = KeywordMemoryIndex(store)
-        assert await idx.search("nomatch", scope=_scope()) == ()
-
-    asyncio.run(_run())
-
-
-def test_keyword_index_index_and_remove_are_noops():
-    async def _run():
-        store = _StubStore()
-        idx = KeywordMemoryIndex(store)
-
-        now = _now()
-        record = MemoryRecord(
-            id="m-x",
-            tenant_id="t1",
-            owner_id="u1",
-            content="x",
-            category=None,
-            confidence=None,
-            version=1,
-            created_at=now,
-            updated_at=now,
-            metadata={},
-        )
-        # Should not raise; both return None (no-op).
-        assert await idx.index(record) is None
-        assert await idx.remove("m-x") is None
-
-    asyncio.run(_run())
-
-
-# --- MemoryManager + index integration --------------------------------------
-
-
-def test_manager_with_index_remember_and_forget():
-    async def _run():
-        store = _StubStore()
-        idx = KeywordMemoryIndex(store)
-        mgr = MemoryManager(store=store, index=idx)
-
-        record = await mgr.remember(_scope(), "hello world")
-        # index.search should reflect the remembered record (index.index was called).
-        hits = await idx.search("hello", scope=_scope())
-        assert len(hits) == 1
-        assert hits[0].memory_id == record.id
-
-        await mgr.forget(record.id, expected_version=1)
-        # After forget, index.remove was called (store-backed index reflects it).
-        assert await mgr.recall(_scope(), "hello") == ()
-
-    asyncio.run(_run())
+def test_manager_has_no_index_parameter():
+    # The fake MemoryIndex abstraction is gone: MemoryManager takes only a
+    # store, and exposes no index/sync field.
+    mgr = MemoryManager(store=_StubStore())
+    assert not hasattr(mgr, "index")

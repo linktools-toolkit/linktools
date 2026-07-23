@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for memory.models, MemoryStore/MemoryIndex Protocols,
-MemorySearchHit, and the MemoryError family in errors.py. Pure data/Protocol
-checks -- no I/O."""
+"""Tests for memory.models (MemoryRecord, MemoryMatch), the MemoryStore
+Protocol, and the MemoryError family in errors.py. Pure data/Protocol checks
+-- no I/O."""
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
@@ -15,8 +15,7 @@ from linktools.ai.errors import (
     MemoryError,
     MemoryNotFoundError,
 )
-from linktools.ai.memory.index import MemoryIndex, MemorySearchHit
-from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.models import MemoryMatch, MemoryRecord
 from linktools.ai.memory.store import MemoryStore, _UNSET
 
 
@@ -116,24 +115,35 @@ def test_memory_record_inequality():
     assert a != b
 
 
-# --- MemorySearchHit ---------------------------------------------------------
+# --- MemoryMatch -------------------------------------------------------------
 
 
-def test_memory_search_hit_construct():
-    hit = MemorySearchHit(memory_id="m1", score=1.0)
-    assert hit.memory_id == "m1"
-    assert hit.score == 1.0
+def test_memory_match_defaults_score_to_none():
+    # A keyword backend constructs MemoryMatch with no score rather than a
+    # fabricated value.
+    record = _make_record()
+    match = MemoryMatch(record=record)
+    assert match.record is record
+    assert match.score is None
 
 
-def test_memory_search_hit_frozen():
-    hit = MemorySearchHit(memory_id="m1", score=1.0)
+def test_memory_match_carries_score():
+    record = _make_record()
+    match = MemoryMatch(record=record, score=0.87)
+    assert match.score == 0.87
+
+
+def test_memory_match_frozen():
+    match = MemoryMatch(record=_make_record(), score=0.5)
     with pytest.raises(FrozenInstanceError):
-        hit.score = 0.5  # type: ignore[misc]
+        match.score = 0.9  # type: ignore[misc]
 
 
-def test_memory_search_hit_equality():
-    assert MemorySearchHit("m1", 1.0) == MemorySearchHit("m1", 1.0)
-    assert MemorySearchHit("m1", 1.0) != MemorySearchHit("m1", 0.5)
+def test_memory_match_equality():
+    record = _make_record()
+    assert MemoryMatch(record=record, score=1.0) == MemoryMatch(record=record, score=1.0)
+    assert MemoryMatch(record=record, score=1.0) != MemoryMatch(record=record, score=0.5)
+    assert MemoryMatch(record=record, score=None) != MemoryMatch(record=record, score=0.0)
 
 
 # --- MemoryError family ------------------------------------------------------
@@ -191,28 +201,6 @@ def test_memory_store_rejects_non_implementor():
         async def get(self, memory_id): ...
 
     assert not isinstance(_Incomplete(), MemoryStore)
-
-
-# --- MemoryIndex Protocol ----------------------------------------------------
-
-
-class _StubIndex:
-    async def index(self, record): ...
-
-    async def remove(self, memory_id): ...
-
-    async def search(self, query, *, scope, limit=10): ...
-
-
-def test_memory_index_is_runtime_checkable():
-    assert isinstance(_StubIndex(), MemoryIndex)
-
-
-def test_memory_index_rejects_non_implementor():
-    class _Incomplete:
-        async def index(self, record): ...
-
-    assert not isinstance(_Incomplete(), MemoryIndex)
 
 
 # --- _UNSET sentinel ---------------------------------------------------------

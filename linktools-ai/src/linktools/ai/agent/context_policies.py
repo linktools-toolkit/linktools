@@ -86,7 +86,10 @@ class DefaultMemoryPolicy:
             workspace_id=_workspace_id_from(context),
             session_id=context.session_id,
         )
-        return await self._store.search(query, scope=scope, limit=self._limit)
+        # The store returns scored MemoryMatch results; prompt injection needs
+        # only the records, so the score is dropped at this boundary.
+        matches = await self._store.search(query, scope=scope, limit=self._limit)
+        return tuple(m.record for m in matches)
 
     async def maybe_write_memories(self, context, result) -> None:
         return None

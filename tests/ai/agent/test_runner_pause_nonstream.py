@@ -30,7 +30,7 @@ from linktools.ai.capability.provider import CapabilityProvider
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import RunPaused
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
@@ -157,7 +157,7 @@ def _compile(
         approval_store=approval_store,
     )
     compiler = AgentCompiler(
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
     )
     compiled = asyncio.run(
@@ -173,7 +173,7 @@ def _compile(
         )
     )
 
-    # P0-6/G1: the runner (not the executor) persists the ApprovalRequest now
+    # the runner (not the executor) persists the ApprovalRequest now
     # -- it must share the SAME approval_store instance the test asserts against.
     runner = _make_runner(
         tmp_path, approval_store=approval_store, tool_executor=executor

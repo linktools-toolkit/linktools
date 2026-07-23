@@ -28,7 +28,7 @@ def _record(session_id="session-1") -> SessionRecord:
 
 
 def _message(role=MessageRole.USER, content="hi") -> NewSessionMessage:
-    # G6/review3 contract: the input shape carries no id/sequence/created_at --
+    # the input shape carries no id/sequence/created_at --
     # the SessionStore is the sole authority for assigning those.
     return NewSessionMessage(role=role, content=content, run_id=None)
 
@@ -134,7 +134,7 @@ async def test_append_then_list_messages_in_order(store_factory):
         (_message(content="hi"), _message(role=MessageRole.ASSISTANT, content="hello")),
     )
     # append_messages returns the persisted messages with store-assigned
-    # id/sequence/created_at (G6).
+    # id/sequence/created_at.
     assert [m.sequence for m in persisted] == [1, 2]
     messages = await store.list_messages("session-1")
     assert [m.content for m in messages] == ["hi", "hello"]
@@ -152,7 +152,7 @@ async def test_list_messages_after_sequence_filters(store_factory):
 
 @pytest.mark.asyncio
 async def test_append_messages_assigns_sequence_the_store_never_reuses(store_factory):
-    """G6: the store -- not the caller -- assigns sequence numbers, and a
+    """the store -- not the caller -- assigns sequence numbers, and a
     second append call continues from the session's current max rather than
     restarting at 1."""
     store = store_factory()
@@ -169,7 +169,7 @@ async def test_append_messages_assigns_sequence_the_store_never_reuses(store_fac
 async def test_concurrent_append_messages_never_assigns_duplicate_sequence(
     store_factory,
 ):
-    """G6: two coroutines racing to append to the SAME session must never be
+    """two coroutines racing to append to the SAME session must never be
     assigned the same sequence number -- the store is the sole sequence
     authority, so unlike the old caller-computed-sequence design, there is no
     read-then-compute-then-write gap for concurrent appenders to race in."""

@@ -54,11 +54,12 @@ async def test_delete_masks_and_survives_reopen(tmp_path):
 
 @pytest.mark.asyncio
 async def test_readonly_backend_still_supports_reads(tmp_path):
+    from linktools.ai.asset import ReadOnlyAssetBackend
+
     backend = FileAssetBackend(root=tmp_path)
     await backend.raw_put(AssetPath("/a.txt"), b"x", content_type=None, metadata={})
 
-    ro = FileAssetBackend(root=tmp_path, readonly=True)
-    assert ro.readonly is True
+    ro = ReadOnlyAssetBackend(backend)
     lookup = await ro.raw_get(AssetPath("/a.txt"))
     assert isinstance(lookup, Found)
 

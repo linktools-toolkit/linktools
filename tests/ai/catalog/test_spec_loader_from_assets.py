@@ -26,7 +26,7 @@ async def _store_with(prefix_files: "dict[str, str]") -> AssetStore:
 
 
 @pytest.mark.asyncio
-async def test_from_assets_reads_via_resourcepath():
+async def test_from_assets_reads_via_assetpath():
     store = await _store_with(
         {
             "/specs/agents/writer.md": "---\nname: writer\n---\nbody\n",

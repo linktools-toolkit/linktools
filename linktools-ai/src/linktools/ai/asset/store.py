@@ -46,14 +46,13 @@ class AssetStore:
         overlays: "tuple[AssetReaderBackend, ...]" = (),
         metrics: Any = None,
     ) -> None:
-        # A readonly backend is a Reader, not a Writer -- it cannot serve as a
-        # primary (writes would silently no-op or raise mid-flight). Reject it
-        # at construction so the misconfiguration surfaces immediately, not on
-        # the first write.
-        if getattr(primary, "readonly", False):
+        # primary must be a Writer: a read-only backend (ReadOnlyAssetBackend)
+        # lacks the write methods, so it fails this structural check at
+        # construction with a clear error rather than silently no-oping writes.
+        if not isinstance(primary, AssetWriterBackend):
             raise AssetReadOnlyError(
-                "a readonly backend cannot be the AssetStore primary; supply a "
-                "Writer as primary and the readonly backend as an overlay"
+                "the AssetStore primary must be an AssetWriterBackend; a "
+                "read-only backend can only be supplied as an overlay"
             )
         self._primary = primary
         self._overlays = overlays
@@ -192,10 +191,6 @@ class AssetStore:
             return AssetPage(items=items, cursor=max_scanned)
         return AssetPage(items=items, cursor=None)
 
-    def _require_writable_primary(self) -> None:
-        if self._primary.readonly:
-            raise AssetReadOnlyError("primary backend is read-only")
-
     async def _check_idempotency(
         self, operation: str, key: "str | None", request_hash: str
     ) -> "IdempotencyRecord | None":
@@ -235,7 +230,6 @@ class AssetStore:
         *,
         options: WriteOptions = WriteOptions(),
     ) -> Asset:
-        self._require_writable_primary()
         # the hash must cover every input that changes the operation's
         # meaning, not just its payload -- otherwise two PUTs with the same
         # path/content/metadata but DIFFERENT preconditions (if_match,
@@ -270,7 +264,6 @@ class AssetStore:
     async def delete(
         self, path: AssetPath, *, options: WriteOptions = WriteOptions()
     ) -> None:
-        self._require_writable_primary()
         # same rationale as put() -- if_match/actor must be part of the
         # hash so a replayed key with a different precondition/actor cannot be
         # mistaken for the same request.
@@ -317,7 +310,6 @@ class AssetStore:
         Idempotency: folded into the backend's atomic ``raw_move_checked`` (the
         precondition + move + idempotency-record save run in one locked
         section/transaction), mirroring put/delete."""
-        self._require_writable_primary()
         req_hash = _request_hash(
             b"move",
             src.value.encode(),

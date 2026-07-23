@@ -24,7 +24,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.errors import SwarmConflictError, SwarmError, SwarmLimitExceededError
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.dispatch import RunDispatcher
 from linktools.ai.run.models import RunInput, RunStatus, RunnableType
@@ -283,7 +283,7 @@ def _compile_worker(agent_id: str, output_text: str) -> CompiledAgent:
     registry.register("test-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     spec = AgentSpec(
         id=agent_id,
@@ -380,7 +380,7 @@ def _build_ctx(
     )
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=ModelRegistry())),
+        model_resolver=ModelResolver(registry=ModelRegistry()),
     )
     return SwarmExecutionContext(
         spec=spec,
@@ -1213,7 +1213,7 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -1235,7 +1235,7 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     registry.register("flaky-model", model=FunctionModel(_flaky_model))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     flaky_spec = AgentSpec(
         id="worker-flaky",
@@ -1328,7 +1328,7 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
     from linktools.ai.agent.spec import AgentSpec, PromptSpec
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.storage.sqlalchemy.models import Base
     from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
     from linktools.ai.swarm.strategy import _run_task
@@ -1381,7 +1381,7 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
         registry.register("flaky-model", model=FunctionModel(_flaky_model))
         compiler = AgentCompiler(
             tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-            model_router=ModelGateway(ModelResolver(registry=registry)),
+            model_resolver=ModelResolver(registry=registry),
         )
         flaky_spec = AgentSpec(
             id="worker-flaky",
@@ -1470,7 +1470,7 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -1497,7 +1497,7 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     worker_spec = AgentSpec(
         id="worker-a",
@@ -1583,7 +1583,7 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -1611,7 +1611,7 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     worker_spec = AgentSpec(
         id="worker-a",
@@ -1685,7 +1685,7 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -1701,7 +1701,7 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
     registry.register("worker-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     worker_spec = AgentSpec(
         id="worker-a",
@@ -1790,7 +1790,7 @@ def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
     worker agent backed by ``model_fn``, wired into a fresh SwarmExecutionContext."""
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -1800,7 +1800,7 @@ def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
     registry.register("worker-model", model=FunctionModel(model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     worker_spec = AgentSpec(
         id="worker-a",
@@ -2022,7 +2022,7 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     from linktools.ai.swarm.strategy import _run_task
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelGateway, ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.agent.compiler import AgentCompiler
     from linktools.ai.agent.models import AgentSpec
     from linktools.ai.agent.spec import PromptSpec
@@ -2090,7 +2090,7 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     registry2.register("worker-model-2", model=FunctionModel(_clean_model_fn))
     compiler2 = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry2)),
+        model_resolver=ModelResolver(registry=registry2),
     )
     worker_spec_2 = AgentSpec(
         id="worker-a",

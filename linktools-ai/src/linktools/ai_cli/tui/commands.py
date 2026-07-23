@@ -23,7 +23,7 @@ class AiCommandProvider(Provider):
     async def search(self, query: str) -> Hits:
         app = self.app
         commands: "list[tuple[str, str, Callable[[], None]]]" = [
-            ("Resources", "Open agents, skills, MCP", app.action_resources),
+            ("Catalog", "Open agents, skills, MCP", app.action_catalog),
             ("Runs", "Open sessions, runs, approvals", app.action_runs),
             ("Doctor", "Validate project and Runtime", app.action_doctor),
             ("Quit", "Exit lt ai", app.quit),

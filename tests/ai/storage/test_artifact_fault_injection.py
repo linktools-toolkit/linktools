@@ -167,11 +167,12 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
     # sweeper sees it as unreferenced and (past the grace window) reaps it.
     from datetime import datetime, timedelta, timezone
 
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.storage.orphan import sweep_orphan_blobs
 
     fs_records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
     future = datetime.now(timezone.utc) + timedelta(hours=25)
-    stats = _run(sweep_orphan_blobs(blob, fs_records, now=future))
+    stats = _run(sweep_orphan_blobs(blob, fs_records, InProcessArtifactDigestCoordinator(), now=future))
     assert stats.deleted == 1, (
         f"orphan sweeper did not reap the orphaned blob: {stats}"
     )

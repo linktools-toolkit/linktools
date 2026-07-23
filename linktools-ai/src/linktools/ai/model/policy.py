@@ -4,7 +4,7 @@
 
 The registry parser validates these fields, but a custom provider can construct
 a ModelPolicy directly -- so the model itself enforces the same contract
-(non-empty primary, non-negative int max_retries, positive-finite timeout,
+(non-empty primary, non-negative int request_retries, positive-finite timeout,
 positive int max_tokens, finite non-negative Decimal budget)."""
 
 import math
@@ -16,7 +16,7 @@ from decimal import Decimal
 class ModelPolicy:
     primary: str
     fallbacks: "tuple[str, ...]" = ()
-    max_retries: int = 0
+    request_retries: int = 0
     timeout_seconds: "float | None" = None
     max_tokens: "int | None" = None
     budget: "Decimal | None" = None
@@ -30,11 +30,11 @@ class ModelPolicy:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError("ModelPolicy.fallbacks must be non-empty strings")
         if (
-            isinstance(self.max_retries, bool)
-            or not isinstance(self.max_retries, int)
-            or self.max_retries < 0
+            isinstance(self.request_retries, bool)
+            or not isinstance(self.request_retries, int)
+            or self.request_retries < 0
         ):
-            raise ValueError("ModelPolicy.max_retries must be a non-negative integer")
+            raise ValueError("ModelPolicy.request_retries must be a non-negative integer")
         if self.timeout_seconds is not None:
             if (
                 isinstance(self.timeout_seconds, bool)

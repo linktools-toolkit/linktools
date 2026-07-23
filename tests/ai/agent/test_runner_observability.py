@@ -24,7 +24,7 @@ from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.observability.tracing import Span
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
@@ -153,7 +153,7 @@ def _seed_session(store, session_id) -> None:
 def _compile(model_fn):
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry(model_fn))),
+        model_resolver=ModelResolver(registry=_registry(model_fn)),
     )
     return asyncio.run(
         compiler.compile(

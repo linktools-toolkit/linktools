@@ -3,9 +3,9 @@
 """linktools.ai.capability: the capability domain's public model.
 The minimal surface: CapabilityRef / CapabilityRuntimeOptions /
 CapabilityInspection / CapabilityProvider / CapabilityProviderRegistry /
-CapabilityToolExposurePolicy. The bundle, context, assembler, and builtin
+CapabilityToolExposurePolicy. The bundle, context, resolver, and builtin
 provider live in their submodules (``capability.models``,
-``capability.provider``, ``capability.registry``, ``capability.assembler``,
+``capability.provider``, ``capability.registry``, ``capability.resolver``,
 ``capability.builtin``)."""
 
 from .exposure import CapabilityToolExposurePolicy

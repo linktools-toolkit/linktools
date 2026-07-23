@@ -12,7 +12,7 @@ capability hook as ``ctx.deps``. The runner constructs one per Run and passes
 it via ``deps=`` at call time; capabilities read ``ctx.deps.tool_context``.
 No mutable shared state, no set/clear lifecycle, safe for concurrent reuse.
 
-``execution`` carries the per-Run ``Sandbox`` the
+``sandbox`` carries the per-Run ``Sandbox`` the
 runner uses to construct the builtin file/terminal toolset at execution time
 (via ``agent.iter(prompt, toolsets=[...])``). ``None`` (default) means the run
 exposes no builtin tools -- a conversational-only agent. Decoupling the backend
@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class AgentDependencies:
     tool_context: ToolContext
-    execution: "Sandbox | None" = None
+    sandbox: "Sandbox | None" = None
     # Per-run tool-name -> ToolDescriptor lookup, populated once the
     # CapabilityResolver has resolved this run's tool contributions. Lets
     # PolicyCapability (the global before-every-tool-call hook) classify a
     # call by category/risk/mutating instead of only by tool name -- None
-    # (default) when no assembler ran.
+    # (default) when no resolver ran.
     descriptor_lookup: "Mapping[str, ToolDescriptor] | None" = None

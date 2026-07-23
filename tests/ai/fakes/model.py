@@ -9,7 +9,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 
 
 def echo_model_fn(text: str = "hello"):

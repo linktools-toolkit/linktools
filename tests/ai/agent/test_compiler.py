@@ -11,7 +11,7 @@ from linktools.ai.agent.models import CompiledAgent
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 
@@ -33,9 +33,9 @@ def _config(model_type: str) -> RuntimeModelConfig:
 async def test_compile_produces_a_compiled_agent_with_no_runtime_state():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelGateway(ModelResolver(registry=registry))
+    router = ModelResolver(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_resolver=router
     )
 
     spec = AgentSpec(
@@ -69,9 +69,9 @@ async def test_compile_wires_spec_instructions_into_pydantic_agent():
     # passed to the constructor.
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelGateway(ModelResolver(registry=registry))
+    router = ModelResolver(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_resolver=router
     )
 
     spec = AgentSpec(
@@ -88,12 +88,12 @@ async def test_compile_wires_spec_instructions_into_pydantic_agent():
 
 
 @pytest.mark.asyncio
-async def test_compile_reuses_model_router_fallback():
+async def test_compile_reuses_model_resolver_fallback():
     registry = ModelRegistry()
     registry.register("fallback-model", config=_config("fallback-model"))
-    router = ModelGateway(ModelResolver(registry=registry))
+    router = ModelResolver(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_resolver=router
     )
 
     spec = AgentSpec(
@@ -103,7 +103,11 @@ async def test_compile_reuses_model_router_fallback():
         instructions=PromptSpec(instructions="hi"),
     )
     compiled = await compiler.compile(spec)
-    assert compiled.model_bundle.config.model_type == "fallback-model"
+    # primary "missing" is unregistered, so resolve falls through to the
+    # registered fallback. With request_retries at its default (0) the
+    # config-backed fallback's model is reused as-is, so the compiled agent
+    # carries exactly that model.
+    assert compiled.model_bundle.model is registry.get("fallback-model").model
 
 
 @pytest.mark.asyncio
@@ -113,11 +117,11 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
 
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelGateway(ModelResolver(registry=registry))
+    router = ModelResolver(registry=registry)
     pipeline = MiddlewarePipeline(middlewares=())
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=router,
+        model_resolver=router,
         middleware_pipeline=pipeline,
     )
     spec = AgentSpec(
@@ -142,9 +146,9 @@ async def test_compile_wires_middleware_capability_when_pipeline_provided():
 async def test_compile_leaves_middleware_capability_none_when_no_pipeline():
     registry = ModelRegistry()
     registry.register("test-model", config=_config("test-model"))
-    router = ModelGateway(ModelResolver(registry=registry))
+    router = ModelResolver(registry=registry)
     compiler = AgentCompiler(
-        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_router=router
+        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())), model_resolver=router
     )
     spec = AgentSpec(
         id="agent-nomw",
@@ -163,5 +167,5 @@ def test_compiler_requires_tool_executor():
 
     with pytest.raises(RuntimeInitializationError):
         AgentCompiler(
-            model_router=ModelGateway(ModelResolver(registry=ModelRegistry())), tool_executor=None
+            model_resolver=ModelResolver(registry=ModelRegistry()), tool_executor=None
         )

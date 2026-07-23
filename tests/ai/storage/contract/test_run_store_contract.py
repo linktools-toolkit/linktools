@@ -215,7 +215,7 @@ async def test_list_children_returns_only_direct_children(store_factory):
 async def test_concurrent_transitions_with_same_expected_version_only_one_succeeds(
     store_factory,
 ):
-    """P0-4/P1-6: N coroutines race to transition the SAME run from PENDING
+    """N coroutines race to transition the SAME run from PENDING
     to RUNNING using the SAME expected_version. Exactly one may succeed;
     every other one must observe a conflict (RunConflictError) rather than
     silently succeeding too (a lost update) or corrupting the version

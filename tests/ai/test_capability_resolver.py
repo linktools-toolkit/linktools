@@ -18,17 +18,17 @@ from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.model.policy import ModelPolicy
 
 
-def _ctx(execution, policy=None, agent_id="a1"):
+def _ctx(sandbox, policy=None, agent_id="a1"):
     return CapabilityContext(
         agent_id=agent_id,
         exposure_policy=policy or CapabilityToolExposurePolicy(),
-        execution=execution,
+        sandbox=sandbox,
     )
 
 
 def _contrib_names(bundle):
     """Descriptor names across all contributions, from the per-tool ``tools``
-    form and/or the legacy ``descriptors`` tuple (the assembler normalizes
+    form and/or the legacy ``descriptors`` tuple (the resolver normalizes
     introspectable contributions to the tools form)."""
     names = set()
     for c in bundle.tool_contributions:
@@ -133,7 +133,7 @@ async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(
 @pytest.mark.asyncio
 async def test_register_rejects_duplicate_kind():
     # Registration lives on the CapabilityProviderRegistry (the runtime
-    # registry); the assembler exposes it via ``.registry``. A duplicate kind is
+    # registry); the resolver exposes it via ``.registry``. A duplicate kind is
     # rejected -- silently overwriting a wired provider is never the default.
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="already registered"):
@@ -255,7 +255,7 @@ class _CollidingProvider:
         from linktools.ai.tool.models import ToolContribution, declared_tool_definitions
 
         ts = build_builtin_toolset(
-            BuiltinToolContext(backend=context.execution, enabled_tools={"file"})
+            BuiltinToolContext(backend=context.sandbox, enabled_tools={"file"})
         )
         descriptors = tuple(
             ToolDescriptor(

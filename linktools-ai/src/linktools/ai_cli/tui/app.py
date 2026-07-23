@@ -4,7 +4,7 @@
 """The Textual app entry point.
 
 Holds the ``RuntimeClient`` and mounts the :class:`ChatScreen`. Global
-keybindings open the Resources/Runs/Doctor screens over the chat; each of those
+keybindings open the Catalog/Runs/Doctor screens over the chat; each of those
 screens binds Esc to pop back. ``run_tui`` is the function the thin ``lt ai
 tui`` shell reaches through :mod:`linktools.ai_cli.tui` (which translates a
 missing Textual install)."""
@@ -17,7 +17,7 @@ from textual.binding import Binding
 from .commands import AiCommandProvider
 from .screens.chat import ChatScreen
 from .screens.doctor import DoctorScreen
-from .screens.resources import ResourcesScreen
+from .screens.catalog import CatalogScreen
 from .screens.runs import RunsScreen
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ class LinktoolsAIApp(App):
     # focused (Textual's Input otherwise eats ctrl+d as delete-right, making
     # Ctrl+D→Doctor unreachable on the chat screen).
     BINDINGS = [
-        Binding("ctrl+r", "resources", "Resources", priority=True),
+        Binding("ctrl+r", "catalog", "Catalog", priority=True),
         Binding("ctrl+o", "runs", "Runs", priority=True),
         Binding("ctrl+d", "doctor", "Doctor", priority=True),
         Binding("ctrl+p", "command_palette", "Commands", priority=True),
@@ -54,8 +54,8 @@ class LinktoolsAIApp(App):
     def on_mount(self) -> None:
         self.push_screen(ChatScreen(self.client))
 
-    def action_resources(self) -> None:
-        self.push_screen(ResourcesScreen(self.client))
+    def action_catalog(self) -> None:
+        self.push_screen(CatalogScreen(self.client))
 
     def action_runs(self) -> None:
         self.push_screen(RunsScreen(self.client))

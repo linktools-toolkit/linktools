@@ -11,7 +11,7 @@ optional orthogonal content filter (it carries no authorization weight)."""
 
 from typing import Protocol, runtime_checkable
 
-from .models import MemoryRecord
+from .models import MemoryMatch, MemoryRecord
 from .scope import MemoryScope
 
 _UNSET = (
@@ -30,7 +30,7 @@ class MemoryStore(Protocol):
         scope: MemoryScope,
         limit: int = 10,
         category: "str | None" = None,
-    ) -> "tuple[MemoryRecord, ...]": ...
+    ) -> "tuple[MemoryMatch, ...]": ...
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord: ...
 

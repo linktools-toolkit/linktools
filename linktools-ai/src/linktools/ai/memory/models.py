@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Memory domain model: MemoryRecord (the persisted memory entry)."""
+"""Memory domain model: MemoryRecord (the persisted memory entry) and
+MemoryMatch (a search result pairing a record with an optional relevance
+score)."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,7 +32,14 @@ class MemoryRecord:
     user_id: "str | None" = None
     workspace_id: "str | None" = None
     session_id: "str | None" = None
-    # The store is authoritative; indexes are derived and may be rebuilt.
-    index_status: str = "pending"
-    index_version: int = 0
-    indexed_at: "datetime | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMatch:
+    """One search hit: the matching record plus an optional relevance score.
+    A keyword backend carries no real ranking signal, so it returns ``score=None``
+    rather than fabricating a value; a backend that ranks (e.g. a vector index)
+    fills in a ``float``."""
+
+    record: MemoryRecord
+    score: "float | None" = None

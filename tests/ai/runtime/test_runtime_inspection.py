@@ -4,7 +4,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.events.payloads import SecurityDegraded
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage.facade import FilesystemStorage
@@ -15,8 +15,8 @@ _DEGRADE_KIND = "degrade"
 
 def _spec() -> AgentSpec:
     # A tool ref whose kind resolves to the test's fake provider, so inspect()
-    # actually drives the provider through the real assembler (no private-field
-    # injection of a fake assembler).
+    # actually drives the provider through the real resolver (no private-field
+    # injection of a fake resolver).
     return AgentSpec(
         id="a",
         name="a",
@@ -50,7 +50,7 @@ def _runtime(tmp_path, *capabilities) -> Runtime:
     storage = FilesystemStorage(root=tmp_path)
     return Runtime.build(
         storage=storage,
-        model_router=ModelResolver(),
+        model_resolver=ModelResolver(),
         providers=RuntimeDependencies(capabilities=tuple(capabilities)),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -123,7 +123,7 @@ async def test_inspection_warnings_reflect_only_security_degraded(tmp_path):
 
 def test_runtime_does_not_expose_executable_capability_resolver(tmp_path):
     # The CapabilityResolver carries raw executable handlers; downstream code
-    # must reach tools only through inspect(), never by grabbing an assembler off
+    # must reach tools only through inspect(), never by grabbing an resolver off
     # the runtime. There is no public capability_resolver attribute to misuse.
     rt = _runtime(tmp_path)
     assert not hasattr(rt, "capability_resolver")

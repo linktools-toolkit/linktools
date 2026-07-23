@@ -13,6 +13,7 @@ from linktools.ai.asset.file import FileAssetBackend
 from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.models import Depth, WriteOptions
 from linktools.ai.asset.path import AssetPath
+from linktools.ai.asset.readonly import ReadOnlyAssetBackend
 from linktools.ai.asset.store import AssetStore
 
 
@@ -107,23 +108,23 @@ async def test_get_missing_returns_none(backend_factory):
 
 @pytest.mark.asyncio
 async def test_overlay_fallback_when_primary_missing(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/builtin.md"), b"builtin content", content_type=None, metadata={}
     )
-    store = AssetStore(primary=backend_factory(), overlays=(overlay,))
+    store = AssetStore(primary=backend_factory(), overlays=(ReadOnlyAssetBackend(overlay),))
     asset = await store.get(AssetPath("/builtin.md"))
     assert asset.content == b"builtin content"
 
 
 @pytest.mark.asyncio
 async def test_primary_shadows_overlay(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/shared.md"), b"overlay version", content_type=None, metadata={}
     )
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     await store.put(AssetPath("/shared.md"), b"primary version")
     asset = await store.get(AssetPath("/shared.md"))
     assert asset.content == b"primary version"
@@ -131,11 +132,11 @@ async def test_primary_shadows_overlay(backend_factory):
 
 @pytest.mark.asyncio
 async def test_whiteout_prevents_overlay_resurrection(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/builtin.md"), b"builtin content", content_type=None, metadata={}
     )
-    store = AssetStore(primary=backend_factory(), overlays=(overlay,))
+    store = AssetStore(primary=backend_factory(), overlays=(ReadOnlyAssetBackend(overlay),))
     assert (await store.get(AssetPath("/builtin.md"))) is not None
     await store.delete(AssetPath("/builtin.md"))
     assert (await store.get(AssetPath("/builtin.md"))) is None
@@ -146,7 +147,7 @@ async def test_readonly_primary_is_rejected_at_construction(backend_factory):
     # A readonly backend is a Reader, not a Writer; it cannot be a primary. The
     # misconfiguration surfaces at construction, not on the first write.
     with pytest.raises(AssetReadOnlyError):
-        AssetStore(primary=backend_factory(readonly=True))
+        AssetStore(primary=ReadOnlyAssetBackend(backend_factory()))
 
 
 @pytest.mark.asyncio
@@ -171,7 +172,7 @@ async def test_put_different_content_bumps_version(backend_factory):
 
 @pytest.mark.asyncio
 async def test_put_content_type_change_alone_bumps_version(backend_factory):
-    """P1-4: same content + same metadata but a DIFFERENT content_type is
+    """same content + same metadata but a DIFFERENT content_type is
     still a real change and must bump version/etag -- not be silently
     dropped as a no-op."""
     store = AssetStore(primary=backend_factory())
@@ -253,7 +254,7 @@ async def test_idempotent_put_same_key_different_hash_conflicts(backend_factory)
 
 @pytest.mark.asyncio
 async def test_idempotent_put_same_key_different_if_match_conflicts(backend_factory):
-    """P1-2: the PUT idempotency hash must cover if_match -- otherwise two
+    """the PUT idempotency hash must cover if_match -- otherwise two
     calls sharing an idempotency_key but differing only in their precondition
     would hash identically, and the second call's precondition would never be
     honored (it would just replay the first call's cached result)."""
@@ -288,18 +289,18 @@ async def test_move_overlay_only_source_is_refused(backend_factory):
     # the move via a non-atomic put+delete.
     from linktools.ai.errors import AssetMoveNotSupportedError
 
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/src.md"), b"overlay content", content_type=None, metadata={}
     )
-    store = AssetStore(primary=backend_factory(), overlays=(overlay,))
+    store = AssetStore(primary=backend_factory(), overlays=(ReadOnlyAssetBackend(overlay),))
     with pytest.raises(AssetMoveNotSupportedError):
         await store.move(AssetPath("/src.md"), AssetPath("/dst.md"))
 
 
 @pytest.mark.asyncio
 async def test_list_merges_primary_and_overlay_primary_wins(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/agents/shared.md"), b"overlay", content_type=None, metadata={}
     )
@@ -310,7 +311,7 @@ async def test_list_merges_primary_and_overlay_primary_wins(backend_factory):
         metadata={},
     )
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     await store.put(AssetPath("/agents/shared.md"), b"primary")
     page = await store.list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
@@ -335,12 +336,12 @@ async def test_list_prefix_does_not_treat_underscore_as_wildcard(backend_factory
 
 @pytest.mark.asyncio
 async def test_put_identical_to_overlay_content_still_writes_primary(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/x.txt"), b"same", content_type=None, metadata={}
     )
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     await store.put(AssetPath("/x.txt"), b"same", options=WriteOptions(metadata={}))
     primary_lookup = await primary.raw_get(AssetPath("/x.txt"))
     from linktools.ai.asset.models import Found
@@ -351,14 +352,14 @@ async def test_put_identical_to_overlay_content_still_writes_primary(backend_fac
 
 @pytest.mark.asyncio
 async def test_list_hides_deleted_overlay_only_path(backend_factory):
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     await overlay.raw_put(
         AssetPath("/agents/only-overlay.md"),
         b"overlay-only",
         content_type=None,
         metadata={},
     )
-    store = AssetStore(primary=backend_factory(), overlays=(overlay,))
+    store = AssetStore(primary=backend_factory(), overlays=(ReadOnlyAssetBackend(overlay),))
     await store.delete(AssetPath("/agents/only-overlay.md"))
     page = await store.list(
         AssetPath("/agents"), depth=Depth.ONE, limit=100, cursor=None
@@ -368,7 +369,7 @@ async def test_list_hides_deleted_overlay_only_path(backend_factory):
 
 async def _list_all(store, path, *, depth=Depth.ONE, limit=2):
     """Drive list() to exhaustion via its cursor, collecting every page.
-    Used by the G4 pagination regression tests below to prove the current
+    Used by the pagination regression tests below to prove the current
     path-cursor implementation (not an opaque cursor type) still visits every
     item across primary+overlay without dropping any."""
     items = []
@@ -389,12 +390,12 @@ async def _list_all(store, path, *, depth=Depth.ONE, limit=2):
 
 @pytest.mark.asyncio
 async def test_list_can_iterate_all_items_across_backends(backend_factory):
-    """G4: with a small page limit forcing many pages, list() must still
+    """with a small page limit forcing many pages, list() must still
     surface every item split across primary and overlay -- no item lost to
     the per-backend limit+1 fetch/merge/cutoff dance."""
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     expected = set()
     for i in range(5):
         await overlay.raw_put(
@@ -418,15 +419,15 @@ async def test_list_can_iterate_all_items_across_backends(backend_factory):
 
 @pytest.mark.asyncio
 async def test_list_overlay_shadow_does_not_drop_later_items(backend_factory):
-    """G4: a primary path that shadows an overlay path (same path, primary
+    """a primary path that shadows an overlay path (same path, primary
     wins) sits interspersed lexically among many overlay-only paths. Paginate
     with a small limit and verify every overlay-only path still surfaces --
     the shadow resolution (dropping the overlay's copy of the shared path)
     must not accidentally swallow neighboring pages' worth of overlay-only
     items."""
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     for i in range(6):
         await overlay.raw_put(
             AssetPath(f"/e/item-{i:02d}.md"),
@@ -452,12 +453,12 @@ async def test_list_overlay_shadow_does_not_drop_later_items(backend_factory):
 
 @pytest.mark.asyncio
 async def test_list_whiteout_does_not_drop_later_overlay_items(backend_factory):
-    """G4: deleting (whiteout) one overlay-only path in the middle of a
+    """deleting (whiteout) one overlay-only path in the middle of a
     lexically-sorted run of overlay-only paths must not drop the paths that
     sort after it when paginating with a small limit."""
-    overlay = backend_factory(readonly=True)
+    overlay = backend_factory()
     primary = backend_factory()
-    store = AssetStore(primary=primary, overlays=(overlay,))
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay),))
     for i in range(6):
         await overlay.raw_put(
             AssetPath(f"/f/item-{i:02d}.md"),
@@ -476,7 +477,7 @@ async def test_list_whiteout_does_not_drop_later_overlay_items(backend_factory):
 
 @pytest.mark.asyncio
 async def test_list_cursor_monotonic_progress(backend_factory):
-    """G4: successive page cursors must strictly advance (lexically) so
+    """successive page cursors must strictly advance (lexically) so
     pagination is guaranteed to terminate rather than looping on a page that
     never moves forward."""
     store = AssetStore(primary=backend_factory())
@@ -497,9 +498,9 @@ async def test_list_multi_overlay_merge_is_stable_and_non_duplicate(
     path appears in the final result) and non-duplicate (no path appears
     twice across pages) regardless of which backend it came from."""
     primary = backend_factory()
-    overlay1 = backend_factory(readonly=True)
-    overlay2 = backend_factory(readonly=True)
-    store = AssetStore(primary=primary, overlays=(overlay1, overlay2))
+    overlay1 = backend_factory()
+    overlay2 = backend_factory()
+    store = AssetStore(primary=primary, overlays=(ReadOnlyAssetBackend(overlay1), ReadOnlyAssetBackend(overlay2)))
 
     await store.put(AssetPath("/h/b.md"), b"primary-b")
     await overlay1.raw_put(

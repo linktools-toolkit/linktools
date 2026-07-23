@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """AgentEngine missing-dependency fail-fast.
 
-A spec that needs tools must fail eagerly when the assembler or the managed
+A spec that needs tools must fail eagerly when the resolver or the managed
 executor is missing -- before any capability resolution work. ``tools=()`` is
 a model-only run and never raises."""
 
@@ -20,7 +20,7 @@ from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -75,7 +75,7 @@ def _seed(store, session_id) -> None:
 def _compiled_spec_with_tools():
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
     )
     spec = AgentSpec(
         id="agent-1",
@@ -115,19 +115,19 @@ def _make_runner(
 
 
 @pytest.mark.parametrize(
-    "assembler,executor,match",
+    "resolver,executor,match",
     [
         (None, None, "CapabilityResolver"),
         (CapabilityResolver({}), None, "GovernedToolInvoker"),
     ],
-    ids=["no-assembler", "no-executor"],
+    ids=["no-resolver", "no-executor"],
 )
-def test_eager_fail_fast_when_tools_declared(tmp_path, assembler, executor, match):
-    """Declaring tools with a missing assembler or executor must fail eagerly
+def test_eager_fail_fast_when_tools_declared(tmp_path, resolver, executor, match):
+    """Declaring tools with a missing resolver or executor must fail eagerly
     (before any capability resolution work)."""
     runner = _make_runner(
         tmp_path,
-        capability_resolver=assembler,
+        capability_resolver=resolver,
         managed_tool_executor=executor,
     )
     _seed(runner._session_store, "session-1")
@@ -147,7 +147,7 @@ def test_empty_tools_never_raises_even_without_assembler_or_executor(tmp_path):
     _seed(runner._session_store, "session-1")
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=_registry())),
+        model_resolver=ModelResolver(registry=_registry()),
     )
     spec = AgentSpec(
         id="agent-1",

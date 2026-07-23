@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from ..observability.metrics import ObservabilityMetrics
 
 from ..storage.protocols import ArtifactBlobStore, ArtifactRecordStore
+from .coordination import (
+    ArtifactDigestCoordinator,
+    InProcessArtifactDigestCoordinator,
+)
 from .models import (
     ArtifactBufferedSizeLimitError,
     ArtifactIntegrityError,
@@ -185,12 +189,19 @@ class ArtifactStore:
         self,
         blob_store: ArtifactBlobStore,
         record_store: ArtifactRecordStore,
+        coordinator: "ArtifactDigestCoordinator | None" = None,
         *,
         metrics: "ObservabilityMetrics | None" = None,
         staging_dir: "Path | None" = None,
     ) -> None:
         self._blob = blob_store
         self._records = record_store
+        # Per-digest coordinator serializes the put (blob reuse + record create)
+        # against the orphan sweeper (re-check + delete). Default is process-local
+        # -- a real per-digest asyncio.Lock, not a lockless fallback. A
+        # multi-worker / cross-process deployment injects a distributed or
+        # filesystem-flock coordinator so the mutual exclusion spans workers.
+        self._coordinator = coordinator or InProcessArtifactDigestCoordinator()
         # Optional ObservabilityMetrics sink. When wired, a digest mismatch on
         # read increments ``artifact_digest_mismatch_total`` and a put failure
         # (blob upload side) increments ``artifact_blob_upload_failure_total``.
@@ -216,32 +227,36 @@ class ArtifactStore:
                 f"for large content"
             )
         sha = hashlib.sha256(content).hexdigest()
-        # Content dedup: put_if_absent is idempotent on digest and verifies the
-        # claimed digest matches the bytes.
-        try:
-            await self._blob.put_if_absent(
-                digest=sha, source=_bytes_to_async_iter(content), size=len(content)
-            )
-        except Exception:
-            # The blob-store-level mismatch already records itself when its
-            # own sink is wired; record at the facade too so a caller that
-            # only wires the facade still observes the failure.
-            if self._metrics is not None:
-                self._metrics.counter(
-                    "artifact_blob_upload_failure_total",
-                    attributes={"reason": "digest_or_store"},
+        # Hold the per-digest lock across blob reuse AND record create so the
+        # orphan sweeper cannot observe the blob as unreferenced and delete it
+        # in the window between the two.
+        async with self._coordinator.hold(sha):
+            # Content dedup: put_if_absent is idempotent on digest and verifies the
+            # claimed digest matches the bytes.
+            try:
+                await self._blob.put_if_absent(
+                    digest=sha, source=_bytes_to_async_iter(content), size=len(content)
                 )
-            raise
-        artifact_id = f"art-{uuid.uuid4().hex}"
-        record = ArtifactRecord(
-            ref=ArtifactRef(
-                id=artifact_id, sha256=sha, media_type=media_type, size=len(content)
-            ),
-            tenant_id=tenant_id,
-            provenance=provenance,
-            created_at=_coerce_utc(now) if now is not None else _utcnow(),
-        )
-        return await self._records.put(record)
+            except Exception:
+                # The blob-store-level mismatch already records itself when its
+                # own sink is wired; record at the facade too so a caller that
+                # only wires the facade still observes the failure.
+                if self._metrics is not None:
+                    self._metrics.counter(
+                        "artifact_blob_upload_failure_total",
+                        attributes={"reason": "digest_or_store"},
+                    )
+                raise
+            artifact_id = f"art-{uuid.uuid4().hex}"
+            record = ArtifactRecord(
+                ref=ArtifactRef(
+                    id=artifact_id, sha256=sha, media_type=media_type, size=len(content)
+                ),
+                tenant_id=tenant_id,
+                provenance=provenance,
+                created_at=_coerce_utc(now) if now is not None else _utcnow(),
+            )
+            return await self._records.put(record)
 
     async def stat(
         self, *, artifact_id: str, tenant_id: str
@@ -310,15 +325,48 @@ class ArtifactStore:
         still dedupes to one blob. Use this instead of ``put`` for content
         at/above :data:`BUFFERED_ARTIFACT_LIMIT`."""
         if expected_digest is not None:
-            digest, final_size = await self._put_stream_with_known_digest(
-                source=source, expected_digest=expected_digest, declared_size=size
+            # Caller vouches for the digest: stream a verifying iterator
+            # straight into put_if_absent under that digest, then pin the
+            # record -- both under the per-digest lock so the sweeper cannot
+            # delete the blob between the two.
+            async with self._coordinator.hold(expected_digest):
+                final_size = await self._put_stream_with_known_digest(
+                    source=source, expected_digest=expected_digest, declared_size=size
+                )
+                return await self._commit_record(
+                    expected_digest, final_size, tenant_id, media_type, provenance, now
+                )
+        # No expected digest: stage to a spooled file (which yields the digest),
+        # then hold the per-digest lock across the blob commit + record pin.
+        # Staging itself is outside the lock -- it is not part of the put/sweep
+        # race window.
+        digest, staged_size, staged = await _stage_and_digest(
+            source, staging_dir=self._staging_dir
+        )
+        async with self._coordinator.hold(digest):
+            try:
+                final_size = await self._put_staged_blob(
+                    digest=digest, staged=staged, staged_size=staged_size
+                )
+            finally:
+                staged.close()
+            return await self._commit_record(
+                digest, final_size, tenant_id, media_type, provenance, now
             )
-        else:
-            digest, final_size = await self._put_stream_via_staging(source=source)
+
+    async def _commit_record(
+        self,
+        digest: str,
+        size: int,
+        tenant_id: str,
+        media_type: str,
+        provenance: "ArtifactProvenance",
+        now: "datetime | None",
+    ) -> ArtifactRecord:
         artifact_id = f"art-{uuid.uuid4().hex}"
         record = ArtifactRecord(
             ref=ArtifactRef(
-                id=artifact_id, sha256=digest, media_type=media_type, size=final_size
+                id=artifact_id, sha256=digest, media_type=media_type, size=size
             ),
             tenant_id=tenant_id,
             provenance=provenance,
@@ -332,14 +380,13 @@ class ArtifactStore:
         source: AsyncIterator[bytes],
         expected_digest: str,
         declared_size: "int | None",
-    ) -> "tuple[str, int]":
+    ) -> int:
         """'caller provides expected_digest' branch: wrap source in a
         verifying iterator (incremental sha256 + size tally) and stream it
         DIRECTLY into ``put_if_absent`` under the claimed digest -- no staging
         file, because the caller vouches for the digest. The blob store
         re-verifies the bytes hash to the digest; a mismatch fails with no record
-        written. Returns the canonical ``(digest, size)`` the store reports
-        (which may come from a deduped existing blob)."""
+        written. Returns the final size the store reports."""
         hasher = hashlib.sha256()
 
         async def _verifying() -> AsyncIterator[bytes]:
@@ -376,40 +423,32 @@ class ArtifactStore:
                 f"streamed source digest {hasher.hexdigest()[:12]} does not "
                 f"match expected_digest {expected_digest[:12]}"
             )
-        return info.digest, info.size
+        return info.size
 
-    async def _put_stream_via_staging(
-        self, *, source: AsyncIterator[bytes]
-    ) -> "tuple[str, int]":
-        """'caller does not provide expected_digest' branch: spill
-        source to a spooled temp file (bounded RSS, configurable staging dir,
-        threaded file I/O), hash incrementally, then re-stream into
-        ``put_if_absent`` under the computed digest. Returns ``(digest, size)``."""
-        digest, staged_size, staged = await _stage_and_digest(
-            source, staging_dir=self._staging_dir
-        )
+    async def _put_staged_blob(
+        self, *, digest: str, staged, staged_size: int
+    ) -> int:
+        """Re-stream a staged spooled file into ``put_if_absent`` under the
+        computed digest. Returns the final size."""
+        async def _file_chunks() -> AsyncIterator[bytes]:
+            while True:
+                chunk = await asyncio.to_thread(staged.read, _STREAM_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+
         try:
-            async def _file_chunks() -> AsyncIterator[bytes]:
-                while True:
-                    chunk = await asyncio.to_thread(staged.read, _STREAM_CHUNK)
-                    if not chunk:
-                        break
-                    yield chunk
-
-            try:
-                await self._blob.put_if_absent(
-                    digest=digest, source=_file_chunks(), size=staged_size
+            await self._blob.put_if_absent(
+                digest=digest, source=_file_chunks(), size=staged_size
+            )
+        except Exception:
+            if self._metrics is not None:
+                self._metrics.counter(
+                    "artifact_blob_upload_failure_total",
+                    attributes={"reason": "digest_or_store"},
                 )
-            except Exception:
-                if self._metrics is not None:
-                    self._metrics.counter(
-                        "artifact_blob_upload_failure_total",
-                        attributes={"reason": "digest_or_store"},
-                    )
-                raise
-        finally:
-            staged.close()
-        return digest, staged_size
+            raise
+        return staged_size
 
     @asynccontextmanager
     async def open_stream(

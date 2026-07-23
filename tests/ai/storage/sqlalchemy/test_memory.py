@@ -133,14 +133,14 @@ def test_search_filters_owner_category_query_and_limit(tmp_path):
             owned = await store.search(
                 "hello", scope=MemoryScope(tenant_id="t1", user_id="u1")
             )
-            ids = {r.id for r in owned}
+            ids = {r.record.id for r in owned}
             assert ids == {a.id, b.id}
 
             # category narrows further
             noted = await store.search(
                 "hello", scope=MemoryScope(tenant_id="t1", user_id="u1"), category="note"
             )
-            assert {r.id for r in noted} == {a.id}
+            assert {r.record.id for r in noted} == {a.id}
 
             # limit truncates (tenant-wide scope sees a, b, c)
             limited = await store.search(
@@ -282,9 +282,9 @@ def test_search_category_filter_isolates_categories(tmp_path):
             await store.remember(log_rec)
             scope = MemoryScope(tenant_id="t1", user_id="user-x")
             only_note = await store.search("same query", scope=scope, category="note")
-            assert {r.id for r in only_note} == {"m-note"}
+            assert {r.record.id for r in only_note} == {"m-note"}
             only_log = await store.search("same query", scope=scope, category="log")
-            assert {r.id for r in only_log} == {"m-log"}
+            assert {r.record.id for r in only_log} == {"m-log"}
 
     asyncio.run(_run_case())
 
@@ -320,11 +320,11 @@ def test_search_isolates_tenants_with_same_owner(tmp_path):
             a_hits = await store.search(
                 "hello", scope=MemoryScope(tenant_id="tenant-a")
             )
-            assert {r.id for r in a_hits} == {"a1"}
+            assert {r.record.id for r in a_hits} == {"a1"}
             b_hits = await store.search(
                 "hello", scope=MemoryScope(tenant_id="tenant-b")
             )
-            assert {r.id for r in b_hits} == {"b1"}
+            assert {r.record.id for r in b_hits} == {"b1"}
 
     asyncio.run(_run_case())
 
@@ -369,7 +369,7 @@ def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
             legacy_hits = await store.search(
                 "legacy", scope=MemoryScope(tenant_id=LEGACY_TENANT_ID)
             )
-            assert {r.id for r in legacy_hits} == {"legacy-1"}
-            assert legacy_hits[0].tenant_id == LEGACY_TENANT_ID
+            assert {r.record.id for r in legacy_hits} == {"legacy-1"}
+            assert legacy_hits[0].record.tenant_id == LEGACY_TENANT_ID
 
     asyncio.run(_run_case())

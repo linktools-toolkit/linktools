@@ -357,7 +357,7 @@ def test_fail_task_missing_raises_not_found(tmp_path):
 
 
 def test_complete_task_with_fencing_token_requires_claimed_status(tmp_path):
-    """G9: mirrors the SqlAlchemy contract -- a stale fencing token retry
+    """mirrors the SqlAlchemy contract -- a stale fencing token retry
     against an already-completed task must be rejected, not silently
     re-applied."""
 

@@ -29,7 +29,7 @@ def _model_fn(messages, info: AgentInfo) -> ModelResponse:
 
 def _registry():
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_model_fn))
@@ -40,7 +40,7 @@ def test_file_runtime_complete_has_one_of_each_artifact(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     runtime = Runtime.build(
         storage=storage,
-        model_router=_registry(),
+        model_resolver=_registry(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(

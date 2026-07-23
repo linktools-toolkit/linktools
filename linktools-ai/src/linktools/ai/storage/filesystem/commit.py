@@ -17,7 +17,7 @@ import logging
 from dataclasses import replace
 from typing import Any, Mapping
 
-from ...events.context import EventContext, append_event
+from ...events.context import EventStreamContext, append_event
 from ...events.payloads import (
     ApprovalRequested,
     RunCompleted,
@@ -316,7 +316,7 @@ class FilesystemRunCommitCoordinator:
         return CompletedRunCommit(result=command.result)
 
     async def _append_critical_event_once(
-        self, *, context: EventContext, commit_id: str, payload: Any
+        self, *, context: EventStreamContext, commit_id: str, payload: Any
     ) -> None:
         """Append a critical pause/complete event exactly once per
         (run_id, commit_id, event_type).
@@ -344,7 +344,7 @@ class FilesystemRunCommitCoordinator:
         )
 
     async def _event_exists(
-        self, context: EventContext, commit_id: str, event_type: str
+        self, context: EventStreamContext, commit_id: str, event_type: str
     ) -> bool:
         """True if a critical event of ``event_type`` tagged with ``commit_id``
         is already persisted for the run. Critical events carry their commit_id
@@ -554,10 +554,10 @@ def _ctx_to_dict(ctx: Any) -> "dict[str, Any]":
     }
 
 
-def _ctx_from_dict(d: "dict[str, Any]") -> "EventContext | None":
+def _ctx_from_dict(d: "dict[str, Any]") -> "EventStreamContext | None":
     if not d or not d.get("run_id"):
         return None
-    return EventContext(
+    return EventStreamContext(
         stream_id=d.get("stream_id") or d["run_id"],
         run_id=d["run_id"],
         root_run_id=d.get("root_run_id") or d["run_id"],

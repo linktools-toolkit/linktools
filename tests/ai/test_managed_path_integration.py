@@ -59,7 +59,7 @@ async def test_assembler_returns_explicit_managed_definitions(tmp_path):
     ctx = CapabilityContext(
         agent_id="a1",
         exposure_policy=CapabilityToolExposurePolicy(),
-        execution=backend,
+        sandbox=backend,
     )
     bundle = await asm.assemble(spec, ctx)
     # Explicit per-tool definitions are populated by the Provider.
@@ -73,7 +73,7 @@ async def test_assembler_returns_explicit_managed_definitions(tmp_path):
 
 @pytest.mark.asyncio
 async def test_managed_adapter_from_assembler_output_deny(tmp_path):
-    """End-to-end: assembler → tool_contributions → ManagedToolAdapter with a
+    """End-to-end: resolver → tool_contributions → ManagedToolAdapter with a
     deny pipeline → tool call blocked."""
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
@@ -87,12 +87,12 @@ async def test_managed_adapter_from_assembler_output_deny(tmp_path):
     ctx = CapabilityContext(
         agent_id="a1",
         exposure_policy=CapabilityToolExposurePolicy(),
-        execution=backend,
+        sandbox=backend,
     )
     bundle = await asm.assemble(spec, ctx)
 
     # Build adapters from the assembled contributions (per-tool form). The
-    # assembler normalizes introspectable toolsets to ManagedToolDefinitions, so
+    # resolver normalizes introspectable toolsets to ManagedToolDefinitions, so
     # iterate contrib.tools -- iterating contrib.descriptors would be empty and
     # the deny assertion would never run.
     pipeline = _DenyAllPipeline()

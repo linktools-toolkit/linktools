@@ -5,7 +5,7 @@
 ``build_runtime_components(RuntimeBuildConfig) -> RuntimeComponents`` is the one
 place the Runtime's sub-components are assembled. Runtime.build is a thin wrapper
 that constructs the config, calls this, and unpacks the result; nothing else
-constructs the compiler/runner/assembler/executor graph."""
+constructs the compiler/runner/resolver/executor graph."""
 
 import dataclasses
 from typing import TYPE_CHECKING, Any
@@ -21,7 +21,7 @@ from ..capability.models import CapabilityRuntimeOptions
 from ..sandbox.protocols import Sandbox
 from ..sandbox.protocols import ExecutionIsolationLevel
 from ..middleware.pipeline import MiddlewarePipeline
-from ..model.router import ModelGateway, ModelResolver
+from ..model.resolver import ModelResolver
 from ..mcp.client import MCPConnectionPool
 from ..mcp.provider import MCPProvider
 from ..extension.capability_provider import ExtensionProvider
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 class RuntimeSettings:
     """Serializable runtime configuration values -- distinct from
     RuntimeDependencies (the process-in-memory object graph: storage,
-    catalogs, capability providers, execution backend, etc.). The
+    catalogs, capability providers, sandbox backend, etc.). The
     "配置是可序列化值；依赖是进程内对象" split, applied to the cleanly-classifiable
     pure-value fields only. ``SecurityBaseline`` (can carry a live
     ``SecurityPipeline``), ``CapabilityRuntimeOptions`` (its ``memory_policy``
@@ -93,14 +93,14 @@ class RuntimeComponents:
     storage: Storage
     providers: RuntimeDependencies
     options: CapabilityRuntimeOptions
-    model_router: ModelGateway
+    model_resolver: ModelResolver
     compiler: "_AgentCompiler"
     runner: "_AgentEngine"
     swarm_runner: "_SwarmRunner"
     run_controller: RunController
     capability_resolver: "_CapabilityResolver | None"
     tool_executor: GovernedToolInvoker
-    execution: "Sandbox | None"
+    sandbox: "Sandbox | None"
     mcp_connection_pool: "MCPConnectionPool | None"
     commit_coordinator: Any = None
     settings: RuntimeSettings = dataclasses.field(default_factory=RuntimeSettings)
@@ -126,10 +126,10 @@ class RuntimeBuildConfig:
     # Injected straight into the SubagentProvider / SkillProvider; never flows
     # through RuntimeDependencies (which would cycle providers <-> skill/subagent).
     skill_subagent: "SkillPrivateSubagentConfig | None" = None
-    model_router: "ModelResolver | None" = None
+    model_resolver: "ModelResolver | None" = None
     middleware_pipeline: "MiddlewarePipeline | None" = None
     retriever: "Retriever | None" = None
-    execution: "Sandbox | None" = None
+    sandbox: "Sandbox | None" = None
     tool_executor: "GovernedToolInvoker | None" = None
     security: Any = None
     capability_options: "CapabilityRuntimeOptions | None" = None
@@ -163,14 +163,14 @@ def _capability_attribute_from_features(features) -> "dict[str, str]":
 
 def _build_capability_registry(
     bundle: RuntimeDependencies,
-    execution: "Sandbox | None",
+    sandbox: "Sandbox | None",
     options: CapabilityRuntimeOptions,
     mcp_manager: "MCPConnectionPool | None",
     subagent_executor: Any = None,
     skill_subagent: "SkillPrivateSubagentConfig | None" = None,
 ) -> "CapabilityProviderRegistry | None":
     """Map the declaration bundle onto the runtime CapabilityProviderRegistry
-    the assembler dispatches over. Builtin is registered only when an execution
+    the resolver dispatches over. Builtin is registered only when an sandbox
     backend exists (it cannot resolve without one). The subagent executor is
     passed in so both SubagentProvider and ExtensionProvider receive it at
     construction. ``skill_subagent`` carries the typed skill-private-subagent
@@ -179,7 +179,7 @@ def _build_capability_registry(
     treats the run as having no capability resolution)."""
     registry = CapabilityProviderRegistry()
     sk = skill_subagent or SkillPrivateSubagentConfig.empty()
-    if execution is not None:
+    if sandbox is not None:
         registry.replace(BuiltinProvider())
     if bundle.skills is not None:
         registry.replace(
@@ -224,9 +224,9 @@ def _build_capability_registry(
 
 
 def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
-    """Assemble the compiler/runner/assembler/executor graph from a
+    """Assemble the compiler/runner/resolver/executor graph from a
     RuntimeBuildConfig. Internal splits: resolve security + exposure -> build
-    executor -> build capability assembler -> build compiler -> build runner ->
+    executor -> build capability resolver -> build compiler -> build runner ->
     build swarm runner."""
     if config.commit_coordinator is None:
         # The build kernel no longer selects a coordinator based on Storage
@@ -238,10 +238,10 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             "RunCommitCoordinator must be injected; the build kernel no "
             "longer selects one"
         )
-    if config.settings.multi_tenant and config.execution is not None:
+    if config.settings.multi_tenant and config.sandbox is not None:
         # Protocol runtime checks cannot distinguish a trusted local backend;
         # use its declared isolation level when available.
-        if getattr(config.execution, "isolation_level", None) == ExecutionIsolationLevel.TRUSTED_LOCAL and not config.settings.local_trusted_mode:
+        if getattr(config.sandbox, "isolation_level", None) == ExecutionIsolationLevel.TRUSTED_LOCAL and not config.settings.local_trusted_mode:
             from ..errors import UnsafeSandboxError
 
             raise UnsafeSandboxError(
@@ -335,11 +335,11 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     )
 
     bundle = config.providers
-    # The run path (compiler + coordinator) resolves a whole ModelPolicy with
-    # retry/fallback, so it gets the ModelGateway wrapping the caller-supplied
-    # (or default) ModelResolver. The resolver only resolves a single
-    # model_type's config; the gateway owns the resilience policy.
-    router = ModelGateway(config.model_router or ModelResolver())
+    # The resolver owns the whole ModelPolicy resolution: it walks primary +
+    # fallbacks once and wraps multiple registered candidates in a pydantic-ai
+    # FallbackModel (request-layer fallback). There is no separate gateway --
+    # retry/fallback no longer live at the registry-lookup layer.
+    model_resolver = config.model_resolver or ModelResolver()
 
     resolved_executor = config.tool_executor
     if resolved_executor is None:
@@ -361,7 +361,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             tenant_id_resolver=lambda context: context.tenant_id,
         )
     compiler = AgentCompiler(
-        model_router=router,
+        model_resolver=model_resolver,
         middleware_pipeline=config.middleware_pipeline,
         tool_executor=resolved_executor,
     )
@@ -385,7 +385,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     if bundle.entrypoints is not None or bundle.subagents is not None:
         # The executor owns the subagent domain flow; the build kernel only
         # constructs it. ``runner`` (the real dispatcher) is bound below, after
-        # it exists -- the runner depends on the capability assembler, which
+        # it exists -- the runner depends on the capability resolver, which
         # depends on this executor.
         dispatcher_handle = LateBoundRunDispatcher()
         sub_executor = SubagentExecutor(
@@ -395,13 +395,13 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         )
     capability_registry = _build_capability_registry(
         bundle,
-        config.execution,
+        config.sandbox,
         resolved_options,
         mcp_manager,
         sub_executor,
         config.skill_subagent,
     )
-    assembler = (
+    resolver = (
         CapabilityResolver(capability_registry) if capability_registry else None
     )
 
@@ -414,9 +414,9 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         memory_store=config.storage.memories,
         retriever=config.retriever,
         run_controller=run_controller,
-        execution=config.execution,
+        sandbox=config.sandbox,
         capability_options=resolved_options,
-        capability_resolver=assembler,
+        capability_resolver=resolver,
         security_pipeline=runner_pipeline,
         baseline_policy=runner_baseline_policy,
         tool_policy_provider=runner_policy_provider,
@@ -450,14 +450,14 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         storage=config.storage,
         providers=bundle,
         options=resolved_options,
-        model_router=router,
+        model_resolver=model_resolver,
         compiler=compiler,
         runner=runner,
         swarm_runner=swarm_runner,
         run_controller=run_controller,
-        capability_resolver=assembler,
+        capability_resolver=resolver,
         tool_executor=resolved_executor,
-        execution=config.execution,
+        sandbox=config.sandbox,
         mcp_connection_pool=mcp_manager,
         commit_coordinator=runner._commit_coordinator,
         settings=config.settings,

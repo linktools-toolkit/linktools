@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from linktools.ai.events.context import EventContext
+from linktools.ai.events.context import EventStreamContext
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -161,7 +161,7 @@ def _record(run_id, session_id, status, version):
 
 
 def _ctx(run_id, session_id):
-    return EventContext.from_run_context(
+    return EventStreamContext.from_run_context(
         RunContext(
             run_id=run_id,
             root_run_id=run_id,

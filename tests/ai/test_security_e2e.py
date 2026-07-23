@@ -80,12 +80,12 @@ def _spec():
 @pytest.mark.asyncio
 async def test_runtime_with_default_baseline_runs(tmp_path):
     """Default SecurityBaseline does not break normal execution."""
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=_registry()),
+        model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
     result = await rt.run(_spec(), "hello")
@@ -95,12 +95,12 @@ async def test_runtime_with_default_baseline_runs(tmp_path):
 @pytest.mark.asyncio
 async def test_runtime_baseline_disabled_runs(tmp_path):
     """SecurityBaseline(enabled=False) falls back to legacy path."""
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=_registry()),
+        model_resolver=ModelResolver(registry=_registry()),
         security=SecurityBaseline(enabled=False),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -126,7 +126,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     def model_fn(messages, info: AgentInfo) -> ModelResponse:
         if len(messages) <= 1:
@@ -140,8 +140,8 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
@@ -177,7 +177,7 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     def model_fn(messages, info: AgentInfo) -> ModelResponse:
         if len(messages) <= 1:
@@ -191,8 +191,8 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         security=SecurityBaseline(enabled=False),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
@@ -237,7 +237,7 @@ async def test_pipeline_attached_to_runtime(tmp_path):
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     pipeline = _deny_terminal_pipeline()
 
@@ -253,8 +253,8 @@ async def test_pipeline_attached_to_runtime(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=pipeline),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -328,7 +328,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     registry = ModelRegistry()
     registry.register(
@@ -337,8 +337,8 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_RequireApprovalPipeline()),
         options=CapabilityRuntimeOptions(tool_exposure=CapabilityToolExposurePolicy()),
         local_trusted_mode=True,
@@ -416,7 +416,7 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     (tmp_path / "real.txt").write_text("MODIFIED-CONTENT", encoding="utf-8")
 
@@ -444,8 +444,8 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         security=SecurityBaseline(pipeline=_ModifyPathPipeline("real.txt")),
         options=CapabilityRuntimeOptions(tool_exposure=CapabilityToolExposurePolicy()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -472,7 +472,7 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.model.policy import ModelPolicy
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.model.registry import ModelRegistry
     from pydantic_ai.models.function import FunctionModel
 
@@ -485,8 +485,8 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=registry),
-        execution=backend,
+        model_resolver=ModelResolver(registry=registry),
+        sandbox=backend,
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy()
         ),  # defaults: no execution tools

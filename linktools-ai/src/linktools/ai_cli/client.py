@@ -576,7 +576,7 @@ def build_runtime_client(
     cli_project = load_project(data_root=environ.get_data_path("ai"), start=start)
     if with_model:
         from linktools.ai.model.registry import RuntimeModelConfig, model_registry
-        from linktools.ai.model.router import ModelResolver
+        from linktools.ai.model.resolver import ModelResolver
 
         config = RuntimeModelConfig(
             model_type="standard",
@@ -589,8 +589,8 @@ def build_runtime_client(
             raw={},
         )
         model_registry.register(config.model_type, config=config)
-        router: "object | None" = ModelResolver(registry=model_registry)
+        resolver: "object | None" = ModelResolver(registry=model_registry)
     else:
-        router = None
-    bundle = build_cli_runtime(project=cli_project, model_router=router)
+        resolver = None
+    bundle = build_cli_runtime(project=cli_project, model_resolver=resolver)
     return LocalRuntimeClient(bundle)

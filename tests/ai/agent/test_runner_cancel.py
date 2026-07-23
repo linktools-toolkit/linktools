@@ -21,7 +21,7 @@ from linktools.ai.middleware.base import Middleware
 from linktools.ai.middleware.pipeline import MiddlewarePipeline
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
@@ -126,7 +126,7 @@ def test_run_cancelled_mid_lifecycle_transitions_to_cancelled(tmp_path):
 
         compiler = AgentCompiler(
             tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-            model_router=ModelGateway(ModelResolver(registry=_registry())),
+            model_resolver=ModelResolver(registry=_registry()),
         )
         compiled = await compiler.compile(
             AgentSpec(

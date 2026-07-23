@@ -6,9 +6,10 @@ Stores ArtifactRecord METADATA only -- the content blob is intentionally out of
 scope (it lives on the filesystem via FilesystemArtifactBlobStore; a row here
 never holds bytes). The store uses the caller-provided AsyncSession: a
 ``session_factory`` for standalone use, or a shared ``session`` so it can
-participate in the same UnitOfWork as the other SQL stores. It holds no engine
-and is SQLite-specific (the create-only INSERT uses the sqlite ``ON CONFLICT``
-upsert). Record serialization goes through the public codec
+participate in the same UnitOfWork as the other SQL stores. The create-only
+INSERT detects a primary-key conflict through the dialect strategy (SQLite /
+PostgreSQL ``ON CONFLICT DO NOTHING``; MySQL SAVEPOINT) so it is portable across
+the supported dialects. Record serialization goes through the public codec
 (:func:`record_to_jsonable` / :func:`record_from_jsonable`) so the JSON shape is
 owned in one place."""
 
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...artifact.models import ArtifactRecord
 from ...artifact.store import record_from_jsonable, record_to_jsonable
 from ...errors import ArtifactRecordConflictError
+from .dialects import SqlAlchemyDialectStrategy, resolve_dialect_strategy
 from .models import ArtifactRecordRow
 
 
@@ -44,9 +46,11 @@ class SqlAlchemyArtifactRecordStore:
         *,
         session_factory: "Callable[[], AsyncSession]",
         session: "AsyncSession | None" = None,
+        strategy: "SqlAlchemyDialectStrategy | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._session = session
+        self._strategy = strategy or resolve_dialect_strategy(session_factory)
 
     async def _run(self, action):
         if self._session is not None:
@@ -60,23 +64,27 @@ class SqlAlchemyArtifactRecordStore:
         payload = json.dumps(record_to_jsonable(record))
 
         async def _action(session: AsyncSession) -> ArtifactRecord:
-            # INSERT first. ON CONFLICT DO NOTHING on the primary key means a
-            # concurrent same-id insert is absorbed without poisoning the
-            # session: rowcount 0 -> the row exists, so read it and reconcile
-            # (idempotent on identical content, conflict on a different value).
-            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
-            stmt = sqlite_insert(ArtifactRecordRow).values(
-                artifact_id=record.ref.id,
-                tenant_id=record.tenant_id,
-                sha256=record.ref.sha256,
-                producer_kind=record.provenance.producer_kind,
-                producer_id=record.provenance.producer_id or None,
-                run_id=record.provenance.run_id,
-                data_json=payload,
-            ).on_conflict_do_nothing(index_elements=["artifact_id"])
-            result = await session.execute(stmt)
-            if result.rowcount == 0:
+            # INSERT first. The dialect strategy runs a conflict-detecting
+            # insert (SQLite/PostgreSQL ON CONFLICT DO NOTHING; MySQL SAVEPOINT)
+            # so a concurrent same-id insert is absorbed without poisoning the
+            # session: a reported conflict -> the row exists, read it and
+            # reconcile (idempotent on identical content, conflict on a
+            # different value).
+            conflict = await self._strategy.execute_conflict_insert(
+                session,
+                ArtifactRecordRow,
+                {
+                    "artifact_id": record.ref.id,
+                    "tenant_id": record.tenant_id,
+                    "sha256": record.ref.sha256,
+                    "producer_kind": record.provenance.producer_kind,
+                    "producer_id": record.provenance.producer_id or None,
+                    "run_id": record.provenance.run_id,
+                    "data_json": payload,
+                },
+                index_elements=["artifact_id"],
+            )
+            if conflict:
                 existing = await session.get(ArtifactRecordRow, record.ref.id)
                 if existing is None:
                     # Conflict vanished after the no-op insert -- only possible
@@ -129,6 +137,21 @@ class SqlAlchemyArtifactRecordStore:
         digests = await self._run(_action)
         for digest in digests:
             yield digest
+
+    async def is_digest_referenced(self, digest: str) -> bool:
+        """Whether any record pins ``digest`` (across tenants). A single-row
+        existence probe -- the orphan sweeper calls this under the per-digest
+        lock so its delete decision reflects the current reference set, not a
+        snapshot taken before the lock."""
+        async def _action(session: AsyncSession) -> bool:
+            result = await session.execute(
+                select(ArtifactRecordRow.sha256)
+                .where(ArtifactRecordRow.sha256 == digest)
+                .limit(1)
+            )
+            return result.first() is not None
+
+        return await self._run(_action)
 
     async def iter_by_run_id(
         self, run_id: str, *, tenant_id: "str | None" = None

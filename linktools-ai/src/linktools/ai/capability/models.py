@@ -25,7 +25,7 @@ from .exposure import CapabilityToolExposurePolicy
 CapabilityRef = ToolRef
 
 
-def requires_capability_resolver(*, tools, execution) -> bool:
+def requires_capability_resolver(*, tools, sandbox) -> bool:
     # ``None`` and ``()`` both mean no capabilities. Builtins are enabled only
     # by an explicit RuntimeTool/Capability option and are materialized by the
     # caller before reaching this predicate.

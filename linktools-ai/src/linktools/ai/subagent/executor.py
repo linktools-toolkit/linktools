@@ -13,7 +13,7 @@ subagent event emission, and structured error redaction.
 Dependencies: the storage (sessions / events / run definitions), the compiler
 (to compile the child AgentSpec), and the run dispatcher -- a late-bound handle
 resolved to the real runner once the runner exists, because the runner depends
-on the capability assembler, which depends on this executor (a genuine
+on the capability resolver, which depends on this executor (a genuine
 self-reference, confined to the single bind-once seam)."""
 
 import asyncio
@@ -131,11 +131,11 @@ class SubagentExecutor:
         )
 
         async def _evt(payload):
-            from ..events.context import EventContext, append_event
+            from ..events.context import EventStreamContext, append_event
 
             await append_event(
                 self._storage.events,
-                EventContext(
+                EventStreamContext(
                     stream_id=child_run,
                     run_id=child_run,
                     root_run_id=effective_root,

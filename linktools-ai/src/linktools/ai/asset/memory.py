@@ -27,14 +27,11 @@ from .models import (
     AssetPage,
     WriteOptions,
 )
-from .path import AssetPath
+from .path import AssetPath, matches_asset_depth
 
 
 class MemoryAssetBackend:
-    readonly = False
-
-    def __init__(self, *, readonly: bool = False) -> None:
-        self.readonly = readonly
+    def __init__(self) -> None:
         self._entries: "dict[str, tuple[bytes, AssetInfo]]" = {}
         self._whiteouts: "dict[str, int]" = {}
         self._idempotency: "dict[str, IdempotencyRecord]" = {}
@@ -61,20 +58,16 @@ class MemoryAssetBackend:
     async def raw_list(
         self, path: AssetPath, *, depth: Depth, limit: int, cursor: "str | None"
     ) -> AssetPage:
-        prefix = path.value.rstrip("/") + "/"
         items = []
         for key, (_content, info) in sorted(self._entries.items()):
-            if not key.startswith(prefix):
+            if not matches_asset_depth(path, AssetPath(key), depth):
                 continue
             if cursor is not None and key <= cursor:
-                continue
-            rest = key[len(prefix) :]
-            if depth == Depth.ONE and "/" in rest:
                 continue
             items.append(info)
             if len(items) > limit:
                 break
-        next_cursor = items[limit].path.value if len(items) > limit else None
+        next_cursor = items[limit - 1].path.value if len(items) > limit else None
         return AssetPage(items=tuple(items[:limit]), cursor=next_cursor)
 
     async def revision(self) -> int:

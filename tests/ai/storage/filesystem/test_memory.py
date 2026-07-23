@@ -112,14 +112,14 @@ def test_search_filters_owner_category_query_and_limit(tmp_path):
         owned = await store.search(
             "hello", scope=MemoryScope(tenant_id="t1", user_id="u1")
         )
-        ids = {r.id for r in owned}
+        ids = {m.record.id for m in owned}
         assert ids == {a.id, b.id}
 
         # category narrows further
         noted = await store.search(
             "hello", scope=MemoryScope(tenant_id="t1", user_id="u1"), category="note"
         )
-        assert {r.id for r in noted} == {a.id}
+        assert {m.record.id for m in noted} == {a.id}
 
         # limit truncates (tenant-wide scope sees a, b, c)
         limited = await store.search("hello", scope=MemoryScope(tenant_id="t1"), limit=1)
@@ -281,9 +281,9 @@ def test_search_isolates_tenants_via_partition(tmp_path):
             _record(memory_id="b1", tenant_id="tenant-b", owner_id="alice", content="hello b")
         )
         a_hits = await store.search("hello", scope=MemoryScope(tenant_id="tenant-a"))
-        assert {r.id for r in a_hits} == {"a1"}
+        assert {m.record.id for m in a_hits} == {"a1"}
         b_hits = await store.search("hello", scope=MemoryScope(tenant_id="tenant-b"))
-        assert {r.id for r in b_hits} == {"b1"}
+        assert {m.record.id for m in b_hits} == {"b1"}
 
     asyncio.run(_run_case())
 
@@ -318,7 +318,7 @@ def test_legacy_flat_record_quarantined_from_real_tenant(tmp_path):
         from linktools.ai.memory.scope import LEGACY_TENANT_ID
 
         legacy_hits = await store.search("legacy", scope=MemoryScope(tenant_id=LEGACY_TENANT_ID))
-        assert {r.id for r in legacy_hits} == {"legacy-1"}
-        assert legacy_hits[0].tenant_id == LEGACY_TENANT_ID
+        assert {m.record.id for m in legacy_hits} == {"legacy-1"}
+        assert legacy_hits[0].record.tenant_id == LEGACY_TENANT_ID
 
     asyncio.run(_run_case())

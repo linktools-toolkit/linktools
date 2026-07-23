@@ -129,7 +129,7 @@ class CliRuntimeBundle:
 _BUILTIN_DEFAULT = AgentSpec(
     id="default",
     name="default",
-    model=ModelPolicy(primary="standard", max_retries=1, timeout_seconds=120),
+    model=ModelPolicy(primary="standard", request_retries=1, timeout_seconds=120),
     instructions=PromptSpec(
         instructions=(
             "You are a general-purpose local assistant running in a terminal. "
@@ -156,7 +156,7 @@ async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None"):
         raise CommandError(f"agent not found: {target}")
 
 
-def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
+def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundle:
     """Assemble a ``Runtime`` from a project's ``.linktools/``."""
     agents = AgentCatalog.from_specloader(SpecLoader.from_filesystem(project.agents_root))
     skills = SkillCatalog.from_specloader(skill_spec_loader(project.skills_root), suffix="")
@@ -207,8 +207,8 @@ def build_cli_runtime(*, project: CliProject, model_router) -> CliRuntimeBundle:
     runtime = Runtime.build(
         storage=storage,
         commit_coordinator=commit_coordinator,
-        model_router=model_router,
-        execution=LocalSandbox(runtime_dir=project.root),
+        model_resolver=model_resolver,
+        sandbox=LocalSandbox(runtime_dir=project.root),
         providers=providers,
         skill_subagent=skill_subagent,
         options=CapabilityRuntimeOptions(

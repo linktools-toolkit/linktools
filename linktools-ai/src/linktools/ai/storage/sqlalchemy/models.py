@@ -24,11 +24,19 @@ class Base(DeclarativeBase):
     pass
 
 
+# Stable, named unique-constraint identifiers so per-dialect integrity-error
+# classifiers (storage/sqlalchemy/dialects/) can map a violation back to the
+# asset path key vs. the idempotency key without parsing free-form messages.
+ASSET_PATH_CONSTRAINT = "uq_ai_assets_tenant_path"
+ASSET_IDEMPOTENCY_CONSTRAINT = "uq_ai_asset_idempotency_tenant_key"
+
+
 class AssetRow(Base):
     __tablename__ = "ai_assets"
+    __table_args__ = (UniqueConstraint("path", name=ASSET_PATH_CONSTRAINT),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    path: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
+    path: Mapped[str] = mapped_column(String(1024), index=True)
     kind: Mapped[str] = mapped_column(String(32))
     etag: Mapped[str] = mapped_column(String(64))
     version: Mapped[int]
@@ -43,9 +51,10 @@ class AssetRow(Base):
 
 class AssetIdempotencyRow(Base):
     __tablename__ = "ai_asset_idempotency"
+    __table_args__ = (UniqueConstraint("key", name=ASSET_IDEMPOTENCY_CONSTRAINT),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    key: Mapped[str] = mapped_column(String(512), index=True)
     request_hash: Mapped[str] = mapped_column(String(64))
     result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
 

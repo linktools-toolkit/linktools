@@ -99,6 +99,32 @@ REPO_WIDE_PATTERNS: "tuple[str, ...]" = (
     r"\bPhase\s+\d",
 )
 
+# §11.5 additions scoped to linktools-ai only (src/linktools/ai + ai_cli +
+# tests/ai). Other sub-packages (cntr, core, mobile) carry their own review /
+# task codes from their own processes; this plan's comment policy does not
+# govern them. The ``review`` forms target review-PROCESS refs (numbered
+# review rounds, current-/final-review) -- NOT legit project feature names
+# like "code-review skill" or "reviewer agent", which this scanner must spare.
+AI_SCOPED_PATTERNS: "tuple[str, ...]" = (
+    r"\bP[0-9]+-[0-9]+\b",
+    r"\bG[0-9]+\b",
+    r"\breview\d+\b",
+    r"\bcurrent-review\b",
+    r"\bfinal-review\b",
+    r"\breview\s+(?:contract|caught|round)\b",
+    r"方案",
+    r"实施步骤",
+    r"本轮",
+    r"后续处理",
+    r"compatibility shim",
+)
+
+_AI_SCOPED_TREES = (
+    _AI_SRC,
+    _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "ai_cli",
+    _REPO_ROOT / "tests" / "ai",
+)
+
 SRC_STRICT_PATTERNS: "tuple[str, ...]" = (
     r"\b[Pp]lan\b",
 )
@@ -186,6 +212,32 @@ def _scan(patterns: "tuple[str, ...]", src_only: bool) -> "list[tuple[str, int, 
     return hits
 
 
+def _scan_trees(
+    trees: "tuple[Path, ...]", patterns: "tuple[str, ...]"
+) -> "list[tuple[str, int, str, str]]":
+    import re
+
+    compiled = [re.compile(p) for p in patterns]
+    hits: "list[tuple[str, int, str, str]]" = []
+    seen: set[Path] = set()
+    for tree in trees:
+        if not tree.exists():
+            continue
+        for path in tree.rglob("*.py"):
+            if "__pycache__" in path.parts or path in seen:
+                continue
+            seen.add(path)
+            rel = str(path.relative_to(_REPO_ROOT))
+            if rel in {str(p) for p in _EXEMPT}:
+                continue
+            for lineno, text in _comments(path) + _docstrings(path):
+                for rx in compiled:
+                    m = rx.search(text)
+                    if m:
+                        hits.append((rel, lineno, m.group(0), rx.pattern))
+    return hits
+
+
 def test_no_forbidden_comment_or_docstring_markers() -> None:
     hits = _scan(REPO_WIDE_PATTERNS, src_only=False)
     if hits:
@@ -195,6 +247,20 @@ def test_no_forbidden_comment_or_docstring_markers() -> None:
         )
         pytest.fail(
             f"forbidden comment/docstring markers found ({len(hits)}):\n{rendered}"
+        )
+
+
+def test_no_ai_scoped_forbidden_markers() -> None:
+    # §11.5 markers scoped to linktools-ai only (other sub-packages carry
+    # their own review/task codes this plan does not govern).
+    hits = _scan_trees(_AI_SCOPED_TREES, AI_SCOPED_PATTERNS)
+    if hits:
+        rendered = "\n".join(
+            f"  {f}:{line}: {matched!r} (pattern {pat!r})"
+            for f, line, matched, pat in hits[:50]
+        )
+        pytest.fail(
+            f"forbidden linktools-ai comment/docstring markers ({len(hits)}):\n{rendered}"
         )
 
 

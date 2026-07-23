@@ -176,7 +176,7 @@ async def test_atomic_move_refuses_overlay_only_source(tmp_path):
             overlay_engine, expire_on_commit=False
         )
         overlay = SqlAlchemyAssetBackend(
-            session_factory=overlay_session_factory, readonly=True
+            session_factory=overlay_session_factory
         )
         await overlay.raw_put(
             AssetPath("/src.md"), b"overlay content", content_type=None, metadata={}

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import MemoryRow
 from ...errors import MemoryConflictError, MemoryNotFoundError
-from ...memory.models import MemoryRecord
+from ...memory.models import MemoryMatch, MemoryRecord
 from ...memory.scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
 from ...memory.store import _UNSET
 
@@ -105,7 +105,7 @@ class SqlAlchemyMemoryStore:
         scope: MemoryScope,
         limit: int = 10,
         category: "str | None" = None,
-    ) -> "tuple[MemoryRecord, ...]":
+    ) -> "tuple[MemoryMatch, ...]":
         async def _do(session):
             stmt = select(MemoryRow).where(MemoryRow.content.like(f"%{query}%"))
             # Hard tenant isolation. A real tenant matches only its own rows;
@@ -148,7 +148,12 @@ class SqlAlchemyMemoryStore:
                 stmt = stmt.where(MemoryRow.category == category)
             stmt = stmt.order_by(MemoryRow.created_at).limit(limit)
             result = await session.execute(stmt)
-            return tuple(_row_to_record(row) for row in result.scalars())
+            # Keyword (content LIKE) search carries no ranking signal; every hit
+            # is returned with score=None rather than a fabricated value.
+            return tuple(
+                MemoryMatch(record=_row_to_record(row), score=None)
+                for row in result.scalars()
+            )
 
         return await self._execute_in_session(_do)
 

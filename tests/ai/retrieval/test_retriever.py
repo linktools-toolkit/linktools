@@ -8,7 +8,7 @@ import asyncio
 from linktools.ai.retrieval.document import Document
 from linktools.ai.retrieval.retriever import MemoryRetriever, Retriever
 from linktools.ai.retrieval.scope import RetrievalScope
-from linktools.ai.memory.models import MemoryRecord
+from linktools.ai.memory.models import MemoryMatch, MemoryRecord
 
 
 def _make_record(**overrides):
@@ -55,7 +55,7 @@ class _StubStore:
             if query and query not in r.content:
                 continue
             hits.append(r)
-        return tuple(hits[:limit])
+        return tuple(MemoryMatch(record=r, score=None) for r in hits[:limit])
 
 
 def _run_search_basic():

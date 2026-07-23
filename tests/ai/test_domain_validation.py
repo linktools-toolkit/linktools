@@ -34,14 +34,14 @@ def test_model_policy_blank_primary_rejected():
         ModelPolicy(primary="  ")
 
 
-def test_model_policy_negative_max_retries_rejected():
+def test_model_policy_negative_request_retries_rejected():
     with pytest.raises(ValueError):
-        _policy(max_retries=-1)
+        _policy(request_retries=-1)
 
 
-def test_model_policy_bool_max_retries_rejected():
+def test_model_policy_bool_request_retries_rejected():
     with pytest.raises(ValueError):
-        _policy(max_retries=True)
+        _policy(request_retries=True)
 
 
 @pytest.mark.parametrize("bad", [0, -1, math.nan, math.inf])

@@ -30,6 +30,7 @@ except (
     raise
 
 if TYPE_CHECKING:
+    from ...artifact.coordination import ArtifactDigestCoordinator
     from ...evaluation.store import EvalStore
     from ...jobs.store import JobStore
     from ..protocols import (
@@ -52,6 +53,7 @@ from ..features import SQLALCHEMY_STORAGE_FEATURES, StorageFeatures
 from ..facade import Storage
 from .approval import SqlAlchemyApprovalStore
 from .artifact_record import SqlAlchemyArtifactRecordStore
+from .dialects import resolve_dialect_strategy
 from .checkpoint import SqlAlchemyCheckpointStore
 from .definition import SqlAlchemyRunDefinitionStore
 from .event import SqlAlchemyEventStore
@@ -126,6 +128,7 @@ class SqlAlchemyStorageAdapter(Storage):
         coordination: "LeaseCoordinator | None",
         features: StorageFeatures,
         naming: "SqlNamingStrategy" = DEFAULT_SQL_NAMING,
+        artifact_coordinator: "ArtifactDigestCoordinator | None" = None,
     ) -> None:
         from ...artifact.store import ArtifactStore
 
@@ -137,8 +140,15 @@ class SqlAlchemyStorageAdapter(Storage):
         if naming.naming_convention:
             Base.metadata.naming_convention = dict(naming.naming_convention)
 
+        # Resolve the dialect strategy eagerly so an unsupported dialect fails
+        # at construction rather than on first write. The asset backend uses
+        # this strategy to classify integrity violations portably.
+        self._dialect_strategy = resolve_dialect_strategy(session_factory)
+
         assets = AssetStore(
-            primary=SqlAlchemyAssetBackend(session_factory=session_factory)
+            primary=SqlAlchemyAssetBackend(
+                session_factory=session_factory, strategy=self._dialect_strategy
+            )
         )
         super().__init__(
             assets=assets,
@@ -160,7 +170,10 @@ class SqlAlchemyStorageAdapter(Storage):
             _transaction_manager=_SqlAlchemyTransactionManager(session_factory),
             artifacts=ArtifactStore(
                 artifact_blobs,
-                SqlAlchemyArtifactRecordStore(session_factory=session_factory),
+                SqlAlchemyArtifactRecordStore(
+                    session_factory=session_factory, strategy=self._dialect_strategy
+                ),
+                artifact_coordinator,
             ),
         )
 
@@ -181,12 +194,18 @@ class SqlAlchemyStorage(SqlAlchemyStorageAdapter):
     ) -> None:
         from ..coordination.process_local import ProcessLocalLeaseCoordinator
         from ..filesystem.artifact import FilesystemArtifactBlobStore
+        from ..filesystem.artifact_coordination import (
+            FilesystemArtifactDigestCoordinator,
+        )
 
         super().__init__(
             session_factory=session_factory,
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
             coordination=ProcessLocalLeaseCoordinator(),
             features=SQLALCHEMY_STORAGE_FEATURES,
+            # Blobs live on the shared filesystem, so the per-digest lock must
+            # span processes (a separate sweeper worker) -- flock the blobs root.
+            artifact_coordinator=FilesystemArtifactDigestCoordinator(root=blobs_root),
         )
 
 

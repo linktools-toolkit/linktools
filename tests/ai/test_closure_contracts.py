@@ -190,7 +190,7 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     from linktools.ai.governance.policy.rule import PolicyDecision, PolicyDecisionKind
     from linktools.ai.runtime import Runtime
     from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.tool.executor import GovernedToolInvoker
     from linktools.ai.sandbox.local import LocalSandbox
@@ -224,9 +224,9 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=reg),
+        model_resolver=ModelResolver(registry=reg),
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=(_CountingRule(),))),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)
         ),
@@ -305,7 +305,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
     from linktools.ai.model.registry import ModelRegistry
-    from linktools.ai.model.router import ModelResolver
+    from linktools.ai.model.resolver import ModelResolver
 
     class _IdemPolicySrc:
         async def get_metadata_map(self):
@@ -342,8 +342,8 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     rt = Runtime.build(
         storage=storage,
-        model_router=ModelResolver(registry=reg),
-        execution=LocalSandbox(runtime_dir=tmp_path),
+        model_resolver=ModelResolver(registry=reg),
+        sandbox=LocalSandbox(runtime_dir=tmp_path),
         providers=RuntimeDependencies(tool_policies=_IdemPolicySrc()),
         options=CapabilityRuntimeOptions(
             tool_exposure=CapabilityToolExposurePolicy(expose_execution_tools=True)

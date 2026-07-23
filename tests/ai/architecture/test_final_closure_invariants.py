@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Architecture invariants that lock the final-review closure: static contract
+"""Architecture invariants that lock the final closure: static contract
 checks (signatures, field shapes, source-level revision properties) plus
 behavioral locks that exercise each closed gain end-to-end through a real
 registry/parser, so a future change -- or a deleted per-area test file --

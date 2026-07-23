@@ -214,7 +214,7 @@ async def test_append_routing_fields_roundtrip(store_factory):
 
 @pytest.mark.asyncio
 async def test_event_envelope_has_stream_id(store_factory):
-    """G3/review3 contract: stream_id is a first-class EventEnvelope field."""
+    """stream_id is a first-class EventEnvelope field."""
     store = store_factory()
     envelope = await _append(store)
     assert envelope.stream_id == "run-1"
@@ -222,7 +222,7 @@ async def test_event_envelope_has_stream_id(store_factory):
 
 @pytest.mark.asyncio
 async def test_different_streams_can_share_sequence_number(store_factory):
-    """G3/review3 contract: the uniqueness boundary is (stream_id, sequence), not
+    """the uniqueness boundary is (stream_id, sequence), not
     (run_id, sequence) -- two DIFFERENT streams that happen to share a run_id
     prefix (or, once a future caller mints stream_id != run_id, genuinely
     different streams for the SAME run) must each independently start
@@ -258,7 +258,7 @@ async def test_different_streams_can_share_sequence_number(store_factory):
 
 @pytest.mark.asyncio
 async def test_event_sequence_unique_per_stream_not_per_run(store_factory):
-    """G3: appending twice to the SAME stream_id (even under different
+    """appending twice to the SAME stream_id (even under different
     run_id values, an edge case only possible once a caller decouples the
     two) still assigns strictly increasing sequences within that stream."""
     store = store_factory()
@@ -295,7 +295,7 @@ async def test_path_traversal_in_run_id_is_rejected(tmp_path):
 
 @pytest.mark.asyncio
 async def test_file_event_store_migrates_legacy_files_without_stream_id(tmp_path):
-    """G3/review3 contract: a FilesystemEventStore event file written before stream_id
+    """a FilesystemEventStore event file written before stream_id
     became a first-class field (no "stream_id" key in the JSON) must still
     load, with stream_id defaulting to run_id -- exact, not a guess, since
     every caller has always passed stream_id == run_id."""
@@ -303,7 +303,7 @@ async def test_file_event_store_migrates_legacy_files_without_stream_id(tmp_path
 
     store = FilesystemEventStore(root=tmp_path)
     await _append(store, run_id="run-legacy")
-    # Simulate a pre-G3 file by rewriting it without the "stream_id" key.
+    # Simulate a legacy file by rewriting it without the "stream_id" key.
     stream_dir = tmp_path / "run-legacy"
     event_path = next(stream_dir.glob("*.json"))
     raw = json.loads(event_path.read_text())

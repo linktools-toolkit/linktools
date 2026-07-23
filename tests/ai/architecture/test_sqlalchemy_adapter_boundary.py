@@ -2,18 +2,23 @@
 # -*- coding: utf-8 -*-
 """SQLAlchemy adapter boundary guards.
 
-The plan (Storage/Asset/Artifact section) fixes hard rules for the in-repo
-SqlAlchemyStorageAdapter:
+The plan (Storage/Asset/Artifact section, WP2 dialect layer) fixes hard rules
+for the in-repo SqlAlchemyStorageAdapter:
 
 1. core receives NO database URL / DSN;
 2. core imports NO dialect driver (psycopg / asyncpg / mysql / mssql / ...);
-3. core contains NO dialect-name branching or dialect-conditional SQL;
-4. SQLite is the only in-repo integration dialect.
+3. dialect-name branching lives ONLY in the isolated ``storage/sqlalchemy/
+   dialects/`` strategy package -- the adapter facade and every store stay
+   dialect-neutral and delegate conflict classification there;
+4. SQLite, MySQL, and PostgreSQL are the supported dialects; SQLite is the only
+   one exercised in-repo (MySQL/PostgreSQL run in CI via
+   ``LINKTOOLS_AI_TEST_MYSQL_DSN`` / ``LINKTOOLS_AI_TEST_POSTGRESQL_DSN``).
 
 These must hold mechanically, not by goodwill -- a future change that adds
-``import asyncpg`` or a ``create_engine(url)`` to the core adapter would
-silently re-couple core to a vendor. This module grep-asserts the boundary so
-the regression cannot slip in.
+``import asyncpg`` or a ``create_engine(url)`` to the core adapter, or scatters
+dialect-name ``if``s outside the strategy package, would silently re-couple
+core to a vendor. This module grep-asserts the boundary so the regression
+cannot slip in.
 """
 
 from __future__ import annotations
@@ -65,7 +70,11 @@ def _imported_top_level_modules(path: Path) -> "set[str]":
             for alias in node.names:
                 roots.add(alias.name.split(".")[0])
         elif isinstance(node, ast.ImportFrom):
-            if node.module:
+            # Relative imports (level > 0) are intra-package -- a local module
+            # named e.g. ``mysql.py`` under ``dialects/`` is NOT the PyPI mysql
+            # driver. Only absolute imports (level == 0) can reach a vendor
+            # driver package.
+            if node.module and node.level == 0:
                 roots.add(node.module.split(".")[0])
     return roots
 
@@ -119,9 +128,12 @@ def test_adapter_parses_no_dsn_or_engine_url() -> None:
 
 
 def test_adapter_has_no_dialect_name_branching() -> None:
-    """No core source may branch on a dialect name. Portable
-    SQLAlchemy API (with_for_update(skip_locked=True), read-check-mutate upsert)
-    is allowed; ``dialect.name == 'sqlite'`` / vendor-conditional SQL is not."""
+    """No core source OUTSIDE the dialect strategy package may branch on a
+    dialect name. Portable SQLAlchemy API (with_for_update(skip_locked=True),
+    read-check-mutate upsert) is allowed; ``dialect.name == 'sqlite'`` /
+    vendor-conditional SQL is allowed ONLY inside ``storage/sqlalchemy/dialects/``,
+    the isolated strategy layer that resolves the dialect once at adapter
+    construction."""
     forbidden = [
         r"\.dialect\.name\b",
         r"==\s*['\"]sqlite['\"]",
@@ -132,13 +144,19 @@ def test_adapter_has_no_dialect_name_branching() -> None:
     ]
     offenders: "list[str]" = []
     for path in _core_py_files():
+        # The dialect strategy package is the one core site that legitimately
+        # branches on a dialect name (it maps sqlite/mysql/postgresql to a
+        # classifier). Everywhere else the ban still holds.
+        if "sqlalchemy" in path.parts and "dialects" in path.parts:
+            continue
         text = path.read_text(encoding="utf-8")
         for pat in forbidden:
             m = re.search(pat, text)
             if m:
                 offenders.append(f"{path.relative_to(_REPO)}: matches {pat!r}")
     assert not offenders, (
-        "dialect-name branching in core adapter:\n  " + "\n  ".join(offenders)
+        "dialect-name branching outside the dialects/ strategy package:\n  "
+        + "\n  ".join(offenders)
     )
 
 

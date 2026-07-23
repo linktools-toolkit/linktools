@@ -22,7 +22,7 @@ from linktools.ai.agent.engine import AgentEngine
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelGateway, ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunnableType
@@ -121,7 +121,7 @@ def test_user_message_is_original_prompt_not_history(tmp_path):
     registry.register("test-model", model=FunctionModel(_model_fn))
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_router=ModelGateway(ModelResolver(registry=registry)),
+        model_resolver=ModelResolver(registry=registry),
     )
     compiled = asyncio.run(
         compiler.compile(

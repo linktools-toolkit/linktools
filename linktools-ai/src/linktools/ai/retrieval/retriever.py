@@ -48,15 +48,15 @@ class MemoryRetriever:
             workspace_id=scope.workspace_id,
             session_id=scope.session_id,
         )
-        records = await self._store.search(query, scope=memory_scope, limit=limit)
+        matches = await self._store.search(query, scope=memory_scope, limit=limit)
         return tuple(
             Document(
-                id=r.id,
-                content=r.content,
-                score=None,
+                id=m.record.id,
+                content=m.record.content,
+                score=m.score,
                 source="memory",
-                metadata=dict(r.metadata),
+                metadata=dict(m.record.metadata),
                 trust_level="untrusted",
             )
-            for r in records
+            for m in matches
         )

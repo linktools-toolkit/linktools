@@ -108,7 +108,7 @@ from linktools.ai.jobs.store import JobStore, TaskClaimLostError
 from linktools.ai.memory.store import MemoryStore
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
-from linktools.ai.model.router import ModelResolver
+from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.checkpoint import CheckpointStore
 from linktools.ai.run.definition import RunDefinitionStore
 from linktools.ai.run.models import RunStatus
@@ -420,7 +420,7 @@ def test_external_adapter_drives_run_to_completion(tmp_path: pathlib.Path) -> No
 
     runtime = Runtime.build(
         storage=storage,
-        model_router=_router(),
+        model_resolver=_router(),
         commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
     )
     spec = AgentSpec(
@@ -506,7 +506,7 @@ def test_external_adapter_drives_approval_resume(tmp_path: pathlib.Path) -> None
     )
     runtime = Runtime.build(
         storage=storage,
-        model_router=_approval_router(),
+        model_resolver=_approval_router(),
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_RiskyProvider(),)),
         local_trusted_mode=True,
@@ -697,7 +697,7 @@ def test_external_adapter_drives_approval_resume_produces_artifact(
     )
     runtime = Runtime.build(
         storage=storage,
-        model_router=_approval_router(),
+        model_resolver=_approval_router(),
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_ArtifactProvider(),)),
         local_trusted_mode=True,
@@ -974,7 +974,7 @@ def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
     )
     runtime = Runtime.build(
         storage=storage,
-        model_router=_approval_router(),
+        model_resolver=_approval_router(),
         tool_executor=executor,
         providers=RuntimeDependencies(capabilities=(_ArtifactProvider(),)),
         local_trusted_mode=True,
