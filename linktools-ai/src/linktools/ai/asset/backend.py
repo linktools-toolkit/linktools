@@ -3,10 +3,16 @@
 """Asset backend Protocols, split by capability.
 
 :class:`AssetReaderBackend` is the read surface every backend implements
-(raw_get / raw_stat / raw_list / revision / get_idempotency). Overlay backends
-are readers. :class:`AssetWriterBackend` extends it with the atomic checked
-operations (raw_put_checked / raw_delete_checked / raw_move / put_idempotency).
-The AssetStore primary is always a Writer; overlays are Readers.
+(raw_get / raw_stat / raw_list / revision). Overlay backends are readers.
+:class:`AssetWriterBackend` extends it with the atomic checked operations
+(raw_put_checked / raw_delete_checked / raw_move_checked). The AssetStore
+primary is always a Writer; overlays are Readers. Idempotency is NOT part of the
+read surface -- it lives inside the Writer's checked operations, so a Reader
+backend never has to implement or expose it.
+
+Each backend carries a ``backend_id`` the AssetStore tags with a stable
+canonical id (``primary`` / ``overlay:N``) so a multi-backend cursor can name
+each backend's contribution.
 
 Splitting the Protocols (and typing the primary as ``AssetWriterBackend``,
 overlays as ``tuple[AssetReaderBackend, ...]``) removes the former
@@ -20,9 +26,7 @@ from typing import Protocol, runtime_checkable
 
 from .models import (
     Depth,
-    IdempotencyRecord,
     Asset,
-    AssetInfo,
     AssetLookupInfo,
     AssetPage,
     WriteOptions,
@@ -33,7 +37,10 @@ from .path import AssetPath
 @runtime_checkable
 class AssetReaderBackend(Protocol):
     """Read surface. Every backend (including read-only overlays) implements
-    these."""
+    these. ``backend_id`` is a stable identifier the AssetStore tags so a
+    multi-backend listing cursor can attribute each item to its source."""
+
+    backend_id: str
 
     async def raw_get(self, path: AssetPath, *, include_content: bool = True): ...
 
@@ -48,9 +55,7 @@ class AssetReaderBackend(Protocol):
         cursor: "str | None",
     ) -> AssetPage: ...
 
-    async def revision(self) -> int: ...
-
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None": ...
+    async def revision(self) -> str: ...
 
 
 @runtime_checkable
@@ -60,9 +65,11 @@ class AssetWriterBackend(AssetReaderBackend, Protocol):
     cannot be interleaved by a concurrent writer (the TOCTOU race a split
     orchestration has). A backend that has a real transaction primitive
     (SqlAlchemy) runs all three inside one transaction; File and Memory
-    serialize with a process-local lock. ``raw_move`` is a single atomic
+    serialize with a process-local lock. ``raw_move_checked`` is a single atomic
     operation (load-source + write-target + whiteout-source + bump-revision);
-    it never decomposes into a public put + delete.
+    it never decomposes into a public put + delete. Idempotency is encapsulated
+    INSIDE these checked writes -- there is no separate idempotency method on
+    the Writer.
 
     A read-only backend (``ReadOnlyAssetBackend``) implements only
     :class:`AssetReaderBackend` -- it lacks these write methods, so it does not
@@ -94,8 +101,6 @@ class AssetWriterBackend(AssetReaderBackend, Protocol):
         options: WriteOptions,
         request_hash: str,
     ) -> Asset: ...
-
-    async def put_idempotency(self, record: IdempotencyRecord) -> None: ...
 
 
 __all__: "list[str]" = ["AssetReaderBackend", "AssetWriterBackend"]

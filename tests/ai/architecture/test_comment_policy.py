@@ -97,6 +97,9 @@ REPO_WIDE_PATTERNS: "tuple[str, ...]" = (
     r"\bIssue\b",
     r"§\s*\d",
     r"\bPhase\s+\d",
+    r"兼容旧",
+    r"currently\s+rejects",
+    r"SQLite\s+UPSERT",
 )
 
 # §11.5 additions scoped to linktools-ai only (src/linktools/ai + ai_cli +

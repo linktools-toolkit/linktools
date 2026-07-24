@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SwarmRunner: the top-level orchestrator that ties the SwarmSpec -> strategy ->
+"""SwarmEngine: the top-level orchestrator that ties the SwarmSpec -> strategy ->
 child Runs flow together . It compiles the member agents, creates the
 driving RunRecord (runnable_type=SWARM) + SwarmRun, builds the
 SwarmExecutionContext, delegates the round loop to the resolved strategy, writes
@@ -9,11 +9,11 @@ driving Run to SUCCEEDED.
 
 This module owns the DRIVING swarm lifecycle only. The round loop, per-round /
 per-task events, task persistence, and aggregation are the strategy's job (see
-swarm.strategy). SwarmRunner never calls a model itself -- it constructs
+swarm.strategy). SwarmEngine never calls a model itself -- it constructs
 one AgentEngine and hands it to the SwarmExecutionContext so the strategy's
 ``_run_task`` can drive child Runs.
 
-Critical invariant (established by strategy._run_task): a SwarmTask's
+Critical invariant (established by strategy._run_task): a SwarmStep's
 ``active_run_id`` is its child RunRecord's ``id`` (NOT the task's own id).
 cancel() exploits this -- ``list_tasks(..., status=CLAIMED)`` yields tasks
 whose ``active_run_id`` is the in-flight child Run to cancel.
@@ -63,7 +63,7 @@ from ..run.models import (
 from ..run.store import RunStore
 from ..session.models import MessageRole, NewSessionMessage
 from ..session.store import SessionStore
-from .models import SwarmCheckpoint, SwarmRun, SwarmStatus, SwarmTaskStatus, TokenUsage
+from .models import SwarmCheckpoint, SwarmRun, SwarmStatus, SwarmStepStatus, TokenUsage
 
 if TYPE_CHECKING:
     from ..run.definition import RunDefinitionStore
@@ -93,15 +93,15 @@ _DRIVING_TERMINAL_STATUSES = frozenset(
 )
 
 
-class SwarmRunner:
+class SwarmEngine:
     """Orchestrates one Swarm invocation end-to-end. Construct once, call
     ``run()`` per invocation. ``resume()`` re-enters the strategy after a
     partial run; ``cancel()`` propagates real cancellation through
     ``RunController`` when wired.
 
-    SwarmRunner does NOT assemble an AgentEngine itself -- Runtime is the
+    SwarmEngine does NOT assemble an AgentEngine itself -- Runtime is the
     single assembly point. The caller (normally
-    ``Runtime.build()``) must hand in the SAME ``RunDispatcher`` (backed by the
+    ``build_runtime()``) must hand in the SAME ``RunDispatcher`` (backed by the
     AgentEngine instance) used for top-level Agent runs, so Swarm worker Runs
     get identical Tool/Policy/Middleware/UoW/Cancellation semantics instead of
     a second, divergent execution path. Passing ``run_controller`` (the SAME
@@ -122,10 +122,10 @@ class SwarmRunner:
         run_definitions: "RunDefinitionStore",
     ) -> None:
         if run_definitions is None:
-            # Defense in depth: Runtime.build rejects this up front, but a
-            # hand-built SwarmRunner must also fail rather than silently
+            # Defense in depth: build_runtime rejects this up front, but a
+            # hand-built SwarmEngine must also fail rather than silently
             # skipping worker snapshots.
-            raise SwarmError("SwarmRunner requires a RunDefinitionStore")
+            raise SwarmError("SwarmEngine requires a RunDefinitionStore")
         self._swarm_store = swarm_store
         self._run_store = run_store
         self._session_store = session_store
@@ -212,7 +212,7 @@ class SwarmRunner:
         # register the driving coroutine
         # + a fresh CancellationToken with run_controller, mirroring
         # AgentEngine.execute()'s own registration. Runtime.cancel(run_id) /
-        # SwarmRunner.cancel() can then call run_controller.cancel(run_id)
+        # SwarmEngine.cancel() can then call run_controller.cancel(run_id)
         # to actually interrupt this coroutine (task.cancel()) instead of
         # only flipping store status. None (default) preserves the old
         # store-only behavior for callers that don't wire a controller.
@@ -536,16 +536,16 @@ class SwarmRunner:
             tasks = await self._swarm_store.list_tasks(swarm_run.id)
             checkpoint = SwarmCheckpoint(
                 completed_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmTaskStatus.SUCCEEDED
+                    t.id for t in tasks if t.status is SwarmStepStatus.SUCCEEDED
                 ),
                 failed_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmTaskStatus.FAILED
+                    t.id for t in tasks if t.status is SwarmStepStatus.FAILED
                 ),
                 pending_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmTaskStatus.PENDING
+                    t.id for t in tasks if t.status is SwarmStepStatus.PENDING
                 ),
                 active_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmTaskStatus.CLAIMED
+                    t.id for t in tasks if t.status is SwarmStepStatus.CLAIMED
                 ),
                 task_outputs={t.id: t.result for t in tasks if t.result is not None},
             )
@@ -690,7 +690,7 @@ class SwarmRunner:
             )
 
         claimed = await self._swarm_store.list_tasks(
-            swarm_run_id, status=SwarmTaskStatus.CLAIMED
+            swarm_run_id, status=SwarmStepStatus.CLAIMED
         )
         for task in claimed:
             # The child RunRecord's id is task.active_run_id (NOT
@@ -806,7 +806,7 @@ class SwarmRunner:
 
         claimed = await self._swarm_store.list_tasks(
             swarm_run_id,
-            status=SwarmTaskStatus.CLAIMED,
+            status=SwarmStepStatus.CLAIMED,
         )
         now = datetime.now(timezone.utc)
         for task in claimed:

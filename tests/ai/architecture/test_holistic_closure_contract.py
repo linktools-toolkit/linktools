@@ -66,17 +66,17 @@ def test_checkpoint_callers_do_not_hardcode_sequence():
 
 
 def test_runtime_build_has_no_pause_on_approval():
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import build_runtime
 
-    build_params = inspect.signature(Runtime.build).parameters
+    build_params = inspect.signature(build_runtime).parameters
     assert "pause_on_approval" not in build_params, (
-        "Runtime.build must not expose pause_on_approval (single pause path)"
+        "build_runtime must not expose pause_on_approval (single pause path)"
     )
 
 
 def test_agent_runner_requires_commit_coordinator():
     """AgentEngine.commit_coordinator has no default -- the cross-store commit
-    is coordinator-owned and Runtime.build always wires one. There is no inline
+    is coordinator-owned and build_runtime always wires one. There is no inline
     fallback path."""
     from linktools.ai.agent.engine import AgentEngine
 
@@ -117,12 +117,12 @@ def test_runtime_resume_takes_only_run_id():
 
 
 def test_swarm_resume_takes_only_swarm_run_id():
-    from linktools.ai.swarm.runner import SwarmRunner
+    from linktools.ai.swarm.engine import SwarmEngine
 
-    params = inspect.signature(SwarmRunner.resume).parameters
+    params = inspect.signature(SwarmEngine.resume).parameters
     forbidden = {"spec", "agents", "user_id", "tenant_id"}
     assert not (forbidden & set(params)), (
-        f"SwarmRunner.resume must not accept caller spec/agents/identity, "
+        f"SwarmEngine.resume must not accept caller spec/agents/identity, "
         f"got {sorted(forbidden & set(params))}"
     )
 
@@ -134,7 +134,7 @@ def test_runtime_lifecycle_entries_delegate_to_run_coordinator():
     """Every public Runtime run-lifecycle entry (run / run_stream /
     cancel / approve / reject / resume) routes through the single
     RunCoordinator. Runtime is a thin facade -- it never reaches the stores or
-    SwarmRunner directly for lifecycle state. SwarmRunner is an internal
+    SwarmEngine directly for lifecycle state. SwarmEngine is an internal
     delegate of RunCoordinator.run (reachable only via RuntimeComponents), not
     a public entry, so the driving run's writes during a swarm have a single
     owner (the coordinator's delegate) rather than two competing writers."""
@@ -168,12 +168,12 @@ def test_runtime_lifecycle_entries_delegate_to_run_coordinator():
         f"Runtime lifecycle methods must delegate to self._coordinator "
         f"(single entry writer): {non_delegating}"
     )
-    # The facade never reaches SwarmRunner directly -- it is an internal
+    # The facade never reaches SwarmEngine directly -- it is an internal
     # delegate of RunCoordinator, reachable only via RuntimeComponents.
     src = inspect.getsource(Runtime)
-    assert "self._components.swarm_runner" not in src, (
-        "Runtime must not call SwarmRunner directly -- route through "
-        "RunCoordinator (SwarmRunner is an internal delegate)"
+    assert "self._components.swarm_engine" not in src, (
+        "Runtime must not call SwarmEngine directly -- route through "
+        "RunCoordinator (SwarmEngine is an internal delegate)"
     )
 
 

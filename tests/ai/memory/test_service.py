@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for the MemoryManager domain facade. Drives it against an in-process
+"""Tests for the MemoryService domain facade. Drives it against an in-process
 dict-backed _StubStore implementing the full MemoryStore Protocol (5 methods,
 including the _UNSET update sentinel). search returns scored MemoryMatch
 results (score=None for the keyword stub)."""
@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from linktools.ai.errors import MemoryConflictError
-from linktools.ai.memory.manager import MemoryManager
+from linktools.ai.memory.service import MemoryService
 from linktools.ai.memory.models import MemoryMatch, MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.memory.store import _UNSET
@@ -113,13 +113,13 @@ class _StubStore:
         del self._records[memory_id]
 
 
-# --- MemoryManager.recall / remember ----------------------------------------
+# --- MemoryService.recall / remember ----------------------------------------
 
 
 def test_remember_then_recall_substring():
     async def _run():
         store = _StubStore()
-        mgr = MemoryManager(store=store)
+        mgr = MemoryService(store=store)
 
         record = await mgr.remember(_scope(), "hello world", category="note")
         assert record.version == 1
@@ -142,7 +142,7 @@ def test_recall_returns_memory_match_with_none_score():
     # whose score is None (never a fabricated 1.0).
     async def _run():
         store = _StubStore()
-        mgr = MemoryManager(store=store)
+        mgr = MemoryService(store=store)
         await mgr.remember(_scope(), "hello world")
         hits = await mgr.recall(_scope(), "hello")
         assert len(hits) == 1
@@ -155,7 +155,7 @@ def test_recall_returns_memory_match_with_none_score():
 def test_recall_filters_by_user_subscope():
     async def _run():
         store = _StubStore()
-        mgr = MemoryManager(store=store)
+        mgr = MemoryService(store=store)
 
         # Remembered under user u1 (same tenant); a u2 recall in the same
         # tenant must not see it.
@@ -168,7 +168,7 @@ def test_recall_filters_by_user_subscope():
 def test_forget_then_get_is_none():
     async def _run():
         store = _StubStore()
-        mgr = MemoryManager(store=store)
+        mgr = MemoryService(store=store)
 
         record = await mgr.remember(_scope(), "hello world")
         await mgr.forget(record.id, expected_version=1)
@@ -180,7 +180,7 @@ def test_forget_then_get_is_none():
 def test_remember_round_trips_metadata():
     async def _run():
         store = _StubStore()
-        mgr = MemoryManager(store=store)
+        mgr = MemoryService(store=store)
 
         record = await mgr.remember(_scope(), "hi", metadata={"k": "v"})
         assert record.metadata == {"k": "v"}
@@ -189,7 +189,7 @@ def test_remember_round_trips_metadata():
 
 
 def test_manager_has_no_index_parameter():
-    # The fake MemoryIndex abstraction is gone: MemoryManager takes only a
+    # The fake MemoryIndex abstraction is gone: MemoryService takes only a
     # store, and exposes no index/sync field.
-    mgr = MemoryManager(store=_StubStore())
+    mgr = MemoryService(store=_StubStore())
     assert not hasattr(mgr, "index")

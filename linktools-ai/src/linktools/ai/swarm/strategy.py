@@ -19,7 +19,7 @@ can never leak into the next attempt's prompt.
 The child RunRecord's id is NOT the task's id. ``_run_task``
 mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
 task via ``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the
-handle SwarmRunner.cancel uses to find the in-flight child Run. On retry the
+handle SwarmEngine.cancel uses to find the in-flight child Run. On retry the
 same task gets a NEW run_id (active_run_id is overwritten), which is the
 decoupling mandated for correctness.
 
@@ -69,9 +69,9 @@ from .limits import SwarmLimits
 from .models import (
     AttemptStatus,
     SwarmRun,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     SwarmCheckpoint,
     TaskInput,
 )
@@ -88,7 +88,7 @@ _LOGGER = logging.getLogger(__name__)
 # --- coordinator_fn signature ------------------------------------------------
 
 CoordinatorFn = Callable[
-    [SwarmRun, "Tuple[SwarmTask, ...]", SwarmLimits],
+    [SwarmRun, "Tuple[SwarmStep, ...]", SwarmLimits],
     "Awaitable[Tuple[TaskInput, ...]]",
 ]
 
@@ -186,7 +186,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
+async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmStep) -> int:
     """Walk ``task.parent_task_id`` up the ancestor chain to compute this task's
     depth. A top-level task (``parent_task_id is None``) is depth 1; each
     ancestor adds one. Guards against malformed cycles by capping the walk at a
@@ -203,7 +203,7 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
     # the whole walk (the ancestor set is immutable for the duration of a single
     # _run_task call). A dedicated get_task is a separate concern.
     ancestors = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
-    by_id: "dict[str, SwarmTask]" = {t.id: t for t in ancestors}
+    by_id: "dict[str, SwarmStep]" = {t.id: t for t in ancestors}
     depth = 1
     current_id = task.parent_task_id
     seen: "set[str]" = set()
@@ -219,12 +219,12 @@ async def _compute_depth(ctx: SwarmExecutionContext, task: SwarmTask) -> int:
 
 async def _retry_fencing_conflict_once(
     ctx: SwarmExecutionContext,
-    claimed: SwarmTask,
+    claimed: SwarmStep,
     *,
-    still_owned: "Callable[[SwarmTask], bool]",
-    op: "Callable[[int], Awaitable[SwarmTask]]",
-) -> "SwarmTask | None":
-    """Run a fenced SwarmTask write (``op(expected_version)`` -- a partial of
+    still_owned: "Callable[[SwarmStep], bool]",
+    op: "Callable[[int], Awaitable[SwarmStep]]",
+) -> "SwarmStep | None":
+    """Run a fenced SwarmStep write (``op(expected_version)`` -- a partial of
     complete_task/fail_task with the version filled in) and classify a
     ``SwarmConflictError`` instead of treating every conflict the same:
 
@@ -238,7 +238,7 @@ async def _retry_fencing_conflict_once(
       return None so the caller discards this attempt without mistaking the
       conflict for a worker failure.
 
-    Any exception that is not a SwarmConflictError (e.g. SwarmTaskNotFoundError,
+    Any exception that is not a SwarmConflictError (e.g. SwarmStepNotFoundError,
     a raw storage error) is not a fencing conflict this helper knows how to
     interpret and is left to propagate to the caller.
 
@@ -280,9 +280,9 @@ async def _retry_fencing_conflict_once(
 
 
 async def _run_task(
-    ctx: SwarmExecutionContext, task: SwarmTask, *, max_task_retries: int = 0
+    ctx: SwarmExecutionContext, task: SwarmStep, *, max_task_retries: int = 0
 ) -> "RunResult | None":
-    """Run a single SwarmTask against its assigned worker agent.
+    """Run a single SwarmStep against its assigned worker agent.
 
     Sequence:
       0. depth guard: walk ``parent_task_id`` chain; raise
@@ -325,7 +325,7 @@ async def _run_task(
     last_exc: "BaseException | None" = None
     child_run_id: "str | None" = None
     # Each retry iteration records one
-    # SwarmTaskAttempt. ``base_attempt`` is the 1-based attempt number of the
+    # SwarmStepAttempt. ``base_attempt`` is the 1-based attempt number of the
     # FIRST iteration of this _run_task call, sourced from the actual audit
     # trail (``list_attempts``) rather than ``claimed.attempts`` -- the task
     # row's counter is bumped only by fail_task(), so it undercounts attempts
@@ -349,7 +349,7 @@ async def _run_task(
         # partial conversation into the retry's prompt, since AgentEngine
         # always prepends list_messages(session_id) for a fresh, non-resume
         # run. set_active_run records the fresh id on the task (bumping its
-        # version) so SwarmRunner.cancel can locate the in-flight child Run.
+        # version) so SwarmEngine.cancel can locate the in-flight child Run.
         child_run_id = str(uuid.uuid4())
         # Unlike complete_task/fail_task below, a set_active_run conflict is
         # NOT retried with the fresh version -- it is discarded outright.
@@ -415,7 +415,7 @@ async def _run_task(
         # trail captures the start even if the worker never returns (crash
         # mid-run). record_attempt is an upsert on attempt.id, so the trailing
         # SUCCEEDED|FAILED write reuses the same id and finishes the row.
-        current_attempt = SwarmTaskAttempt(
+        current_attempt = SwarmStepAttempt(
             id=str(uuid.uuid4()),
             task_id=claimed.id,
             run_id=child_run_id,
@@ -479,7 +479,7 @@ async def _run_task(
             ctx,
             claimed,
             still_owned=lambda t: (
-                t.status is SwarmTaskStatus.CLAIMED and t.active_run_id == child_run_id
+                t.status is SwarmStepStatus.CLAIMED and t.active_run_id == child_run_id
             ),
             op=lambda v: ctx.swarm_store.complete_task(
                 claimed.id,
@@ -561,7 +561,7 @@ async def _run_task(
         ctx,
         claimed,
         still_owned=lambda t: (
-            t.status is SwarmTaskStatus.CLAIMED and t.active_run_id == child_run_id
+            t.status is SwarmStepStatus.CLAIMED and t.active_run_id == child_run_id
         ),
         op=lambda v: ctx.swarm_store.fail_task(
             claimed.id,
@@ -578,15 +578,15 @@ async def _run_task(
     return None
 
 
-def _make_task(ctx: SwarmExecutionContext, ti: TaskInput, agent_id: str) -> SwarmTask:
+def _make_task(ctx: SwarmExecutionContext, ti: TaskInput, agent_id: str) -> SwarmStep:
     now = _now()
-    return SwarmTask(
+    return SwarmStep(
         id=str(uuid.uuid4()),
         swarm_run_id=ctx.swarm_run.id,
         parent_task_id=None,
         assigned_agent_id=agent_id,
         description=ti.prompt[:80],
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=ti,
         result=None,
@@ -635,7 +635,7 @@ class CoordinatorDelegationStrategy:
         seen: "list[bool]" = [False]
 
         async def _default(
-            swarm_run: SwarmRun, completed: "tuple[SwarmTask, ...]", limits: SwarmLimits
+            swarm_run: SwarmRun, completed: "tuple[SwarmStep, ...]", limits: SwarmLimits
         ) -> "tuple[TaskInput, ...]":
             if not seen[0] and not completed:
                 seen[0] = True
@@ -657,7 +657,7 @@ class CoordinatorDelegationStrategy:
         while True:
             completed = await ctx.swarm_store.list_tasks(
                 ctx.swarm_run.id,
-                status=SwarmTaskStatus.SUCCEEDED,
+                status=SwarmStepStatus.SUCCEEDED,
             )
             new_inputs = await coordinator_fn(ctx.swarm_run, completed, ctx.spec.limits)
             if not new_inputs:
@@ -710,7 +710,7 @@ class CoordinatorDelegationStrategy:
             tasks = await ctx.swarm_store.list_tasks(ctx.swarm_run.id)
             new_inputs = await coordinator_fn(
                 ctx.swarm_run,
-                tuple(t for t in tasks if t.status is SwarmTaskStatus.SUCCEEDED),
+                tuple(t for t in tasks if t.status is SwarmStepStatus.SUCCEEDED),
                 ctx.spec.limits,
             )
             if not new_inputs:
@@ -769,7 +769,7 @@ class ParallelFanOutStrategy:
             )
 
         # create all tasks up front, round-robin across the worker pool.
-        tasks: "list[SwarmTask]" = []
+        tasks: "list[SwarmStep]" = []
         for i, ti in enumerate(inputs):
             agent_id = workers[i % len(workers)]
             task = _make_task(ctx, ti, agent_id)
@@ -780,7 +780,7 @@ class ParallelFanOutStrategy:
         max_concurrency = max(1, ctx.spec.limits.max_concurrency)
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def _run_one(t: SwarmTask) -> None:
+        async def _run_one(t: SwarmStep) -> None:
             async with semaphore:
                 await _run_task(ctx, t, max_task_retries=self._max_task_retries)
 

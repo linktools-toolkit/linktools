@@ -27,7 +27,7 @@ from .models import (
     AssetPage,
     WriteOptions,
 )
-from .path import AssetPath, matches_asset_depth
+from .path import AssetPath, _require_persistable_path, matches_asset_depth
 
 
 class MemoryAssetBackend:
@@ -36,11 +36,15 @@ class MemoryAssetBackend:
         self._whiteouts: "dict[str, int]" = {}
         self._idempotency: "dict[str, IdempotencyRecord]" = {}
         self._revision = 0
+        # Stable id the AssetStore overrides with the canonical primary/overlay
+        # tag; defaults to the backend's origin so it is never blank.
+        self.backend_id = "memory"
         # One lock guards every checked op so the precondition + idempotency +
         # mutate steps cannot interleave across concurrent coroutines.
         self._lock = asyncio.Lock()
 
     async def raw_get(self, path: AssetPath, *, include_content: bool = True):
+        _require_persistable_path(path)
         key = path.value
         if key in self._entries:
             content, info = self._entries[key]
@@ -70,8 +74,8 @@ class MemoryAssetBackend:
         next_cursor = items[limit - 1].path.value if len(items) > limit else None
         return AssetPage(items=tuple(items[:limit]), cursor=next_cursor)
 
-    async def revision(self) -> int:
-        return self._revision
+    async def revision(self) -> str:
+        return str(self._revision)
 
     async def raw_put(
         self,
@@ -99,12 +103,6 @@ class MemoryAssetBackend:
         self._whiteouts[path.value] = prior_version + 1
         self._revision += 1
         return removed[1] if removed else None
-
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
-        return self._idempotency.get(key)
-
-    async def put_idempotency(self, record: IdempotencyRecord) -> None:
-        self._idempotency[record.key] = record
 
     # -- Atomic checked operations (serialized under self._lock) -------------
 
@@ -141,6 +139,7 @@ class MemoryAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> Asset:
+        _require_persistable_path(path)
         async with self._lock:
             idem_key = options.idempotency_key
             if idem_key is not None:
@@ -193,6 +192,7 @@ class MemoryAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> None:
+        _require_persistable_path(path)
         async with self._lock:
             idem_key = options.idempotency_key
             if idem_key is not None:
@@ -228,6 +228,8 @@ class MemoryAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> Asset:
+        _require_persistable_path(source)
+        _require_persistable_path(target)
         async with self._lock:
             idem_key = options.idempotency_key
             if idem_key is not None:

@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..errors import InvalidAssetPathError
+from ..errors import AssetRootMutationError, InvalidAssetPathError
 
 if TYPE_CHECKING:
     from .models import Depth
@@ -43,12 +43,33 @@ class AssetPath:
         return self.value
 
     @property
+    def is_root(self) -> bool:
+        return self.value == "/"
+
+    @property
     def parts(self) -> "tuple[str, ...]":
+        if self.is_root:
+            return ()
         return tuple(self.value.strip("/").split("/"))
 
     @property
-    def namespace(self) -> str:
+    def namespace(self) -> "str | None":
+        if self.is_root:
+            return None
         return self.parts[0]
+
+    @property
+    def name(self) -> str:
+        if self.is_root:
+            return ""
+        return self.parts[-1]
+
+    @property
+    def parent(self) -> "AssetPath | None":
+        if self.is_root:
+            return None
+        parts = self.parts[:-1]
+        return AssetPath("/" + "/".join(parts)) if parts else AssetPath("/")
 
     def child(self, name: str) -> "AssetPath":
         return AssetPath(f"{self.value}/{name}")
@@ -57,11 +78,23 @@ class AssetPath:
         return self.child(name)
 
 
+def _require_persistable_path(path: AssetPath) -> None:
+    """Reject the namespace root for any operation that loads or mutates
+    content (get/put/delete/move). Called at BOTH the Store and Backend
+    layers -- a caller that reaches a backend directly (bypassing the Store)
+    still gets the same fail-closed rejection."""
+    if path.is_root:
+        raise AssetRootMutationError(
+            "the namespace root (\"/\") is a synthetic directory, not a "
+            "persistable Asset -- only list/stat/revision accept it"
+        )
+
+
 def _relative_depth(base_value: str, candidate_value: str) -> "int | None":
     """String-level relative-depth computation. Split out from
     :func:`relative_asset_depth` so the root-namespace case (``base_value ==
     "/"``) is unit-testable without constructing an ``AssetPath("/")``, which
-    normalization currently rejects."""
+    normalization rejects."""
     if candidate_value == base_value:
         return 0
     prefix = "/" if base_value == "/" else base_value + "/"

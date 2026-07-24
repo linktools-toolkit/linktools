@@ -7,11 +7,25 @@ runnable_id=...`` at each call site. ``append_event(store, context, payload)``
 is the single helper."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
 if TYPE_CHECKING:
-    from ..run.context import RunContext
     from .store import EventStore
+
+
+class _RunContextLike(Protocol):
+    """Structural shape ``from_run_context`` reads. Defined here (rather than
+    importing ``run.context.RunContext``) so the ``events`` package does not
+    depend on ``run`` -- ``run`` imports ``events`` (RunCoordinator owns
+    lifecycle-event emission, per the run-owner work package), so a
+    ``RunContext`` import in this direction would form a top-level 2-cycle.
+    ``RunContext`` satisfies this Protocol structurally."""
+
+    run_id: str
+    root_run_id: "str | None"
+    parent_run_id: "str | None"
+    session_id: str
+    runnable_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,11 +39,11 @@ class EventStreamContext:
 
     @classmethod
     def from_run_context(
-        cls, ctx: "RunContext", *, stream_id: "str | None" = None
+        cls, ctx: "_RunContextLike", *, stream_id: "str | None" = None
     ) -> "EventStreamContext":
-        """Build an EventStreamContext from a RunContext. ``stream_id`` defaults to the
-        run_id (the common case -- every current caller passes stream_id ==
-        run_id)."""
+        """Build an EventStreamContext from a RunContext-like object. ``stream_id``
+        defaults to the run_id (the common case -- every current caller passes
+        stream_id == run_id)."""
         run_id = ctx.run_id
         root = ctx.root_run_id or run_id
         return cls(

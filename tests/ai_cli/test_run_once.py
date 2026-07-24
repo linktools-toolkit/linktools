@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """``run_once`` exit-code contract.
 
-0 = completed; 4 = paused for approval (run_id/approval_id printed); 130 =
-Ctrl+C after cancelling the run through the runtime (not just the process).
-Drives the console layer with ``FakeRuntimeClient`` so no real Runtime/model is
-needed."""
+0 = completed; 4 = paused for approval (run_id/approval_id printed); 1 = the
+run ended FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model,
+spec section 12.3, reports this way instead of raising); 130 = a
+``{"type": "cancelled", ...}`` event OR Ctrl+C after cancelling the run
+through the runtime (not just the process). Drives the console layer with
+``FakeRuntimeClient`` so no real Runtime/model is needed."""
 
 import asyncio
 import contextlib
@@ -52,6 +54,50 @@ class TestRunOnceExitCodes(unittest.TestCase):
         self.assertEqual(code, 130)
         # The run minted its own id; cancel must target exactly that id.
         self.assertEqual(fake.cancel_calls, [fake.last_run_id])
+
+    def test_failed_event_returns_exit_code_1(self):
+        fake = FakeRuntimeClient(
+            stream_events=[
+                {
+                    "type": "failed",
+                    "run_id": "r1",
+                    "error_type": "RuntimeError",
+                    "message": "model exploded",
+                }
+            ]
+        )
+        self.assertEqual(_call(fake), 1)
+
+    def test_cancelled_event_returns_exit_code_130(self):
+        fake = FakeRuntimeClient(
+            stream_events=[{"type": "cancelled", "run_id": "r1"}]
+        )
+        self.assertEqual(_call(fake), 130)
+
+    def test_failed_json_mode_emits_event_line(self):
+        fake = FakeRuntimeClient(
+            stream_events=[
+                {
+                    "type": "failed",
+                    "run_id": "r1",
+                    "error_type": "RuntimeError",
+                    "message": "model exploded",
+                }
+            ]
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = _call(fake, json_output=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(buf.getvalue()),
+            {
+                "type": "failed",
+                "run_id": "r1",
+                "error_type": "RuntimeError",
+                "message": "model exploded",
+            },
+        )
 
     def test_missing_prompt_raises_command_error(self):
         from linktools.cli import CommandError

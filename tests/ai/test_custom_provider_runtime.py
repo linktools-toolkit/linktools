@@ -8,7 +8,7 @@ import pytest
 
 from linktools.ai.capability import CapabilityRuntimeOptions
 from linktools.ai.runtime import RuntimeDependencies
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -17,7 +17,7 @@ def _runtime(tmp_path, **kw):
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
-    return Runtime.build(
+    return build_runtime(
         storage=storage,
         model_resolver=ModelResolver(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -89,7 +89,7 @@ async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
     er = DirectoryEntrypointResolver({"skill-creator": root})
     # entrypoints is bundle-only (contract has no expanded entrypoints param).
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         providers=RuntimeDependencies(extension_content=rp, entrypoints=er),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -112,7 +112,7 @@ async def test_extension_resource_ref_resolves_through_runtime(tmp_path):
 
 @pytest.mark.asyncio
 async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
-    # Agent #2 defect #2: Runtime.build(allow_mcp_wildcard=True) must enable mcp:*.
+    # Agent #2 defect #2: build_runtime(allow_mcp_wildcard=True) must enable mcp:*.
     from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
     from linktools.ai.errors import CapabilityResolutionError
     from linktools.ai.model.policy import ModelPolicy
@@ -137,7 +137,7 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
 
     # Off: the gate denies mcp:* at assemble time (before any connection).
     storage_off = FilesystemStorage(root=tmp_path)
-    rt_off = Runtime.build(
+    rt_off = build_runtime(
         storage=storage_off,
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage_off),
@@ -148,7 +148,7 @@ async def test_allow_mcp_wildcard_build_param_is_honored(tmp_path):
     # On: the build flag is folded into options (live connection is exercised
     # separately via MCPProvider + a fake manager in test_mcp_provider.py).
     storage_on = FilesystemStorage(root=tmp_path / "on")
-    rt_on = Runtime.build(
+    rt_on = build_runtime(
         storage=storage_on,
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         allow_mcp_wildcard=True,
@@ -220,7 +220,7 @@ async def test_mcp_tool_runs_through_runtime_to_connection_manager(tmp_path):
     registry.register("m", model=FunctionModel(model_fn))
     manager = _Manager()
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
@@ -263,7 +263,7 @@ async def test_custom_skill_provider_wires_assembler(tmp_path):
             return _SkillSpec("sql", "sql", "SQL analysis", "FULL SQL")
 
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         providers=RuntimeDependencies(skills=_SkillSrc()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -299,7 +299,7 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
             closed["v"] = True
 
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         providers=RuntimeDependencies(mcp_servers=_McpSrc()),
         mcp_connection_pool=_Manager(),
@@ -374,7 +374,7 @@ async def test_runtime_resolve_agent_and_swarm_via_providers(tmp_path):
 
     bundle = RuntimeDependencies(agents=_AgentSrc(), swarms=_SwarmSrc())
     storage = FilesystemStorage(root=tmp_path)
-    Runtime.build(
+    build_runtime(
         storage=storage,
         providers=bundle,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),

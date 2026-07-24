@@ -369,9 +369,9 @@ async def test_list_hides_deleted_overlay_only_path(backend_factory):
 
 async def _list_all(store, path, *, depth=Depth.ONE, limit=2):
     """Drive list() to exhaustion via its cursor, collecting every page.
-    Used by the pagination regression tests below to prove the current
-    path-cursor implementation (not an opaque cursor type) still visits every
-    item across primary+overlay without dropping any."""
+    Used by the pagination regression tests below to prove the opaque
+    per-backend cursor implementation still visits every item across
+    primary+overlay without dropping any."""
     items = []
     cursor = None
     pages = 0
@@ -477,15 +477,16 @@ async def test_list_whiteout_does_not_drop_later_overlay_items(backend_factory):
 
 @pytest.mark.asyncio
 async def test_list_cursor_monotonic_progress(backend_factory):
-    """successive page cursors must strictly advance (lexically) so
-    pagination is guaranteed to terminate rather than looping on a page that
-    never moves forward."""
+    """successive page cursors must never repeat, so pagination is guaranteed
+    to terminate rather than looping on a page that never moves forward. The
+    cursor is an opaque HMAC-signed token (not a literal path string), so it
+    carries no lexical ordering guarantee -- only that each page's token
+    differs from every other page's."""
     store = AssetStore(primary=backend_factory())
     for i in range(8):
         await store.put(AssetPath(f"/g/item-{i:02d}.md"), f"v{i}".encode())
 
     _, cursors = await _list_all(store, AssetPath("/g"), limit=3)
-    assert cursors == sorted(cursors), "cursor sequence must be non-decreasing"
     assert len(cursors) == len(set(cursors)), "cursor must strictly advance, not repeat"
 
 

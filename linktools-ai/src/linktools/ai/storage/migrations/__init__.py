@@ -16,11 +16,32 @@ from pathlib import Path
 
 __all__ = [
     "migrate_asset_layout",
+    "migrate_asset_path_hash_index",
+    "migrate_asset_path_hash_index_downgrade",
     "migrate_sql_asset_tables",
     "migrate_sql_asset_tables_downgrade",
     "migrate_sqlite_artifact_root",
     "SqliteArtifactRootMigrationReport",
 ]
+
+async def migrate_asset_path_hash_index(engine) -> None:
+    """Live migration for an EXISTING ``ai_assets`` / ``ai_asset_idempotency``
+    database created before ``path_hash`` / ``key_hash`` existed (spec
+    section 7.4). Thin dispatcher: the actual dialect-specific SQL lives in
+    :mod:`storage.sqlalchemy.dialects._hash_migration` -- the ``dialects/``
+    package is the one place core is allowed to branch on a dialect name, so
+    this module stays dialect-neutral."""
+    from ..sqlalchemy.dialects._hash_migration import run_hash_index_migration
+
+    await run_hash_index_migration(engine)
+
+
+async def migrate_asset_path_hash_index_downgrade(engine) -> None:
+    """Reverse of :func:`migrate_asset_path_hash_index`. Exists only for
+    rollback -- runtime code never calls it."""
+    from ..sqlalchemy.dialects._hash_migration import run_hash_index_migration_downgrade
+
+    await run_hash_index_migration_downgrade(engine)
 
 
 def migrate_asset_layout(root: "str | Path") -> None:

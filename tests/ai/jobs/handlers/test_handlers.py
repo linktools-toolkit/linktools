@@ -135,6 +135,7 @@ def _stores(tmp_path=None):
     import tempfile
     from pathlib import Path
     from linktools.ai.artifact import ArtifactStore
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.storage.filesystem.artifact import (
         FilesystemArtifactBlobStore,
         FilesystemArtifactRecordStore,
@@ -143,6 +144,7 @@ def _stores(tmp_path=None):
     artifacts = ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=root / "blobs"),
         FilesystemArtifactRecordStore(records_root=root / "records"),
+        InProcessArtifactDigestCoordinator(),
     )
     return _FakeTaskStore(), artifacts
 

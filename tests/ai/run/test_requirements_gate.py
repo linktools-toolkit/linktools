@@ -84,16 +84,16 @@ def test_missing_bool_capability_rejected():
 
 
 def test_gate_through_runtime_build_rejects_process_local_for_distributed(tmp_path):
-    # The gate is wired into Runtime.build: a FilesystemStorage (process-local)
+    # The gate is wired into build_runtime: a FilesystemStorage (process-local)
     # rejected when the caller declares a distributed-coordination requirement.
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
     with pytest.raises(_Err, match="coordination"):
-        Runtime.build(
+        build_runtime(
             storage=rt_storage,
             requirements=RuntimeRequirements(
                 coordination=CoordinationScope.DISTRIBUTED
@@ -106,16 +106,16 @@ def test_gate_through_runtime_build_passes_when_met(tmp_path):
     # No requirements -> build succeeds (backward compatible). A requirement
     # the reference Filesystem storage DOES meet (process-local coordination)
     # also succeeds.
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
-    Runtime.build(
+    build_runtime(
         storage=rt_storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
     )  # no gate
-    Runtime.build(
+    build_runtime(
         storage=rt_storage,
         requirements=RuntimeRequirements(
             coordination=CoordinationScope.PROCESS_LOCAL
@@ -285,13 +285,13 @@ def test_multi_worker_jobs_rejects_process_local_storage(tmp_path):
     # multi-worker Job topology must FAIL TO CONSTRUCT against process-local
     # storage -- no silent fallback to the in-process coordinator.
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)  # process-local coordination
     with pytest.raises(_Err, match="coordination"):
-        Runtime.build(
+        build_runtime(
             storage=rt_storage,
             requirements=RuntimeRequirements.for_multi_worker_jobs(),
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),

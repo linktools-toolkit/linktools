@@ -5,7 +5,7 @@
 Every run entry point (Runtime agent run / run_stream / swarm run) builds the
 immutable run-definition snapshot through this coordinator so the snapshot's
 shape, fingerprint, and identity restoration are defined once -- not duplicated
-across Runtime and SwarmRunner (the prior double-create). A run that cannot be
+across Runtime and SwarmEngine (the prior double-create). A run that cannot be
 persisted for resume is rejected here rather than silently resuming from a
 caller-supplied spec later.
 

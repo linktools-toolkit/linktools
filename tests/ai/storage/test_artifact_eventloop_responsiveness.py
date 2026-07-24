@@ -14,11 +14,11 @@ upload test additionally forces a long operation via a slow source so a healthy
 floor of beats is required there."""
 
 import asyncio
-import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.storage.filesystem.artifact import (
     FilesystemArtifactBlobStore,
     FilesystemArtifactRecordStore,
@@ -26,8 +26,8 @@ from linktools.ai.storage.filesystem.artifact import (
 from linktools.ai.storage.orphan import OrphanSweepConfig, sweep_orphan_blobs
 
 
-def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _digest(data: bytes) -> ArtifactDigest:
+    return ArtifactDigest.from_bytes(data)
 
 
 async def _heartbeat_until_cancelled(interval: float):

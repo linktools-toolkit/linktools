@@ -16,7 +16,7 @@ from linktools.ai.errors import (
     SwarmError,
     SwarmLimitExceededError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.swarm.models import (
@@ -24,8 +24,8 @@ from linktools.ai.swarm.models import (
     AgentRef,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -49,15 +49,15 @@ def test_swarm_status_is_str_enum():
     assert SwarmStatus.PENDING == "pending"
 
 
-# --- SwarmTaskStatus enum ----------------------------------------------------
+# --- SwarmStepStatus enum ----------------------------------------------------
 
 
 def test_swarm_task_status_values():
-    assert SwarmTaskStatus.PENDING.value == "pending"
-    assert SwarmTaskStatus.CLAIMED.value == "claimed"
-    assert SwarmTaskStatus.SUCCEEDED.value == "succeeded"
-    assert SwarmTaskStatus.FAILED.value == "failed"
-    assert SwarmTaskStatus.CANCELLED.value == "cancelled"
+    assert SwarmStepStatus.PENDING.value == "pending"
+    assert SwarmStepStatus.CLAIMED.value == "claimed"
+    assert SwarmStepStatus.SUCCEEDED.value == "succeeded"
+    assert SwarmStepStatus.FAILED.value == "failed"
+    assert SwarmStepStatus.CANCELLED.value == "cancelled"
 
 
 # --- ALLOWED_SWARM_TRANSITIONS ----------------------------------------------
@@ -227,20 +227,20 @@ def test_swarm_run_frozen():
         run.status = SwarmStatus.RUNNING
 
 
-# --- SwarmTask --------------------------------------------------------------
+# --- SwarmStep --------------------------------------------------------------
 
 
 def test_swarm_task_construct_with_result_and_error():
     now = _now()
     result = RunResult(output="done")
     error = RunErrorInfo(error_type="ValueError", message="boom")
-    task = SwarmTask(
+    task = SwarmStep(
         id="t-1",
         swarm_run_id="sr-1",
         parent_task_id="t-0",
         assigned_agent_id="a-1",
         description="do the thing",
-        status=SwarmTaskStatus.SUCCEEDED,
+        status=SwarmStepStatus.SUCCEEDED,
         dependencies=("t-0",),
         input=TaskInput(prompt="hi", metadata={"k": 1}),
         result=result,
@@ -254,7 +254,7 @@ def test_swarm_task_construct_with_result_and_error():
     )
     assert task.parent_task_id == "t-0"
     assert task.assigned_agent_id == "a-1"
-    assert task.status is SwarmTaskStatus.SUCCEEDED
+    assert task.status is SwarmStepStatus.SUCCEEDED
     assert task.dependencies == ("t-0",)
     assert task.input.metadata == {"k": 1}
     assert task.result is result
@@ -267,13 +267,13 @@ def test_swarm_task_construct_with_result_and_error():
 
 def test_swarm_task_construct():
     now = _now()
-    task = SwarmTask(
+    task = SwarmStep(
         id="t-1",
         swarm_run_id="sr-1",
         parent_task_id=None,
         assigned_agent_id=None,
         description="do the thing",
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=TaskInput(prompt="hi"),
         result=None,
@@ -290,7 +290,7 @@ def test_swarm_task_construct():
     assert task.parent_task_id is None
     assert task.assigned_agent_id is None
     assert task.description == "do the thing"
-    assert task.status is SwarmTaskStatus.PENDING
+    assert task.status is SwarmStepStatus.PENDING
     assert task.dependencies == ()
     assert task.input == TaskInput(prompt="hi")
     assert task.result is None
@@ -305,13 +305,13 @@ def test_swarm_task_construct():
 
 def test_swarm_task_frozen():
     now = _now()
-    task = SwarmTask(
+    task = SwarmStep(
         id="t-1",
         swarm_run_id="sr-1",
         parent_task_id=None,
         assigned_agent_id=None,
         description="x",
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=TaskInput(prompt="hi"),
         result=None,
@@ -324,7 +324,7 @@ def test_swarm_task_frozen():
         updated_at=now,
     )
     with pytest.raises(FrozenInstanceError):
-        task.status = SwarmTaskStatus.CLAIMED
+        task.status = SwarmStepStatus.CLAIMED
 
 
 # --- SwarmError family ------------------------------------------------------
@@ -338,7 +338,7 @@ def test_swarm_error_is_linktools_ai_error():
     "exc_cls",
     [
         SwarmRunNotFoundError,
-        SwarmTaskNotFoundError,
+        SwarmStepNotFoundError,
         SwarmConflictError,
         InvalidSwarmTransitionError,
         SwarmLimitExceededError,

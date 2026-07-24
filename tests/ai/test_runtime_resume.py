@@ -48,7 +48,7 @@ from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.approval import ApprovalRule
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
@@ -141,7 +141,7 @@ def _build_runtime(tmp_path) -> "tuple[Runtime, FilesystemStorage]":
         policy=PolicyEngine(rules=(ApprovalRule(require_for=frozenset({TOOL_NAME})),)),
         approval_store=storage.approvals,
     )
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         tool_executor=executor,
@@ -610,7 +610,7 @@ def test_resume_with_capability_prompt_does_not_crash(tmp_path):
             ),
             approval_store=storage.approvals,
         )
-        runtime = Runtime.build(
+        runtime = build_runtime(
             storage=storage,
             model_resolver=ModelResolver(registry=_registry()),
             tool_executor=executor,

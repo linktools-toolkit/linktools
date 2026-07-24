@@ -17,7 +17,7 @@ import pytest
 from linktools.ai.runtime.assembly.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError
 from linktools.ai.sandbox.local import _run_file_tool_sync
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.governance.security.pipeline import validate_model_decision
 from linktools.ai.governance.security.secured_model import SecuredModel
 from linktools.ai.session.models import SessionRecord
@@ -89,7 +89,7 @@ def test_v5_runtime_recovery_is_serialized():
     import tempfile
 
     storage = FilesystemStorage(root=tempfile.mkdtemp())
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )

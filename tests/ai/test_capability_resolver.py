@@ -56,7 +56,7 @@ async def test_assemble_builtin_file_only(tmp_path):
     tools are explicitly allowed."""
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
-    bundle = await asm.assemble(
+    bundle = await asm.resolve(
         _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend)
     )
     assert isinstance(bundle, CapabilityBundle)
@@ -69,7 +69,7 @@ async def test_assemble_builtin_file_execution_tools_allowed_exposes_writes(tmp_
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
-    bundle = await asm.assemble(
+    bundle = await asm.resolve(
         _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
     )
     names = _contrib_names(bundle)
@@ -86,7 +86,7 @@ async def test_assemble_kindname_string_resolves(tmp_path):
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
     # kind:name parsed form
     spec = _spec((ToolRef(name="terminal", kind="builtin"),))
-    bundle = await asm.assemble(spec, _ctx(backend, policy=policy))
+    bundle = await asm.resolve(spec, _ctx(backend, policy=policy))
     assert _contrib_names(bundle) == {"bash"}
 
 
@@ -95,7 +95,7 @@ async def test_assemble_kindname_terminal_hidden_by_default(tmp_path):
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     spec = _spec((ToolRef(name="terminal", kind="builtin"),))
-    bundle = await asm.assemble(spec, _ctx(backend))
+    bundle = await asm.resolve(spec, _ctx(backend))
     assert bundle.tool_contributions == ()
 
 
@@ -103,7 +103,7 @@ async def test_assemble_kindname_terminal_hidden_by_default(tmp_path):
 async def test_assemble_empty_tools_yields_empty_bundle(tmp_path):
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
-    bundle = await asm.assemble(_spec(()), _ctx(backend))
+    bundle = await asm.resolve(_spec(()), _ctx(backend))
     assert dict(bundle.prompt_sections) == {}
 
 
@@ -112,7 +112,7 @@ async def test_unknown_kind_raises_resolution_error(tmp_path):
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityResolutionError, match="no capability provider"):
-        await asm.assemble(_spec((ToolRef(name="x", kind="skill"),)), _ctx(backend))
+        await asm.resolve(_spec((ToolRef(name="x", kind="skill"),)), _ctx(backend))
 
 
 @pytest.mark.asyncio
@@ -127,7 +127,7 @@ async def test_unregistered_kind_raises_resolution_error_no_hardcoded_allowlist(
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityResolutionError, match="no capability provider"):
-        await asm.assemble(_spec((ToolRef(name="x", kind="bogus"),)), _ctx(backend))
+        await asm.resolve(_spec((ToolRef(name="x", kind="bogus"),)), _ctx(backend))
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_introspectable_contribution_populates_per_tool_definitions(tmp_pa
     descriptor + extractable handler (the contract per-tool model, exercised)."""
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
-    bundle = await asm.assemble(
+    bundle = await asm.resolve(
         _spec((ToolRef(name="file-read", kind="builtin"),)), _ctx(backend)
     )
     contrib = bundle.tool_contributions[0]
@@ -229,7 +229,7 @@ async def test_duplicate_ref_raises_conflict(tmp_path):
     backend = LocalSandbox(runtime_dir=str(tmp_path))
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="duplicate"):
-        await asm.assemble(
+        await asm.resolve(
             _spec(
                 (
                     ToolRef(name="file", kind="builtin"),
@@ -292,7 +292,7 @@ async def test_cross_capability_tool_name_conflict_detected(tmp_path):
     policy = CapabilityToolExposurePolicy(expose_execution_tools=True)
     # builtin:file and mcp:x both emit the file tools -> conflict, no silent overwrite.
     with pytest.raises(CapabilityConflictError, match="produced by both"):
-        await asm.assemble(
+        await asm.resolve(
             _spec(
                 (ToolRef(name="file", kind="builtin"), ToolRef(name="x", kind="mcp"))
             ),
@@ -309,7 +309,7 @@ async def test_total_tool_cap_enforced(tmp_path):
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     # builtin:file alone exposes 5 tools -> exceeds max_tools_total=2.
     with pytest.raises(CapabilityConflictError, match="max_tools_total"):
-        await asm.assemble(
+        await asm.resolve(
             _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
         )
 
@@ -322,7 +322,7 @@ async def test_per_capability_cap_enforced(tmp_path):
     )
     asm = CapabilityResolver({"builtin": BuiltinProvider()})
     with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
-        await asm.assemble(
+        await asm.resolve(
             _spec((ToolRef(name="file", kind="builtin"),)), _ctx(backend, policy=policy)
         )
 
@@ -338,7 +338,7 @@ class _PromptProvider:
 async def test_prompt_sections_merged_in_stable_order(tmp_path):
     asm = CapabilityResolver({"skill": _PromptProvider()})
     spec = _spec((ToolRef(name="a", kind="skill"), ToolRef(name="b", kind="skill")))
-    bundle = await asm.assemble(spec, _ctx(None))
+    bundle = await asm.resolve(spec, _ctx(None))
     assert "section-a" in bundle.prompt_sections["skills"]
     assert "section-b" in bundle.prompt_sections["skills"]
 

@@ -40,6 +40,7 @@ from external_adapter.conformance_adapter import (
 _PUBLIC_ADAPTER_IMPORTS = frozenset(
     {
         "linktools.ai.storage.protocols",
+        "linktools.ai.artifact.digest",
         "linktools.ai.artifact.models",
         "linktools.ai.errors",
     }

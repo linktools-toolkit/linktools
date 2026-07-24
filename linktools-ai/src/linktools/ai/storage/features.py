@@ -65,6 +65,12 @@ class StorageFeatures:
     idempotency: bool
     streaming_artifacts: bool
     append_only_events: bool
+    # The scope of the ArtifactStore's digest coordinator (put/sweep mutual
+    # exclusion) -- a SEPARATE capability from ``coordination_scope`` (the Job
+    # Lease coordinator's scope). A Storage with no ArtifactStore wired declares
+    # NONE here; one with an ArtifactStore declares whatever its injected
+    # ArtifactDigestCoordinator's own ``.scope`` is.
+    artifact_coordination_scope: CoordinationScope = CoordinationScope.NONE
 
 
 # Coordination note: the in-repo reference Storage instances (FilesystemStorage
@@ -74,7 +80,7 @@ class StorageFeatures:
 # downstream concern: a deployment that needs multi-worker Jobs or multi-process
 # Swarms injects a distributed LeaseCoordinator and declares DISTRIBUTED on its
 # own StorageFeatures. The build-time capability gate compares these scopes
-# against a declared RuntimeRequirements and refuses a shortfall at Runtime.build
+# against a declared RuntimeRequirements and refuses a shortfall at build_runtime
 # time; subsystems opt into enforcement by passing requirements.
 
 
@@ -90,6 +96,9 @@ FILE_STORAGE_FEATURES = StorageFeatures(
     idempotency=True,
     streaming_artifacts=True,
     append_only_events=True,
+    # FilesystemStorage wires ArtifactStore with the default
+    # InProcessArtifactDigestCoordinator -> PROCESS_LOCAL.
+    artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
 )
 
 SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
@@ -104,6 +113,9 @@ SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
     idempotency=True,
     streaming_artifacts=True,
     append_only_events=True,
+    # SqlAlchemyStorage wires ArtifactStore with a FilesystemArtifactDigestCoordinator
+    # -> PROCESS_LOCAL (flock coordinates one filesystem, not distributed workers).
+    artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
 )
 
 

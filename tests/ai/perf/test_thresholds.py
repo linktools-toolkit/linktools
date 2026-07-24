@@ -6,7 +6,7 @@ measurable checks. Each assertion pins a fixed acceptance threshold from the
 plan; the reference env is 4 vCPU / 8 GiB RAM / Linux / Python 3.10 / SSD
 . These run in the default suite so a regression past a threshold is
 caught immediately -- the thresholds carry generous headroom (an in-process
-lock op at p95 <= 5ms; a Runtime.build at p95 <= 1s), so they do not flake on
+lock op at p95 <= 5ms; a build_runtime at p95 <= 1s), so they do not flake on
 a normally-loaded machine.
 
 Coverage of the table: RuntimeBuilder.build p95 <= 1s; Catalog cache get
@@ -38,7 +38,7 @@ from datetime import timedelta
 import pytest
 
 from linktools.ai.jobs.runtime import JobRuntimeOptions
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.coordination.process_local import (
     ProcessLocalLeaseCoordinator,
 )
@@ -270,7 +270,7 @@ def test_runtime_build_p95_under_1s(tmp_path):
 
     def _build() -> None:
         fresh = FilesystemStorage(root=tmp_path / "x")
-        Runtime.build(
+        build_runtime(
             storage=fresh,
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(fresh),
         )
@@ -284,7 +284,7 @@ def test_runtime_build_p95_under_1s(tmp_path):
         _build()
         samples.append(time.perf_counter() - t0)
     p95 = _p95_ms(samples)
-    assert p95 <= 1000.0, f"Runtime.build p95 {p95:.1f}ms > 1000ms"
+    assert p95 <= 1000.0, f"build_runtime p95 {p95:.1f}ms > 1000ms"
 
 
 # --- Catalog: cache get p95 <= 5ms / 10k, cold-load 100 specs <= 500ms ---
@@ -495,6 +495,7 @@ async def test_asset_list_1000_filesystem_p95_under_200ms(tmp_path):
 
 @pytest.mark.asyncio
 async def test_artifact_integrity_10000_rw_zero_mismatch():
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.artifact.store import ArtifactStore
 
     from external_adapter import (
@@ -502,7 +503,11 @@ async def test_artifact_integrity_10000_rw_zero_mismatch():
         InMemoryArtifactRecordStore,
     )
 
-    store = ArtifactStore(InMemoryArtifactBlobStore(), InMemoryArtifactRecordStore())
+    store = ArtifactStore(
+        InMemoryArtifactBlobStore(),
+        InMemoryArtifactRecordStore(),
+        InProcessArtifactDigestCoordinator(),
+    )
     for i in range(10000):
         content = f"payload-{i}".encode()
         record = await store.put(content=content, media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)

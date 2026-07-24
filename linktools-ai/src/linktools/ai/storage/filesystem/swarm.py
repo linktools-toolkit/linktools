@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """FilesystemSwarmStore: single-process file backend for SwarmStore (the Protocol in
 swarm/store.py). One JSON file per SwarmRun under root/runs/{id}.json
-and one per SwarmTask under root/tasks/{id}.json. Mirrors FilesystemRunStore's
+and one per SwarmStep under root/tasks/{id}.json. Mirrors FilesystemRunStore's
 atomic-write + path-traversal-guard patterns (see storage/filesystem/run.py).
 
 Each public async method delegates to a ``_*_sync`` private method via
@@ -21,7 +21,7 @@ from ...errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from ...run.models import RunErrorInfo, RunResult
 from ...swarm.models import (
@@ -29,9 +29,9 @@ from ...swarm.models import (
     AttemptStatus,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -109,7 +109,7 @@ def _error_from_json(raw: dict) -> RunErrorInfo:
     )
 
 
-def _task_to_json(task: SwarmTask) -> dict:
+def _task_to_json(task: SwarmStep) -> dict:
     return {
         "id": task.id,
         "swarm_run_id": task.swarm_run_id,
@@ -135,14 +135,14 @@ def _task_to_json(task: SwarmTask) -> dict:
     }
 
 
-def _task_from_json(raw: dict) -> SwarmTask:
-    return SwarmTask(
+def _task_from_json(raw: dict) -> SwarmStep:
+    return SwarmStep(
         id=raw["id"],
         swarm_run_id=raw["swarm_run_id"],
         parent_task_id=raw["parent_task_id"],
         assigned_agent_id=raw["assigned_agent_id"],
         description=raw["description"],
-        status=SwarmTaskStatus(raw["status"]),
+        status=SwarmStepStatus(raw["status"]),
         dependencies=tuple(raw["dependencies"]),
         input=TaskInput(
             prompt=raw["input"]["prompt"], metadata=raw["input"]["metadata"]
@@ -164,7 +164,7 @@ def _task_from_json(raw: dict) -> SwarmTask:
     )
 
 
-def _attempt_to_json(attempt: SwarmTaskAttempt) -> dict:
+def _attempt_to_json(attempt: SwarmStepAttempt) -> dict:
     return {
         "id": attempt.id,
         "task_id": attempt.task_id,
@@ -180,8 +180,8 @@ def _attempt_to_json(attempt: SwarmTaskAttempt) -> dict:
     }
 
 
-def _attempt_from_json(raw: dict) -> SwarmTaskAttempt:
-    return SwarmTaskAttempt(
+def _attempt_from_json(raw: dict) -> SwarmStepAttempt:
+    return SwarmStepAttempt(
         id=raw["id"],
         task_id=raw["task_id"],
         run_id=raw["run_id"],
@@ -200,7 +200,7 @@ class FilesystemSwarmStore:
     """Single-process SwarmStore backed by per-record JSON files.
 
     ``SwarmRun`` records live at ``root/runs/{swarm_run_id}.json`` and
-    ``SwarmTask`` records at ``root/tasks/{task_id}.json``. Writes are atomic
+    ``SwarmStep`` records at ``root/tasks/{task_id}.json``. Writes are atomic
     (temp-file + ``os.replace``) and ids are validated to prevent path
     traversal. An ``asyncio.Lock`` serializes ``claim_task``/``update_run`` so
     that optimistic-concurrency invariants hold within one process.
@@ -217,7 +217,7 @@ class FilesystemSwarmStore:
         observed by this backend, so ``reclaim_expired_tasks`` returns ``()``
         unconditionally. Lease semantics live on SqlAlchemySwarmStore.
       * Process restart: a caller that recovers from a crash invokes
-        ``SwarmRunner.recover(swarm_run_id)``, which scans incomplete tasks and
+        ``SwarmEngine.recover(swarm_run_id)``, which scans incomplete tasks and
         reconciles them with the child RunRecord + Checkpoint state (best-effort
         -- this is not a distributed coordination system). The store itself
         performs no automatic recovery; the caller owns the policy.
@@ -348,18 +348,18 @@ class FilesystemSwarmStore:
 
     # -- task lifecycle ------------------------------------------------
 
-    def _create_task_sync(self, task: SwarmTask) -> SwarmTask:
+    def _create_task_sync(self, task: SwarmStep) -> SwarmStep:
         _atomic_write(
             self._task_path(task.id), json.dumps(_task_to_json(task)).encode("utf-8")
         )
         return task
 
-    async def create_task(self, task: SwarmTask) -> SwarmTask:
+    async def create_task(self, task: SwarmStep) -> SwarmStep:
         return await asyncio.to_thread(self._create_task_sync, task)
 
     def _list_tasks_sync(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None"
-    ) -> "tuple[SwarmTask, ...]":
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None"
+    ) -> "tuple[SwarmStep, ...]":
         # swarm_run_id used as a filter, not a filename, so no path traversal risk here.
         out: list = []
         for path in self._tasks_dir.glob("*.json"):
@@ -373,23 +373,23 @@ class FilesystemSwarmStore:
         return tuple(out)
 
     async def list_tasks(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
-    ) -> "tuple[SwarmTask, ...]":
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None" = None
+    ) -> "tuple[SwarmStep, ...]":
         return await asyncio.to_thread(
             self._list_tasks_sync, swarm_run_id, status=status
         )
 
     def _claim_task_sync(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None"
-    ) -> "SwarmTask | None":
+    ) -> "SwarmStep | None":
         # Snapshot of all tasks for this swarm, indexed by id for dependency lookups.
         tasks = self._list_tasks_sync(swarm_run_id, status=None)
         by_id = {t.id: t for t in tasks}
         for task in tasks:
-            if task.status != SwarmTaskStatus.PENDING:
+            if task.status != SwarmStepStatus.PENDING:
                 continue
             deps_ok = all(
-                dep in by_id and by_id[dep].status == SwarmTaskStatus.SUCCEEDED
+                dep in by_id and by_id[dep].status == SwarmStepStatus.SUCCEEDED
                 for dep in task.dependencies
             )
             if not deps_ok:
@@ -400,13 +400,13 @@ class FilesystemSwarmStore:
             lease_expires = None
             if lease_seconds is not None:
                 lease_expires = now + timedelta(seconds=lease_seconds)
-            claimed = SwarmTask(
+            claimed = SwarmStep(
                 id=task.id,
                 swarm_run_id=task.swarm_run_id,
                 parent_task_id=task.parent_task_id,
                 assigned_agent_id=agent_id,
                 description=task.description,
-                status=SwarmTaskStatus.CLAIMED,
+                status=SwarmStepStatus.CLAIMED,
                 dependencies=task.dependencies,
                 input=task.input,
                 result=task.result,
@@ -430,7 +430,7 @@ class FilesystemSwarmStore:
 
     async def claim_task(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None" = None
-    ) -> "SwarmTask | None":
+    ) -> "SwarmStep | None":
         async with self._lock:
             return await asyncio.to_thread(
                 self._claim_task_sync,
@@ -441,7 +441,7 @@ class FilesystemSwarmStore:
 
     def _set_active_run_sync(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # Status guard added alongside expected_version (mirrors
         # complete_task/fail_task's own fencing below): the strategy calls
         # this right after a successful claim_task (task is CLAIMED) with the
@@ -451,18 +451,18 @@ class FilesystemSwarmStore:
         # explicit status check is defense-in-depth and a clearer error.
         path = self._task_path(task_id)
         if not path.exists():
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
         if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
             )
-        if current.status != SwarmTaskStatus.CLAIMED:
+        if current.status != SwarmStepStatus.CLAIMED:
             raise SwarmConflictError(
                 f"task {task_id} is not claimed (status={current.status.value})"
             )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
-        updated = SwarmTask(
+        updated = SwarmStep(
             id=current.id,
             swarm_run_id=current.swarm_run_id,
             parent_task_id=current.parent_task_id,
@@ -486,7 +486,7 @@ class FilesystemSwarmStore:
 
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             return await asyncio.to_thread(
                 self._set_active_run_sync,
@@ -502,19 +502,19 @@ class FilesystemSwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None",
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # expected_version is mandatory -- no more unconditional
         # fallback path. Held under self._lock (see complete_task) so the
         # read-check-write is atomic within this process.
         path = self._task_path(task_id)
         if not path.exists():
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
         if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
             )
-        if current.status != SwarmTaskStatus.CLAIMED:
+        if current.status != SwarmStepStatus.CLAIMED:
             raise SwarmConflictError(
                 f"task {task_id} is not claimed (status={current.status.value})"
             )
@@ -524,13 +524,13 @@ class FilesystemSwarmStore:
                 f"found {current.active_run_id!r}"
             )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
-        updated = SwarmTask(
+        updated = SwarmStep(
             id=current.id,
             swarm_run_id=current.swarm_run_id,
             parent_task_id=current.parent_task_id,
             assigned_agent_id=current.assigned_agent_id,
             description=current.description,
-            status=SwarmTaskStatus.SUCCEEDED,
+            status=SwarmStepStatus.SUCCEEDED,
             dependencies=current.dependencies,
             input=current.input,
             result=result,
@@ -553,7 +553,7 @@ class FilesystemSwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             return await asyncio.to_thread(
                 self._complete_task_sync,
@@ -570,16 +570,16 @@ class FilesystemSwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None",
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         path = self._task_path(task_id)
         if not path.exists():
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
         if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
             )
-        if current.status != SwarmTaskStatus.CLAIMED:
+        if current.status != SwarmStepStatus.CLAIMED:
             raise SwarmConflictError(
                 f"task {task_id} is not claimed (status={current.status.value})"
             )
@@ -589,13 +589,13 @@ class FilesystemSwarmStore:
                 f"found {current.active_run_id!r}"
             )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
-        updated = SwarmTask(
+        updated = SwarmStep(
             id=current.id,
             swarm_run_id=current.swarm_run_id,
             parent_task_id=current.parent_task_id,
             assigned_agent_id=current.assigned_agent_id,
             description=current.description,
-            status=SwarmTaskStatus.FAILED,
+            status=SwarmStepStatus.FAILED,
             dependencies=current.dependencies,
             input=current.input,
             result=current.result,
@@ -618,7 +618,7 @@ class FilesystemSwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             return await asyncio.to_thread(
                 self._fail_task_sync,
@@ -628,7 +628,7 @@ class FilesystemSwarmStore:
                 active_run_id=active_run_id,
             )
 
-    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
+    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmStep, ...]":
         # Single-process store: the in-process asyncio.Lock guarantees a task
         # cannot be observed with an expired lease while another coroutine is
         # mid-claim, so there is nothing to reclaim at rest. Returns empty.
@@ -638,22 +638,22 @@ class FilesystemSwarmStore:
 
     def _renew_lease_sync(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         path = self._task_path(task_id)
         if not path.exists():
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = _task_from_json(json.loads(path.read_text()))
         if current.version != expected_version:
             raise SwarmConflictError(
                 f"expected version {expected_version}, found {current.version}"
             )
-        if current.status != SwarmTaskStatus.CLAIMED:
+        if current.status != SwarmStepStatus.CLAIMED:
             raise InvalidSwarmTransitionError(
                 f"renew_lease requires CLAIMED, task {task_id} is {current.status.value}"
             )
         now = datetime.now(current.created_at.tzinfo or timezone.utc)
         new_lease = now + timedelta(seconds=lease_seconds)
-        updated = SwarmTask(
+        updated = SwarmStep(
             id=current.id,
             swarm_run_id=current.swarm_run_id,
             parent_task_id=current.parent_task_id,
@@ -677,7 +677,7 @@ class FilesystemSwarmStore:
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             return await asyncio.to_thread(
                 self._renew_lease_sync,
@@ -688,7 +688,7 @@ class FilesystemSwarmStore:
 
     # -- attempts ---------------------------------------------
 
-    def _record_attempt_sync(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+    def _record_attempt_sync(self, attempt: SwarmStepAttempt) -> SwarmStepAttempt:
         # Upsert keyed on attempt.id: the strategy writes the RUNNING row before
         # the worker call and the SUCCEEDED|FAILED row after, with the same id.
         _atomic_write(
@@ -697,10 +697,10 @@ class FilesystemSwarmStore:
         )
         return attempt
 
-    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+    async def record_attempt(self, attempt: SwarmStepAttempt) -> SwarmStepAttempt:
         return await asyncio.to_thread(self._record_attempt_sync, attempt)
 
-    def _list_attempts_sync(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+    def _list_attempts_sync(self, task_id: str) -> "tuple[SwarmStepAttempt, ...]":
         out: list = []
         for path in self._attempts_dir.glob("*.json"):
             raw = json.loads(path.read_text())
@@ -710,5 +710,5 @@ class FilesystemSwarmStore:
         out.sort(key=lambda a: (a.started_at, a.attempt))
         return tuple(out)
 
-    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmStepAttempt, ...]":
         return await asyncio.to_thread(self._list_attempts_sync, task_id)

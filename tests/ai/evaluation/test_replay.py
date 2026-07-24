@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from linktools.ai.artifact import ArtifactStore
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.evaluation.models import EvalExecution, EvalTarget
 from linktools.ai.evaluation.replay import (
     SnapshotValidationError,
@@ -25,6 +26,7 @@ def _artifacts(tmp_path) -> ArtifactStore:
     return ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+        InProcessArtifactDigestCoordinator(),
     )
 
 

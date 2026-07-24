@@ -16,7 +16,13 @@ from decimal import Decimal
 class ModelPolicy:
     primary: str
     fallbacks: "tuple[str, ...]" = ()
-    request_retries: int = 0
+    # None = a prebuilt model manages its own retry behavior (the framework does
+    # not touch its HTTP client); 0 or a positive int = the framework explicitly
+    # configures the provider client's max_retries (0 disables the SDK's own
+    # retry). The programmatic default is None so a default policy is compatible
+    # with a prebuilt model; config-file parsing defaults to 0 (meaningful only
+    # for config-backed models, where the framework owns the client).
+    request_retries: "int | None" = None
     timeout_seconds: "float | None" = None
     max_tokens: "int | None" = None
     budget: "Decimal | None" = None
@@ -29,12 +35,14 @@ class ModelPolicy:
         for item in self.fallbacks:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError("ModelPolicy.fallbacks must be non-empty strings")
-        if (
+        if self.request_retries is not None and (
             isinstance(self.request_retries, bool)
             or not isinstance(self.request_retries, int)
             or self.request_retries < 0
         ):
-            raise ValueError("ModelPolicy.request_retries must be a non-negative integer")
+            raise ValueError(
+                "ModelPolicy.request_retries must be None or a non-negative integer"
+            )
         if self.timeout_seconds is not None:
             if (
                 isinstance(self.timeout_seconds, bool)

@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.storage.migrations import (
     migrate_asset_layout,
+    migrate_asset_path_hash_index,
+    migrate_asset_path_hash_index_downgrade,
     migrate_sql_asset_tables,
     migrate_sql_asset_tables_downgrade,
     migrate_sqlite_artifact_root,
@@ -282,5 +284,135 @@ def test_migrate_sqlite_artifact_root_is_idempotent_and_shared_dir_safe(tmp_path
         assert rep_a2.copied == []
         await eng_a.dispose()
         await eng_b.dispose()
+
+    asyncio.run(_run())
+
+
+async def _seed_pre_hash_schema(conn):
+    """The pre-WP4 ai_assets/ai_asset_idempotency schema: full-column unique
+    constraints, no path_hash/key_hash columns -- what an existing deployment
+    looked like before spec section 7."""
+    await conn.exec_driver_sql(
+        """
+        CREATE TABLE ai_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path VARCHAR(1024) NOT NULL UNIQUE,
+            kind VARCHAR(32) NOT NULL,
+            etag VARCHAR(64) NOT NULL,
+            version INTEGER NOT NULL,
+            content_type VARCHAR(255),
+            size INTEGER NOT NULL,
+            content BLOB NOT NULL,
+            modified_at DATETIME NOT NULL,
+            metadata_json TEXT NOT NULL,
+            deleted_at DATETIME,
+            whiteout_version INTEGER
+        )
+        """
+    )
+    await conn.exec_driver_sql(
+        """
+        CREATE TABLE ai_asset_idempotency (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key VARCHAR(512) NOT NULL UNIQUE,
+            request_hash VARCHAR(64) NOT NULL,
+            result_json TEXT
+        )
+        """
+    )
+    await conn.exec_driver_sql(
+        "INSERT INTO ai_assets (path, kind, etag, version, content_type, size, "
+        "content, modified_at, metadata_json, deleted_at, whiteout_version) "
+        "VALUES ('/a.txt', 'file', 'e1', 1, NULL, 1, X'61', "
+        "'2024-01-01T00:00:00', '{}', NULL, NULL)"
+    )
+    await conn.exec_driver_sql(
+        "INSERT INTO ai_asset_idempotency (key, request_hash, result_json) "
+        "VALUES ('put:k1', 'h1', NULL)"
+    )
+
+
+def test_migrate_asset_path_hash_index_backfills_and_enforces_hash_uniqueness(tmp_path):
+    async def _run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/hash.db")
+        async with engine.begin() as conn:
+            await _seed_pre_hash_schema(conn)
+
+        await migrate_asset_path_hash_index(engine)
+
+        async with engine.begin() as conn:
+            row = (
+                await conn.exec_driver_sql(
+                    "SELECT path, path_hash FROM ai_assets WHERE path='/a.txt'"
+                )
+            ).fetchone()
+            assert row is not None
+            import hashlib
+
+            assert row[1] == hashlib.sha256(b"/a.txt").digest()
+
+            idem_row = (
+                await conn.exec_driver_sql(
+                    "SELECT key, key_hash FROM ai_asset_idempotency WHERE key='put:k1'"
+                )
+            ).fetchone()
+            assert idem_row is not None
+            assert idem_row[1] == hashlib.sha256(b"put:k1").digest()
+
+            # The new unique constraint is on path_hash, not path: inserting a
+            # second row with the SAME path_hash (spoofed) must now violate
+            # the unique index.
+            from sqlalchemy.exc import IntegrityError
+
+            with pytest.raises(IntegrityError):
+                await conn.exec_driver_sql(
+                    "INSERT INTO ai_assets (path, path_hash, kind, etag, version, "
+                    "content_type, size, content, modified_at, metadata_json, "
+                    "deleted_at, whiteout_version) VALUES ('/different.txt', "
+                    f"X'{row[1].hex()}', 'file', 'e2', 1, NULL, 1, X'62', "
+                    "'2024-01-01T00:00:00', '{}', NULL, NULL)"
+                )
+        await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_migrate_asset_path_hash_index_is_idempotent(tmp_path):
+    async def _run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/hash2.db")
+        async with engine.begin() as conn:
+            await _seed_pre_hash_schema(conn)
+        await migrate_asset_path_hash_index(engine)
+        # Re-running against an already-migrated schema must not error.
+        await migrate_asset_path_hash_index(engine)
+        async with engine.begin() as conn:
+            row = (
+                await conn.exec_driver_sql("SELECT COUNT(*) FROM ai_assets")
+            ).fetchone()
+            assert row[0] == 1
+        await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_migrate_asset_path_hash_index_downgrade_round_trips(tmp_path):
+    async def _run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/hash3.db")
+        async with engine.begin() as conn:
+            await _seed_pre_hash_schema(conn)
+        await migrate_asset_path_hash_index(engine)
+        await migrate_asset_path_hash_index_downgrade(engine)
+        async with engine.begin() as conn:
+            cols = (
+                await conn.exec_driver_sql("SELECT * FROM ai_assets LIMIT 0")
+            ).keys()
+            assert "path_hash" not in cols
+            row = (
+                await conn.exec_driver_sql(
+                    "SELECT path FROM ai_assets WHERE path='/a.txt'"
+                )
+            ).fetchone()
+            assert row is not None
+        await engine.dispose()
 
     asyncio.run(_run())

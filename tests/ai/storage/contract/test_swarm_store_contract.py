@@ -6,7 +6,7 @@ contract backend parity). The parametrized ``store_factory`` fixture is copied
 verbatim from ``test_run_store_contract.py`` (file + sqlalchemy branches,
 including the ``_run_in_new_loop`` helper that bootstraps the SQL engine off the
 test loop); ``Base.metadata.create_all`` already covers ``SwarmRunRow`` /
-``SwarmTaskRow`` since they subclass the same ``Base``.
+``SwarmStepRow`` since they subclass the same ``Base``.
 
 Uses the ``def test_x(store_factory):`` + ``asyncio.run(_run())`` style (sync
 test wrapper driving its own event loop) — no pytest-asyncio mode config needed."""
@@ -21,15 +21,15 @@ from linktools.ai.errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
 from linktools.ai.swarm.models import (
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -70,14 +70,14 @@ def make_task(
     task_id: str = "task-1",
     swarm_run_id: str = "swarm-1",
     parent_task_id: "str | None" = None,
-    status: SwarmTaskStatus = SwarmTaskStatus.PENDING,
+    status: SwarmStepStatus = SwarmStepStatus.PENDING,
     dependencies: "tuple[str, ...]" = (),
     assigned_agent_id: "str | None" = None,
     attempts: int = 0,
     version: int = 1,
-) -> SwarmTask:
+) -> SwarmStep:
     now = datetime.now(timezone.utc)
-    return SwarmTask(
+    return SwarmStep(
         id=task_id,
         swarm_run_id=swarm_run_id,
         parent_task_id=parent_task_id,
@@ -154,7 +154,7 @@ def store_factory(request, tmp_path):
 
         async def _create():
             async with engine.begin() as conn:
-                # SwarmRunRow + SwarmTaskRow subclass Base, so a single
+                # SwarmRunRow + SwarmStepRow subclass Base, so a single
                 # create_all covers every table both backends need.
                 await conn.run_sync(Base.metadata.create_all)
             # The connection pool otherwise holds a connection bound to this
@@ -289,20 +289,20 @@ def test_create_task_then_list_with_status_filter(store_factory):
     async def _run():
         await store.create_run(make_run())
         await store.create_task(
-            make_task(task_id="t-pending", status=SwarmTaskStatus.PENDING)
+            make_task(task_id="t-pending", status=SwarmStepStatus.PENDING)
         )
         await store.create_task(
             make_task(
                 task_id="t-claimed",
-                status=SwarmTaskStatus.CLAIMED,
+                status=SwarmStepStatus.CLAIMED,
                 assigned_agent_id="agent-7",
             ),
         )
         all_tasks = await store.list_tasks("swarm-1")
         assert {t.id for t in all_tasks} == {"t-pending", "t-claimed"}
-        claimed = await store.list_tasks("swarm-1", status=SwarmTaskStatus.CLAIMED)
+        claimed = await store.list_tasks("swarm-1", status=SwarmStepStatus.CLAIMED)
         assert {t.id for t in claimed} == {"t-claimed"}
-        pending = await store.list_tasks("swarm-1", status=SwarmTaskStatus.PENDING)
+        pending = await store.list_tasks("swarm-1", status=SwarmStepStatus.PENDING)
         assert {t.id for t in pending} == {"t-pending"}
 
     asyncio.run(_run())
@@ -322,7 +322,7 @@ def test_claim_task_marks_claimed_and_assigns_agent(store_factory):
         claimed = await store.claim_task("swarm-1", "agent-9")
         assert claimed is not None
         assert claimed.id == "t-1"
-        assert claimed.status == SwarmTaskStatus.CLAIMED
+        assert claimed.status == SwarmStepStatus.CLAIMED
         assert claimed.assigned_agent_id == "agent-9"
         assert claimed.claimed_at is not None
         assert claimed.version == 2
@@ -337,7 +337,7 @@ def test_claim_task_respects_dependencies(store_factory):
         await store.create_run(make_run())
         # t-dep is PENDING (claimable, no deps); t-blocked depends on t-dep.
         await store.create_task(
-            make_task(task_id="t-dep", status=SwarmTaskStatus.PENDING)
+            make_task(task_id="t-dep", status=SwarmStepStatus.PENDING)
         )
         await store.create_task(make_task(task_id="t-blocked", dependencies=("t-dep",)))
         # First claim picks t-dep (created first, deps trivially satisfied),
@@ -362,7 +362,7 @@ def test_claim_task_returns_none_when_nothing_claimable(store_factory):
         assert await store.claim_task("swarm-1", "agent-1") is None
         # A terminal/SUCCEEDED task is not claimable either.
         await store.create_task(
-            make_task(task_id="t-done", status=SwarmTaskStatus.SUCCEEDED)
+            make_task(task_id="t-done", status=SwarmStepStatus.SUCCEEDED)
         )
         assert await store.claim_task("swarm-1", "agent-1") is None
 
@@ -411,7 +411,7 @@ def test_set_active_run_missing_task_raises_not_found(store_factory):
 
     async def _run():
         await store.create_run(make_run())
-        with pytest.raises(SwarmTaskNotFoundError):
+        with pytest.raises(SwarmStepNotFoundError):
             await store.set_active_run("nope", "child-1", expected_version=1)
 
     asyncio.run(_run())
@@ -490,7 +490,7 @@ def test_complete_and_fail_task_store_result_and_error(store_factory):
         completed = await store.complete_task(
             "t-ok", result, expected_version=claimed_ok.version
         )
-        assert completed.status == SwarmTaskStatus.SUCCEEDED
+        assert completed.status == SwarmStepStatus.SUCCEEDED
         assert completed.result.output == {"done": True}
         assert dict(completed.result.metadata) == {"m": "n"}
         assert completed.version == 3
@@ -501,7 +501,7 @@ def test_complete_and_fail_task_store_result_and_error(store_factory):
         failed = await store.fail_task(
             "t-bad", err, expected_version=claimed_bad.version
         )
-        assert failed.status == SwarmTaskStatus.FAILED
+        assert failed.status == SwarmStepStatus.FAILED
         assert failed.error.error_type == "ValueError"
         assert failed.error.message == "boom"
         assert failed.attempts == 1
@@ -526,11 +526,11 @@ def test_missing_run_and_task_raise_not_found(store_factory):
             await store.update_run(
                 "nope", expected_version=1, status=SwarmStatus.RUNNING
             )
-        with pytest.raises(SwarmTaskNotFoundError):
+        with pytest.raises(SwarmStepNotFoundError):
             await store.complete_task(
                 "nope", RunResult(output=None), expected_version=1
             )
-        with pytest.raises(SwarmTaskNotFoundError):
+        with pytest.raises(SwarmStepNotFoundError):
             await store.fail_task(
                 "nope", RunErrorInfo(error_type="X", message="y"), expected_version=1
             )

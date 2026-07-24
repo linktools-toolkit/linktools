@@ -14,12 +14,14 @@ single candidate is used directly.
 
 ``request_retries`` configures the provider HTTP client's own retry of transient
 HTTP failures (wired into ``AsyncOpenAI`` as ``max_retries`` when a config-backed
-OpenAI model is built at resolve time). It is NOT a registry-lookup retry, and it
-does not apply to a prebuilt model (one registered directly via ``model=``), which
-has no HTTP client to configure and is reused as-is. The resolved revision is a
-stable hash of the ordered candidates' non-secret identity plus
-``request_retries``: reordering the chain, swapping an endpoint field, or changing
-the retry count are real revision changes; rotating an api_key is not."""
+OpenAI model is built, ALWAYS explicitly including 0). It is NOT a registry-lookup
+retry. ``None`` is the signal that a prebuilt model (registered directly via
+``model=``) manages its own retry behavior and is reused as-is; an int
+``request_retries`` on a prebuilt model is rejected (the framework cannot configure
+a client it does not own). The resolved revision is a stable hash of the ordered
+candidates' non-secret identity plus ``request_retries``: reordering the chain,
+swapping an endpoint field, or changing the retry count are real revision changes;
+rotating an api_key is not."""
 
 import hashlib
 from dataclasses import dataclass
@@ -27,7 +29,7 @@ from dataclasses import dataclass
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
-from ..errors import ModelRoutingError
+from ..errors import ModelRoutingError, ModelRetryConfigurationError
 from ..json import canonical_json
 from .policy import ModelPolicy
 from .registry import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
@@ -75,18 +77,34 @@ class ModelResolver:
         return ResolvedModel(FallbackModel(*models), revision, usage_limits)
 
 
-def _candidate_model(bundle: ModelBundle, request_retries: int) -> Model:
-    """Pick the model for one candidate, wiring ``request_retries`` into the
-    provider HTTP client for a config-backed OpenAI model. ``request_retries``
-    of 0 matches the registry's own registration-time build, so the existing
-    model is reused; a prebuilt model (registered directly) has no HTTP client
-    and is reused as-is regardless."""
-    from .registry import _bundle_from_config
+def _candidate_model(bundle: ModelBundle, request_retries: "int | None") -> Model:
+    """Pick the model for one candidate, applying the policy's retry semantics.
 
-    if bundle.config.protocol == "openai" and request_retries:
-        return _bundle_from_config(
-            bundle.config, request_retries=request_retries
-        ).model
+    Config-backed OpenAI model: the framework ALWAYS owns ``max_retries``. A
+    registration builds with ``max_retries=0``; when the policy asks for a
+    positive count the model is rebuilt so the provider client carries that count
+    (0 is already explicit at registration, so the registered model is reused).
+    ``request_retries=None`` on a config-backed model is treated as 0 (the
+    config-file default) -- None is the prebuilt signal, but a config-backed model
+    has a framework-managed client either way.
+
+    Prebuilt model: it owns its own HTTP client, so the framework cannot set
+    ``max_retries``. ``request_retries=None`` reuses it as-is; a non-None value is
+    a configuration error (the framework was asked to configure a client it does
+    not own) and is rejected with :class:`ModelRetryConfigurationError`."""
+    if bundle.config.protocol == "openai":
+        retries = request_retries if isinstance(request_retries, int) else 0
+        if retries > 0:
+            return ModelBundle.from_config(
+                bundle.config, request_retries=retries
+            ).model
+        return bundle.model
+    if request_retries is not None:
+        raise ModelRetryConfigurationError(
+            f"prebuilt model {bundle.config.model_type!r} cannot be configured with "
+            f"request_retries={request_retries!r}; pass request_retries=None so the "
+            f"prebuilt model manages its own retry behavior"
+        )
     return bundle.model
 
 
@@ -103,4 +121,9 @@ def _resolved_revision(bundles: "list[ModelBundle]", request_retries: int) -> st
     return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
 
 
-__all__: "list[str]" = ["ResolvedModel", "ModelResolver", "ModelRoutingError"]
+__all__: "list[str]" = [
+    "ResolvedModel",
+    "ModelResolver",
+    "ModelRoutingError",
+    "ModelRetryConfigurationError",
+]

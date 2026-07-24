@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     # adapters can ``from linktools.ai.storage.protocols import ...`` in any
     # import order without hitting a partially-initialized module.
     from ..agent.approval import ApprovalStore
+    from ..artifact.digest import ArtifactDigest
     from ..artifact.models import ArtifactRecord
     from ..asset.store import AssetStore
     from ..events.store import EventStore
@@ -93,18 +94,26 @@ class ArtifactBlobStore(Protocol):
     """Content-addressed immutable byte storage for artifacts.
 
     ``put_if_absent`` is idempotent on digest. Reads stream; callers re-verify
-    the digest after reading.
+    the digest after reading. Every digest parameter is the validated
+    :class:`ArtifactDigest` value object -- a bare string never reaches a blob
+    address, so traversal / overflow input cannot become a shard path.
     """
 
     async def put_if_absent(
-        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+        self,
+        *,
+        digest: ArtifactDigest,
+        source: AsyncIterator[bytes],
+        size: "int | None",
     ) -> BlobInfo: ...
 
-    def open(self, *, digest: str) -> AsyncContextManager[AsyncIterator[bytes]]: ...
+    def open(
+        self, *, digest: ArtifactDigest
+    ) -> AsyncContextManager[AsyncIterator[bytes]]: ...
 
-    async def stat(self, *, digest: str) -> "BlobInfo | None": ...
+    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None": ...
 
-    async def delete(self, *, digest: str) -> None: ...
+    async def delete(self, *, digest: ArtifactDigest) -> None: ...
 
 
 @runtime_checkable

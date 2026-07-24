@@ -101,7 +101,6 @@ def _make_runner(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=capability_resolver,
         managed_tool_executor=managed_tool_executor,
         commit_coordinator=FilesystemRunCommitCoordinator(

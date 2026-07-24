@@ -19,8 +19,8 @@ from linktools.ai.swarm.aggregation import (
 from linktools.ai.swarm.limits import DEFAULT_SWARM_LIMITS, SwarmLimits
 from linktools.ai.swarm.models import (
     AgentRef,
-    SwarmTask,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepStatus,
     TaskInput,
 )
 from linktools.ai.swarm.spec import (
@@ -33,15 +33,15 @@ from linktools.ai.swarm.spec import (
 # --- helpers -----------------------------------------------------------------
 
 
-def _make_task(output) -> SwarmTask:
-    """Build a minimal SwarmTask carrying a succeeded RunResult(output=...)."""
-    return SwarmTask(
+def _make_task(output) -> SwarmStep:
+    """Build a minimal SwarmStep carrying a succeeded RunResult(output=...)."""
+    return SwarmStep(
         id="t-1",
         swarm_run_id="sr-1",
         parent_task_id=None,
         assigned_agent_id="agent-1",
         description="d",
-        status=SwarmTaskStatus.SUCCEEDED,
+        status=SwarmStepStatus.SUCCEEDED,
         dependencies=(),
         input=TaskInput(prompt="p"),
         result=RunResult(output=output),
@@ -55,15 +55,15 @@ def _make_task(output) -> SwarmTask:
     )
 
 
-def _make_failed_task() -> SwarmTask:
-    """Build a SwarmTask whose result is None (e.g. failed/cancelled)."""
-    return SwarmTask(
+def _make_failed_task() -> SwarmStep:
+    """Build a SwarmStep whose result is None (e.g. failed/cancelled)."""
+    return SwarmStep(
         id="t-fail",
         swarm_run_id="sr-1",
         parent_task_id=None,
         assigned_agent_id="agent-1",
         description="d",
-        status=SwarmTaskStatus.FAILED,
+        status=SwarmStepStatus.FAILED,
         dependencies=(),
         input=TaskInput(prompt="p"),
         result=None,
@@ -152,7 +152,7 @@ def test_aggregate_concat_joins_outputs():
     assert result.output == "alpha\nbeta"
     assert result.metadata["task_count"] == 2
     # The aggregate now sums per-task token_usage into the result so
-    # SwarmRunner can enforce max_total_tokens. _make_task results carry the
+    # SwarmEngine can enforce max_total_tokens. _make_task results carry the
     # default empty token_usage -> the sum is zeros (still a populated dict).
     assert result.token_usage == {"input_tokens": 0, "output_tokens": 0}
 

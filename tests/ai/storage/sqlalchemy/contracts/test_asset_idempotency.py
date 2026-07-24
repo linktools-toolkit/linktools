@@ -44,8 +44,10 @@ async def test_non_unique_integrity_error_is_not_swallowed(sql_asset_backend):
     # Insert a row directly with a NULL on a NOT-NULL column to provoke a
     # non-unique IntegrityError; it must surface (not be converted to an asset
     # conflict) -- a non-unique violation must always re-raise.
+    from linktools.ai.storage.sqlalchemy.asset import asset_path_hash
     from linktools.ai.storage.sqlalchemy.models import AssetRow
 
+    bad_path = AssetPath("/contract/bad.txt")
     async with sql_asset_backend._session_factory() as session:
         async with session.begin():
             with pytest.raises(IntegrityError):
@@ -53,7 +55,8 @@ async def test_non_unique_integrity_error_is_not_swallowed(sql_asset_backend):
                     session,
                     AssetRow,
                     {
-                        "path": "/contract/bad.txt",
+                        "path": bad_path.value,
+                        "path_hash": asset_path_hash(bad_path),
                         "kind": "file",
                         "etag": "e",
                         "version": 1,
@@ -65,5 +68,5 @@ async def test_non_unique_integrity_error_is_not_swallowed(sql_asset_backend):
                         "deleted_at": None,
                         "whiteout_version": None,
                     },
-                    index_elements=["path"],
+                    index_elements=["path_hash"],
                 )

@@ -5,12 +5,12 @@ backend-agnostic sweep. A blob is deletable only when (a) no record references
 it AND (b) it is past the grace window -- so an in-flight transaction that has
 written its blob but not yet committed its record is never corrupted."""
 
-import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import (
     ArtifactProvenance,
     ArtifactRecord,
@@ -40,8 +40,8 @@ async def _aiter(content: bytes):
     yield content
 
 
-def _sha(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
+def _sha(content: bytes) -> ArtifactDigest:
+    return ArtifactDigest.from_bytes(content)
 
 
 def _record(artifact_id: str, sha: str, tenant: str = "t1") -> ArtifactRecord:
@@ -63,7 +63,7 @@ def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
         await blob_store.put_if_absent(
             digest=ref_sha, source=_aiter(ref_content), size=len(ref_content)
         )
-        await record_store.put(_record("art-ref", ref_sha))
+        await record_store.put(_record("art-ref", ref_sha.value))
         # An orphan blob: written but NO record pins it.
         orphan_content = b"orphan"
         orphan_sha = _sha(orphan_content)
@@ -176,7 +176,7 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
         await blob_store.put_if_absent(
             digest=ref_sha, source=_aiter(ref_content), size=len(ref_content)
         )
-        await record_store.put(_record("art-ref", ref_sha))
+        await record_store.put(_record("art-ref", ref_sha.value))
         # An orphan blob past the grace window that the sweeper WOULD delete if
         # the scan were healthy.
         orphan_content = b"would-be-deleted"

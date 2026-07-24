@@ -207,7 +207,10 @@ def parse_model_policy(payload: "dict[str, Any]") -> Any:
     # Route every typed field through the reader so a missing field uses its
     # default, an explicit null is rejected, and (for timeout) NaN/Infinity are
     # rejected via math.isfinite -- positive_number centralizes that check.
-    request_retries = reader.non_negative_int("request_retries", default=1)
+    # Default 0: a missing config field means "the framework explicitly disables
+    # the SDK's own retry" (max_retries=0), not "inherit the SDK default". None is
+    # reserved for prebuilt models that manage their own retry behavior.
+    request_retries = reader.non_negative_int("request_retries", default=0)
     timeout = reader.positive_number("timeout_seconds", default=30.0)
     budget = reader.non_negative_decimal("budget")
     return ModelPolicy(

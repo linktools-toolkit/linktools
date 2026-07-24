@@ -3,7 +3,7 @@
 
 """Runtime assembly for a discovered project.
 
-Wires ``.linktools/{agents,skills,mcp}`` into ``Runtime.build`` via a real
+Wires ``.linktools/{agents,skills,mcp}`` into ``build_runtime`` via a real
 ``RuntimeDependencies`` (AgentCatalog / SkillCatalog / MCPCatalog built from the
 project directories), a project-scoped ``FilesystemStorage`` (state isolation), an
 ``MCPConnectionPool`` (so ``aclose`` can release connections), and
@@ -30,7 +30,7 @@ from linktools.ai.agent.catalog import AgentCatalog
 from linktools.ai.catalog.parsing import SpecLoader
 from linktools.ai.mcp.catalog import MCPCatalog
 from linktools.ai.skill.catalog import SkillCatalog
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.skill.private import ActiveSkillContext, get_active_skill
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.subagent.config import SkillPrivateSubagentConfig
@@ -204,7 +204,7 @@ def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundl
     )
 
     commit_coordinator = FilesystemRunCommitCoordinator.from_storage(storage)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         commit_coordinator=commit_coordinator,
         model_resolver=model_resolver,

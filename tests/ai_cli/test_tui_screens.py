@@ -10,8 +10,8 @@ import unittest
 from linktools.ai_cli.client import DoctorReport, FakeRuntimeClient
 from linktools.ai_cli.tui.app import LinktoolsAIApp
 from linktools.ai_cli.tui.screens.chat import ChatScreen
+from linktools.ai_cli.tui.screens.catalog import CatalogScreen
 from linktools.ai_cli.tui.screens.doctor import DoctorScreen
-from linktools.ai_cli.tui.screens.resources import ResourcesScreen
 from linktools.ai_cli.tui.screens.runs import RunsScreen
 
 
@@ -35,7 +35,7 @@ def _spy(fake, method_name: str, record: list):
 
 
 class TestTuiScreens(unittest.IsolatedAsyncioTestCase):
-    async def test_resources_screen_lists_via_client(self):
+    async def test_catalog_screen_lists_via_client(self):
         fake = FakeRuntimeClient(
             agents=("default", "reviewer"), skills=("code-review",), mcp_servers=()
         )
@@ -46,7 +46,7 @@ class TestTuiScreens(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("ctrl+r")
-            await _wait_until(pilot, lambda: isinstance(app.screen, ResourcesScreen))
+            await _wait_until(pilot, lambda: isinstance(app.screen, CatalogScreen))
             await app.workers.wait_for_complete()
             self.assertIn("list_agents", called)
             self.assertIn("list_skills", called)

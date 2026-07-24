@@ -17,27 +17,30 @@ def test_top_level_runtime_import():
 
 
 def test_build_runtime_is_public_importable():
-    # : ``from linktools.ai.runtime import Runtime, build_runtime`` is the
-    # public build entry. build_runtime is the module-level handle for the
-    # public builder (equivalent to Runtime.build).
+    # ``from linktools.ai.runtime import Runtime, build_runtime`` is the
+    # public build entry. build_runtime is the ONLY public construction
+    # entry point -- Runtime.build/Runtime.create and RuntimeFactory do
+    # not exist.
     from linktools.ai.runtime import Runtime, build_runtime
 
     assert callable(build_runtime)
-    # Same underlying classmethod (accessing a classmethod twice yields distinct
-    # bound-method objects, so compare the underlying function).
-    assert build_runtime.__func__ is Runtime.build.__func__
+    assert not hasattr(Runtime, "build")
+    assert not hasattr(Runtime, "create")
+    import linktools.ai.runtime as runtime_module
+
+    assert not hasattr(runtime_module, "RuntimeFactory")
 
 
 def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
     import importlib.util
 
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     assert not hasattr(Runtime, "assemble")
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -53,7 +56,9 @@ def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
 
     import linktools.ai.capability as capability
 
-    assert not hasattr(capability, "CapabilityResolver")
+    # CapabilityResolver is part of the fixed public API:
+    # `from linktools.ai.capability import CapabilityResolver`.
+    assert hasattr(capability, "CapabilityResolver")
 
 
 def test_agent_domain_imports():

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from linktools.ai.artifact import ArtifactStore, ANONYMOUS_PROVENANCE
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.identity.principal import ScopeSet
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.artifact import (
@@ -206,6 +207,7 @@ def _handler(runtime, resolver, tmp_path=None, **kwargs):
         artifact_store=ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=root / "blobs"),
             FilesystemArtifactRecordStore(records_root=root / "records"),
+            InProcessArtifactDigestCoordinator(),
         ),
         **kwargs)
 
@@ -629,6 +631,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             artifact_store=ArtifactStore(
                 FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
                 FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+                InProcessArtifactDigestCoordinator(),
             ),
         )
         ct = CancellationToken()

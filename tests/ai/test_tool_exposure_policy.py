@@ -142,7 +142,7 @@ async def test_mutating_mcp_tool_hidden_by_default_policy():
 
     asm = CapabilityResolver({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(agent_id="a1", exposure_policy=Policy())
-    bundle = await asm.assemble(_spec(), ctx)
+    bundle = await asm.resolve(_spec(), ctx)
     assert bundle.tool_contributions == ()
 
 
@@ -154,6 +154,6 @@ async def test_mutating_mcp_tool_exposed_when_execution_tools_allowed():
     ctx = CapabilityContext(
         agent_id="a1", exposure_policy=Policy(expose_execution_tools=True)
     )
-    bundle = await asm.assemble(_spec(), ctx)
+    bundle = await asm.resolve(_spec(), ctx)
     names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
     assert names == {"risky_call"}

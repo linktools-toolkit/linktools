@@ -3,7 +3,7 @@
 """2 (v4 guide ): RunDefinitionStore is a required capability, not
 optional. These tests pin the two guarantees the spec states in :
 
-1. Runtime.build fails fast when Storage has no RunDefinitionStore --
+1. build_runtime fails fast when Storage has no RunDefinitionStore --
    the error surfaces at build time, not when a subagent/worker tool first
    pauses on approval and Runtime.resume(child_run_id) cannot find a snapshot.
 2. A subagent run always persists a RunDefinitionSnapshot for its child run
@@ -20,7 +20,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunInput
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -34,7 +34,7 @@ def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
     object.__setattr__(storage, "run_definitions", None)
 
     with pytest.raises(RuntimeInitializationError):
-        Runtime.build(
+        build_runtime(
             storage=storage,
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
         )

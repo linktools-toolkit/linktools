@@ -6,9 +6,11 @@ Every test triggers the actual code path that increments the counter and
 asserts the InMemoryMetrics sink observed it."""
 
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 
 import asyncio
 import hashlib
+from linktools.ai.artifact.digest import ArtifactDigest
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -340,7 +342,12 @@ def test_artifact_digest_mismatch_total_fires_on_corrupt_blob():
             r = self._by_id.get(artifact_id)
             return r if r is not None and r.tenant_id == tenant_id else None
 
-    store = ArtifactStore(_CorruptBlobStore(), _MemRecordStore(), metrics=metrics)
+    store = ArtifactStore(
+        _CorruptBlobStore(),
+        _MemRecordStore(),
+        InProcessArtifactDigestCoordinator(),
+        metrics=metrics,
+    )
 
     async def _run():
         # The pinned sha256 is for "real-bytes"; the blob store returns
@@ -381,7 +388,7 @@ def test_artifact_orphan_total_fires_when_sweep_deletes_orphan(tmp_path):
         # Write one blob with no record pointing at it -> it is an orphan
         # candidate. Use the real digest so put_if_absent succeeds.
         content = b"orphaned-blob"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _src():
             yield content
@@ -799,7 +806,7 @@ def test_artifact_blob_upload_failure_total_fires_on_digest_mismatch(tmp_path):
 
         with pytest.raises(ArtifactIntegrityError):
             await blobs.put_if_absent(
-                digest="0" * 64, source=_src(), size=21
+                digest=ArtifactDigest.parse("0" * 64), source=_src(), size=21
             )
 
     asyncio.run(_run())
@@ -822,7 +829,7 @@ def test_artifact_blob_upload_failure_total_fires_on_size_mismatch(tmp_path):
         blobs_root=tmp_path / "blobs", metrics=metrics
     )
     payload = b"payload"  # 7 bytes
-    digest = hashlib.sha256(payload).hexdigest()
+    digest = ArtifactDigest.from_bytes(payload)
 
     async def _run():
         async def _src():
@@ -853,7 +860,7 @@ def test_artifact_blob_upload_failure_total_fires_on_corrupt_existing(tmp_path):
         blobs_root=tmp_path / "blobs", metrics=metrics
     )
     payload = b"payload"
-    digest = hashlib.sha256(payload).hexdigest()
+    digest = ArtifactDigest.from_bytes(payload)
 
     async def _run():
         async def _src():
@@ -862,7 +869,7 @@ def test_artifact_blob_upload_failure_total_fires_on_corrupt_existing(tmp_path):
         await blobs.put_if_absent(digest=digest, source=_src(), size=7)
         # Tamper the stored blob in place; the second put's dedup path re-hashes
         # it and refuses to record a reference to the corrupt blob.
-        (tmp_path / "blobs" / digest[:2] / digest).write_bytes(b"TAMPERED")
+        (tmp_path / "blobs" / digest.value[:2] / digest.value).write_bytes(b"TAMPERED")
         with pytest.raises(ArtifactIntegrityError):
             await blobs.put_if_absent(digest=digest, source=_src(), size=7)
 
@@ -896,7 +903,7 @@ def test_artifact_orphan_cleanup_failure_total_fires_on_delete_error(tmp_path):
         blobs = _FailingDeleteBlobStore(blobs_root=tmp_path / "blobs")
         records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
         content = b"orphaned-blob"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _src():
             yield content

@@ -11,7 +11,7 @@ spec's static instructions (``PromptSpec.instructions``) only.
 
 The compiler never bakes in a default command denylist. The default
 SecurityBaseline (including its CommandRule) is resolved exactly once, by
-``Runtime.build`` -- the compiler only ever consumes the ``tool_executor`` it
+``build_runtime`` -- the compiler only ever consumes the ``tool_executor`` it
 is given, which is REQUIRED: there is no rule-less ALLOW-all fallback, so a
 directly-constructed compiler without an explicit executor fails loudly rather
 than silently governing nothing."""
@@ -39,7 +39,7 @@ class AgentCompiler:
     ) -> None:
         if tool_executor is None:
             raise RuntimeInitializationError(
-                "AgentCompiler requires a GovernedToolInvoker; Runtime.build is the "
+                "AgentCompiler requires a GovernedToolInvoker; build_runtime is the "
                 "single source of the baseline-governed executor"
             )
         self._model_resolver = model_resolver

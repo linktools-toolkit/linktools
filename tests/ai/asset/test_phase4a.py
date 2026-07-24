@@ -134,11 +134,11 @@ async def test_atomic_move_bumps_revision_exactly_once(tmp_path):
             b"payload",
             options=WriteOptions(metadata={"k": "v"}),
         )
-        before = await backend.revision()
+        before = int(await backend.revision())
 
         moved = await store.move(AssetPath("/src.txt"), AssetPath("/dst.txt"))
 
-        after = await backend.revision()
+        after = int(await backend.revision())
         assert after == before + 1, (
             f"atomic MOVE must bump revision exactly once (delta={after - before}); "
             "a delta of 2 means the move decomposed into put+delete"

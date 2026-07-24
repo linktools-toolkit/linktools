@@ -6,13 +6,13 @@ ops 4-5; ). The Filesystem reference backends stream to/from disk
 crash-safe atomic-write helper used by every other File store."""
 
 import asyncio
-import hashlib
 from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import (
     ArtifactBlobNotFoundError,
     ArtifactIntegrityError,
@@ -32,8 +32,11 @@ def _aiter(chunks: "list[bytes]") -> AsyncIterator[bytes]:
     return _g()
 
 
-def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _digest(data: bytes) -> ArtifactDigest:
+    return ArtifactDigest.from_bytes(data)
+
+
+_VALID = "0" * 64
 
 
 # --- FilesystemArtifactBlobStore ---
@@ -51,10 +54,10 @@ def test_blob_put_if_absent_then_open_roundtrips_streaming(tmp_path: Path) -> No
             size=len(payload),
         )
         assert isinstance(info, BlobInfo)
-        assert info.digest == digest
+        assert info.digest == digest.value
         assert info.size == len(payload)
         # The blob lands at the sharded path blobs/<xx>/<sha>.
-        assert (tmp_path / "blobs" / digest[:2] / digest).exists()
+        assert (tmp_path / "blobs" / digest.value[:2] / digest.value).exists()
         collected: "list[bytes]" = []
         async with blob.open(digest=digest) as chunks:
             async for chunk in chunks:
@@ -75,7 +78,7 @@ def test_blob_put_if_absent_is_idempotent_on_matching_digest(tmp_path: Path) -> 
         # Second put of identical content: the blob already exists at the address;
         # put_if_absent returns success without overwriting or erroring.
         second = await blob.put_if_absent(digest=d, source=_aiter([payload]), size=len(payload))
-        assert first.digest == second.digest == d
+        assert first.digest == second.digest == d.value
 
     asyncio.run(run())
 
@@ -99,7 +102,7 @@ def test_blob_put_if_absent_consumes_source_even_when_blob_exists(tmp_path: Path
                 yield chunk
 
         info = await blob.put_if_absent(digest=d, source=_tracking(), size=len(payload))
-        assert info.digest == d
+        assert info.digest == d.value
         # The whole source was drained, not short-circuited by "blob exists".
         assert b"".join(consumed) == payload
 
@@ -131,7 +134,7 @@ def test_blob_put_if_absent_rejects_digest_mismatch(tmp_path: Path) -> None:
     async def run() -> None:
         with pytest.raises(ArtifactIntegrityError):
             await blob.put_if_absent(
-                digest="0" * 64, source=_aiter([b"not-the-claimed-digest"]), size=19
+                digest=ArtifactDigest.parse(_VALID), source=_aiter([b"not-the-claimed-digest"]), size=19
             )
         # Nothing published on mismatch.
         assert not (tmp_path / "blobs").rglob("*") or not list(
@@ -151,7 +154,7 @@ def test_blob_put_if_absent_refuses_corrupt_existing(tmp_path: Path) -> None:
         await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=7)
         # Tamper the stored blob in place; a second put of the same digest must
         # refuse to record a reference to the corrupt blob.
-        path = tmp_path / "blobs" / digest[:2] / digest
+        path = tmp_path / "blobs" / digest.value[:2] / digest.value
         path.write_bytes(b"TAMPERED")
         with pytest.raises(ArtifactIntegrityError):
             await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=7)
@@ -166,7 +169,7 @@ def test_blob_open_missing_raises(tmp_path: Path) -> None:
         # Missing (absent) blob surfaces the UNIFIED ArtifactBlobNotFoundError
         # , distinct from ArtifactIntegrityError (corrupt-but-present).
         with pytest.raises(ArtifactBlobNotFoundError):
-            async with blob.open(digest="0" * 64) as _chunks:
+            async with blob.open(digest=ArtifactDigest.parse(_VALID)) as _chunks:
                 pass
 
     asyncio.run(run())
@@ -442,7 +445,9 @@ def test_blob_iter_digests_with_mtime(tmp_path: Path) -> None:
             digest=_digest(b"bb"), source=_aiter([b"bb"]), size=2
         )
         pairs = [(d, m) async for d, m in blob.iter_digests_with_mtime()]
-        assert sorted(d for d, _ in pairs) == sorted([_digest(b"a"), _digest(b"bb")])
+        assert sorted(d for d, _ in pairs) == sorted(
+            [_digest(b"a").value, _digest(b"bb").value]
+        )
         from datetime import datetime
 
         for _, mtime in pairs:
@@ -469,14 +474,12 @@ def test_blob_put_if_absent_rejects_size_mismatch(tmp_path: Path) -> None:
 
 
 def test_blob_rejects_path_traversal_digest(tmp_path: Path) -> None:
-    blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
+    # A traversal string cannot become an ArtifactDigest, so it can never reach
+    # the Filesystem backend's path construction -- the boundary rejects it.
+    from linktools.ai.errors import InvalidArtifactDigestError
 
-    async def run() -> None:
-        with pytest.raises(ValueError):
-            async with blob.open(digest="../escape"):
-                pass
-
-    asyncio.run(run())
+    with pytest.raises(InvalidArtifactDigestError):
+        ArtifactDigest.parse("../escape")
 
 
 def test_record_rejects_path_traversal_ids(tmp_path: Path) -> None:

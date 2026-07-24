@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RuntimeDependencies: the typed spec-provider declarations handed to
-``Runtime.build``. Holds the optional spec providers for each capability domain
+``build_runtime``. Holds the optional spec providers for each capability domain
 plus the pre-built capability providers. Distinct from Storage (state),
 CapabilityRuntimeOptions (policy), and SkillPrivateSubagentConfig (skill-private
 wiring, injected separately).
@@ -87,7 +87,7 @@ class RuntimeDependencies:
     run_commit_coordinator: "RunCommitCoordinator | None" = None
     # NOTE: skill-private-subagent wiring no longer lives here -- it flows
     # through a typed SkillPrivateSubagentConfig injected via
-    # ``Runtime.build(skill_subagent=...)`` straight into the SubagentProvider.
+    # ``build_runtime(skill_subagent=...)`` straight into the SubagentProvider.
     # RuntimeDependencies is spec-providers + capabilities + the two
     # composition-root objects the gate reads.
 

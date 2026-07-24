@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SwarmStore Protocol: persistence contract for SwarmRun/SwarmTask.
+"""SwarmStore Protocol: persistence contract for SwarmRun/SwarmStep.
 Two backends implement it: FilesystemSwarmStore (single-process) and
 SqlAlchemySwarmStore (multi-process via atomic optimistic claim)."""
 
 from typing import Any, Protocol, runtime_checkable
 
 from ..run.models import RunErrorInfo, RunResult
-from .models import SwarmRun, SwarmStatus, SwarmTask, SwarmTaskAttempt, SwarmTaskStatus
+from .models import SwarmRun, SwarmStatus, SwarmStep, SwarmStepAttempt, SwarmStepStatus
 
 
 @runtime_checkable
@@ -28,15 +28,15 @@ class SwarmStore(Protocol):
         metadata: "dict | None" = None,
     ) -> SwarmRun: ...
 
-    async def create_task(self, task: SwarmTask) -> SwarmTask: ...
+    async def create_task(self, task: SwarmStep) -> SwarmStep: ...
 
     async def claim_task(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None" = None
-    ) -> "SwarmTask | None": ...
+    ) -> "SwarmStep | None": ...
 
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         """Record the freshly-minted child RunRecord id on the task. Called by
         strategy._run_task immediately after a successful claim_task with the
         new uuid4 run_id it generated for this execution. Bumps the task
@@ -52,7 +52,7 @@ class SwarmStore(Protocol):
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         """Mark the task SUCCEEDED. ``expected_version`` is now a MANDATORY
         fencing token -- the CLAIMED
         task's version right after set_active_run -- so a worker whose lease
@@ -73,30 +73,30 @@ class SwarmStore(Protocol):
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         """Mark the task FAILED (bumping ``attempts``). Same mandatory
         fencing-token semantics as :meth:`complete_task`."""
         ...
 
     async def list_tasks(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
-    ) -> "tuple[SwarmTask, ...]": ...
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None" = None
+    ) -> "tuple[SwarmStep, ...]": ...
 
     async def reclaim_expired_tasks(
         self, swarm_run_id: str
-    ) -> "tuple[SwarmTask, ...]": ...
+    ) -> "tuple[SwarmStep, ...]": ...
 
     # -- attempts ---------------------------------------------------------
     #
-    # Each (re)execution of a SwarmTask records one SwarmTaskAttempt for audit.
+    # Each (re)execution of a SwarmStep records one SwarmStepAttempt for audit.
     # ``record_attempt`` is an upsert keyed on ``attempt.id``: the strategy
     # writes status=RUNNING/started_at before invoking the worker, then calls it
     # again with finished_at + SUCCEEDED|FAILED after the worker returns. One
     # attempt row per retry iteration so a 3-try retry leaves a 3-row trail.
 
-    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt: ...
+    async def record_attempt(self, attempt: SwarmStepAttempt) -> SwarmStepAttempt: ...
 
-    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]": ...
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmStepAttempt, ...]": ...
 
     # -- lease renewal ----------------------------------------------------
     #
@@ -109,4 +109,4 @@ class SwarmStore(Protocol):
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask: ...
+    ) -> SwarmStep: ...

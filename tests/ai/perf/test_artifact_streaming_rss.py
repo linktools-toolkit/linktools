@@ -45,6 +45,7 @@ from typing import AsyncIterator, Callable
 
 import pytest
 
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.artifact.store import ArtifactStore
 from linktools.ai.storage.filesystem.artifact import (
     FilesystemArtifactBlobStore,
@@ -206,7 +207,7 @@ def test_put_stream_and_open_stream_extra_rss_under_64mib(tmp_path: Path) -> Non
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records)
+    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
 
     pre_baseline_kib = _read_vm_rss_kib()
     assert pre_baseline_kib is not None

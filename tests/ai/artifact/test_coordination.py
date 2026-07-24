@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactProvenance
 from linktools.ai.artifact.store import ArtifactStore
 from linktools.ai.storage.filesystem.artifact import (
@@ -28,8 +29,8 @@ from linktools.ai.storage.filesystem.artifact import (
 from linktools.ai.storage.orphan import OrphanSweepConfig, sweep_orphan_blobs
 
 
-def _sha(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
+def _sha(content: bytes) -> ArtifactDigest:
+    return ArtifactDigest.from_bytes(content)
 
 
 async def _aiter(content: bytes):

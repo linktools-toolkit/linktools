@@ -56,7 +56,6 @@ import contextlib
 import dataclasses
 import logging
 import time
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..errors import (
@@ -79,24 +78,30 @@ from ..prompt.builder import PromptBuilder
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..run.cancellation import CancellationToken
-from ..run.checkpoint import CheckpointStore
 from ..run.commit import CompleteRunCommand, PauseRunCommand
 from ..run.context import RunContext
 from ..run.controller import RunController
-from ..run.lifecycle import mark_cancelled, mark_failed
+from ..run.events_bus import RunEventBus
+from ..run.lifecycle import create_and_start_run, mark_cancelled, mark_failed
 from ..run.models import (
     RunErrorInfo,
     RunInput,
-    RunRecord,
     RunResult,
     RunStatus,
 )
 from ..run.store import RunStore
-from ..session.models import MessageRole, NewSessionMessage
+from ..session.recorder import SessionRecorder
 from ..session.store import SessionStore
 from .checkpoint import serialize_messages
 from .dependencies import AgentDependencies
-from .models import CompiledAgent
+from .models import (
+    AgentExecutionOutcome,
+    AgentExecutionStatus,
+    AgentInput,
+    CompiledAgent,
+    PauseRequest,
+    RunUsage,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -117,6 +122,46 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+class _PendingCommit:
+    """Mutable out-parameter: when passed to ``execute()`` as ``commit_sink``,
+    the success/pause paths stash their Complete/PauseRunCommand here INSTEAD
+    OF calling ``commit_coordinator.complete()``/``.pause()`` themselves,
+    letting the caller (``_drive_paused_or_result``) perform that one Store-
+    writing call after the generator has already fully drained -- a safe
+    reordering since nothing else runs concurrently at that point. ``None``
+    (the default, every direct-engine caller/test) preserves execute()'s
+    original behavior exactly: it commits internally, as it always has."""
+
+    __slots__ = (
+        "complete_command",
+        "pause_command",
+        "record_metrics",
+        "on_cancelled",
+        "on_failed",
+        "running_version",
+    )
+
+    def __init__(self) -> None:
+        self.complete_command: "CompleteRunCommand | None" = None
+        self.pause_command: "PauseRunCommand | None" = None
+        # Closure capturing execute()'s local run_attrs/started/metrics --
+        # avoids duplicating those fields onto this sink. Invoked by the
+        # caller immediately after it performs the complete commit.
+        self.record_metrics: "Any" = None
+        # Closures capturing execute()'s local context/running_version/exc
+        # (plus self._run_store/_middleware_pipeline/_event_store/_metrics)
+        # for the cancel/fail terminal transitions. Invoked by the caller
+        # from its OWN except block, catching the SAME exception these
+        # closures were built to handle, immediately before re-raising it.
+        self.on_cancelled: "Any" = None
+        self.on_failed: "Any" = None
+        # The RUNNING version execute() read/created with -- the collector
+        # needs it to drive the fail-transition if the post-drain commit
+        # itself raises (a case execute()'s own fail-closure cannot cover,
+        # since the generator has already exited cleanly by then).
+        self.running_version: "int | None" = None
+
+
 @contextlib.asynccontextmanager
 async def _noop_span():
     """Async context manager that yields ``None`` and does nothing -- the
@@ -132,7 +177,6 @@ class AgentEngine:
         run_store: RunStore,
         session_store: SessionStore,
         event_store: EventStore,
-        checkpoint_store: CheckpointStore,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
         memory_store: "MemoryStore | None" = None,
         retriever: "Retriever | None" = None,
@@ -149,11 +193,11 @@ class AgentEngine:
         security_audit_failure_mode: Any = "fail_closed",
         commit_coordinator: Any,
         pricing_provider: Any = None,
+        event_bus: "RunEventBus | None" = None,
     ) -> None:
         self._run_store = run_store
         self._session_store = session_store
         self._event_store = event_store
-        self._checkpoint_store = checkpoint_store
         self._middleware_pipeline = middleware_pipeline
         self._memory_store = memory_store
         self._retriever = retriever
@@ -187,20 +231,32 @@ class AgentEngine:
         self._baseline_policy = baseline_policy
         self._tool_policy_provider = tool_policy_provider
         # The GovernedToolInvoker every managed tool delegates to. Constructor-injected
-        # (Runtime.build passes the compiler's executor) so the runner is fully
+        # (build_runtime passes the compiler's executor) so the runner is fully
         # wired at construction -- no post-build private-field mutation.
         self._tool_executor_for_managed = managed_tool_executor
         self._security_audit_failure_mode = security_audit_failure_mode
         # RunCommitCoordinator (required). The runner NEVER writes cross-store
         # pause/complete state directly: it builds a Pause/CompleteRunCommand
         # and delegates to the coordinator, which owns the atomic commit (one
-        # transaction for SQL, a journaled sequence for File). Runtime.build
+        # transaction for SQL, a journaled sequence for File). build_runtime
         # always wires the storage-appropriate coordinator.
         self._commit_coordinator = commit_coordinator
         # Optional ModelPricingProvider: when ModelPolicy.budget is set, the
         # runner computes the per-response cost and refuses to exceed it (and
         # refuses to run at all if budget is set without pricing -- fail-closed).
         self._pricing_provider = pricing_provider
+        # Optional live fan-out of the SAME text/tool/paused event dicts
+        # execute() already yields, published in ADDITION to (not instead of)
+        # those yields. A future run_stream() can be reimplemented as a pure
+        # RunEventBus subscriber once every caller relies on the bus instead
+        # of iterating execute()'s own generator -- not done yet, so both
+        # paths currently carry identical events. None (default) is a no-op.
+        self._event_bus = event_bus
+        # Message-format conversion for a completed turn. Not injectable
+        # today (stateless, no config yet) -- constructed here so a future
+        # increment can inject a configured instance without touching every
+        # call site.
+        self._session_recorder = SessionRecorder()
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -272,6 +328,9 @@ class AgentEngine:
         context: RunContext,
         *,
         message_history: "Sequence[ModelMessage] | None" = None,
+        commit_sink: "_PendingCommit | None" = None,
+        emit_run_started: bool = True,
+        running_version: "int | None" = None,
     ) -> "AsyncIterator[dict]":
         """The SINGLE lifecycle. Drives ``agent.pydantic_agent.iter()`` and
         yields RuntimeEvent dicts (text deltas, tool events, paused).
@@ -301,39 +360,31 @@ class AgentEngine:
         metrics = self._metrics
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
 
-        # -- Setup: create record + transition RUNNING (or read version for resume).
-        # The terminal transitions reuse the version returned
-        # here -- no hardcoded expected_version anywhere in this file.
-        if message_history is None:
-            now = datetime.now(timezone.utc)
-            record = RunRecord(
-                id=context.run_id,
-                root_run_id=context.root_run_id,
-                parent_run_id=context.parent_run_id,
-                session_id=context.session_id,
-                runnable_id=context.runnable_id,
-                runnable_type=context.runnable_type,
-                status=RunStatus.PENDING,
-                input=request,
-                result=None,
-                error=None,
-                version=1,
-                created_at=now,
-                started_at=None,
-                finished_at=None,
-            )
-            created = await self._run_store.create(record)
-            running = await self._run_store.transition(
-                context.run_id,
-                RunStatus.RUNNING,
-                expected_version=created.version,
-            )
-            running_version = running.version
-        else:
-            # Resume: Runtime.resume already transitioned WAITING_APPROVAL ->
-            # RUNNING; capture the current version for terminal transitions.
-            current = await self._run_store.get(context.run_id)
-            running_version = current.version
+        # -- Setup: read the existing record's version, or create + transition
+        # RUNNING when none exists yet. RunCoordinator (the production entry
+        # point) now creates + starts new-run records itself via
+        # ``run.lifecycle.create_and_start_run`` before ever calling here --
+        # this get-or-create fallback exists so a direct AgentEngine caller
+        # (bypassing RunCoordinator entirely, e.g. most engine-level tests)
+        # still works unchanged. Resume follows the same get path: Runtime.resume
+        # already transitioned WAITING_APPROVAL -> RUNNING before calling here.
+        # The terminal transitions reuse the version read/returned here -- no
+        # hardcoded expected_version anywhere in this file. When the caller
+        # (RunCoordinator, which already create_and_start_run'd the record)
+        # supplies running_version, skip the get-or-create entirely.
+        if running_version is None:
+            existing = await self._run_store.get(context.run_id)
+            if existing is None:
+                running = await create_and_start_run(
+                    self._run_store, context=context, request=request
+                )
+                running_version = running.version
+            else:
+                running_version = existing.version
+        if commit_sink is not None:
+            # The collector needs the RUNNING version to drive the fail-
+            # transition if the post-drain commit itself raises.
+            commit_sink.running_version = running_version
 
         # Fence this execution in persistent storage when the backend supports
         # it. Older/custom stores remain compatible, but production stores must
@@ -404,14 +455,20 @@ class AgentEngine:
             async with self._span("agent.run", attrs=run_attrs):
                 # -- New-run setup: RunStarted event + before_run middleware.
                 # Resume path skips both -- the initial run already did them.
+                # ``emit_run_started=False`` (WP9 step 3): RunCoordinator
+                # already emitted the event itself before calling here, right
+                # after create_and_start_run -- the same relocation pattern
+                # as RunRecord creation. before_run middleware is NOT a Store
+                # dependency, so it always stays here regardless.
                 if message_history is None:
-                    await append_event(
-                        self._event_store,
-                        EventStreamContext.from_run_context(context),
-                        RunStarted(
-                            run_id=context.run_id, runnable_id=context.runnable_id
-                        ),
-                    )
+                    if emit_run_started:
+                        await append_event(
+                            self._event_store,
+                            EventStreamContext.from_run_context(context),
+                            RunStarted(
+                                run_id=context.run_id, runnable_id=context.runnable_id
+                            ),
+                        )
                     if self._middleware_pipeline is not None:
                         await self._middleware_pipeline.run_before_run(context)
 
@@ -591,7 +648,7 @@ class AgentEngine:
                         )
                     else:
                         effective_spec = agent.spec
-                    cap_bundle = await self._capability_resolver.assemble(
+                    cap_bundle = await self._capability_resolver.resolve(
                         effective_spec, cap_ctx
                     )
                     # Publish this run's descriptor lookup so PolicyCapability
@@ -830,10 +887,15 @@ class AgentEngine:
                                                         text = ev.delta.content_delta
                                                     if text:
                                                         accumulated_text += text
-                                                        yield {
+                                                        text_event = {
                                                             "type": "text",
                                                             "text": text,
                                                         }
+                                                        if self._event_bus is not None:
+                                                            await self._event_bus.publish(
+                                                                context.run_id, text_event
+                                                            )
+                                                        yield text_event
                                         except AssertionError:
                                             # pydantic-ai raises AssertionError
                                             # ("FunctionModel must receive a
@@ -851,10 +913,11 @@ class AgentEngine:
                                                 run.ctx
                                             ) as tool_stream:
                                                 async for ev in tool_stream:
+                                                    tool_event = None
                                                     if isinstance(
                                                         ev, FunctionToolCallEvent
                                                     ):
-                                                        yield {
+                                                        tool_event = {
                                                             "type": "tool",
                                                             "name": ev.part.tool_name,
                                                             "phase": "start",
@@ -863,7 +926,7 @@ class AgentEngine:
                                                     elif isinstance(
                                                         ev, FunctionToolResultEvent
                                                     ):
-                                                        yield {
+                                                        tool_event = {
                                                             "type": "tool",
                                                             "name": ev.part.tool_name,
                                                             "phase": "end",
@@ -871,6 +934,12 @@ class AgentEngine:
                                                                 ev.part, ToolReturnPart
                                                             ),
                                                         }
+                                                    if tool_event is not None:
+                                                        if self._event_bus is not None:
+                                                            await self._event_bus.publish(
+                                                                context.run_id, tool_event
+                                                            )
+                                                        yield tool_event
                                         except AssertionError:
                                             # Same non-streaming-model signal as
                                             # above -- tools already ran via
@@ -936,29 +1005,42 @@ class AgentEngine:
                                 # as one atomic commit. The resolved approval id
                                 # is written back so the paused-event yield
                                 # below reports the persisted id.
-                                _commit = await self._commit_coordinator.pause(
-                                    PauseRunCommand(
-                                        run_id=context.run_id,
-                                        expected_version=running_version,
-                                        approval_request={
-                                            "tenant_id": context.tenant_id,
-                                            "approval_id": paused.approval_id,
-                                            "tool_call_id": paused.tool_call_id,
-                                            "tool_name": paused.tool_name or "",
-                                            "reason": paused.reason,
-                                            "arguments": paused.arguments,
-                                            **paused.binding,
-                                        },
-                                        checkpoint_payload=serialize_messages(
-                                            run.all_messages()
-                                        ),
-                                        event_context=EventStreamContext.from_run_context(
-                                            context
-                                        ),
-                                        commit_id=f"pause:{context.run_id}:{paused.approval_id}",
-                                    )
+                                pause_command = PauseRunCommand(
+                                    run_id=context.run_id,
+                                    expected_version=running_version,
+                                    approval_request={
+                                        "tenant_id": context.tenant_id,
+                                        "approval_id": paused.approval_id,
+                                        "tool_call_id": paused.tool_call_id,
+                                        "tool_name": paused.tool_name or "",
+                                        "reason": paused.reason,
+                                        "arguments": paused.arguments,
+                                        **paused.binding,
+                                    },
+                                    checkpoint_payload=serialize_messages(
+                                        run.all_messages()
+                                    ),
+                                    event_context=EventStreamContext.from_run_context(
+                                        context
+                                    ),
+                                    commit_id=f"pause:{context.run_id}:{paused.approval_id}",
                                 )
-                                paused.approval_id = _commit.approval_id
+                                if commit_sink is not None:
+                                    # The caller (_drive_paused_or_result)
+                                    # performs the actual pause commit after
+                                    # this generator has fully drained, then
+                                    # patches the resolved approval_id onto
+                                    # the returned paused event -- safe for
+                                    # the same reason as the success path.
+                                    # ``paused.approval_id`` stays the
+                                    # UNRESOLVED id here; the caller fixes it
+                                    # up once it has the commit's response.
+                                    commit_sink.pause_command = pause_command
+                                else:
+                                    _commit = await self._commit_coordinator.pause(
+                                        pause_command
+                                    )
+                                    paused.approval_id = _commit.approval_id
                                 paused_signal = paused
                             else:
                                 if not timed_out:
@@ -1079,23 +1161,11 @@ class AgentEngine:
                     # (Python preserves the ``with ... as run`` target after the
                     # block); the iter() context has exited cleanly but the
                     # AgentRun still serves message history.
-                    user_content = request.prompt
-                    messages_to_append = [
-                        NewSessionMessage(
-                            role=MessageRole.ASSISTANT,
-                            content=str(output),
-                            run_id=context.run_id,
-                        ),
-                    ]
-                    if user_content:
-                        messages_to_append.insert(
-                            0,
-                            NewSessionMessage(
-                                role=MessageRole.USER,
-                                content=user_content,
-                                run_id=context.run_id,
-                            ),
-                        )
+                    messages_to_append = self._session_recorder.build_turn_messages(
+                        user_prompt=request.prompt,
+                        output=output,
+                        run_id=context.run_id,
+                    )
                     checkpoint_payload = serialize_messages(run.all_messages())
 
                     run_result = RunResult(
@@ -1120,24 +1190,33 @@ class AgentEngine:
                     # checkpoint, the SUCCEEDED transition (with the result),
                     # and the RunCompleted event as one atomic commit. The
                     # runner never writes those stores directly.
-                    await self._commit_coordinator.complete(
-                        CompleteRunCommand(
-                            run_id=context.run_id,
-                            session_id=context.session_id,
-                            expected_version=running_version,
-                            messages=tuple(messages_to_append),
-                            checkpoint_payload=checkpoint_payload,
-                            result=run_result,
-                            event_context=EventStreamContext.from_run_context(context),
-                            commit_id=f"complete:{context.run_id}:{running_version}",
+                    complete_command = CompleteRunCommand(
+                        run_id=context.run_id,
+                        session_id=context.session_id,
+                        expected_version=running_version,
+                        messages=tuple(messages_to_append),
+                        checkpoint_payload=checkpoint_payload,
+                        result=run_result,
+                        event_context=EventStreamContext.from_run_context(context),
+                        commit_id=f"complete:{context.run_id}:{running_version}",
+                    )
+                    if commit_sink is not None:
+                        # The caller (_drive_paused_or_result) performs the
+                        # actual commit once this generator has fully drained
+                        # -- safe, since nothing else runs concurrently at
+                        # that point. Success metrics move with it (best-
+                        # effort observation only; a metrics failure must
+                        # never flip a committed run to FAILED, regardless of
+                        # which side of the boundary records it).
+                        commit_sink.complete_command = complete_command
+                        commit_sink.record_metrics = lambda: self._record_success_metrics(
+                            attributes=run_attrs, started=started, metrics=metrics
                         )
-                    )
-
-                    # Success metrics are best-effort observation only -- a
-                    # metrics failure must never flip a committed run to FAILED.
-                    self._record_success_metrics(
-                        attributes=run_attrs, started=started, metrics=metrics
-                    )
+                    else:
+                        await self._commit_coordinator.complete(complete_command)
+                        self._record_success_metrics(
+                            attributes=run_attrs, started=started, metrics=metrics
+                        )
         except asyncio.CancelledError:
             # in-flight cancel path. CancelledError
             # surfaces at the current await point (model call / node.stream() /
@@ -1161,117 +1240,45 @@ class AgentEngine:
             # break the cancel machinery. The warning keeps failures visible
             # rather than silent (the run may already be terminal, e.g. a
             # concurrent cancel beat this handler).
-            try:
-                try:
-                    cancelling = await self._run_store.transition(
-                        context.run_id,
-                        RunStatus.CANCELLING,
-                        expected_version=running_version,
-                    )
-                except (InvalidRunTransitionError, RunConflictError):
-                    # Runtime.cancel already moved the store to CANCELLING
-                    # (controller-driven path): either the version no longer
-                    # matches (RunConflictError) or the source state is no
-                    # longer RUNNING (InvalidRunTransitionError). Re-read to
-                    # capture the live version for the CANCELLED transition.
-                    # If the run is not in CANCELLING (e.g. concurrent
-                    # terminal transition), bail out -- nothing more we can do
-                    # here.
-                    current = await self._run_store.get(context.run_id)
-                    if current is None or current.status is not RunStatus.CANCELLING:
-                        raise
-                    cancelling = current
-                await mark_cancelled(
-                    self._run_store,
-                    context.run_id,
-                    expected_version=cancelling.version,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition run %s to CANCELLED on cancel: %s",
-                    context.run_id,
-                    exc,
-                )
+            async def _do_cancel_transition() -> None:
+                await self._apply_cancel_transition(context, running_version)
+
+            # WP9 step 3: when commit_sink is wired, the caller
+            # (_drive_paused_or_result) performs this Store transition itself
+            # after catching the SAME CancelledError this raise re-propagates
+            # -- the closure carries every local this needs (context,
+            # running_version), so nothing has to be threaded out by hand.
+            # commit_sink=None (every direct-engine caller/test) preserves
+            # execute()'s original behavior exactly: it transitions inline.
+            if commit_sink is not None:
+                commit_sink.on_cancelled = _do_cancel_transition
+            else:
+                await _do_cancel_transition()
             raise
         except Exception as exc:
             # Generic error path: transition FAILED, run on_error, append
             # RunFailed, record metrics. Re-raise so the caller sees the error.
             #
-            # Terminal/commit-point guard: if the run already left RUNNING -- it
-            # reached a commit point (SUCCEEDED / WAITING_APPROVAL / PAUSED) or
-            # is already terminal (a post-commit error such as a metrics or
-            # critical-event failure) -- do NOT fabricate a contradictory FAILED
-            # transition or RunFailed event. Re-raise the original error; the
-            # committed state stays authoritative and recovery re-attempts any
-            # missed post-commit write.
-            current = await self._run_store.get(context.run_id)
-            if current is not None and current.status is not RunStatus.RUNNING:
-                raise
-            safe_error = redact_exception(exc)
-            error_info = RunErrorInfo(error_type=type(exc).__name__, message=safe_error)
-            # Run status update. The FAILED transition is kept
-            # best-effort ONLY because we are already in the failing path:
-            # letting the transition error escape would replace the ORIGINAL
-            # exc (the actual cause) with a version-mismatch/store error,
-            # losing the cause for the caller. The warning keeps the
-            # transition failure visible rather than silent; a typical failure
-            # is a version mismatch from a concurrent terminal transition.
-            try:
-                await mark_failed(
-                    self._run_store,
-                    context.run_id,
-                    expected_version=running_version,
-                    error=error_info,
+            # Python implicitly unbinds ``exc`` at the end of this except
+            # block (to avoid a traceback reference cycle) -- captured into a
+            # plain local BEFORE the closure below so a LATER invocation
+            # (commit_sink.on_failed, called from a different frame after
+            # this block has already exited) does not hit a NameError on a
+            # free variable that no longer exists by the time it runs.
+            failure = exc
+
+            async def _do_fail_transition() -> None:
+                await self._apply_fail_transition(
+                    context, running_version, failure, metrics=metrics
                 )
-            except Exception as transition_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition run %s to FAILED: %s",
-                    context.run_id,
-                    transition_exc,
-                )
-            if self._middleware_pipeline is not None:
-                # on_error is best-effort observation: its failure must not
-                # replace the ORIGINAL exc the caller needs to see.
-                try:
-                    await self._middleware_pipeline.run_on_error(context, exc)
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception(
-                        "on_error middleware failed for run %s",
-                        context.run_id,
-                    )
-            # best-effort audit - non-critical path: the run is already failing
-            # (FAILED transition attempted above), so a missing RunFailed event
-            # is an observability gap, not state corruption.
-            try:
-                await append_event(
-                    self._event_store,
-                    EventStreamContext.from_run_context(context),
-                    RunFailed(
-                        run_id=context.run_id,
-                        error_type=type(exc).__name__,
-                        message=safe_error,
-                    ),
-                )
-            except Exception as event_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to append RunFailed event for run %s: %s",
-                    context.run_id,
-                    event_exc,
-                )
-            if metrics is not None:
-                try:
-                    metrics.counter(
-                        "agent.run.failed",
-                        attributes={
-                            "run_id": context.run_id,
-                            "session_id": context.session_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception(
-                        "failure metrics failed for run %s", context.run_id
-                    )
+
+            # WP9 step 3: same relocation pattern as the cancel path above --
+            # commit_sink=None (every direct-engine caller/test) preserves
+            # execute()'s original behavior exactly.
+            if commit_sink is not None:
+                commit_sink.on_failed = _do_fail_transition
+            else:
+                await _do_fail_transition()
             raise
         finally:
             if heartbeat_task is not None:
@@ -1296,55 +1303,301 @@ class AgentEngine:
         # consumer (run_stream()) receives the event and lets the generator
         # exhaust naturally on the next drive.
         if paused_signal is not None:
-            yield {
+            paused_event = {
                 "type": "paused",
                 "run_id": paused_signal.run_id,
                 "approval_id": paused_signal.approval_id,
             }
+            if self._event_bus is not None:
+                await self._event_bus.publish(context.run_id, paused_event)
+            yield paused_event
+
+    async def _apply_cancel_transition(
+        self, context: RunContext, running_version: int
+    ) -> None:
+        """Best-effort CANCELLING -> CANCELLED transition on the cancel path.
+        Idempotent against the controller-driven path (Runtime.cancel may have
+        already moved the store to CANCELLING): re-reads the live version on a
+        version/source mismatch and bails out if the run is no longer
+        CANCELLING. Swallows transition errors (asyncio requires
+        CancelledError to propagate; a transition error must not replace it).
+        Extracted from execute()'s cancel handler so a collector that catches
+        the SAME CancelledError can drive the identical transition."""
+        try:
+            try:
+                cancelling = await self._run_store.transition(
+                    context.run_id,
+                    RunStatus.CANCELLING,
+                    expected_version=running_version,
+                )
+            except (InvalidRunTransitionError, RunConflictError):
+                current = await self._run_store.get(context.run_id)
+                if (
+                    current is None
+                    or current.status is not RunStatus.CANCELLING
+                ):
+                    raise
+                cancelling = current
+            await mark_cancelled(
+                self._run_store,
+                context.run_id,
+                expected_version=cancelling.version,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "failed to transition run %s to CANCELLED on cancel: %s",
+                context.run_id,
+                exc,
+            )
+
+    async def _apply_fail_transition(
+        self,
+        context: RunContext,
+        running_version: int,
+        failure: BaseException,
+        *,
+        metrics: "ObservabilityMetrics | None" = None,
+    ) -> None:
+        """Best-effort FAILED transition + on_error + RunFailed + metrics on
+        the generic-error path. Terminal/commit-point guard: if the run already
+        left RUNNING (reached SUCCEEDED/WAITING_APPROVAL/PAUSED or is already
+        terminal), the committed state stays authoritative and this is a no-op.
+        Every side effect is best-effort (the ORIGINAL failure must propagate,
+        not be replaced by a transition/middleware/event/metrics error).
+        Extracted from execute()'s generic-error handler so a collector that
+        catches the SAME exception can drive the identical transition."""
+        current = await self._run_store.get(context.run_id)
+        if current is not None and current.status is not RunStatus.RUNNING:
+            return
+        safe_error = redact_exception(failure)
+        error_info = RunErrorInfo(
+            error_type=type(failure).__name__, message=safe_error
+        )
+        try:
+            await mark_failed(
+                self._run_store,
+                context.run_id,
+                expected_version=running_version,
+                error=error_info,
+            )
+        except Exception as transition_exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "failed to transition run %s to FAILED: %s",
+                context.run_id,
+                transition_exc,
+            )
+        if self._middleware_pipeline is not None:
+            try:
+                await self._middleware_pipeline.run_on_error(context, failure)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "on_error middleware failed for run %s",
+                    context.run_id,
+                )
+        try:
+            await append_event(
+                self._event_store,
+                EventStreamContext.from_run_context(context),
+                RunFailed(
+                    run_id=context.run_id,
+                    error_type=type(failure).__name__,
+                    message=safe_error,
+                ),
+            )
+        except Exception as event_exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "failed to append RunFailed event for run %s: %s",
+                context.run_id,
+                event_exc,
+            )
+        if metrics is not None:
+            try:
+                metrics.counter(
+                    "agent.run.failed",
+                    attributes={
+                        "run_id": context.run_id,
+                        "session_id": context.session_id,
+                        "error_type": type(failure).__name__,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "failure metrics failed for run %s", context.run_id
+                )
+
+    async def _fail_committed_run(
+        self,
+        context: RunContext,
+        commit_sink: "_PendingCommit",
+        failure: BaseException,
+    ) -> None:
+        """Drive the fail-transition when a post-drain commit (pause/complete)
+        itself raises. execute() has already exited cleanly, so its own
+        fail-closure cannot cover this case; the collector drives the identical
+        transition using the RUNNING version execute() stashed on the sink.
+        The terminal/commit-point guard inside :meth:`_apply_fail_transition`
+        keeps an already-committed state authoritative (a partially-successful
+        commit is not contradicted)."""
+        running_version = commit_sink.running_version
+        if running_version is None:
+            # No version stashed -- nothing safe to transition against. This
+            # should not happen (execute() sets it whenever a sink is wired);
+            # leave state untouched rather than guessing a version.
+            return
+        await self._apply_fail_transition(
+            context, running_version, failure, metrics=self._metrics
+        )
+
+    async def _drive_paused_or_result(
+        self,
+        agent: CompiledAgent,
+        request: RunInput,
+        context: RunContext,
+        *,
+        message_history: "Sequence[ModelMessage] | None" = None,
+        emit_run_started: bool = True,
+        running_version: "int | None" = None,
+    ) -> "tuple[dict | None, RunResult | None]":
+        """Shared collector behind both ``run()`` and ``execute_outcome()``:
+        drains execute() to completion and reads the committed RunResult back
+        from the RunStore (execute() already persisted it via the SUCCEEDED
+        transition -- this is the single source of truth, not threaded state).
+        Returns ``(paused_event, None)`` on pause, ``(None, result)`` on
+        success.
+
+        Any exception this raises (CancelledError or a genuine model/runtime
+        error) is the EXACT SAME exception execute() raised -- never
+        translated, wrapped, or swallowed -- so ``run()`` keeps its existing
+        raise-based contract byte-for-byte and ``execute_outcome()`` (which
+        wraps this call in its OWN try/except) can still classify the
+        original exception type.
+
+        All four terminal paths now move their Store-writing commit/
+        transition OUT of execute() via a ``commit_sink`` (WP9 step 3):
+        execute() stashes a command or closure instead of performing the
+        Store write inline, and this method performs it -- for success/pause,
+        AFTER the generator has already fully drained (nothing else runs
+        concurrently, so the reordering is behavior-preserving); for cancel/
+        fail, from this method's OWN except blocks, immediately before re-
+        raising the SAME exception execute() raised (the closures execute()
+        hands over already capture context/running_version/the exception
+        itself, so no state needs to be threaded out by hand). This is the
+        single location (for BOTH ``run()`` and ``execute_outcome()``) every
+        terminal commit now happens from, rather than each of execute()'s 3
+        former callers duplicating it. The pause commit additionally patches
+        the RESOLVED approval id (``create_or_get_pending`` may dedup onto an
+        existing id) onto the returned event before handing it back.
+
+        ``contextlib.aclosing`` guarantees the generator is finalized in THIS
+        task when the caller exits early on a pause -- execute() yields the
+        paused event with no open context manager, but aclosing is belt-and-
+        suspenders so any future change to execute()'s suspension points
+        stays safe."""
+        commit_sink = _PendingCommit()
+        paused_event: "dict | None" = None
+        try:
+            async with contextlib.aclosing(
+                self.execute(
+                    agent,
+                    request,
+                    context,
+                    message_history=message_history,
+                    commit_sink=commit_sink,
+                    emit_run_started=emit_run_started,
+                    running_version=running_version,
+                )
+            ) as gen:
+                async for event in gen:
+                    if event["type"] == "paused":
+                        paused_event = event
+                        break
+        except asyncio.CancelledError:
+            if commit_sink.on_cancelled is not None:
+                await commit_sink.on_cancelled()
+            raise
+        except Exception:
+            if commit_sink.on_failed is not None:
+                await commit_sink.on_failed()
+            raise
+
+        if paused_event is not None:
+            if commit_sink.pause_command is not None:
+                try:
+                    _commit = await self._commit_coordinator.pause(
+                        commit_sink.pause_command
+                    )
+                except Exception as commit_exc:  # noqa: BLE001
+                    # The pause commit raised (e.g. a critical event-append
+                    # failure). execute() has already exited cleanly, so its
+                    # fail-closure cannot cover this -- drive the identical
+                    # fail-transition here, then re-raise so the caller sees
+                    # the original cause.
+                    await self._fail_committed_run(context, commit_sink, commit_exc)
+                    raise
+                paused_event["approval_id"] = _commit.approval_id
+            return paused_event, None
+
+        # execute() must always leave a pending commit on a non-paused drain.
+        # If it did not, that is a runtime invariant violation -- raise rather
+        # than fabricate an empty success that masks the bug.
+        if commit_sink.complete_command is None:
+            raise RunInvariantError(
+                f"run {context.run_id} completed without a pending commit"
+            )
+        try:
+            committed = await self._commit_coordinator.complete(
+                commit_sink.complete_command
+            )
+        except Exception as commit_exc:  # noqa: BLE001
+            await self._fail_committed_run(context, commit_sink, commit_exc)
+            raise
+        if commit_sink.record_metrics is not None:
+            commit_sink.record_metrics()
+        if committed.result is None:
+            raise RunInvariantError(
+                f"run {context.run_id} committed without a persisted result"
+            )
+        return None, committed.result
 
     async def run(
         self,
         agent: CompiledAgent,
         request: RunInput,
         context: RunContext,
+        *,
+        emit_run_started: bool = True,
+        running_version: "int | None" = None,
     ) -> RunResult:
-        """Non-streaming entry point. Consumes execute() in full, re-raises
-        RunPaused when the lifecycle yields a pause signal, and reads the
-        final RunResult back from the RunStore (execute() already populated it
-        via the SUCCEEDED transition). All lifecycle concerns -- events,
-        middleware, transitions, timeout, budget, observability -- live in
-        execute(); run() is purely a collector.
+        """Non-streaming entry point. Consumes execute() in full (via
+        :meth:`_drive_paused_or_result`), re-raises RunPaused when the
+        lifecycle yields a pause signal, and returns the final RunResult. All
+        lifecycle concerns -- events, middleware, transitions, timeout,
+        budget, observability -- live in execute(); run() is purely a
+        collector.
 
-        ``contextlib.aclosing`` guarantees the generator is finalized in THIS
-        task when run() exits early on a pause -- execute() yields the paused
-        event with no open context manager, but aclosing is belt-and-suspenders
-        so any future change to execute()'s suspension points stays safe."""
-        paused_event: "dict | None" = None
-        async with contextlib.aclosing(self.execute(agent, request, context)) as gen:
-            async for event in gen:
-                if event["type"] == "paused":
-                    paused_event = event
-                    break
+        ``emit_run_started=False`` (WP9 step 3): the caller (RunCoordinator)
+        already emitted the RunStarted event itself before calling here --
+        the default ``True`` preserves execute()'s original behavior for
+        every direct-engine caller/test that doesn't pass this.
 
+        ``running_version`` (WP9 step 3): when the caller (RunCoordinator)
+        already create_and_start_run'd the record, it passes the RUNNING
+        version here so execute() skips its own get-or-create. ``None`` (the
+        default) preserves execute()'s original get-or-create for every
+        direct-engine caller/test."""
+        paused_event, result = await self._drive_paused_or_result(
+            agent,
+            request,
+            context,
+            emit_run_started=emit_run_started,
+            running_version=running_version,
+        )
         if paused_event is not None:
             raise RunPaused(
                 run_id=paused_event["run_id"],
                 approval_id=paused_event["approval_id"],
             )
-
-        # execute() completed without pausing -- the SUCCEEDED transition
-        # stored the RunResult. Read it back rather than threading state out
-        # of the generator, so the result is the store's authoritative copy
-        # (single source of truth).
-        record = await self._run_store.get(context.run_id)
-        if record is not None and record.result is not None:
-            return record.result
-        # execute() must always leave a terminal record with a result. If it
-        # did not, that is a runtime invariant violation -- raise rather than
-        # fabricate an empty success that masks the bug.
-        raise RunInvariantError(
-            f"run {context.run_id} completed without a persisted result"
-        )
+        return result
 
     async def dispatch(self, request: "RunDispatchRequest") -> RunResult:
         """RunDispatcher adapter: lets Swarm/Subagent execution depend on the
@@ -1352,22 +1605,145 @@ class AgentEngine:
         directly."""
         return await self.run(request.agent, request.input, request.context)
 
+    async def execute_outcome(
+        self,
+        *,
+        context: RunContext,
+        agent: CompiledAgent,
+        input: AgentInput,
+        cancellation: "CancellationToken | None" = None,
+        message_history: "Sequence[ModelMessage] | None" = None,
+        emit_run_started: bool = True,
+        running_version: "int | None" = None,
+    ) -> AgentExecutionOutcome:
+        """Section 12.4's target ``AgentEngine.execute()`` surface: a single
+        ``AgentExecutionOutcome`` instead of the legacy async-generator-of-
+        dict-events shape. Shares :meth:`_drive_paused_or_result` with
+        ``run()`` (the single collector both now depend on) but wraps it in
+        its OWN try/except to translate a raised exception into a FAILED/
+        CANCELLED outcome instead of letting it propagate -- that generator
+        is UNCHANGED and still owns the RunStore/Session/Event/Checkpoint
+        writes internally, so this method matches the target CALL signature
+        and return SHAPE without satisfying "AgentEngine must not depend on
+        any Store" (spec 12.2) on its own; ``RunCoordinator`` (and its
+        resume/subagent/swarm callers) can depend on the outcome shape
+        immediately, ahead of the larger, separate increment that removes
+        AgentEngine's Store dependencies for good.
+
+        ``cancellation`` is accepted for signature conformance; the existing
+        generator's own ``RunController``-based cancellation (registered by
+        the constructor, not per-call) is what drives cancellation here."""
+        request = RunInput(prompt=input.prompt, metadata=input.metadata)
+        try:
+            paused_event, result = await self._drive_paused_or_result(
+                agent,
+                request,
+                context,
+                message_history=message_history,
+                emit_run_started=emit_run_started,
+                running_version=running_version,
+            )
+        except asyncio.CancelledError:
+            return AgentExecutionOutcome(status=AgentExecutionStatus.CANCELLED)
+        except Exception as exc:  # noqa: BLE001 - reported via the outcome, not raised
+            safe_error = redact_exception(exc)
+            return AgentExecutionOutcome(
+                status=AgentExecutionStatus.FAILED,
+                error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),
+            )
+
+        if paused_event is not None:
+            return AgentExecutionOutcome(
+                status=AgentExecutionStatus.PAUSED,
+                pause_request=PauseRequest(approval_id=paused_event["approval_id"]),
+            )
+
+        token_usage = result.token_usage
+        return AgentExecutionOutcome(
+            status=AgentExecutionStatus.COMPLETED,
+            result=result,
+            usage=RunUsage(
+                input_tokens=token_usage.get("input_tokens", 0),
+                output_tokens=token_usage.get("output_tokens", 0),
+            ),
+        )
+
     async def run_stream(
         self,
         agent: CompiledAgent,
         request: RunInput,
         context: RunContext,
         message_history: "Sequence[ModelMessage] | None" = None,
+        *,
+        emit_run_started: bool = True,
+        running_version: "int | None" = None,
     ) -> "AsyncIterator[dict]":
-        """Streaming entry point. A thin pass-through to execute(): every
-        event the lifecycle yields (text deltas, tool events, paused) is
-        forwarded to the consumer unchanged. Resume (Runtime.resume) supplies
+        """Streaming entry point. Resume (Runtime.resume) supplies
         ``message_history=<deserialized checkpoint>`` so the pydantic-ai graph
-        picks up from the paused state."""
-        async for event in self.execute(
-            agent,
-            request,
-            context,
-            message_history=message_history,
-        ):
-            yield event
+        picks up from the paused state.
+
+        With no ``event_bus`` wired (the default -- every direct-engine
+        caller/test), this is a thin pass-through to execute(): every event
+        the lifecycle yields (text deltas, tool events, paused) is forwarded
+        unchanged, raising on model/runtime failure exactly as before.
+
+        With an ``event_bus`` wired (the production ``build_runtime`` path),
+        ``execute_outcome()`` drives the lifecycle in a background task while
+        this generator drains the SAME live events off the bus -- the seam
+        that lets execute()'s own generator eventually be retired. Model
+        failure/cancellation are reported as a final status event
+        (``{"type": "failed"/"cancelled", ...}``) instead of a raised
+        exception, per the Outcome model (spec section 12.3). A genuine bug
+        in ``execute_outcome()`` itself (e.g. RunInvariantError) still
+        propagates as a raised exception -- that is not a normal run
+        outcome."""
+        if self._event_bus is None:
+            async for event in self.execute(
+                agent,
+                request,
+                context,
+                message_history=message_history,
+                emit_run_started=emit_run_started,
+                running_version=running_version,
+            ):
+                yield event
+            return
+
+        bus = self._event_bus
+        run_id = context.run_id
+        bus.open(run_id)
+        task = asyncio.create_task(
+            self.execute_outcome(
+                context=context,
+                agent=agent,
+                input=AgentInput(prompt=request.prompt, metadata=request.metadata),
+                message_history=message_history,
+                emit_run_started=emit_run_started,
+                running_version=running_version,
+            )
+        )
+
+        async def _close_bus_when_done() -> None:
+            try:
+                await task
+            finally:
+                bus.close(run_id)
+
+        closer = asyncio.create_task(_close_bus_when_done())
+        try:
+            async for event in bus.subscribe(run_id):
+                yield event
+        finally:
+            await closer
+
+        outcome = task.result()
+        if outcome.status is AgentExecutionStatus.FAILED:
+            error = outcome.error
+            yield {
+                "type": "failed",
+                "run_id": run_id,
+                "error_type": error.error_type if error is not None else "RuntimeError",
+                "message": error.message if error is not None else "",
+            }
+        elif outcome.status is AgentExecutionStatus.CANCELLED:
+            yield {"type": "cancelled", "run_id": run_id}

@@ -5,15 +5,18 @@
 
 Runs one agent task against a freshly-built client, streams the events to the
 console renderer, and returns the exit codes: ``0`` on completion, ``4`` when
-the run pauses for approval (with run_id/approval_id printed), ``130`` on Ctrl+C
-(after cancelling the run through the runtime, not just the process)."""
+the run pauses for approval (with run_id/approval_id printed), ``1`` when the
+run ends FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model,
+spec section 12.3, reports run failure this way instead of raising), ``130``
+on a ``{"type": "cancelled", ...}`` event OR Ctrl+C (the latter cancels the
+run through the runtime, not just the process)."""
 
 import asyncio
 
 from linktools.core import environ
 
 from ..client import RunRequest, RuntimeClient, build_runtime_client, new_run_id
-from .renderer import announce_paused, print_event
+from .renderer import announce_cancelled, announce_failed, announce_paused, print_event
 
 
 def run_once(
@@ -87,6 +90,18 @@ async def _run_once_async(
                     approval = await _fetch_approval(client, event.get("approval_id"))
                     announce_paused(approval, event, logger)
                 return 4
+            if event.get("type") == "failed":
+                if json_output:
+                    print_event(event, json_output=True, logger=logger)
+                else:
+                    announce_failed(event, logger)
+                return 1
+            if event.get("type") == "cancelled":
+                if json_output:
+                    print_event(event, json_output=True, logger=logger)
+                else:
+                    announce_cancelled(event, logger)
+                return 130
             print_event(event, json_output=json_output, logger=logger)
         if not json_output:
             print()

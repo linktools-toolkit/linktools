@@ -16,7 +16,7 @@ from linktools.ai.errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.sqlalchemy.models import Base
@@ -25,9 +25,9 @@ from linktools.ai.swarm.models import (
     AttemptStatus,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -64,14 +64,14 @@ def _task(
     task_id: str = "task-1",
     swarm_run_id: str = "swarm-1",
     parent_task_id: "str | None" = None,
-    status: SwarmTaskStatus = SwarmTaskStatus.PENDING,
+    status: SwarmStepStatus = SwarmStepStatus.PENDING,
     dependencies: "tuple[str, ...]" = (),
     assigned_agent_id: "str | None" = None,
     attempts: int = 0,
     version: int = 1,
-) -> SwarmTask:
+) -> SwarmStep:
     now = _now()
-    return SwarmTask(
+    return SwarmStep(
         id=task_id,
         swarm_run_id=swarm_run_id,
         parent_task_id=parent_task_id,
@@ -227,17 +227,17 @@ def test_list_tasks_status_filter(tmp_path):
         async with _store_ctx(tmp_path) as store:
             await store.create_run(_run())
             await store.create_task(
-                _task(task_id="t-pending", status=SwarmTaskStatus.PENDING)
+                _task(task_id="t-pending", status=SwarmStepStatus.PENDING)
             )
             await store.create_task(
                 _task(
                     task_id="t-claimed",
-                    status=SwarmTaskStatus.CLAIMED,
+                    status=SwarmStepStatus.CLAIMED,
                     assigned_agent_id="agent-7",
                 ),
             )
-            pending = await store.list_tasks("swarm-1", status=SwarmTaskStatus.PENDING)
-            claimed = await store.list_tasks("swarm-1", status=SwarmTaskStatus.CLAIMED)
+            pending = await store.list_tasks("swarm-1", status=SwarmStepStatus.PENDING)
+            claimed = await store.list_tasks("swarm-1", status=SwarmStepStatus.CLAIMED)
             assert {t.id for t in pending} == {"t-pending"}
             assert {t.id for t in claimed} == {"t-claimed"}
 
@@ -257,7 +257,7 @@ def test_claim_task_assigns_and_stamps(tmp_path):
             claimed = await store.claim_task("swarm-1", "agent-9")
             assert claimed is not None
             assert claimed.id == "t-1"
-            assert claimed.status == SwarmTaskStatus.CLAIMED
+            assert claimed.status == SwarmStepStatus.CLAIMED
             assert claimed.assigned_agent_id == "agent-9"
             assert claimed.claimed_at is not None
             assert claimed.version == 2
@@ -271,7 +271,7 @@ def test_claim_task_respects_dependencies(tmp_path):
             await store.create_run(_run())
             # t-dep not yet succeeded -> t-blocked must NOT be claimed.
             await store.create_task(
-                _task(task_id="t-dep", status=SwarmTaskStatus.PENDING)
+                _task(task_id="t-dep", status=SwarmStepStatus.PENDING)
             )
             await store.create_task(_task(task_id="t-blocked", dependencies=("t-dep",)))
             # First claim should pick t-dep (no deps), not t-blocked.
@@ -350,7 +350,7 @@ def test_complete_task_stores_result(tmp_path):
             completed = await store.complete_task(
                 "t-1", result, expected_version=claimed.version
             )
-            assert completed.status == SwarmTaskStatus.SUCCEEDED
+            assert completed.status == SwarmStepStatus.SUCCEEDED
             assert completed.result.output == {"done": True}
             assert completed.result.metadata == {"m": "n"}
             assert completed.version == claimed.version + 1
@@ -366,7 +366,7 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
             claimed = await store.claim_task("swarm-1", "agent-a")
             err = RunErrorInfo(error_type="ValueError", message="boom", detail={"x": 1})
             failed = await store.fail_task("t-1", err, expected_version=claimed.version)
-            assert failed.status == SwarmTaskStatus.FAILED
+            assert failed.status == SwarmStepStatus.FAILED
             assert failed.error.error_type == "ValueError"
             assert failed.error.message == "boom"
             assert failed.attempts == 1
@@ -378,7 +378,7 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
 def test_complete_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            with pytest.raises(SwarmTaskNotFoundError):
+            with pytest.raises(SwarmStepNotFoundError):
                 await store.complete_task(
                     "nope", RunResult(output=None), expected_version=1
                 )
@@ -389,7 +389,7 @@ def test_complete_task_missing_raises_not_found(tmp_path):
 def test_fail_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
-            with pytest.raises(SwarmTaskNotFoundError):
+            with pytest.raises(SwarmStepNotFoundError):
                 await store.fail_task(
                     "nope",
                     RunErrorInfo(error_type="X", message="y"),
@@ -575,7 +575,7 @@ def test_reclaim_expired_tasks_is_atomic_under_concurrent_races(tmp_path):
             reclaimed = await store.reclaim_expired_tasks("swarm-1")
             assert reclaimed == (), "a freshly-renewed lease must not be reclaimed"
             still_claimed = await store.list_tasks(
-                "swarm-1", status=SwarmTaskStatus.CLAIMED
+                "swarm-1", status=SwarmStepStatus.CLAIMED
             )
             assert len(still_claimed) == 1
             assert still_claimed[0].version == renewed.version
@@ -597,12 +597,12 @@ def test_reclaim_expired_tasks_flips_back_to_pending(tmp_path):
             await store.create_task(_task(task_id="t-stale"))
             claimed = await store.claim_task("swarm-1", "agent-x", lease_seconds=0)
             assert claimed is not None
-            assert claimed.status == SwarmTaskStatus.CLAIMED
+            assert claimed.status == SwarmStepStatus.CLAIMED
 
             reclaimed = await store.reclaim_expired_tasks("swarm-1")
             assert len(reclaimed) == 1
             assert reclaimed[0].id == "t-stale"
-            assert reclaimed[0].status == SwarmTaskStatus.PENDING
+            assert reclaimed[0].status == SwarmStepStatus.PENDING
             assert reclaimed[0].assigned_agent_id is None
             assert reclaimed[0].claimed_at is None
             assert reclaimed[0].lease_expires_at is None
@@ -642,7 +642,7 @@ def test_reclaim_expired_tasks_skips_non_expired_lease(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. SwarmTaskAttempt: record -> list round-trip (design note contract)
+# 8. SwarmStepAttempt: record -> list round-trip (design note contract)
 # ---------------------------------------------------------------------------
 
 
@@ -656,8 +656,8 @@ def _attempt(
     started_at: "datetime | None" = None,
     finished_at: "datetime | None" = None,
     error: "RunErrorInfo | None" = None,
-) -> SwarmTaskAttempt:
-    return SwarmTaskAttempt(
+) -> SwarmStepAttempt:
+    return SwarmStepAttempt(
         id=attempt_id,
         task_id=task_id,
         run_id=run_id,

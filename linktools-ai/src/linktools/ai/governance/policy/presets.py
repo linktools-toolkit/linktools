@@ -23,7 +23,7 @@ def build_default_command_policy(
     raises RunPaused (the single approval path); wire an ``approval_store`` so
     the pause can be persisted. This is a convenience preset, not a Runtime
     default -- pass it explicitly via
-    ``Runtime.build(tool_executor=build_default_command_policy(...))``."""
+    ``build_runtime(tool_executor=build_default_command_policy(...))``."""
     return GovernedToolInvoker(
         policy=PolicyEngine(rules=(CommandRule(denied_patterns=denied_patterns),)),
         approval_store=approval_store,

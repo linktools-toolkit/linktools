@@ -142,6 +142,7 @@ class FilesystemStorage(Storage):
         from .filesystem.job import FilesystemJobStore
 
         root_path = Path(root)
+        from ..artifact.coordination import InProcessArtifactDigestCoordinator
         from ..artifact.store import ArtifactStore
         from .coordination.process_local import ProcessLocalLeaseCoordinator
         from .filesystem.artifact import (
@@ -174,6 +175,7 @@ class FilesystemStorage(Storage):
                 FilesystemArtifactRecordStore(
                     records_root=root_path / "artifacts" / "records"
                 ),
+                InProcessArtifactDigestCoordinator(),
             ),
         )
         # Stash the root so the FilesystemRunCommitCoordinator can place its crash-

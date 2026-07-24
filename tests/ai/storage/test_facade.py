@@ -262,6 +262,7 @@ def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
     import hashlib
     from datetime import datetime, timezone
 
+    from linktools.ai.artifact.digest import ArtifactDigest
     from linktools.ai.artifact.models import (
         ArtifactProvenance,
         ArtifactRecord,
@@ -281,7 +282,7 @@ def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
 
     async def _seed():
         await storage.artifacts._blob.put_if_absent(
-            digest=digest, source=_src(), size=len(payload)
+            digest=ArtifactDigest.parse(digest), source=_src(), size=len(payload)
         )
 
     asyncio.run(_seed())
@@ -309,7 +310,7 @@ def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
         assert await storage.runs.get("run-1") is None
         assert await storage.artifacts.stat(artifact_id="art-1", tenant_id="t1") is None
         # The blob survives (written outside the UoW) -> orphan candidate.
-        info = await storage.artifacts._blob.stat(digest=digest)
+        info = await storage.artifacts._blob.stat(digest=ArtifactDigest.parse(digest))
         assert info is not None and info.size == len(payload)
 
     asyncio.run(_check())

@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.model import ModelPolicy, ModelRegistry, ModelResolver
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.storage import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
@@ -38,7 +38,7 @@ async def run(data_dir: Path, workdir: Path) -> Any:
     registry.register("standard", model=_canned_model())
 
     storage = FilesystemStorage(root=data_dir)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=workdir),

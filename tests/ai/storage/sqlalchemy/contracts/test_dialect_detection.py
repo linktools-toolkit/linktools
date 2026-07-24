@@ -128,7 +128,7 @@ async def test_adapter_construction_resolves_dialect(tmp_path):
 def test_sqlite_classifier_recognizes_asset_and_idempotency_keys():
     strategy = SqliteDialectStrategy()
     assert strategy.classify_integrity_error(
-        _Err(_Orig("UNIQUE constraint failed: ai_assets.path"))
+        _Err(_Orig("UNIQUE constraint failed: ai_assets.path_hash"))
     ) is IntegrityViolationKind.ASSET_KEY
     assert strategy.classify_integrity_error(
         _Err(_Orig("UNIQUE constraint failed: ai_asset_idempotency.key"))

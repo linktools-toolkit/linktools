@@ -104,6 +104,38 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         log.write.assert_called_once()
         self.assertIn("read_file", log.write.call_args.args[0])
 
+    def test_render_failed_event_shows_error(self):
+        """The Outcome model (spec 12.3) reports run failure as a stream
+        event rather than a raised exception -- the chat screen must render
+        it the same way it renders a genuinely raised error."""
+        screen = ChatScreen(client=FakeRuntimeClient())
+        log = mock.MagicMock()
+        with mock.patch.object(screen, "query_one", return_value=log):
+            screen.on_run_event_message(
+                RunEventMessage(
+                    {
+                        "type": "failed",
+                        "run_id": "r1",
+                        "error_type": "RuntimeError",
+                        "message": "model exploded",
+                    }
+                )
+            )
+        log.write.assert_called_once()
+        rendered = log.write.call_args.args[0]
+        self.assertIn("RuntimeError", rendered)
+        self.assertIn("model exploded", rendered)
+
+    def test_render_cancelled_event(self):
+        screen = ChatScreen(client=FakeRuntimeClient())
+        log = mock.MagicMock()
+        with mock.patch.object(screen, "query_one", return_value=log):
+            screen.on_run_event_message(
+                RunEventMessage({"type": "cancelled", "run_id": "r1"})
+            )
+        log.write.assert_called_once()
+        self.assertIn("cancelled", log.write.call_args.args[0])
+
     async def test_second_submit_ignored_while_running(self):
         # Spec : one active Run at a time -- a second submit is dropped.
         fake = _BlockingClient()

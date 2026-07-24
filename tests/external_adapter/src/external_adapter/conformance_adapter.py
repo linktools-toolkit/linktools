@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import (
     ArtifactBlobNotFoundError,
     ArtifactIntegrityError,
@@ -41,15 +42,15 @@ class InMemoryArtifactBlobStore:
         self._blobs: "dict[str, bytes]" = {}
 
     async def put_if_absent(
-        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size: "int | None"
     ) -> BlobInfo:
         chunks: "list[bytes]" = []
         async for chunk in source:
             chunks.append(chunk)
         actual = b"".join(chunks)
-        if hashlib.sha256(actual).hexdigest() != digest:
+        if hashlib.sha256(actual).hexdigest() != digest.value:
             raise ArtifactIntegrityError(
-                f"digest mismatch: claimed sha256 {digest[:12]}..."
+                f"digest mismatch: claimed sha256 {digest.value[:12]}..."
             )
         if size is not None and len(actual) != size:
             raise ArtifactIntegrityError(
@@ -57,15 +58,15 @@ class InMemoryArtifactBlobStore:
             )
         # Idempotent on digest: a second put of the same content is a reuse,
         # not an error.
-        self._blobs.setdefault(digest, actual)
-        return BlobInfo(digest=digest, size=len(actual), content_type=None)
+        self._blobs.setdefault(digest.value, actual)
+        return BlobInfo(digest=digest.value, size=len(actual), content_type=None)
 
     @asynccontextmanager
-    async def open(self, *, digest: str):
-        existing = self._blobs.get(digest)
+    async def open(self, *, digest: ArtifactDigest):
+        existing = self._blobs.get(digest.value)
         if existing is None:
             raise ArtifactBlobNotFoundError(
-                f"blob for sha256 {digest[:12]} missing"
+                f"blob for sha256 {digest.value[:12]} missing"
             )
 
         async def _chunks() -> AsyncIterator[bytes]:
@@ -73,14 +74,14 @@ class InMemoryArtifactBlobStore:
 
         yield _chunks()
 
-    async def stat(self, *, digest: str) -> "BlobInfo | None":
-        data = self._blobs.get(digest)
+    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None":
+        data = self._blobs.get(digest.value)
         if data is None:
             return None
-        return BlobInfo(digest=digest, size=len(data), content_type=None)
+        return BlobInfo(digest=digest.value, size=len(data), content_type=None)
 
-    async def delete(self, *, digest: str) -> None:
-        self._blobs.pop(digest, None)
+    async def delete(self, *, digest: ArtifactDigest) -> None:
+        self._blobs.pop(digest.value, None)
 
 
 class InMemoryArtifactRecordStore:
@@ -115,10 +116,10 @@ class InMemoryArtifactRecordStore:
     async def delete(self, artifact_id: str, *, tenant_id: str) -> bool:
         return self._records.pop((artifact_id, tenant_id), None) is not None
 
-    async def is_digest_referenced(self, digest: str) -> bool:
+    async def is_digest_referenced(self, digest: ArtifactDigest) -> bool:
         # Not tenant-scoped: orphan status is a global property of the
         # content-addressed blob.
-        return any(rec.ref.sha256 == digest for rec in self._records.values())
+        return any(rec.ref.sha256 == digest.value for rec in self._records.values())
 
 
 class InMemoryLeaseCoordinator:

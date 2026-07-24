@@ -69,9 +69,9 @@ async def test_delete_never_written_still_masks_for_overlay_shadowing():
 @pytest.mark.asyncio
 async def test_revision_increments_on_write():
     backend = MemoryAssetBackend()
-    r0 = await backend.revision()
+    r0 = int(await backend.revision())
     await backend.raw_put(AssetPath("/a"), b"x", content_type=None, metadata={})
-    r1 = await backend.revision()
+    r1 = int(await backend.revision())
     assert r1 > r0
 
 
@@ -95,15 +95,23 @@ async def test_list_lists_under_prefix_with_depth_one():
 
 
 @pytest.mark.asyncio
-async def test_idempotency_record_roundtrip():
-    from linktools.ai.asset.models import IdempotencyRecord
+async def test_checked_put_is_idempotent_within_backend():
+    # Idempotency lives INSIDE the checked write, not on a separate reader/
+    # writer method: a replay with the same key + request hash returns the
+    # cached result without re-mutating, and a different body under the same
+    # key conflicts.
+    from linktools.ai.asset.models import WriteOptions
+    from linktools.ai.errors import IdempotencyConflictError
 
     backend = MemoryAssetBackend()
-    assert await backend.get_idempotency("k1") is None
-    record = IdempotencyRecord(key="k1", request_hash="h1", result=None)
-    await backend.put_idempotency(record)
-    fetched = await backend.get_idempotency("k1")
-    assert fetched == record
+    path = AssetPath("/a.txt")
+    opts = WriteOptions(idempotency_key="k1")
+    first = await backend.raw_put_checked(path, b"one", options=opts, request_hash="h1")
+    second = await backend.raw_put_checked(path, b"one", options=opts, request_hash="h1")
+    assert second.info.version == first.info.version
+    assert backend._revision == 1  # replay did not mutate again
+    with pytest.raises(IdempotencyConflictError):
+        await backend.raw_put_checked(path, b"two", options=opts, request_hash="h2")
 
 
 @pytest.mark.asyncio

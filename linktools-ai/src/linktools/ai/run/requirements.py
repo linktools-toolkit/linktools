@@ -9,7 +9,7 @@ degrading to a weaker scope.
 This is the capability gate: it branches on capability scope/flag values,
 never on ``isinstance`` against a concrete backend. A caller whose topology
 needs, e.g., distributed coordination passes
-``Runtime.build(requirements=RuntimeRequirements(coordination=CoordinationScope.DISTRIBUTED))``
+``build_runtime(requirements=RuntimeRequirements(coordination=CoordinationScope.DISTRIBUTED))``
 and the builder refuses a process-local Storage rather than letting it race.
 
 Every field defaults to the most permissive value (no requirement), so a bare
@@ -168,17 +168,28 @@ class RuntimeRequirements:
     streaming_artifacts: bool = False
     optimistic_concurrency: bool = False
     append_only_events: bool = False
+    # A MULTI_WORKER topology with an enabled ArtifactStore requires its digest
+    # coordinator to be DISTRIBUTED (a process-local one races between workers on
+    # the put/sweep window). NONE (the default) imposes no requirement -- a
+    # single-process topology, or one with no ArtifactStore, is unaffected.
+    artifact_coordination: CoordinationScope = CoordinationScope.NONE
 
     @classmethod
     def for_multi_worker_jobs(cls) -> "RuntimeRequirements":
         """A multi-worker JobRuntime requires DISTRIBUTED coordination, leasing,
         AND fencing -- a process-local coordinator races on shared JobStore rows
         across workers, and each worker's claim must be fenced so a stale
-        worker's state commit is rejected."""
+        worker's state commit is rejected. If the Storage also wires an
+        ArtifactStore, its digest coordinator must be DISTRIBUTED too --
+        artifact_coordination is enforced ONLY when streaming_artifacts is true on
+        the storage (checked by the gate, not derivable from the requirements
+        object alone, so this classmethod declares it unconditionally and the
+        gate skips the check when there is no ArtifactStore)."""
         return cls(
             coordination=CoordinationScope.DISTRIBUTED,
             leasing=True,
             fencing=True,
+            artifact_coordination=CoordinationScope.DISTRIBUTED,
         )
 
 
@@ -198,6 +209,20 @@ def enforce_storage_capability_gate(
         raise StorageRequirementsNotMetError(
             f"storage coordination scope {features.coordination_scope.value!r} is "
             f"below the required {requirements.coordination.value!r}"
+        )
+    # Artifact-coordination is enforced ONLY when the storage actually has an
+    # ArtifactStore wired (streaming_artifacts=True); a storage with no
+    # ArtifactStore declares artifact_coordination_scope=NONE by definition and
+    # must not be rejected for a topology-derived requirement that assumed
+    # artifacts were enabled.
+    if features.streaming_artifacts and (
+        _COORDINATION_RANK[features.artifact_coordination_scope]
+        < _COORDINATION_RANK[requirements.artifact_coordination]
+    ):
+        raise StorageRequirementsNotMetError(
+            "storage artifact coordination scope "
+            f"{features.artifact_coordination_scope.value!r} is below the "
+            f"required {requirements.artifact_coordination.value!r}"
         )
     if _TRANSACTION_RANK[features.transaction_scope] < _TRANSACTION_RANK[
         requirements.transactions
@@ -239,7 +264,7 @@ def enforce_storage_feature_consistency(storage: "Storage") -> None:
       store on the Storage (a declared-but-unwired component is a false claim).
     * JOBS in transactional_components -> storage.jobs must be non-None.
 
-    Run this at Runtime.build alongside the requirements gate so a
+    Run this at build_runtime alongside the requirements gate so a
     misconfigured Storage fails fast instead of producing an AttributeError at
     the first use."""
     from ..errors import StorageRequirementsNotMetError
@@ -281,6 +306,19 @@ def enforce_storage_feature_consistency(storage: "Storage") -> None:
             "Storage wires an ArtifactStore (storage.artifacts) but declares "
             "streaming_artifacts=False -- the flag must agree with the wired store"
         )
+    wired_coordinator = getattr(storage.artifacts, "_coordinator", None)
+    if wired_coordinator is not None:
+        # The declared artifact_coordination_scope must match the ACTUAL wired
+        # coordinator's own scope -- a mismatch here is a Storage that claims one
+        # capability but wired a coordinator providing a different one (the
+        # topology gate above only sees the claim, not the real object).
+        wired_scope = wired_coordinator.scope
+        if wired_scope != f.artifact_coordination_scope:
+            raise StorageRequirementsNotMetError(
+                f"Storage declares artifact_coordination_scope="
+                f"{f.artifact_coordination_scope.value!r} but its wired "
+                f"ArtifactDigestCoordinator scope is {wired_scope.value!r}"
+            )
     if f.leasing and storage.coordination is None:
         raise StorageRequirementsNotMetError(
             "Storage declares leasing=True but its LeaseCoordinator is None "

@@ -15,6 +15,7 @@ from .path import AssetPath
 class AssetKind(str, Enum):
     FILE = "file"
     COLLECTION = "collection"
+    DIRECTORY = "directory"
 
 
 class Depth(str, Enum):
@@ -33,6 +34,10 @@ class AssetInfo:
     size: int
     modified_at: datetime
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+    # True for the synthesized namespace-root directory (AssetPath("/")): no
+    # backend stores a root record, so the Store fabricates this AssetInfo
+    # rather than reading it from any backend.
+    synthetic: bool = False
 
 
 @dataclass(frozen=True, slots=True)

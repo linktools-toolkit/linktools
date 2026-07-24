@@ -23,12 +23,12 @@ from typing import Callable
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import SwarmRunRow, SwarmTaskAttemptRow, SwarmTaskRow
+from .models import SwarmRunRow, SwarmStepAttemptRow, SwarmStepRow
 from ...errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from ...run.models import RunErrorInfo, RunResult
 from ...swarm.models import (
@@ -36,9 +36,9 @@ from ...swarm.models import (
     AttemptStatus,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -47,7 +47,7 @@ from ...swarm.models import (
 def _as_utc(dt: "datetime | None") -> "datetime | None":
     # SQLite (aiosqlite) round-trips datetimes as naive values regardless of the
     # tzinfo they were stored with, so reattach UTC on read to match the
-    # timezone-aware datetimes SwarmRun/SwarmTask are constructed with everywhere
+    # timezone-aware datetimes SwarmRun/SwarmStep are constructed with everywhere
     # else.
     if dt is None or dt.tzinfo is not None:
         return dt
@@ -74,14 +74,14 @@ def _row_to_run(row: SwarmRunRow) -> SwarmRun:
     )
 
 
-def _row_to_task(row: SwarmTaskRow) -> SwarmTask:
-    return SwarmTask(
+def _row_to_task(row: SwarmStepRow) -> SwarmStep:
+    return SwarmStep(
         id=row.id,
         swarm_run_id=row.swarm_run_id,
         parent_task_id=row.parent_task_id,
         assigned_agent_id=row.assigned_agent_id,
         description=row.description,
-        status=SwarmTaskStatus(row.status),
+        status=SwarmStepStatus(row.status),
         dependencies=tuple(json.loads(row.dependencies_json)),
         input=TaskInput(**json.loads(row.input_json)),
         result=None
@@ -123,8 +123,8 @@ def _error_to_json(error: RunErrorInfo) -> str:
     )
 
 
-def _row_to_attempt(row: SwarmTaskAttemptRow) -> SwarmTaskAttempt:
-    return SwarmTaskAttempt(
+def _row_to_attempt(row: SwarmStepAttemptRow) -> SwarmStepAttempt:
+    return SwarmStepAttempt(
         id=row.id,
         task_id=row.task_id,
         run_id=row.run_id,
@@ -286,10 +286,10 @@ class SqlAlchemySwarmStore:
 
     # -- task lifecycle ------------------------------------------------
 
-    async def create_task(self, task: SwarmTask) -> SwarmTask:
+    async def create_task(self, task: SwarmStep) -> SwarmStep:
         async def _do(session):
             session.add(
-                SwarmTaskRow(
+                SwarmStepRow(
                     id=task.id,
                     swarm_run_id=task.swarm_run_id,
                     parent_task_id=task.parent_task_id,
@@ -323,15 +323,15 @@ class SqlAlchemySwarmStore:
         return task
 
     async def list_tasks(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
-    ) -> "tuple[SwarmTask, ...]":
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None" = None
+    ) -> "tuple[SwarmStep, ...]":
         async def _do(session):
-            query = select(SwarmTaskRow).where(
-                SwarmTaskRow.swarm_run_id == swarm_run_id
+            query = select(SwarmStepRow).where(
+                SwarmStepRow.swarm_run_id == swarm_run_id
             )
             if status is not None:
-                query = query.where(SwarmTaskRow.status == status.value)
-            query = query.order_by(SwarmTaskRow.created_at)
+                query = query.where(SwarmStepRow.status == status.value)
+            query = query.order_by(SwarmStepRow.created_at)
             result = await session.execute(query)
             return tuple(_row_to_task(row) for row in result.scalars())
 
@@ -339,17 +339,17 @@ class SqlAlchemySwarmStore:
 
     async def claim_task(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None" = None
-    ) -> "SwarmTask | None":
+    ) -> "SwarmStep | None":
         async def _do(session):
             # Snapshot pending candidates ordered by created_at. FOR UPDATE
             # SKIP LOCKED is a no-op on SQLite (aiosqlite) but is the correct
             # row-locking clause for Postgres, where concurrent workers each
             # skip rows the others have locked.
             candidates_result = await session.execute(
-                select(SwarmTaskRow)
-                .where(SwarmTaskRow.swarm_run_id == swarm_run_id)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.PENDING.value)
-                .order_by(SwarmTaskRow.created_at)
+                select(SwarmStepRow)
+                .where(SwarmStepRow.swarm_run_id == swarm_run_id)
+                .where(SwarmStepRow.status == SwarmStepStatus.PENDING.value)
+                .order_by(SwarmStepRow.created_at)
                 .with_for_update(skip_locked=True)
             )
             candidates = candidates_result.scalars().all()
@@ -359,10 +359,10 @@ class SqlAlchemySwarmStore:
                 deps_ok = True
                 for dep_id in deps:
                     dep_result = await session.execute(
-                        select(SwarmTaskRow.status).where(SwarmTaskRow.id == dep_id)
+                        select(SwarmStepRow.status).where(SwarmStepRow.id == dep_id)
                     )
                     dep_status = dep_result.scalar_one_or_none()
-                    if dep_status != SwarmTaskStatus.SUCCEEDED.value:
+                    if dep_status != SwarmStepStatus.SUCCEEDED.value:
                         deps_ok = False
                         break
                 if not deps_ok:
@@ -378,15 +378,15 @@ class SqlAlchemySwarmStore:
                 # this task between our SELECT and UPDATE. rowcount is the
                 # race-decider.
                 claim_result = await session.execute(
-                    update(SwarmTaskRow)
-                    .where(SwarmTaskRow.id == candidate.id)
-                    .where(SwarmTaskRow.status == SwarmTaskStatus.PENDING.value)
+                    update(SwarmStepRow)
+                    .where(SwarmStepRow.id == candidate.id)
+                    .where(SwarmStepRow.status == SwarmStepStatus.PENDING.value)
                     .values(
-                        status=SwarmTaskStatus.CLAIMED.value,
+                        status=SwarmStepStatus.CLAIMED.value,
                         assigned_agent_id=agent_id,
                         claimed_at=now,
                         lease_expires_at=lease_expires,
-                        version=SwarmTaskRow.version + 1,
+                        version=SwarmStepRow.version + 1,
                         updated_at=now,
                     )
                 )
@@ -402,7 +402,7 @@ class SqlAlchemySwarmStore:
 
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # Status guard added alongside expected_version (mirrors
         # complete_task/fail_task's own fencing): the strategy calls this
         # with the freshly-minted child RunRecord id right after claim_task
@@ -416,24 +416,24 @@ class SqlAlchemySwarmStore:
         # for a currently reachable race.
         async def _do(session):
             result = await session.execute(
-                update(SwarmTaskRow)
-                .where(SwarmTaskRow.id == task_id)
-                .where(SwarmTaskRow.version == expected_version)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                update(SwarmStepRow)
+                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.version == expected_version)
+                .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
                 .values(
                     active_run_id=run_id,
-                    version=SwarmTaskRow.version + 1,
+                    version=SwarmStepRow.version + 1,
                     updated_at=datetime.now(timezone.utc),
                 )
             )
             if result.rowcount == 0:
                 # Missing, version mismatch, or not CLAIMED -- read to discriminate.
                 query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                    raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
                 if row.version != expected_version:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
@@ -442,7 +442,7 @@ class SqlAlchemySwarmStore:
                     f"task {task_id} is not claimed (status={row.status})"
                 )
             query_result = await session.execute(
-                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
@@ -456,7 +456,7 @@ class SqlAlchemySwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # expected_version is now
         # MANDATORY -- there is no unconditional fallback. DB-level
         # CAS via UPDATE ... WHERE version=:expected AND status='claimed'
@@ -471,32 +471,32 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             now = datetime.now(timezone.utc)
             stmt = (
-                update(SwarmTaskRow)
-                .where(SwarmTaskRow.id == task_id)
-                .where(SwarmTaskRow.version == expected_version)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                update(SwarmStepRow)
+                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.version == expected_version)
+                .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
             )
             if active_run_id is not None:
-                stmt = stmt.where(SwarmTaskRow.active_run_id == active_run_id)
+                stmt = stmt.where(SwarmStepRow.active_run_id == active_run_id)
             stmt = stmt.values(
-                status=SwarmTaskStatus.SUCCEEDED.value,
+                status=SwarmStepStatus.SUCCEEDED.value,
                 result_json=_result_to_json(result),
-                version=SwarmTaskRow.version + 1,
+                version=SwarmStepRow.version + 1,
                 updated_at=now,
             )
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                    raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
                 if row.version != expected_version:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
                     )
-                if row.status != SwarmTaskStatus.CLAIMED.value:
+                if row.status != SwarmStepStatus.CLAIMED.value:
                     raise SwarmConflictError(
                         f"task {task_id} is not claimed (status={row.status})"
                     )
@@ -505,7 +505,7 @@ class SqlAlchemySwarmStore:
                     f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
-                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
 
@@ -518,38 +518,38 @@ class SqlAlchemySwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # same mandatory fencing as complete_task.
         async def _do(session):
             now = datetime.now(timezone.utc)
             stmt = (
-                update(SwarmTaskRow)
-                .where(SwarmTaskRow.id == task_id)
-                .where(SwarmTaskRow.version == expected_version)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                update(SwarmStepRow)
+                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.version == expected_version)
+                .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
             )
             if active_run_id is not None:
-                stmt = stmt.where(SwarmTaskRow.active_run_id == active_run_id)
+                stmt = stmt.where(SwarmStepRow.active_run_id == active_run_id)
             stmt = stmt.values(
-                status=SwarmTaskStatus.FAILED.value,
+                status=SwarmStepStatus.FAILED.value,
                 error_json=_error_to_json(error),
-                attempts=SwarmTaskRow.attempts + 1,
-                version=SwarmTaskRow.version + 1,
+                attempts=SwarmStepRow.attempts + 1,
+                version=SwarmStepRow.version + 1,
                 updated_at=now,
             )
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                    raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
                 if row.version != expected_version:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
                     )
-                if row.status != SwarmTaskStatus.CLAIMED.value:
+                if row.status != SwarmStepStatus.CLAIMED.value:
                     raise SwarmConflictError(
                         f"task {task_id} is not claimed (status={row.status})"
                     )
@@ -558,13 +558,13 @@ class SqlAlchemySwarmStore:
                     f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
-                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
 
         return await self._execute_in_session(_do)
 
-    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
+    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmStep, ...]":
         # A select-then-loop-mutate here raced against a concurrent
         # renew_lease/complete_task/fail_task -- two overlapping
         # reclaim_expired_tasks calls could both select the same expired rows
@@ -577,25 +577,25 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             now = datetime.now(timezone.utc)
             stmt = (
-                update(SwarmTaskRow)
-                .where(SwarmTaskRow.swarm_run_id == swarm_run_id)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
-                .where(SwarmTaskRow.lease_expires_at < now)
+                update(SwarmStepRow)
+                .where(SwarmStepRow.swarm_run_id == swarm_run_id)
+                .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
+                .where(SwarmStepRow.lease_expires_at < now)
                 .values(
-                    status=SwarmTaskStatus.PENDING.value,
+                    status=SwarmStepStatus.PENDING.value,
                     assigned_agent_id=None,
                     claimed_at=None,
                     lease_expires_at=None,
-                    version=SwarmTaskRow.version + 1,
+                    version=SwarmStepRow.version + 1,
                     updated_at=now,
                 )
-                .returning(SwarmTaskRow.id)
+                .returning(SwarmStepRow.id)
             )
             reclaimed_ids = [row.id for row in (await session.execute(stmt))]
             if not reclaimed_ids:
                 return ()
             query_result = await session.execute(
-                select(SwarmTaskRow).where(SwarmTaskRow.id.in_(reclaimed_ids))
+                select(SwarmStepRow).where(SwarmStepRow.id.in_(reclaimed_ids))
             )
             return tuple(_row_to_task(row) for row in query_result.scalars())
 
@@ -605,7 +605,7 @@ class SqlAlchemySwarmStore:
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         # UPDATE ... WHERE id=:tid AND version=:expected AND status='claimed':
         # the WHERE clauses make both the optimistic-concurrency check and the
         # CLAIMED-only guard atomic. rowcount == 0 means either missing, stale
@@ -614,23 +614,23 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             new_lease = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
             result = await session.execute(
-                update(SwarmTaskRow)
-                .where(SwarmTaskRow.id == task_id)
-                .where(SwarmTaskRow.version == expected_version)
-                .where(SwarmTaskRow.status == SwarmTaskStatus.CLAIMED.value)
+                update(SwarmStepRow)
+                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.version == expected_version)
+                .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
                 .values(
                     lease_expires_at=new_lease,
-                    version=SwarmTaskRow.version + 1,
+                    version=SwarmStepRow.version + 1,
                     updated_at=datetime.now(timezone.utc),
                 )
             )
             if result.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
-                    raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                    raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
                 if row.version != expected_version:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
@@ -639,7 +639,7 @@ class SqlAlchemySwarmStore:
                     f"renew_lease requires CLAIMED, task {task_id} is {row.status}"
                 )
             query_result = await session.execute(
-                select(SwarmTaskRow).where(SwarmTaskRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
@@ -648,7 +648,7 @@ class SqlAlchemySwarmStore:
 
     # -- attempts -------------------------------------
 
-    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+    async def record_attempt(self, attempt: SwarmStepAttempt) -> SwarmStepAttempt:
         # Upsert keyed on attempt.id. SQLite/SQLAlchemy has no native upsert
         # across dialects, so emulate: try to find the row, INSERT if missing,
         # UPDATE all mutable columns if present. The strategy writes the RUNNING
@@ -656,7 +656,7 @@ class SqlAlchemySwarmStore:
         # same id, so this path always sees exactly one prior row on the update.
         async def _do(session):
             query_result = await session.execute(
-                select(SwarmTaskAttemptRow).where(SwarmTaskAttemptRow.id == attempt.id)
+                select(SwarmStepAttemptRow).where(SwarmStepAttemptRow.id == attempt.id)
             )
             row = query_result.scalar_one_or_none()
             error_json = (
@@ -664,7 +664,7 @@ class SqlAlchemySwarmStore:
             )
             if row is None:
                 session.add(
-                    SwarmTaskAttemptRow(
+                    SwarmStepAttemptRow(
                         id=attempt.id,
                         task_id=attempt.task_id,
                         run_id=attempt.run_id,
@@ -685,12 +685,12 @@ class SqlAlchemySwarmStore:
 
         return await self._execute_in_session(_do)
 
-    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmStepAttempt, ...]":
         async def _do(session):
             result = await session.execute(
-                select(SwarmTaskAttemptRow)
-                .where(SwarmTaskAttemptRow.task_id == task_id)
-                .order_by(SwarmTaskAttemptRow.started_at, SwarmTaskAttemptRow.attempt)
+                select(SwarmStepAttemptRow)
+                .where(SwarmStepAttemptRow.task_id == task_id)
+                .order_by(SwarmStepAttemptRow.started_at, SwarmStepAttemptRow.attempt)
             )
             return tuple(_row_to_attempt(row) for row in result.scalars())
 

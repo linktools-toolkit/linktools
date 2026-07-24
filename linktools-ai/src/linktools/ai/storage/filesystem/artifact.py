@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 if TYPE_CHECKING:
     from ...observability.metrics import ObservabilityMetrics
 
+from ...artifact.digest import ArtifactDigest
 from ...artifact.models import (
     ArtifactBlobNotFoundError,
     ArtifactIntegrityError,
@@ -86,10 +87,12 @@ class FilesystemArtifactBlobStore:
         self._chunk = chunk_size
         self._metrics = metrics
 
-    def _path(self, digest: str) -> Path:
-        _safe_component(digest, "digest")
-        _validate_digest(digest)
-        return self._root / digest[:2] / digest
+    def _path(self, digest: ArtifactDigest) -> Path:
+        # Defense-in-depth on the path component (the value object already
+        # guarantees 64 lowercase hex with no separators). Never trust the
+        # string form alone for the shard path.
+        _safe_component(digest.value, "digest")
+        return self._root / digest.value[:2] / digest.value
 
     def _fail(self, error: Exception, *, reason: str) -> None:
         if self._metrics is not None:
@@ -99,7 +102,7 @@ class FilesystemArtifactBlobStore:
         raise error
 
     async def put_if_absent(
-        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size: "int | None"
     ) -> BlobInfo:
         final = self._path(digest)
         await _io.async_makedirs(final.parent)
@@ -121,10 +124,10 @@ class FilesystemArtifactBlobStore:
                     await _io.async_write_chunk(f, chunk)
                 await _io.async_fsync_file(f)
             actual = hasher.hexdigest()
-            if actual != digest:
+            if actual != digest.value:
                 self._fail(
                     ArtifactIntegrityError(
-                        f"blob digest mismatch: claimed {digest[:12]}, actual {actual[:12]}"
+                        f"blob digest mismatch: claimed {digest.value[:12]}, actual {actual[:12]}"
                     ),
                     reason="digest_mismatch",
                 )
@@ -140,7 +143,7 @@ class FilesystemArtifactBlobStore:
             if await _io.async_stat_size(final) is None:
                 await _io.async_replace(tmp_name, final)
                 await _io.async_fsync_directory(final.parent)
-                return BlobInfo(digest=digest, size=written, content_type=None)
+                return BlobInfo(digest=digest.value, size=written, content_type=None)
             return await self._verify_existing(final, digest, declared_size=size)
         finally:
             # Drop the temp if the publish path did not rename it away.
@@ -148,13 +151,13 @@ class FilesystemArtifactBlobStore:
                 await _io.async_unlink(tmp_path)
 
     async def _verify_existing(
-        self, final: Path, digest: str, *, declared_size: "int | None"
+        self, final: Path, digest: ArtifactDigest, *, declared_size: "int | None"
     ) -> BlobInfo:
         existing_digest = await _io.async_hash_file(final, chunk_size=self._chunk)
-        if existing_digest != digest:
+        if existing_digest != digest.value:
             self._fail(
                 ArtifactIntegrityError(
-                    f"blob at sha256 {digest[:12]} is corrupt (actual {existing_digest[:12]}); "
+                    f"blob at sha256 {digest.value[:12]} is corrupt (actual {existing_digest[:12]}); "
                     f"refusing to record a reference to it"
                 ),
                 reason="corrupt",
@@ -167,13 +170,13 @@ class FilesystemArtifactBlobStore:
                 ),
                 reason="size_mismatch",
             )
-        return BlobInfo(digest=digest, size=existing_size, content_type=None)
+        return BlobInfo(digest=digest.value, size=existing_size, content_type=None)
 
     @asynccontextmanager
-    async def open(self, *, digest: str):
+    async def open(self, *, digest: ArtifactDigest):
         path = self._path(digest)
         if await _io.async_stat_size(path) is None:
-            raise ArtifactBlobNotFoundError(f"blob for sha256 {digest[:12]} missing")
+            raise ArtifactBlobNotFoundError(f"blob for sha256 {digest.value[:12]} missing")
         f = await _io.async_open_read(path)
         try:
             chunk = self._chunk
@@ -189,14 +192,14 @@ class FilesystemArtifactBlobStore:
         finally:
             await _io.async_close(f)
 
-    async def stat(self, *, digest: str) -> "BlobInfo | None":
+    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None":
         path = self._path(digest)
         size = await _io.async_stat_size(path)
         if size is None:
             return None
-        return BlobInfo(digest=digest, size=size, content_type=None)
+        return BlobInfo(digest=digest.value, size=size, content_type=None)
 
-    async def delete(self, *, digest: str) -> None:
+    async def delete(self, *, digest: ArtifactDigest) -> None:
         path = self._path(digest)
         await _io.async_unlink(path)
 
@@ -307,13 +310,13 @@ class FilesystemArtifactRecordStore:
         async for record in self._iter_records():
             yield record.ref.sha256
 
-    async def is_digest_referenced(self, digest: str) -> bool:
+    async def is_digest_referenced(self, digest: ArtifactDigest) -> bool:
         """Whether any record pins ``digest`` (across tenants). Scans records
         fail-closed: a corrupt record aborts (raises) so the orphan sweeper
         cannot mistake a pinned blob for an orphan. Returns on the first
         matching record."""
         async for record in self._iter_records():
-            if record.ref.sha256 == digest:
+            if record.ref.sha256 == digest.value:
                 return True
         return False
 

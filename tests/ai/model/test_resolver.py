@@ -4,9 +4,10 @@
 
 Covers the candidate-walk contract (single vs FallbackModel, unregistered-skip,
 no-candidate error), the revision contract (secret-excluding, order-sensitive,
-request_retries-sensitive), and the request_retries wiring (rebuilt into the
-provider HTTP client only for config-backed OpenAI models; prebuilt models are
-reused as-is)."""
+request_retries-sensitive), and the request_retries wiring (always wired
+explicitly into the provider HTTP client for config-backed OpenAI models --
+including 0; a prebuilt model is reused as-is only when request_retries is None,
+and rejected otherwise)."""
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -17,8 +18,9 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.errors import ModelRoutingError
 from linktools.ai.model import resolver as resolver_module
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.model.registry import ModelRegistry, RuntimeModelConfig
+from linktools.ai.model.registry import ModelBundle, ModelRegistry, RuntimeModelConfig
 from linktools.ai.model.resolver import ModelResolver, ResolvedModel
+from linktools.ai.errors import ModelRetryConfigurationError
 
 
 def _fn(text: str = "ok"):
@@ -121,7 +123,10 @@ def test_revision_changes_on_candidate_reorder():
 
 
 def test_revision_changes_on_request_retries():
-    registry = _prebuilt_registry("m")
+    # request_retries is part of the resolved revision (config-backed model: the
+    # framework owns the retry count). Different counts -> different revisions.
+    registry = ModelRegistry()
+    registry.register("m", config=_config("m", base_url="http://x", api_key="k"))
     rev_zero = ModelResolver(registry=registry).resolve(
         ModelPolicy(primary="m", request_retries=0)
     ).revision
@@ -137,17 +142,14 @@ def test_request_retries_rebuilds_config_backed_model(monkeypatch):
     registry = ModelRegistry()
     registry.register("m", config=_config("m", base_url="http://x", api_key="k"))
     captured: "list[int]" = []
-    real = resolver_module.__dict__  # noqa: F841 - for clarity below
 
-    import linktools.ai.model.registry as registry_module
+    original = ModelBundle.from_config
 
-    original = registry_module._bundle_from_config
-
-    def _spy(config: RuntimeModelConfig, *, request_retries: int = 0) -> Any:
+    def _spy(config, *, request_retries: int):
         captured.append(request_retries)
         return original(config, request_retries=request_retries)
 
-    monkeypatch.setattr(registry_module, "_bundle_from_config", _spy)
+    monkeypatch.setattr(ModelBundle, "from_config", _spy)
     ModelResolver(registry=registry).resolve(
         ModelPolicy(primary="m", request_retries=4)
     )
@@ -155,8 +157,8 @@ def test_request_retries_rebuilds_config_backed_model(monkeypatch):
 
 
 def test_zero_request_retries_reuses_bundle_model():
-    # request_retries==0 matches the registration-time build, so the existing
-    # bundle.model is reused without a rebuild.
+    # request_retries==0 matches the registration-time build (which already set
+    # max_retries=0 explicitly), so the existing bundle.model is reused.
     registry = ModelRegistry()
     registry.register("m", config=_config("m", base_url="http://x", api_key="k"))
     bundle_model = registry.get("m").model
@@ -166,12 +168,57 @@ def test_zero_request_retries_reuses_bundle_model():
     assert resolved.model is bundle_model
 
 
-def test_prebuilt_model_reused_regardless_of_request_retries():
-    # A prebuilt model has no HTTP client to configure, so request_retries is
-    # ignored and the registered model is reused as-is.
+def test_from_config_always_passes_max_retries_explicitly(monkeypatch):
+    # The provider HTTP client is ALWAYS built with an explicit max_retries --
+    # including 0 (which disables the SDK's own retry). Never the client default.
+    from openai import AsyncOpenAI
+
+    captured: "list[int]" = []
+
+    def _fake_client(*args, **kwargs):
+        captured.append(kwargs.get("max_retries", "MISSING"))
+        return AsyncOpenAI(*args, **kwargs)
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_client)
+    # 0 -> max_retries=0
+    ModelBundle.from_config(_config("m", base_url="http://x", api_key="k"), request_retries=0)
+    # 2 -> max_retries=2
+    ModelBundle.from_config(_config("m2", base_url="http://x", api_key="k"), request_retries=2)
+    assert captured == [0, 2]
+
+
+def test_prebuilt_model_with_none_retries_is_reused():
+    # request_retries=None is the signal that a prebuilt model manages its own
+    # retry behavior; the registered model is reused as-is.
     registry = _prebuilt_registry("m")
     bundle_model = registry.get("m").model
     resolved = ModelResolver(registry=registry).resolve(
-        ModelPolicy(primary="m", request_retries=9)
+        ModelPolicy(primary="m", request_retries=None)
     )
     assert resolved.model is bundle_model
+
+
+def test_prebuilt_model_with_int_retries_is_rejected():
+    # A prebuilt model has no framework-managed HTTP client, so an int
+    # request_retries (asking the framework to configure retries) is rejected.
+    registry = _prebuilt_registry("m")
+    with pytest.raises(ModelRetryConfigurationError):
+        ModelResolver(registry=registry).resolve(
+            ModelPolicy(primary="m", request_retries=0)
+        )
+    with pytest.raises(ModelRetryConfigurationError):
+        ModelResolver(registry=registry).resolve(
+            ModelPolicy(primary="m", request_retries=9)
+        )
+
+
+def test_from_instance_rejects_int_retries():
+    # ModelBundle.from_instance is the prebuilt construction path; a non-None
+    # request_retries is a configuration error, never silently ignored.
+    with pytest.raises(ModelRetryConfigurationError):
+        ModelBundle.from_instance("m", FunctionModel(_fn("x")), request_retries=0)
+    with pytest.raises(ModelRetryConfigurationError):
+        ModelBundle.from_instance("m", FunctionModel(_fn("x")), request_retries=3)
+    # None is allowed (the prebuilt-manages-its-own signal).
+    bundle = ModelBundle.from_instance("m", FunctionModel(_fn("x")))
+    assert bundle.config.protocol == "prebuilt"

@@ -9,7 +9,6 @@ from linktools.ai.model.registry import (
     ModelClientUnavailable,
     ModelRegistry,
     RuntimeModelConfig,
-    _bundle_from_config,
 )
 
 
@@ -29,7 +28,7 @@ def _config(**overrides) -> RuntimeModelConfig:
 
 
 def test_bundle_from_config_builds_openai_model():
-    bundle = _bundle_from_config(_config())
+    bundle = ModelBundle.from_config(_config(), request_retries=0)
     assert bundle.config.model_type == "standard"
     assert bundle.model.model_name == "gpt-4o-mini"
     assert bundle.settings["max_tokens"] == 4096
@@ -38,12 +37,12 @@ def test_bundle_from_config_builds_openai_model():
 
 def test_bundle_from_config_rejects_unsupported_protocol():
     with pytest.raises(ModelClientUnavailable, match="unsupported protocol"):
-        _bundle_from_config(_config(protocol="anthropic"))
+        ModelBundle.from_config(_config(protocol="anthropic"), request_retries=0)
 
 
 def test_bundle_from_config_rejects_missing_base_url():
     with pytest.raises(ModelClientUnavailable, match="requires base_url"):
-        _bundle_from_config(_config(base_url=""))
+        ModelBundle.from_config(_config(base_url=""), request_retries=0)
 
 
 def test_model_registry_register_with_config_returns_bundle():

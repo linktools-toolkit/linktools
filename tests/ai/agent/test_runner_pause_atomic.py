@@ -202,7 +202,6 @@ def _sqla_runner(storage) -> AgentEngine:
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
-        checkpoint_store=storage.checkpoints,
         commit_coordinator=SqlAlchemyRunCommitCoordinator(storage),
         capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=GovernedToolInvoker(
@@ -544,7 +543,6 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=executor,
         # File coordinator: event appends are best-effort, so a RunPaused event
@@ -591,7 +589,7 @@ def test_file_pause_does_not_rollback_when_event_append_fails(tmp_path):
     assert run_record.status is RunStatus.WAITING_APPROVAL, (
         "pause commit point (WAITING_APPROVAL) must persist, not roll back"
     )
-    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-f1"))
+    checkpoint = asyncio.run(runner._commit_coordinator._checkpoints.latest("run-f1"))
     assert checkpoint is not None, "pause checkpoint must persist"
 
     # The RunPaused event is missing now (recovery will re-attempt it), and the
@@ -650,7 +648,6 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=executor,
         # The coordinator owns the approval write; a failure propagates so the
@@ -697,7 +694,7 @@ def test_file_pause_does_not_wait_when_approval_write_fails(tmp_path):
         "a failed approval write must not leave the run WAITING_APPROVAL"
     )
     # The approval write precedes the checkpoint append, so no orphan checkpoint.
-    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-r02"))
+    checkpoint = asyncio.run(runner._commit_coordinator._checkpoints.latest("run-r02"))
     assert checkpoint is None, (
         "no checkpoint should persist when the approval write fails"
     )

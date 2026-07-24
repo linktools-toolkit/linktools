@@ -9,7 +9,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -36,7 +36,7 @@ def test_runtime_build_hides_internal_components(tmp_path):
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -47,14 +47,14 @@ def test_runtime_build_hides_internal_components(tmp_path):
 
 
 def test_runtime_build_no_longer_accepts_workdir(tmp_path):
-    """scenario (actionable-fix-contract): Runtime.build() must not depend
+    """scenario (actionable-fix-contract): build_runtime() must not depend
     on a bare `workdir: Path` param -- the caller builds its own
     Sandbox and passes it via `sandbox=`."""
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
     with pytest.raises(TypeError):
-        Runtime.build(
+        build_runtime(
             storage=storage,
             model_resolver=ModelResolver(registry=_registry()),
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -71,7 +71,7 @@ def test_runtime_build_wires_execution_backend_for_builtin_tools(tmp_path):
 
     storage = FilesystemStorage(root=tmp_path)
     backend = LocalSandbox(runtime_dir=tmp_path / "workdir")
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         sandbox=backend,
@@ -84,7 +84,7 @@ def test_runtime_run_creates_session_when_none_given_and_returns_result(tmp_path
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -118,7 +118,7 @@ def test_runtime_run_with_explicit_session_reuses_it(tmp_path):
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -182,7 +182,7 @@ def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_p
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(_worker_fn))
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -255,7 +255,7 @@ def test_runtime_run_swarm_spec_without_agents_raises(tmp_path):
     )
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -326,7 +326,7 @@ def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
     from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_echo_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -342,7 +342,7 @@ def test_runtime_run_surfaces_seeded_memory_in_output(tmp_path):
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_echo_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -420,7 +420,7 @@ def test_runtime_applies_session_window_policy(tmp_path):
             return list(messages)
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         options=CapabilityRuntimeOptions(session_window_policy=_Recording()),

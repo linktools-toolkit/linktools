@@ -62,7 +62,7 @@ class FilesystemRunCommitCoordinator:
         # ``critical_event_persist_failure_total``. Default None keeps existing
         # callers no-op.
         self._metrics = metrics
-        # Production (Runtime.build) always passes storage.root / "transactions"
+        # Production (build_runtime) always passes storage.root / "transactions"
         # so recovery survives restarts. Tests that don't exercise recovery can
         # omit it and get an ephemeral temp dir (a real journal, just not shared
         # across coordinator instances).

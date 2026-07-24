@@ -32,11 +32,24 @@ ASSET_IDEMPOTENCY_CONSTRAINT = "uq_ai_asset_idempotency_tenant_key"
 
 
 class AssetRow(Base):
+    """``path_hash`` (sha256 of the normalized path, see
+    :func:`storage.sqlalchemy.asset.asset_path_hash`) -- not ``path`` itself --
+    carries the uniqueness constraint: MySQL's index key-length limit is
+    exceeded by a ``VARCHAR(1024)`` column under a multi-byte charset, so the
+    full path cannot be the unique-index key on that dialect. The plain
+    (non-unique) ``path`` index below is capped to a MySQL-safe prefix length
+    via ``mysql_length`` for prefix/LIKE listing queries; SQLite/PostgreSQL
+    ignore that hint and index the whole column."""
+
     __tablename__ = "ai_assets"
-    __table_args__ = (UniqueConstraint("path", name=ASSET_PATH_CONSTRAINT),)
+    __table_args__ = (
+        UniqueConstraint("path_hash", name=ASSET_PATH_CONSTRAINT),
+        Index("ix_ai_assets_path_prefix", "path", mysql_length={"path": 191}),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    path: Mapped[str] = mapped_column(String(1024), index=True)
+    path: Mapped[str] = mapped_column(String(1024))
+    path_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
     kind: Mapped[str] = mapped_column(String(32))
     etag: Mapped[str] = mapped_column(String(64))
     version: Mapped[int]
@@ -50,11 +63,19 @@ class AssetRow(Base):
 
 
 class AssetIdempotencyRow(Base):
+    """``key_hash`` carries the uniqueness constraint for the same reason as
+    ``AssetRow.path_hash`` -- a long idempotency key under a multi-byte
+    charset can exceed MySQL's index key-length limit."""
+
     __tablename__ = "ai_asset_idempotency"
-    __table_args__ = (UniqueConstraint("key", name=ASSET_IDEMPOTENCY_CONSTRAINT),)
+    __table_args__ = (
+        UniqueConstraint("key_hash", name=ASSET_IDEMPOTENCY_CONSTRAINT),
+        Index("ix_ai_asset_idempotency_key_prefix", "key", mysql_length={"key": 191}),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    key: Mapped[str] = mapped_column(String(512), index=True)
+    key_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
+    key: Mapped[str] = mapped_column(String(1024))
     request_hash: Mapped[str] = mapped_column(String(64))
     result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
 
@@ -262,7 +283,7 @@ class SwarmRunRow(Base):
     metadata_json: Mapped[str] = mapped_column(Text)
 
 
-class SwarmTaskRow(Base):
+class SwarmStepRow(Base):
     __tablename__ = "ai_swarm_tasks"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -286,9 +307,9 @@ class SwarmTaskRow(Base):
     active_run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
 
 
-class SwarmTaskAttemptRow(Base):
-    """One execution attempt of a SwarmTask. Mirrors the
-    SwarmTaskAttempt domain model. Indexed on task_id for fast list_attempts."""
+class SwarmStepAttemptRow(Base):
+    """One execution attempt of a SwarmStep. Mirrors the
+    SwarmStepAttempt domain model. Indexed on task_id for fast list_attempts."""
 
     __tablename__ = "ai_swarm_task_attempts"
 

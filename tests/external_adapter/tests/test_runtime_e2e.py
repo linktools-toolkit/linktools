@@ -27,7 +27,7 @@ Six properties are pinned here:
 3. ``test_external_adapter_drives_run_to_completion`` -- mirrors
    ``tests/ai/e2e/test_file_runtime_complete.py`` but uses
    ``build_in_memory_external_storage(root=tmp_path)`` instead of
-   ``FilesystemStorage``. Drives the real ``Runtime.build -> Runtime.run``
+   ``FilesystemStorage``. Drives the real ``build_runtime -> Runtime.run``
    chain with a TOOLLESS AgentSpec, then asserts the run reached SUCCEEDED
    with exactly one USER + one ASSISTANT session message, one checkpoint at
    sequence 1, and exactly one RunCompleted event (no RunFailed). This test
@@ -113,7 +113,7 @@ from linktools.ai.run.checkpoint import CheckpointStore
 from linktools.ai.run.definition import RunDefinitionStore
 from linktools.ai.run.models import RunStatus
 from linktools.ai.run.store import RunStore
-from linktools.ai.runtime import Runtime, RuntimeDependencies
+from linktools.ai.runtime import Runtime, build_runtime, RuntimeDependencies
 from linktools.ai.session.models import MessageRole
 from linktools.ai.session.store import SessionStore
 from linktools.ai.storage.transaction import NoCrossStoreTransactions
@@ -186,6 +186,8 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
         "linktools.ai.asset.store",
         "linktools.ai.asset.memory",
         "linktools.ai.artifact.store",
+        "linktools.ai.artifact.coordination",
+        "linktools.ai.artifact.digest",
         "linktools.ai.artifact.models",
         "linktools.ai.jobs.store",
         "linktools.ai.jobs.models",
@@ -418,7 +420,7 @@ def test_external_adapter_drives_run_to_completion(tmp_path: pathlib.Path) -> No
     assert storage.features is FILE_STORAGE_FEATURES
     assert isinstance(storage._transaction_manager, NoCrossStoreTransactions)
 
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_router(),
         commit_coordinator=InMemoryRunCommitCoordinator.from_storage(storage),
@@ -504,7 +506,7 @@ def test_external_adapter_drives_approval_resume(tmp_path: pathlib.Path) -> None
         ),
         approval_store=storage.approvals,
     )
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_approval_router(),
         tool_executor=executor,
@@ -695,7 +697,7 @@ def test_external_adapter_drives_approval_resume_produces_artifact(
         ),
         approval_store=storage.approvals,
     )
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_approval_router(),
         tool_executor=executor,
@@ -972,7 +974,7 @@ def test_external_adapter_full_connected_chain_run_approval_resume_artifact_job(
         ),
         approval_store=storage.approvals,
     )
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_approval_router(),
         tool_executor=executor,

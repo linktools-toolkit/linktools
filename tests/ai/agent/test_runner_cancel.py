@@ -69,7 +69,6 @@ def _make_runner(tmp_path, pipeline=None) -> AgentEngine:
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),

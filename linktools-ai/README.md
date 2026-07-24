@@ -15,7 +15,7 @@ A tested minimal example lives at [`examples/minimal_runtime.py`](../examples/mi
 ```python
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model import ModelPolicy, ModelRegistry, ModelResolver
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import build_runtime
 from linktools.ai.storage import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -23,7 +23,7 @@ registry = ModelRegistry()
 registry.register("standard", model=my_model)
 
 storage = FilesystemStorage(root="./data")
-async with Runtime.build(
+async with build_runtime(
     storage=storage,
     model_resolver=ModelResolver(registry=registry),
     commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -38,8 +38,8 @@ async with Runtime.build(
     print(result.output)
 ```
 
-`build_runtime(...)` is the function form of `Runtime.build(...)` — same
-signature, useful when you want a value rather than the class method.
+`build_runtime(...)` (in `linktools.ai.runtime`) is the sole construction
+entry point — it returns a `Runtime` usable as an async context manager.
 
 ## Public entry points
 
@@ -55,10 +55,10 @@ Sandbox             GovernedToolInvoker RunCoordinator    Runtime  build_runtime
 ## Architecture
 
 ```text
-Runtime.build(storage, model_resolver, providers, ...)
+build_runtime(storage, model_resolver, providers, ...)
   -> AgentCompiler   (resolves ModelPolicy -> ResolvedModel, compiles AgentSpec)
   -> AgentEngine     (drives the agent: model calls, tool calls, governance)
-  -> SwarmRunner     (orchestrates multi-agent swarms)
+  -> SwarmEngine     (orchestrates multi-agent swarms)
   -> CapabilityResolver  (resolves declared tools into a governed toolset)
   -> GovernedToolInvoker (single execution entry: policy + approval + security)
   -> Storage         (Filesystem or SQLAlchemy backends)
@@ -89,7 +89,7 @@ through a governed builtin tool resolved from the sandbox. See
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.sandbox.local import LocalSandbox
 
-async with Runtime.build(
+async with build_runtime(
     storage=storage,
     model_resolver=ModelResolver(registry=registry),
     sandbox=LocalSandbox(runtime_dir="./workdir"),
@@ -129,13 +129,13 @@ invalidates the cache without the plaintext ever entering the key.
 ### Swarm
 
 `SwarmSpec` declares agents + a coordinator + a strategy + limits. The
-`SwarmRunner` compiles member agents, distributes tasks, and aggregates
+`SwarmEngine` compiles member agents, distributes tasks, and aggregates
 results. Cost and token limits (`max_total_cost`, `max_total_tokens`) can cap
 execution.
 
 ## Provider + Catalog
 
-`Runtime.build` accepts a `RuntimeDependencies` bundle of spec providers
+`build_runtime` accepts a `RuntimeDependencies` bundle of spec providers
 (agents, skills, MCP, subagents, packages). Default catalogs parse `agent.md` /
 `SKILL.md` / `mcp.yaml` from a filesystem root or an `AssetStore`:
 

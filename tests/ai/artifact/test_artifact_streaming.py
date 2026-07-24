@@ -24,6 +24,8 @@ from linktools.ai.artifact import (
     ArtifactStore,
 )
 from linktools.ai.artifact import store as store_mod
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactProvenance
 from linktools.ai.storage.protocols import BlobInfo
 
@@ -39,20 +41,20 @@ class _StreamBlob:
         self._blobs: "dict[str, bytes]" = {}
 
     async def put_if_absent(
-        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size: "int | None"
     ) -> BlobInfo:
         acc: "list[bytes]" = []
         async for c in source:
             acc.append(c)
         data = b"".join(acc)
-        if hashlib.sha256(data).hexdigest() != digest:
+        if hashlib.sha256(data).hexdigest() != digest.value:
             raise ArtifactIntegrityError("digest mismatch")
-        self._blobs.setdefault(digest, data)
-        return BlobInfo(digest=digest, size=len(data), content_type=None)
+        self._blobs.setdefault(digest.value, data)
+        return BlobInfo(digest=digest.value, size=len(data), content_type=None)
 
     @asynccontextmanager
-    async def open(self, *, digest: str):
-        data = self._blobs.get(digest)
+    async def open(self, *, digest: ArtifactDigest):
+        data = self._blobs.get(digest.value)
         if data is None:
             raise ArtifactBlobNotFoundError("missing")
 
@@ -62,12 +64,12 @@ class _StreamBlob:
 
         yield _chunks()
 
-    async def stat(self, *, digest: str) -> "BlobInfo | None":
-        d = self._blobs.get(digest)
-        return None if d is None else BlobInfo(digest=digest, size=len(d), content_type=None)
+    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None":
+        d = self._blobs.get(digest.value)
+        return None if d is None else BlobInfo(digest=digest.value, size=len(d), content_type=None)
 
-    async def delete(self, *, digest: str) -> None:
-        self._blobs.pop(digest, None)
+    async def delete(self, *, digest: ArtifactDigest) -> None:
+        self._blobs.pop(digest.value, None)
 
 
 class _StreamRecord:
@@ -87,7 +89,7 @@ class _StreamRecord:
 
 def _store() -> "tuple[ArtifactStore, _StreamBlob]":
     blob = _StreamBlob()
-    return ArtifactStore(blob, _StreamRecord()), blob
+    return ArtifactStore(blob, _StreamRecord(), InProcessArtifactDigestCoordinator()), blob
 
 
 def _aiter(chunks: "list[bytes]") -> AsyncIterator[bytes]:

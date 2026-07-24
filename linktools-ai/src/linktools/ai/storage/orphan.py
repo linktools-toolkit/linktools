@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     from ..observability.metrics import ObservabilityMetrics
     from .protocols import ArtifactBlobStore, ArtifactRecordStore
 
-from ..errors import ArtifactRecordCorruptError
+from ..artifact.digest import ArtifactDigest
+from ..errors import ArtifactRecordCorruptError, InvalidArtifactDigestError
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,12 +101,23 @@ async def sweep_orphan_blobs(
     deleted = 0
     kept_within_grace = 0
     in_use = 0
-    async for digest, modified_at in blob_store.iter_digests_with_mtime():
+    async for digest_value, modified_at in blob_store.iter_digests_with_mtime():
         age = moment - modified_at
         if age < cfg.grace_period:
             # Inside the safety window regardless of reference state: an
             # in-flight transaction may still commit a record pinning it.
             kept_within_grace += 1
+            continue
+        # The blob's filename IS its sha256; parse it into the validated value
+        # object before it becomes a coordination key or a stat/delete address.
+        # A filename that is not a canonical digest means the blob tree was
+        # tampered with out of band -- fail closed (skip + count) rather than
+        # operating on an unvalidated address.
+        try:
+            digest = ArtifactDigest.parse(digest_value)
+        except InvalidArtifactDigestError:
+            if metrics is not None:
+                metrics.counter("artifact_orphan_sweep_failure_total")
             continue
         # Past grace: candidate. The delete decision is re-evaluated under the
         # per-digest lock so it reflects the live reference set, not the scan

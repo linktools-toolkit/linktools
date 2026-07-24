@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MemoryManager: domain facade over MemoryStore. recall/remember/forget; mints
+"""MemoryService: domain facade over MemoryStore. recall/remember/forget; mints
 id (uuid4)/version/timestamps on remember. Every read/write carries a
 :class:`MemoryScope` so the tenant boundary is enforced end to end -- there is
 no unscoped path. recall delegates straight to ``MemoryStore.search`` and
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class MemoryManager:
+class MemoryService:
     store: "MemoryStore"
 
     async def recall(

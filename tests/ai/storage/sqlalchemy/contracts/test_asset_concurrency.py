@@ -90,3 +90,74 @@ async def test_concurrent_cas_same_expected_version_one_wins(sql_asset_backend):
     # and the other sees a precondition failure.
     assert len(precondition_failed) == 1, results
     assert (await store.get(path)).content in (b"a", b"b")
+
+
+# -- Work package 3 (spec section 6.6): no-op version-fence regressions -----
+
+
+async def test_noop_put_does_not_lose_a_concurrent_write(sql_asset_backend):
+    """Lost-write scenario: T1 reads A (content matches -> would take the
+    no-op short-circuit), T2 writes B and commits first, T1's no-op version
+    fence must then fail (the row changed under it) and T1 must retry -- not
+    silently return as if A were still current. The final state must be B,
+    never A re-asserted by a stale no-op return."""
+    store = AssetStore(primary=sql_asset_backend)
+    path = AssetPath("/contract/noop-lost-write.txt")
+    await _put(store, path, b"A")
+
+    # T1: a same-content PUT of "A" (would take the no-op branch) racing T2's
+    # real content change to "B". Both issued concurrently; regardless of
+    # scheduling, once both complete the live content must be exactly what
+    # the LAST successful write produced, never a value silently reasserted
+    # from a stale read.
+    results = await asyncio.gather(
+        _put(store, path, b"A"),
+        _put(store, path, b"B"),
+        return_exceptions=True,
+    )
+    assert all(not isinstance(r, Exception) for r in results), results
+    final = await store.get(path)
+    assert final.content == b"B", (
+        "a same-content no-op PUT raced against a real write must never win "
+        "by returning a stale pre-race value"
+    )
+
+
+async def test_same_value_concurrent_put_succeeds_without_error(sql_asset_backend):
+    """Two writers PUT the identical content concurrently: both must succeed
+    with no exception, and the version-fence retry (if the no-op fence loses
+    the race to the other writer's real first write) converges rather than
+    deadlocking or raising a spurious conflict."""
+    store = AssetStore(primary=sql_asset_backend)
+    path = AssetPath("/contract/noop-same-value.txt")
+
+    results = await asyncio.gather(
+        _put(store, path, b"same"),
+        _put(store, path, b"same"),
+        return_exceptions=True,
+    )
+    assert all(not isinstance(r, Exception) for r in results), results
+    final = await store.get(path)
+    assert final.content == b"same"
+
+
+async def test_noop_fence_does_not_bypass_stale_cas(sql_asset_backend):
+    """An old ``expected_version``/etag must never pass through the no-op
+    branch: a same-content PUT issued with an if_match that is no longer the
+    live etag (because a real write already advanced it) must raise a
+    precondition failure, not silently succeed via the version fence."""
+    store = AssetStore(primary=sql_asset_backend)
+    path = AssetPath("/contract/noop-stale-cas.txt")
+    await _put(store, path, b"v1")
+    stale_info = await sql_asset_backend.raw_stat(path)
+
+    # Advance the row for real, invalidating stale_info.etag.
+    await _put(store, path, b"v2")
+
+    with pytest.raises(AssetPreconditionFailedError):
+        # Same content as the (now stale) v1 read, but stamped with the old
+        # etag -- must fail the precondition, never take the no-op fast path.
+        await store.put(
+            path, b"v1", options=_put_opts(if_match=stale_info.etag)
+        )
+    assert (await store.get(path)).content == b"v2"

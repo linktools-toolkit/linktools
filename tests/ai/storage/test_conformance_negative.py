@@ -9,11 +9,11 @@ asset-cleanup guarantee (no __aexit__ to close the fd/connection). This
 test pins that the contract SHAPE catches such an impl -- the headline
 negative-validation gap the cross-reference found."""
 
-import hashlib
 from typing import AsyncIterator
 
 import pytest
 
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.storage.protocols import BlobInfo
 
 
@@ -32,25 +32,25 @@ class _AsyncGenOpenBlobStore:
         self._blobs: "dict[str, bytes]" = {}
 
     async def put_if_absent(
-        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
+        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size: "int | None"
     ) -> BlobInfo:
         acc: "list[bytes]" = []
         async for c in source:
             acc.append(c)
         data = b"".join(acc)
-        self._blobs[digest] = data
-        return BlobInfo(digest=digest, size=len(data), content_type=None)
+        self._blobs[digest.value] = data
+        return BlobInfo(digest=digest.value, size=len(data), content_type=None)
 
-    async def open(self, *, digest: str) -> AsyncIterator[bytes]:
+    async def open(self, *, digest: ArtifactDigest) -> AsyncIterator[bytes]:
         # NON-CONFORMANT: bare async generator, NOT @asynccontextmanager. An
         # async-generator object has no __aenter__/__aexit__.
-        data = self._blobs.get(digest, b"")
+        data = self._blobs.get(digest.value, b"")
         yield data
 
-    async def stat(self, *, digest: str) -> "BlobInfo | None":
+    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None":
         return None
 
-    async def delete(self, *, digest: str) -> None:
+    async def delete(self, *, digest: ArtifactDigest) -> None:
         pass
 
 
@@ -64,7 +64,7 @@ def test_contract_rejects_async_gen_open_that_is_not_a_context_manager():
     import asyncio
 
     bad = _AsyncGenOpenBlobStore()
-    digest = hashlib.sha256(b"x").hexdigest()
+    digest = ArtifactDigest.from_bytes(b"x")
 
     async def _run():
         await bad.put_if_absent(digest=digest, source=_aiter([b"x"]), size=1)
@@ -86,7 +86,7 @@ def test_conformant_backend_open_is_usable_as_async_with(tmp_path):
     from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
     store = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
-    digest = hashlib.sha256(b"roundtrip").hexdigest()
+    digest = ArtifactDigest.from_bytes(b"roundtrip")
 
     async def _run():
         await store.put_if_absent(

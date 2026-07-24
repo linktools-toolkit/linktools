@@ -18,7 +18,10 @@ it)."""
 from __future__ import annotations
 
 import asyncio
-import hashlib
+from linktools.ai.artifact.digest import ArtifactDigest
+
+# A canonical all-zero digest reused across the blob contract.
+_ZERO_DIGEST = ArtifactDigest.parse("0" * 64)
 from typing import Any
 
 import pytest
@@ -72,7 +75,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
     def test_put_if_absent_is_idempotent_on_digest(self) -> None:
         store = self.blob_store()
         content = b"artifact-bytes"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             info1 = await store.put_if_absent(
@@ -83,7 +86,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
             info2 = await store.put_if_absent(
                 digest=digest, source=_aiter(content), size=len(content)
             )
-            assert info1.digest == info2.digest == digest
+            assert info1.digest == info2.digest == digest.value
 
         self._contract_run(_run)
 
@@ -95,7 +98,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
             with __import__("pytest").raises(ArtifactIntegrityError):
                 await store.put_if_absent(
-                    digest="0" * 64,
+                    digest=_ZERO_DIGEST,
                     source=_aiter(b"not-the-claimed-digest"),
                     size=21,
                 )
@@ -116,7 +119,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         # Claim a digest that is NOT the partial bytes' hash, so a backend
         # that published the partial chunk and then computed the digest
         # itself would also fail (the published bytes wouldn't match).
-        claimed_digest = hashlib.sha256(b"complete-content").hexdigest()
+        claimed_digest = ArtifactDigest.from_bytes(b"complete-content")
 
         async def _run() -> None:
             from linktools.ai.artifact.models import ArtifactIntegrityError
@@ -142,7 +145,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
     def test_open_returns_the_pinned_bytes(self) -> None:
         store = self.blob_store()
         content = b"roundtrip"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             await store.put_if_absent(
@@ -168,7 +171,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
             from linktools.ai.artifact.models import ArtifactBlobNotFoundError
 
             with __import__("pytest").raises(ArtifactBlobNotFoundError):
-                async with store.open(digest="0" * 64) as stream:
+                async with store.open(digest=_ZERO_DIGEST) as stream:
                     async for _ in stream:
                         pass
 
@@ -181,7 +184,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         store = self.blob_store()
 
         async def _run() -> None:
-            assert (await store.stat(digest="0" * 64)) is None
+            assert (await store.stat(digest=_ZERO_DIGEST)) is None
 
         self._contract_run(_run)
 
@@ -191,7 +194,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         store = self.blob_store()
 
         async def _run() -> None:
-            await store.delete(digest="0" * 64)  # no error
+            await store.delete(digest=_ZERO_DIGEST)  # no error
 
         self._contract_run(_run)
 
@@ -207,7 +210,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
                 yield chunk
 
         content = b"AAABBC"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             await store.put_if_absent(digest=digest, source=_src(), size=len(content))
@@ -229,7 +232,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         buffered-size-cap decision in the facade."""
         store = self.blob_store()
         content = b"twelve-bytes"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             from linktools.ai.artifact.models import ArtifactIntegrityError
@@ -250,7 +253,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         blob (some backends), the second open would fail or block."""
         store = self.blob_store()
         content = b"cancel-me-payload"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             await store.put_if_absent(
@@ -287,7 +290,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         raise on the second writer."""
         store = self.blob_store()
         content = b"concurrent-same"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             results = await asyncio.gather(
@@ -296,7 +299,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
             )
             for info in results:
                 assert info is not None
-                assert info.digest == digest
+                assert info.digest == digest.value
             stat = await store.stat(digest=digest)
             assert stat is not None
 
@@ -309,7 +312,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         ``async with`` form callers depend on."""
         store = self.blob_store()
         content = b"ctx-mgr-shape"
-        digest = hashlib.sha256(content).hexdigest()
+        digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
             await store.put_if_absent(
@@ -388,7 +391,7 @@ class ArtifactRecordStoreContract(_ConformanceRecorderMixin):
         )
 
         return ArtifactRecord(
-            ref=ArtifactRef(id=artifact_id, sha256="0" * 64, media_type="", size=0),
+            ref=ArtifactRef(id=artifact_id, sha256=_ZERO_DIGEST.value, media_type="", size=0),
             tenant_id=tenant,
             provenance=ArtifactProvenance(
                 producer_kind=producer_kind,

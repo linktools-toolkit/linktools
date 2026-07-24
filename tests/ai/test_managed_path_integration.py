@@ -61,7 +61,7 @@ async def test_assembler_returns_explicit_managed_definitions(tmp_path):
         exposure_policy=CapabilityToolExposurePolicy(),
         sandbox=backend,
     )
-    bundle = await asm.assemble(spec, ctx)
+    bundle = await asm.resolve(spec, ctx)
     # Explicit per-tool definitions are populated by the Provider.
     assert len(bundle.tool_contributions) > 0
     # Each definition has an explicit descriptor and callable handler.
@@ -89,7 +89,7 @@ async def test_managed_adapter_from_assembler_output_deny(tmp_path):
         exposure_policy=CapabilityToolExposurePolicy(),
         sandbox=backend,
     )
-    bundle = await asm.assemble(spec, ctx)
+    bundle = await asm.resolve(spec, ctx)
 
     # Build adapters from the assembled contributions (per-tool form). The
     # resolver normalizes introspectable toolsets to ManagedToolDefinitions, so

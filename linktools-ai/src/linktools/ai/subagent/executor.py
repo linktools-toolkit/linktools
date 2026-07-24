@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from ..run.lifecycle import create_and_start_run
 from ..run.preparation import RunPreparationCoordinator
 from ..session.models import SessionRecord, SessionStatus
 from ..storage.facade import Storage
@@ -116,6 +117,17 @@ class SubagentExecutor:
                     spec=agent_spec, context=run_ctx
                 )
                 compiled = await self._compiler.compile(agent_spec)
+                # Create + start the child RunRecord here (WP9 step 5 --
+                # spec 12.8: "SubagentExecutor creates and executes the child
+                # Run" -- the same create_and_start_run RunCoordinator uses
+                # for a top-level Run) so the dispatcher's own get-or-create
+                # fallback (AgentEngine.execute(), for direct-engine callers
+                # that skip this ownership entirely) is never reached here.
+                await create_and_start_run(
+                    self._storage.runs,
+                    context=run_ctx,
+                    request=RunInput(prompt=task),
+                )
                 return await self._dispatcher.dispatch(
                     RunDispatchRequest(
                         agent=compiled, input=RunInput(prompt=task), context=run_ctx

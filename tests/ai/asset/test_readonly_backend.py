@@ -32,11 +32,16 @@ async def test_readonly_backend_delegates_reads_and_has_no_write_methods():
         "raw_put_checked",
         "raw_delete_checked",
         "raw_move_checked",
-        "put_idempotency",
     ):
         assert not hasattr(ro, write_method), (
             f"ReadOnlyAssetBackend must not expose {write_method}"
         )
+    # Idempotency is not part of the read surface -- the wrapper exposes no
+    # idempotency method either.
+    assert not hasattr(ro, "get_idempotency")
+    assert not hasattr(ro, "put_idempotency")
+    # The Reader backend_id is forwarded from the inner backend.
+    assert ro.backend_id == writable.backend_id
 
     # Reads delegate to the inner writable backend.
     lookup = await ro.raw_get(AssetPath("/a/b.txt"))

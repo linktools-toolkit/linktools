@@ -23,7 +23,7 @@ from linktools.ai.run.models import (
     RunnableType,
     RunStatus,
 )
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.identity.principal import PrincipalContext
 from linktools.ai.governance.security.authorization import ScopeAuthorization
 from linktools.ai.storage.facade import FilesystemStorage
@@ -80,7 +80,7 @@ def _principal(tenant_id: str = "t1", actor_id: str = "alice") -> PrincipalConte
 
 def test_cancel_without_principal_denied_by_default(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )  # default strict
@@ -94,7 +94,7 @@ def test_cancel_without_principal_denied_by_default(tmp_path):
 
 def test_cancel_without_principal_emits_deprecation(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -109,7 +109,7 @@ def test_cancel_without_principal_emits_deprecation(tmp_path):
 
 def test_cancel_without_principal_allowed_in_local_trusted_mode(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         local_trusted_mode=True,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -129,7 +129,7 @@ def test_cancel_without_principal_allowed_in_local_trusted_mode(tmp_path):
 
 def test_cancel_with_principal_proceeds_and_audits(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         authorization=ScopeAuthorization(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -150,7 +150,7 @@ def test_cancel_with_principal_proceeds_and_audits(tmp_path):
 
 def test_cancel_with_principal_emits_no_deprecation(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         authorization=ScopeAuthorization(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -165,7 +165,7 @@ def test_cancel_with_principal_emits_no_deprecation(tmp_path):
 
 def test_task_attempt_can_cancel_only_its_bound_run(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         authorization=ScopeAuthorization(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -184,7 +184,7 @@ def test_task_attempt_can_cancel_only_its_bound_run(tmp_path):
 
 def test_resume_without_principal_denied_by_default(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
@@ -206,7 +206,7 @@ def test_cancel_cross_tenant_denied(tmp_path):
     from linktools.ai.run.definition import RunDefinitionSnapshot
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         local_trusted_mode=True,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),

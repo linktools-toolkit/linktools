@@ -14,11 +14,9 @@ process while the event loop continues running other coroutines."""
 import asyncio
 import json
 import os
-import tempfile
 import threading
 import urllib.parse
 from datetime import datetime, timezone
-from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
@@ -37,17 +35,17 @@ from .models import (
     AssetPage,
     WriteOptions,
 )
-from .path import AssetPath, matches_asset_depth
+from .path import AssetPath, _require_persistable_path, matches_asset_depth
 from ..errors import (
     IdempotencyConflictError,
     InvalidAssetPathError,
     AssetPreconditionFailedError,
 )
-
-
-class SymlinkPolicy(str, Enum):
-    DENY = "deny"
-    ALLOW_INTERNAL = "allow_internal"
+from ._path_security import (
+    SymlinkPolicy,
+    open_temp_nofollow,
+    resolve_secure_path,
+)
 
 
 def _filename(path: AssetPath) -> str:
@@ -69,11 +67,13 @@ class FileAssetBackend:
     ) -> None:
         self._symlink_policy = symlink_policy
         self._root = Path(root)
+        # Stable id the AssetStore overrides with the canonical primary/overlay
+        # tag; defaults to the backend's origin so it is never blank.
+        self.backend_id = "filesystem"
         self._data_dir = self._root / "data"
         self._meta_dir = self._root / ".assets" / "metadata"
         self._whiteout_dir = self._root / ".assets" / "whiteouts"
         self._idempotency_dir = self._root / ".assets" / "idempotency"
-        self._revision_file = self._root / ".assets" / "revision"
         # In-process lock serializing the checked (precondition+idempotency+
         # mutate) operations. The filesystem itself is not transactional, so
         # this lock is the best atomicity FileAssetBackend can offer: it
@@ -86,6 +86,15 @@ class FileAssetBackend:
         # event loop is never blocked either by the I/O or by another worker
         # waiting on this lock.
         self._lock = threading.Lock()
+        # In-memory mirror of the on-disk revision counter: revision() is now
+        # called on every AssetStore.list() page (to mint/validate a cursor),
+        # and a disk read dispatched through asyncio.to_thread on every call
+        # is measurably slow at scale. Populated by the first read and kept
+        # current by every _bump_revision() this instance performs; a
+        # concurrent writer in a DIFFERENT process is the same documented
+        # limitation as the rest of this backend's checked operations
+        # (single-process atomicity only).
+        self._revision_cache: "int | None" = None
         for d in (
             self._data_dir,
             self._meta_dir,
@@ -94,52 +103,77 @@ class FileAssetBackend:
         ):
             d.mkdir(parents=True, exist_ok=True)
 
-    def _resolve(self, directory: Path, filename: str) -> Path:
-        resolved = (directory / filename).resolve()
-        if self._symlink_policy == SymlinkPolicy.DENY and resolved.is_symlink():
-            raise InvalidAssetPathError(f"symlink not allowed: {resolved}")
-        if (
-            directory.resolve() not in resolved.parents
-            and resolved != directory.resolve()
-        ):
-            raise InvalidAssetPathError(f"path escapes backend root: {resolved}")
-        return resolved
-
     def _atomic_write(self, path: Path, content: bytes) -> None:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        # Pre-write recheck: re-validate the parent chain right before the
+        # atomic replace -- the same policy check, replayed against the
+        # path's actual position under the trusted root -- so a symlink
+        # swapped in after the initial resolve (TOCTOU) is still caught.
+        resolve_secure_path(
+            self._root,
+            *path.relative_to(self._root).parts,
+            policy=self._symlink_policy,
+        )
+        fd, tmp_path = open_temp_nofollow(
+            path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(content)
-            os.replace(tmp_name, path)
+            os.replace(tmp_path, path)
         finally:
             # finally so cancellation propagates naturally while still removing
             # the temp file on any failure (no-op on success once replace ran).
-            if os.path.exists(tmp_name):
-                os.remove(tmp_name)
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def _revision_path(self) -> Path:
+        return resolve_secure_path(
+            self._root, ".assets", "revision", policy=self._symlink_policy
+        )
 
     def _read_revision(self) -> int:
-        if not self._revision_file.exists():
+        revision_path = self._revision_path()
+        if not revision_path.exists():
             return 0
-        return int(self._revision_file.read_text().strip() or "0")
+        return int(revision_path.read_text().strip() or "0")
 
     def _bump_revision(self) -> int:
         value = self._read_revision() + 1
-        self._atomic_write(self._revision_file, str(value).encode("utf-8"))
+        self._atomic_write(self._revision_path(), str(value).encode("utf-8"))
+        self._revision_cache = value
         return value
 
     def _meta_path(self, path: AssetPath) -> Path:
-        return self._resolve(self._meta_dir, _filename(path) + ".json")
+        return resolve_secure_path(
+            self._root,
+            ".assets",
+            "metadata",
+            _filename(path) + ".json",
+            policy=self._symlink_policy,
+        )
 
     def _data_path(self, path: AssetPath) -> Path:
-        return self._resolve(self._data_dir, _filename(path))
+        return resolve_secure_path(
+            self._root, "data", _filename(path), policy=self._symlink_policy
+        )
 
     def _whiteout_path(self, path: AssetPath) -> Path:
-        return self._resolve(self._whiteout_dir, _filename(path) + ".json")
+        return resolve_secure_path(
+            self._root,
+            ".assets",
+            "whiteouts",
+            _filename(path) + ".json",
+            policy=self._symlink_policy,
+        )
 
     def _idempotency_path(self, key: str) -> Path:
-        return self._resolve(self._idempotency_dir, key.replace("/", "__") + ".json")
+        return resolve_secure_path(
+            self._root,
+            ".assets",
+            "idempotency",
+            key.replace("/", "__") + ".json",
+            policy=self._symlink_policy,
+        )
 
     def _load_info(self, path: AssetPath) -> "AssetInfo | None":
         meta_path = self._meta_path(path)
@@ -183,6 +217,7 @@ class FileAssetBackend:
         return Missing()
 
     async def raw_get(self, path: AssetPath, *, include_content: bool = True):
+        _require_persistable_path(path)
         return await asyncio.to_thread(
             self._raw_get_sync, path, include_content=include_content
         )
@@ -300,8 +335,10 @@ class FileAssetBackend:
     async def raw_delete(self, path: AssetPath) -> "AssetInfo | None":
         return await asyncio.to_thread(self._raw_delete_sync, path)
 
-    async def revision(self) -> int:
-        return await asyncio.to_thread(self._read_revision)
+    async def revision(self) -> str:
+        if self._revision_cache is None:
+            self._revision_cache = await asyncio.to_thread(self._read_revision)
+        return str(self._revision_cache)
 
     def _read_idempotency_sync(self, key: str) -> "IdempotencyRecord | None":
         path = self._idempotency_path(key)
@@ -342,12 +379,6 @@ class FileAssetBackend:
         self._atomic_write(
             self._idempotency_path(record.key), json.dumps(raw).encode("utf-8")
         )
-
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
-        return await asyncio.to_thread(self._read_idempotency_sync, key)
-
-    async def put_idempotency(self, record: IdempotencyRecord) -> None:
-        await asyncio.to_thread(self._write_idempotency_sync, record)
 
     def _raw_put_checked_sync(
         self,
@@ -432,6 +463,7 @@ class FileAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> Asset:
+        _require_persistable_path(path)
         return await asyncio.to_thread(
             self._raw_put_checked_sync,
             path,
@@ -475,6 +507,7 @@ class FileAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> None:
+        _require_persistable_path(path)
         return await asyncio.to_thread(
             self._raw_delete_checked_sync,
             path,
@@ -613,6 +646,8 @@ class FileAssetBackend:
         options: WriteOptions,
         request_hash: str,
     ) -> MoveResult:
+        _require_persistable_path(source)
+        _require_persistable_path(target)
         return await asyncio.to_thread(
             self._raw_move_sync,
             source,

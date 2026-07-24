@@ -110,7 +110,7 @@ def test_model_policy_timeout_rejects_nan_inf_and_null():
 
 def test_model_policy_request_retries_null_rejected_missing_defaults():
     base = {"primary": "gpt"}
-    assert parse_model_policy(dict(base)).request_retries == 1
+    assert parse_model_policy(dict(base)).request_retries == 0
     with pytest.raises(InvalidSpecError, match="must not be null"):
         parse_model_policy({**base, "request_retries": None})
 

@@ -8,6 +8,7 @@ import asyncio
 from types import SimpleNamespace
 
 from linktools.ai.artifact import ArtifactStore
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.evaluation.executors import DirectEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
 from linktools.ai.storage.filesystem.artifact import (
@@ -20,6 +21,7 @@ def _artifacts(tmp_path) -> ArtifactStore:
     return ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+        InProcessArtifactDigestCoordinator(),
     )
 
 

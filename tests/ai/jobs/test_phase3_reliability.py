@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.artifact import ArtifactStore
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.models import Asset, AssetInfo, AssetKind
@@ -338,6 +339,7 @@ def test_snapshot_uses_single_resource_read(tmp_path) -> None:
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+            InProcessArtifactDigestCoordinator(),
         )
         snap = await snapshot_asset(
             counter, artifacts, "/data/file.txt", tenant_id="t1"
@@ -383,6 +385,7 @@ def test_snapshot_picks_consistent_revision_under_concurrent_change(
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+            InProcessArtifactDigestCoordinator(),
         )
         snap = await snapshot_asset(
             _MutatingResource(), artifacts, "/data/x", tenant_id="t1"

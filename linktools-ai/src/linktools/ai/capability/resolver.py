@@ -85,7 +85,7 @@ class CapabilityResolver:
         # registry's register/replace).
         return self._registry.providers
 
-    async def assemble(
+    async def resolve(
         self,
         spec: "AgentSpec",
         context: CapabilityContext,

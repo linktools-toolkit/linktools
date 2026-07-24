@@ -11,10 +11,10 @@ from linktools.ai.events.payloads import (
     SwarmRoundCompleted,
     SwarmRoundStarted,
     SwarmStarted,
-    SwarmTaskClaimed,
-    SwarmTaskCompleted,
-    SwarmTaskCreated,
-    SwarmTaskFailed,
+    SwarmStepClaimed,
+    SwarmStepCompleted,
+    SwarmStepCreated,
+    SwarmStepFailed,
 )
 
 
@@ -32,20 +32,20 @@ def test_swarm_payloads():
     assert SwarmRoundStarted(swarm_run_id="sr1", round=1).round == 1
     assert SwarmRoundCompleted(swarm_run_id="sr1", round=1).round == 1
     assert (
-        SwarmTaskCreated(
+        SwarmStepCreated(
             swarm_run_id="sr1", task_id="t1", description="do x"
         ).description
         == "do x"
     )
     assert (
-        SwarmTaskClaimed(
+        SwarmStepClaimed(
             swarm_run_id="sr1", task_id="t1", assigned_agent_id="agent-1"
         ).assigned_agent_id
         == "agent-1"
     )
-    assert SwarmTaskCompleted(swarm_run_id="sr1", task_id="t1").task_id == "t1"
+    assert SwarmStepCompleted(swarm_run_id="sr1", task_id="t1").task_id == "t1"
     assert (
-        SwarmTaskFailed(
+        SwarmStepFailed(
             swarm_run_id="sr1", task_id="t1", error_message="boom"
         ).error_message
         == "boom"

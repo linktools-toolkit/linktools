@@ -94,7 +94,6 @@ def _make_runner(
         run_store=recording,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         run_controller=controller,
         commit_coordinator=FilesystemRunCommitCoordinator(
@@ -214,16 +213,16 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     Contrast with test_runtime_cancel.py::test_cancel_running_run_transitions_to_cancelled
     which seeds a RUNNING run WITHOUT an in-flight task and expects a direct
     -> CANCELLED transition."""
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         local_trusted_mode=True,
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
     )
-    # Runtime.build always wires a RunController -- but the runner's actual
+    # build_runtime always wires a RunController -- but the runner's actual
     # driving Task is only registered once execute() starts. To exercise the
     # in-flight path we drive a real run and cancel it mid-flight.
 
@@ -247,7 +246,7 @@ async def test_runtime_cancel_with_in_flight_task_uses_cancelling(tmp_path):
     # Rebuild Runtime with the blocking pipeline so the in-flight cancel has
     # a deterministic landing point (the before_run await). The model router
     # must carry the test FunctionModel so spec compilation resolves.
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         middleware_pipeline=MiddlewarePipeline(middlewares=(_BlockingMiddleware(),)),
@@ -315,7 +314,6 @@ async def test_runner_without_controller_still_transitions_on_external_cancel(tm
         run_store=recording,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),

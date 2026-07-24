@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import (
 from ..coordination.process_local import ProcessLocalLeaseCoordinator
 from ..features import SQLALCHEMY_STORAGE_FEATURES
 from ..filesystem.artifact import FilesystemArtifactBlobStore
+from ..filesystem.artifact_coordination import FilesystemArtifactDigestCoordinator
 from ..sqlalchemy.facade import SqlAlchemyStorageAdapter
 
 
@@ -106,6 +107,11 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
             coordination=ProcessLocalLeaseCoordinator(),
             features=SQLALCHEMY_STORAGE_FEATURES,
+            # Blobs live on the shared filesystem, so the per-digest lock must
+            # span processes (a separate sweeper worker) -- flock the blobs root.
+            artifact_coordinator=FilesystemArtifactDigestCoordinator(
+                root=resolved_root / "blobs"
+            ),
         )
 
     async def dispose(self) -> None:

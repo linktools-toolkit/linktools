@@ -3,7 +3,7 @@
 """The single Runtime build kernel.
 
 ``build_runtime_components(RuntimeBuildConfig) -> RuntimeComponents`` is the one
-place the Runtime's sub-components are assembled. Runtime.build is a thin wrapper
+place the Runtime's sub-components are assembled. build_runtime is a thin wrapper
 that constructs the config, calls this, and unpacks the result; nothing else
 constructs the compiler/runner/resolver/executor graph."""
 
@@ -29,6 +29,7 @@ from .dependencies import RuntimeDependencies
 from .dispatcher import LateBoundRunDispatcher
 from ..run.commit import RunCommitCoordinator
 from ..run.controller import RunController
+from ..run.events_bus import RunEventBus
 from ..run.options import RuntimeCancellationOptions
 from ..run.requirements import (
     RuntimeRequirements,
@@ -40,7 +41,7 @@ from ..observability.metrics import InMemoryMetrics
 from ..skill.provider import SkillProvider
 from ..storage.facade import Storage
 from ..subagent.provider import SubagentProvider
-from ..swarm.runner import SwarmRunner
+from ..swarm.engine import SwarmEngine
 from ..tool.executor import GovernedToolInvoker
 
 if TYPE_CHECKING:
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
     from ..retrieval.retriever import Retriever
     from ..run.dispatch import RunDispatcher, RunDispatchRequest
     from ..run.models import RunResult
-    from ..swarm.runner import SwarmRunner as _SwarmRunner
+    from ..swarm.engine import SwarmEngine as _SwarmEngine
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -96,7 +97,7 @@ class RuntimeComponents:
     model_resolver: ModelResolver
     compiler: "_AgentCompiler"
     runner: "_AgentEngine"
-    swarm_runner: "_SwarmRunner"
+    swarm_engine: "_SwarmEngine"
     run_controller: RunController
     capability_resolver: "_CapabilityResolver | None"
     tool_executor: GovernedToolInvoker
@@ -111,7 +112,7 @@ class RuntimeComponents:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class RuntimeBuildConfig:
-    """The final set of inputs Runtime.build accepts. Capability
+    """The final set of inputs build_runtime accepts. Capability
     providers come exclusively via ``providers``."""
 
     storage: Storage
@@ -409,7 +410,6 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         run_store=config.storage.runs,
         session_store=config.storage.sessions,
         event_store=config.storage.events,
-        checkpoint_store=config.storage.checkpoints,
         middleware_pipeline=config.middleware_pipeline,
         memory_store=config.storage.memories,
         retriever=config.retriever,
@@ -425,10 +425,11 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             baseline, "audit_failure_mode", "fail_closed"
         ),
         commit_coordinator=config.commit_coordinator,
+        event_bus=RunEventBus(),
     )
     if dispatcher_handle is not None:
         dispatcher_handle.bind(runner)
-    swarm_runner = SwarmRunner(
+    swarm_engine = SwarmEngine(
         swarm_store=config.storage.swarms,
         run_store=config.storage.runs,
         session_store=config.storage.sessions,
@@ -453,7 +454,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         model_resolver=model_resolver,
         compiler=compiler,
         runner=runner,
-        swarm_runner=swarm_runner,
+        swarm_engine=swarm_engine,
         run_controller=run_controller,
         capability_resolver=resolver,
         tool_executor=resolved_executor,

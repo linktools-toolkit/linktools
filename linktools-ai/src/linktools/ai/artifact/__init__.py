@@ -7,6 +7,7 @@ backend -- asset store, filesystem, or external object store).
 Public types for downstream and for the task / evaluation domains.
 """
 
+from .digest import ArtifactDigest
 from .models import (
     ANONYMOUS_PROVENANCE,
     ArtifactBlobNotFoundError,
@@ -21,6 +22,7 @@ from .models import (
 from .store import ArtifactStore
 
 __all__: "list[str]" = [
+    "ArtifactDigest",
     "ArtifactRef",
     "ArtifactProvenance",
     "ArtifactRecord",

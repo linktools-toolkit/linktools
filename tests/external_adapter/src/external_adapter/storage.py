@@ -28,7 +28,7 @@ reference raises for the same condition. For run / approval / swarm / memory
 (RunConflictError / RunNotFoundError / InvalidRunTransitionError,
 ApprovalConflictError / ApprovalNotFoundError / InvalidApprovalTransitionError,
 LostIdempotencyClaimError, SwarmConflictError / SwarmRunNotFoundError /
-SwarmTaskNotFoundError / InvalidSwarmTransitionError, MemoryConflictError /
+SwarmStepNotFoundError / InvalidSwarmTransitionError, MemoryConflictError /
 MemoryNotFoundError, SessionError). For jobs the errors come from
 ``linktools.ai.jobs.store`` (TaskClaimLostError / JobNotFoundError /
 TaskNotFoundError / TaskBudgetExceededError / InvalidTaskCommandError /
@@ -53,6 +53,7 @@ from linktools.ai.agent.approval import (
     build_approval_request,
     check_dedupe_conflict,
 )
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.artifact.store import ArtifactStore
 from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.store import AssetStore
@@ -70,7 +71,7 @@ from linktools.ai.errors import (
     SessionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from linktools.ai.events.envelope import EventEnvelope
 from linktools.ai.events.payloads import EventPayload
@@ -149,9 +150,9 @@ from linktools.ai.swarm.models import (
     AttemptStatus,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -994,8 +995,8 @@ class InMemorySwarmStore:
 
     def __init__(self) -> None:
         self._runs: "dict[str, SwarmRun]" = {}
-        self._tasks: "dict[str, SwarmTask]" = {}
-        self._attempts: "dict[str, list[SwarmTaskAttempt]]" = {}
+        self._tasks: "dict[str, SwarmStep]" = {}
+        self._attempts: "dict[str, list[SwarmStepAttempt]]" = {}
         self._lock = asyncio.Lock()
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
@@ -1046,14 +1047,14 @@ class InMemorySwarmStore:
             self._runs[swarm_run_id] = updated
             return updated
 
-    async def create_task(self, task: SwarmTask) -> SwarmTask:
+    async def create_task(self, task: SwarmStep) -> SwarmStep:
         async with self._lock:
             self._tasks[task.id] = task
         return task
 
     async def claim_task(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None" = None
-    ) -> "SwarmTask | None":
+    ) -> "SwarmStep | None":
         async with self._lock:
             tasks = [
                 task
@@ -1063,10 +1064,10 @@ class InMemorySwarmStore:
             tasks.sort(key=lambda task: task.created_at)
             by_id = {task.id: task for task in tasks}
             for task in tasks:
-                if task.status is not SwarmTaskStatus.PENDING:
+                if task.status is not SwarmStepStatus.PENDING:
                     continue
                 deps_ok = all(
-                    dep in by_id and by_id[dep].status is SwarmTaskStatus.SUCCEEDED
+                    dep in by_id and by_id[dep].status is SwarmStepStatus.SUCCEEDED
                     for dep in task.dependencies
                 )
                 if not deps_ok:
@@ -1078,7 +1079,7 @@ class InMemorySwarmStore:
                 claimed = dataclasses.replace(
                     task,
                     assigned_agent_id=agent_id,
-                    status=SwarmTaskStatus.CLAIMED,
+                    status=SwarmStepStatus.CLAIMED,
                     version=task.version + 1,
                     claimed_at=now,
                     lease_expires_at=lease_expires,
@@ -1090,11 +1091,11 @@ class InMemorySwarmStore:
 
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             current = self._tasks.get(task_id)
             if current is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
             if current.version != expected_version:
                 raise SwarmConflictError(
                     f"expected version {expected_version}, found {current.version}"
@@ -1116,16 +1117,16 @@ class InMemorySwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             current = self._tasks.get(task_id)
             if current is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
             if current.version != expected_version:
                 raise SwarmConflictError(
                     f"expected version {expected_version}, found {current.version}"
                 )
-            if current.status is not SwarmTaskStatus.CLAIMED:
+            if current.status is not SwarmStepStatus.CLAIMED:
                 raise SwarmConflictError(f"task {task_id} is not CLAIMED")
             if (
                 active_run_id is not None
@@ -1138,7 +1139,7 @@ class InMemorySwarmStore:
             tz = current.created_at.tzinfo or timezone.utc
             updated = dataclasses.replace(
                 current,
-                status=SwarmTaskStatus.SUCCEEDED,
+                status=SwarmStepStatus.SUCCEEDED,
                 result=result,
                 error=None,
                 version=current.version + 1,
@@ -1154,16 +1155,16 @@ class InMemorySwarmStore:
         *,
         expected_version: int,
         active_run_id: "str | None" = None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             current = self._tasks.get(task_id)
             if current is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
             if current.version != expected_version:
                 raise SwarmConflictError(
                     f"expected version {expected_version}, found {current.version}"
                 )
-            if current.status is not SwarmTaskStatus.CLAIMED:
+            if current.status is not SwarmStepStatus.CLAIMED:
                 raise SwarmConflictError(f"task {task_id} is not CLAIMED")
             if (
                 active_run_id is not None
@@ -1176,7 +1177,7 @@ class InMemorySwarmStore:
             tz = current.created_at.tzinfo or timezone.utc
             updated = dataclasses.replace(
                 current,
-                status=SwarmTaskStatus.FAILED,
+                status=SwarmStepStatus.FAILED,
                 error=error,
                 attempts=current.attempts + 1,
                 version=current.version + 1,
@@ -1186,8 +1187,8 @@ class InMemorySwarmStore:
             return updated
 
     async def list_tasks(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
-    ) -> "tuple[SwarmTask, ...]":
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None" = None
+    ) -> "tuple[SwarmStep, ...]":
         out = [
             task
             for task in self._tasks.values()
@@ -1199,12 +1200,12 @@ class InMemorySwarmStore:
 
     async def reclaim_expired_tasks(
         self, swarm_run_id: str
-    ) -> "tuple[SwarmTask, ...]":
+    ) -> "tuple[SwarmStep, ...]":
         # Single-process: a CLAIMED task can never be observed with an expired
         # lease while another coroutine holds the claim critical section.
         return ()
 
-    async def record_attempt(self, attempt: SwarmTaskAttempt) -> SwarmTaskAttempt:
+    async def record_attempt(self, attempt: SwarmStepAttempt) -> SwarmStepAttempt:
         async with self._lock:
             bucket = self._attempts.setdefault(attempt.task_id, [])
             existing_idx = next(
@@ -1216,21 +1217,21 @@ class InMemorySwarmStore:
                 bucket[existing_idx] = attempt
         return attempt
 
-    async def list_attempts(self, task_id: str) -> "tuple[SwarmTaskAttempt, ...]":
+    async def list_attempts(self, task_id: str) -> "tuple[SwarmStepAttempt, ...]":
         return tuple(self._attempts.get(task_id, ()))
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         async with self._lock:
             current = self._tasks.get(task_id)
             if current is None:
-                raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
             if current.version != expected_version:
                 raise SwarmConflictError(
                     f"expected version {expected_version}, found {current.version}"
                 )
-            if current.status is not SwarmTaskStatus.CLAIMED:
+            if current.status is not SwarmStepStatus.CLAIMED:
                 raise InvalidSwarmTransitionError(
                     f"renew_lease requires CLAIMED, task {task_id} is {current.status.value}"
                 )
@@ -2571,7 +2572,11 @@ def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
     coordination = InMemoryLeaseCoordinator()
     blob_store = InMemoryArtifactBlobStore()
     record_store = InMemoryArtifactRecordStore()
-    artifacts = ArtifactStore(blob_store, record_store)
+    # This adapter is single-process (in-memory stores share no cross-process
+    # state), so the in-process digest coordinator is the honest declaration --
+    # matching FILE_STORAGE_FEATURES.artifact_coordination_scope=PROCESS_LOCAL
+    # below.
+    artifacts = ArtifactStore(blob_store, record_store, InProcessArtifactDigestCoordinator())
     assets = AssetStore(primary=MemoryAssetBackend())
     jobs = InMemoryJobStore()
     root_path = Path(root)

@@ -83,7 +83,6 @@ def _make_runner(tmp_path, pipeline=None):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
@@ -125,7 +124,7 @@ def test_run_succeeds_persists_session_run_events_and_checkpoint(tmp_path):
         run_record = await runner._run_store.get("run-1")
         messages = await runner._session_store.list_messages("session-1")
         events = await runner._event_store.list("run-1")
-        checkpoint = await runner._checkpoint_store.latest("run-1")
+        checkpoint = await runner._commit_coordinator._checkpoints.latest("run-1")
         return run_record, messages, events, checkpoint
 
     run_record, messages, events, checkpoint = asyncio.run(_verify())
@@ -361,7 +360,6 @@ def _make_runner_with_memory(tmp_path):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         memory_store=FilesystemMemoryStore(root=tmp_path / "memories"),
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
@@ -464,7 +462,6 @@ def test_retriever_injection_prepends_knowledge_section_to_prompt(tmp_path):
         run_store=FilesystemRunStore(root=tmp_path / "runs"),
         session_store=FilesystemSessionStore(root=tmp_path / "sessions"),
         event_store=FilesystemEventStore(root=tmp_path / "events"),
-        checkpoint_store=FilesystemCheckpointStore(root=tmp_path / "checkpoints"),
         retriever=_StubRetriever(),
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),

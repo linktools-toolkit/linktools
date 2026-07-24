@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[3]
-_SEARCH_ROOTS = (_REPO / "linktools-ai" / "src", _REPO / "tests" / "ai")
+_SEARCH_ROOTS = (
+    _REPO / "linktools-ai" / "src",
+    _REPO / "tests" / "ai",
+    _REPO / "examples",
+)
 
 FORBIDDEN_RUNTIME_TERMS = (
     "ResourceStore",
@@ -30,6 +34,9 @@ FORBIDDEN_RUNTIME_TERMS = (
     "ExecutionBackend",
     "KeywordMemoryIndex",
     "MemoryIndexStatus",
+    "MemoryManager",
+    "SwarmRunner",
+    "SwarmTask",
 )
 
 
@@ -75,6 +82,21 @@ def test_forbidden_term_absent_from_file_paths(term: str) -> None:
         if needle in str(path.relative_to(_REPO)).lower():
             hits.append(str(path.relative_to(_REPO)))
     assert not hits, f"forbidden term {term!r} found in file path: {hits}"
+
+
+def test_capability_resolver_assemble_method_absent() -> None:
+    # CapabilityResolver.assemble was renamed to .resolve() -- the old method
+    # name must not reappear as a call (".assemble(") anywhere in source.
+    rx = re.compile(r"\.assemble\(")
+    hits = []
+    for path in _py_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if rx.search(text):
+            hits.append(str(path.relative_to(_REPO)))
+    assert not hits, f"forbidden '.assemble(' call found: {hits}"
 
 
 def test_resource_term_absent_outside_migrations() -> None:

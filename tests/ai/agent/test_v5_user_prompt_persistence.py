@@ -69,7 +69,6 @@ def _build(tmp_path):
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
-            checkpoint_store=checkpoint_store,
             commit_coordinator=FilesystemRunCommitCoordinator(
                 approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
                 checkpoint_store=checkpoint_store,

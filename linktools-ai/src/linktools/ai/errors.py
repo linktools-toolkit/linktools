@@ -67,6 +67,37 @@ class InvalidAssetPathError(AssetError):
     pass
 
 
+class AssetRootMutationError(AssetError):
+    """The namespace root (``AssetPath("/")``) was targeted by an operation
+    that loads or mutates content (get/put/delete/move). The root is a
+    synthetic directory, not a persistable Asset -- only list/stat/revision
+    accept it."""
+
+
+class InvalidAssetCursorError(AssetError):
+    """A multi-backend Asset list page token failed to decode: malformed
+    structure, an unsupported version, a tampered/mismatched HMAC tag, or a
+    decoded size over the byte cap. Raised fail-closed rather than silently
+    falling back to a fresh listing."""
+
+
+class StaleAssetCursorError(AssetError):
+    """A decoded Asset list cursor no longer matches the live backend set --
+    a backend's revision changed, or the backend id/count differs from what
+    the cursor was minted against. The listing is not silently resumed
+    against a possibly-inconsistent backend state."""
+
+
+class AssetPathHashCollisionError(AssetError):
+    """Two DIFFERENT values (an AssetPath, or an idempotency key) hashed to
+    the same digest on one of the SqlAlchemy asset backend's hash-based
+    unique indexes (``AssetRow.path_hash`` / `AssetIdempotencyRow.key_hash`).
+    The full path/key is always the actual identity; the unique constraint is
+    on the hash only because the full value cannot safely be a MySQL index
+    key. Raised fail-closed rather than letting one value silently shadow the
+    other."""
+
+
 class SkillAssetAccessError(AssetError):
     """A skill-private asset path is forbidden: it is absolute, escapes the
     skill's ``agents/`` directory (including via symlink), is not Markdown, or
@@ -98,6 +129,14 @@ class ArtifactRecordCorruptError(ArtifactError):
     required fields, has a sha256 that is not a valid digest, or its id/tenant
     does not match the path it was filed under. Raised fail-closed so the orphan
     sweeper never mistakes a broken record for an unreferenced blob."""
+
+
+class InvalidArtifactDigestError(ArtifactError):
+    """A digest did not parse as exactly 64 lowercase hex characters. Raised at
+    the domain boundary before the digest becomes a coordinator key, a lock-file
+    path component, or a blob address, so traversal / overflow / collision input
+    can never reach those surfaces. The message intentionally does not echo the
+    rejected value."""
 
 
 class StorageError(LinktoolsAIError):
@@ -361,6 +400,15 @@ class ModelRoutingError(LinktoolsAIError):
     pass
 
 
+class ModelRetryConfigurationError(LinktoolsAIError):
+    """A prebuilt (already-constructed) Model was resolved under a policy that
+    asks the framework to configure provider retries (``request_retries`` is an
+    int). A prebuilt model owns its own HTTP client, so the framework cannot set
+    ``max_retries`` on it; the combination is rejected rather than silently
+    ignored. ``request_retries=None`` is the signal that a prebuilt model manages
+    its own retry behavior."""
+
+
 class ModelInvocationDeniedError(LinktoolsAIError):
     """The model call was denied by before_model policy (DENY or an unsupported
     action). Raised before the delegate model is invoked, so no prompt leaves."""
@@ -396,11 +444,11 @@ class SwarmResumeUnsupportedError(SwarmError):
     pass
 
 
-class SwarmTaskNotFoundError(SwarmError):
+class SwarmStepNotFoundError(SwarmError):
     pass
 
 
-class SwarmTaskConflictError(SwarmError):
+class SwarmStepConflictError(SwarmError):
     pass
 
 

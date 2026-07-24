@@ -127,8 +127,8 @@ class SqlAlchemyStorageAdapter(Storage):
         artifact_blobs: "ArtifactBlobStore",
         coordination: "LeaseCoordinator | None",
         features: StorageFeatures,
+        artifact_coordinator: "ArtifactDigestCoordinator",
         naming: "SqlNamingStrategy" = DEFAULT_SQL_NAMING,
-        artifact_coordinator: "ArtifactDigestCoordinator | None" = None,
     ) -> None:
         from ...artifact.store import ArtifactStore
 

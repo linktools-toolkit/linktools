@@ -77,7 +77,7 @@ async def test_revision_persists_across_reopen(tmp_path):
     backend = FileAssetBackend(root=tmp_path)
     await backend.raw_put(AssetPath("/a.txt"), b"x", content_type=None, metadata={})
     reopened = FileAssetBackend(root=tmp_path)
-    assert await reopened.revision() == 1
+    assert int(await reopened.revision()) == 1
 
 
 @pytest.mark.asyncio
@@ -99,14 +99,18 @@ async def test_list_depth_one(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_idempotency_record_persists_across_reopen(tmp_path):
+async def test_checked_put_idempotency_persists_across_reopen(tmp_path):
+    # Idempotency is encapsulated in the checked write and persists to disk: a
+    # reopened backend recognizes a replay of the same key + request hash.
+    from linktools.ai.asset.models import WriteOptions
+
     backend = FileAssetBackend(root=tmp_path)
-    await backend.put_idempotency(
-        IdempotencyRecord(key="k1", request_hash="h1", result=None)
-    )
+    path = AssetPath("/a.txt")
+    opts = WriteOptions(idempotency_key="k1")
+    first = await backend.raw_put_checked(path, b"one", options=opts, request_hash="h1")
     reopened = FileAssetBackend(root=tmp_path)
-    fetched = await reopened.get_idempotency("k1")
-    assert fetched.key == "k1" and fetched.request_hash == "h1"
+    second = await reopened.raw_put_checked(path, b"one", options=opts, request_hash="h1")
+    assert second.info.version == first.info.version
 
 
 @pytest.mark.asyncio

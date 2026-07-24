@@ -21,9 +21,12 @@ race."""
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import AsyncIterator, Protocol, runtime_checkable
 
 from ..errors import ArtifactError
+from ..storage.features import CoordinationScope
+from .digest import ArtifactDigest
 
 
 class UnsupportedArtifactCoordinationError(ArtifactError):
@@ -37,35 +40,84 @@ class UnsupportedArtifactCoordinationError(ArtifactError):
 class ArtifactDigestCoordinator(Protocol):
     """Per-digest mutual exclusion for the artifact put/sweep race.
 
-    ``hold(digest)`` is an async context manager; the lock is scoped to a single
-    SHA-256 digest -- the same digest serializes, different digests run in
-    parallel (no global serialization bottleneck)."""
+    ``hold(digest)`` takes the validated :class:`ArtifactDigest` value object --
+    a bare string is never accepted, so an unvalidated digest cannot become a
+    coordination key. The lock is scoped to a single SHA-256 digest: the same
+    digest serializes, different digests run in parallel (no global bottleneck).
+
+    ``scope`` declares the coordination range this coordinator actually
+    provides -- PROCESS_LOCAL (this process only) or DISTRIBUTED (spans workers/
+    processes). The Runtime multi-worker gate reads this to refuse a
+    process-local coordinator under a topology that shares ArtifactStore across
+    workers, exactly as it does for the Job Lease coordinator's own scope."""
+
+    scope: CoordinationScope
 
     @asynccontextmanager
-    async def hold(self, digest: str) -> AsyncIterator[None]:
+    async def hold(self, digest: ArtifactDigest) -> AsyncIterator[None]:
         ...
         yield
 
 
+@dataclass
+class _LockEntry:
+    """One in-process digest lock plus a reference count of every coroutine
+    currently relying on it -- the holder AND each waiter. The entry is reaped
+    when the count returns to zero and the lock is free, so the registry cannot
+    grow without bound over the lifetime of a long-running process."""
+
+    lock: asyncio.Lock
+    references: int = 0
+
+
 class InProcessArtifactDigestCoordinator:
-    """Process-local digest mutex: one ``asyncio.Lock`` per digest. Declares
-    PROCESS_LOCAL scope only -- it coordinates within a single process, so a
-    multi-worker deployment MUST inject a distributed coordinator instead. Used
-    by in-repo Memory/Filesystem/SqlAlchemy storage and by tests."""
+    """Process-local digest mutex: one ``asyncio.Lock`` per digest, refcounted.
+    Declares PROCESS_LOCAL scope only -- it coordinates within a single process,
+    so a multi-worker deployment MUST inject a distributed coordinator instead.
+    Used by in-repo Memory/Filesystem/SqlAlchemy storage and by tests.
+
+    The registry is bounded: every ``hold`` registers (references +1, counting
+    the holder and each waiter), and every exit path -- normal release, holder
+    cancellation, waiter cancellation -- decrements. An entry whose count
+    reaches zero and whose lock is free is deleted, so a process that churns
+    through many unique digests does not accumulate stale entries."""
+
+    scope = CoordinationScope.PROCESS_LOCAL
 
     def __init__(self) -> None:
-        self._locks: "dict[str, asyncio.Lock]" = {}
-        self._registry_guard = asyncio.Lock()
+        self._entries: "dict[str, _LockEntry]" = {}
+        self._registry_lock = asyncio.Lock()
+
+    @property
+    def active_entry_count(self) -> int:
+        """Read-only count of currently-registered digest entries (held or
+        awaited). Returns to zero when no coroutine is relying on any lock."""
+        return len(self._entries)
 
     @asynccontextmanager
-    async def hold(self, digest: str) -> AsyncIterator[None]:
-        async with self._registry_guard:
-            lock = self._locks.get(digest)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._locks[digest] = lock
-        async with lock:
-            yield
+    async def hold(self, digest: ArtifactDigest) -> AsyncIterator[None]:
+        key = digest.value
+        async with self._registry_lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _LockEntry(lock=asyncio.Lock())
+                self._entries[key] = entry
+            # references counts this coroutine (the about-to-be holder/waiter);
+            # every exit path below decrements it.
+            entry.references += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            # Reached on normal release AND on cancellation (holder or waiter):
+            # the per-digest lock is released by ``async with`` on the way out,
+            # and the registry reference this coroutine held is returned. When
+            # no coroutine references the entry and the lock is free, the entry
+            # is reaped so the registry stays bounded.
+            async with self._registry_lock:
+                entry.references -= 1
+                if entry.references <= 0 and not entry.lock.locked():
+                    self._entries.pop(key, None)
 
 
 __all__: "list[str]" = (

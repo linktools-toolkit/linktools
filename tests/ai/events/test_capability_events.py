@@ -83,7 +83,7 @@ async def test_capability_resolve_events_emitted():
         instructions=PromptSpec(instructions="hi"),
         tools=(ToolRef(name="*", kind="skill"),),
     )
-    await asm.assemble(spec, _ctx(store))
+    await asm.resolve(spec, _ctx(store))
     assert "CapabilityResolveStarted" in store.events
     assert "CapabilityResolveCompleted" in store.events
 

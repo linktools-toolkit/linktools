@@ -19,6 +19,7 @@ from typing import AsyncIterator, Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...artifact.digest import ArtifactDigest
 from ...artifact.models import ArtifactRecord
 from ...artifact.store import record_from_jsonable, record_to_jsonable
 from ...errors import ArtifactRecordConflictError
@@ -138,7 +139,7 @@ class SqlAlchemyArtifactRecordStore:
         for digest in digests:
             yield digest
 
-    async def is_digest_referenced(self, digest: str) -> bool:
+    async def is_digest_referenced(self, digest: ArtifactDigest) -> bool:
         """Whether any record pins ``digest`` (across tenants). A single-row
         existence probe -- the orphan sweeper calls this under the per-digest
         lock so its delete decision reflects the current reference set, not a
@@ -146,7 +147,7 @@ class SqlAlchemyArtifactRecordStore:
         async def _action(session: AsyncSession) -> bool:
             result = await session.execute(
                 select(ArtifactRecordRow.sha256)
-                .where(ArtifactRecordRow.sha256 == digest)
+                .where(ArtifactRecordRow.sha256 == digest.value)
                 .limit(1)
             )
             return result.first() is not None

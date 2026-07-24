@@ -20,7 +20,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.models import CapabilityBundle
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
@@ -52,7 +52,7 @@ def test_invariant_runtime_has_no_assemble():
 # --- Runtime exposes no public capability_resolver -----------------------------
 def test_invariant_runtime_has_no_public_capability_resolver(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -78,7 +78,7 @@ def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
     from linktools.ai.errors import RuntimeInitializationError
 
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -96,7 +96,7 @@ def test_invariant_runner_requires_assembler_for_declared_tools(tmp_path):
 
 def test_invariant_runner_empty_tools_does_not_require_assembler(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -162,7 +162,7 @@ def test_invariant_mcp_provider_returns_managed_tool_definitions():
 # --- Runtime.inspect returns no handler ----------------------------------------
 def test_invariant_inspect_returns_no_handler(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_router(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),

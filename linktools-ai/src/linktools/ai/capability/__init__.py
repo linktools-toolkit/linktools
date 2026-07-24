@@ -3,8 +3,8 @@
 """linktools.ai.capability: the capability domain's public model.
 The minimal surface: CapabilityRef / CapabilityRuntimeOptions /
 CapabilityInspection / CapabilityProvider / CapabilityProviderRegistry /
-CapabilityToolExposurePolicy. The bundle, context, resolver, and builtin
-provider live in their submodules (``capability.models``,
+CapabilityToolExposurePolicy / CapabilityResolver. The bundle, context, and
+builtin provider live in their submodules (``capability.models``,
 ``capability.provider``, ``capability.registry``, ``capability.resolver``,
 ``capability.builtin``)."""
 
@@ -12,6 +12,7 @@ from .exposure import CapabilityToolExposurePolicy
 from .models import CapabilityInspection, CapabilityRef, CapabilityRuntimeOptions
 from .provider import CapabilityProvider
 from .registry import CapabilityProviderRegistry
+from .resolver import CapabilityResolver
 
 __all__ = [
     "CapabilityRef",
@@ -19,5 +20,6 @@ __all__ = [
     "CapabilityInspection",
     "CapabilityProvider",
     "CapabilityProviderRegistry",
+    "CapabilityResolver",
     "CapabilityToolExposurePolicy",
 ]

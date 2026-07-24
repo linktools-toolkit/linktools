@@ -7,7 +7,7 @@ per-area test file -- cannot silently re-introduce the gap each fix closed:
 
 1. SQL idempotency: a concurrent first-time claim never leaks a raw
    IntegrityError.
-2. RunDefinitionStore is a required Storage capability; Runtime.build fails
+2. RunDefinitionStore is a required Storage capability; build_runtime fails
    fast without it.
 3. File commit events dedup by commit_id, so recovery does not duplicate and a
    second legitimate approval keeps its events.
@@ -117,9 +117,9 @@ async def test_v4_sql_concurrent_claim_never_leaks_integrity_error(
 
 def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_path):
     """run_definitions is a required Storage field (no default) and
-    Runtime.build raises RuntimeInitializationError when it is None."""
+    build_runtime raises RuntimeInitializationError when it is None."""
     from linktools.ai.errors import RuntimeInitializationError
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
     fields = {f.name: f for f in dataclasses.fields(FilesystemStorage)}
@@ -130,7 +130,7 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
     storage = FilesystemStorage(root=tmp_path)
     object.__setattr__(storage, "run_definitions", None)
     with pytest.raises(RuntimeInitializationError):
-        Runtime.build(
+        build_runtime(
             storage=storage,
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
         )
@@ -323,7 +323,7 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
     from linktools.ai.storage.filesystem.session import FilesystemSessionStore
     from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
     from linktools.ai.swarm.models import SwarmRun, SwarmStatus, TokenUsage
-    from linktools.ai.swarm.runner import SwarmRunner
+    from linktools.ai.swarm.engine import SwarmEngine
 
     now = datetime.now(timezone.utc)
 
@@ -340,7 +340,6 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
                 run_store=self.run_store,
                 session_store=self.session_store,
                 event_store=self.event_store,
-                checkpoint_store=self.checkpoint_store,
                 run_controller=self.run_controller,
                 commit_coordinator=FilesystemRunCommitCoordinator(
                     approval_store=FilesystemApprovalStore(root=root / "approvals"),
@@ -391,7 +390,7 @@ def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
         )
 
     asyncio.run(_seed())
-    runner = SwarmRunner(
+    runner = SwarmEngine(
         swarm_store=stores.swarm_store,
         run_store=stores.run_store,
         session_store=stores.session_store,

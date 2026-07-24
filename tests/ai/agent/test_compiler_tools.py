@@ -85,7 +85,6 @@ def _make_runner(tmp_path, *, sandbox=None) -> AgentEngine:
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         sandbox=sandbox,
         capability_resolver=CapabilityResolver({"builtin": BuiltinProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
@@ -265,7 +264,7 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
 
     # And the file content reached the message history -- the checkpoint
     # payload holds the serialized ``run.all_messages()`` with tool-returns.
-    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-1"))
+    checkpoint = asyncio.run(runner._commit_coordinator._checkpoints.latest("run-1"))
     assert checkpoint is not None, "expected a checkpoint after the run"
     assert "hello from workdir" in str(checkpoint.payload), (
         "file content should appear in the checkpointed message history"

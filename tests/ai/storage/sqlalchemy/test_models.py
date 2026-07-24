@@ -5,12 +5,14 @@
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
+from linktools.ai.storage.sqlalchemy.asset import _idempotency_key_hash, asset_path_hash
 from linktools.ai.storage.sqlalchemy.models import (
     Base,
     AssetRow,
     AssetIdempotencyRow,
     AssetRevisionRow,
 )
+from linktools.ai.asset.path import AssetPath
 
 
 @pytest.mark.asyncio
@@ -23,6 +25,7 @@ async def test_create_all_and_insert_resource_row(tmp_path):
         session.add(
             AssetRow(
                 path="/a.txt",
+                path_hash=asset_path_hash(AssetPath("/a.txt")),
                 kind="file",
                 etag="e1",
                 version=1,
@@ -58,7 +61,14 @@ async def test_idempotency_row_unique_key(tmp_path):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSession(engine) as session:
-        session.add(AssetIdempotencyRow(key="put:k1", request_hash="h1", result_json=None))
+        session.add(
+            AssetIdempotencyRow(
+                key="put:k1",
+                key_hash=_idempotency_key_hash("put:k1"),
+                request_hash="h1",
+                result_json=None,
+            )
+        )
         await session.commit()
     async with AsyncSession(engine) as session:
         from sqlalchemy import select

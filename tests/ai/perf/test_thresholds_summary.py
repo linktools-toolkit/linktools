@@ -170,7 +170,7 @@ def _measure_coordination_p95() -> "dict[str, Any]":
 
 
 def _measure_runtime_build_p95(tmp_path: Path) -> "dict[str, Any]":
-    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime import Runtime, build_runtime
     from linktools.ai.storage.facade import FilesystemStorage
     from linktools.ai.storage.filesystem.commit import (
         FilesystemRunCommitCoordinator,
@@ -178,7 +178,7 @@ def _measure_runtime_build_p95(tmp_path: Path) -> "dict[str, Any]":
 
     def _build() -> None:
         fresh = FilesystemStorage(root=tmp_path / "x")
-        Runtime.build(
+        build_runtime(
             storage=fresh,
             commit_coordinator=FilesystemRunCommitCoordinator.from_storage(fresh),
         )
@@ -214,6 +214,7 @@ def _measure_event_append_p95(tmp_path: Path) -> "dict[str, Any]":
 
 
 def _measure_artifact_integrity_10k() -> "dict[str, Any]":
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.artifact.store import ArtifactStore
 
     from external_adapter import (
@@ -223,7 +224,9 @@ def _measure_artifact_integrity_10k() -> "dict[str, Any]":
 
     async def _run() -> "dict[str, Any]":
         store = ArtifactStore(
-            InMemoryArtifactBlobStore(), InMemoryArtifactRecordStore()
+            InMemoryArtifactBlobStore(),
+            InMemoryArtifactRecordStore(),
+            InProcessArtifactDigestCoordinator(),
         )
         mismatches = 0
         for i in range(10000):
@@ -393,6 +396,7 @@ def _measure_streaming_rss_if_enabled(tmp_path: Path) -> "dict[str, Any]":
         _CHUNK_KIB,
         _read_vm_rss_kib,
     )
+    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.artifact.store import ArtifactStore
     from linktools.ai.storage.filesystem.artifact import (
         FilesystemArtifactBlobStore,
@@ -403,7 +407,7 @@ def _measure_streaming_rss_if_enabled(tmp_path: Path) -> "dict[str, Any]":
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records)
+    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
     pre_baseline = _read_vm_rss_kib()
     if pre_baseline is None:
         return {"skipped": True, "reason": "/proc unavailable", "passed": None}

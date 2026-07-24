@@ -17,7 +17,7 @@ from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.mcp.spec import MCPServerSpecProvider
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.mcp.codec import parse_mcp_spec
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.governance.security.emitter import (
     DefaultSecurityEventSanitizer,
@@ -122,7 +122,7 @@ async def test_runtime_inspect_reports_mcp_best_effort_degradation(tmp_path):
     provider = MCPProvider(_InfoSpecProvider(spec_mcp), _UnenumerableManager())
 
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(),
         providers=RuntimeDependencies(capabilities=(provider,)),

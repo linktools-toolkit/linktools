@@ -3,7 +3,7 @@
 """tests/ai/e2e/test_file_runtime_complete.py — File-backed Runtime end-to-end
 run-completion contract.
 
-Drives the real path: FilesystemStorage -> Runtime.build -> Runtime.run -> agent
+Drives the real path: FilesystemStorage -> build_runtime -> Runtime.run -> agent
 returns. Asserts the cross-store commit leaves exactly one of each artifact
 (no duplicate session messages, no duplicate checkpoint, no duplicate
 RunCompleted event, no RunFailed) -- the invariants that broke before the
@@ -18,7 +18,7 @@ from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunStatus
 from linktools.ai.session.models import MessageRole
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -38,7 +38,7 @@ def _registry():
 
 def test_file_runtime_complete_has_one_of_each_artifact(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=_registry(),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),

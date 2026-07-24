@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryScope: the tenant-bound access scope required by every
-``MemoryStore`` search (and by ``MemoryManager.recall`` / retrieval adapters).
+``MemoryStore`` search (and by ``MemoryService.recall`` / retrieval adapters).
 ``search`` is the tenant isolation boundary: there is no unscoped /
 cross-tenant query path, and a missing tenant fails closed (no results, never
 the whole table).

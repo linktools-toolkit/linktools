@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Residual-cleanup checks: the core package carries no old hook
 wrapper, no requirement-source comment markers, no default security policy in
-Runtime.build, and no unimplemented public Protocol methods. Also confirms
+build_runtime, and no unimplemented public Protocol methods. Also confirms
 ``import linktools.ai`` stays SQLAlchemy-free."""
 
 import re
@@ -58,7 +58,7 @@ def test_no_requirement_source_comment_markers():
 def test_runtime_build_has_no_default_command_rule():
     rt = (_AI_SRC / "runtime" / "facade.py").read_text(encoding="utf-8")
     assert "DEFAULT_DENIED_COMMAND_PATTERNS" not in rt, (
-        "Runtime.build must not inject a default command denylist"
+        "build_runtime must not inject a default command denylist"
     )
 
 

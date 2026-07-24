@@ -149,7 +149,6 @@ def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentE
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=tool_executor,
         commit_coordinator=FilesystemRunCommitCoordinator(
@@ -255,7 +254,7 @@ def test_run_stream_pause_saves_real_checkpoint_with_model_response(tmp_path):
     paused = next(e for e in events if e["type"] == "paused")
     approval_id = paused["approval_id"]
 
-    checkpoint = asyncio.run(runner._checkpoint_store.latest("run-p2"))
+    checkpoint = asyncio.run(runner._commit_coordinator._checkpoints.latest("run-p2"))
     assert checkpoint is not None, "no checkpoint saved for paused run"
     # Payload is non-empty real serialization (not the empty-bytes placeholder).
     assert checkpoint.payload != b""

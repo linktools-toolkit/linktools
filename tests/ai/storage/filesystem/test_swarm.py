@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/filesystem/test_swarm.py — FilesystemSwarmStore contract: JSON-on-disk
-persistence for SwarmRun/SwarmTask. Uses the `def test_x(): asyncio.run(_run())`
+persistence for SwarmRun/SwarmStep. Uses the `def test_x(): asyncio.run(_run())`
 style (sync test wrapper driving its own event loop) so no pytest-asyncio mode
 config is needed."""
 
@@ -15,7 +15,7 @@ from linktools.ai.errors import (
     InvalidSwarmTransitionError,
     SwarmConflictError,
     SwarmRunNotFoundError,
-    SwarmTaskNotFoundError,
+    SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
@@ -23,9 +23,9 @@ from linktools.ai.swarm.models import (
     AttemptStatus,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskAttempt,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepAttempt,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -62,14 +62,14 @@ def _task(
     task_id: str = "task-1",
     swarm_run_id: str = "swarm-1",
     parent_task_id: "str | None" = None,
-    status: SwarmTaskStatus = SwarmTaskStatus.PENDING,
+    status: SwarmStepStatus = SwarmStepStatus.PENDING,
     dependencies: "tuple[str, ...]" = (),
     assigned_agent_id: "str | None" = None,
     attempts: int = 0,
     version: int = 1,
-) -> SwarmTask:
+) -> SwarmStep:
     now = _now()
-    return SwarmTask(
+    return SwarmStep(
         id=task_id,
         swarm_run_id=swarm_run_id,
         parent_task_id=parent_task_id,
@@ -212,17 +212,17 @@ def test_list_tasks_status_filter(tmp_path):
         store = FilesystemSwarmStore(root=tmp_path)
         await store.create_run(_run())
         await store.create_task(
-            _task(task_id="t-pending", status=SwarmTaskStatus.PENDING)
+            _task(task_id="t-pending", status=SwarmStepStatus.PENDING)
         )
         await store.create_task(
             _task(
                 task_id="t-claimed",
-                status=SwarmTaskStatus.CLAIMED,
+                status=SwarmStepStatus.CLAIMED,
                 assigned_agent_id="agent-7",
             ),
         )
-        pending = await store.list_tasks("swarm-1", status=SwarmTaskStatus.PENDING)
-        claimed = await store.list_tasks("swarm-1", status=SwarmTaskStatus.CLAIMED)
+        pending = await store.list_tasks("swarm-1", status=SwarmStepStatus.PENDING)
+        claimed = await store.list_tasks("swarm-1", status=SwarmStepStatus.CLAIMED)
         assert {t.id for t in pending} == {"t-pending"}
         assert {t.id for t in claimed} == {"t-claimed"}
 
@@ -242,7 +242,7 @@ def test_claim_task_assigns_and_stamps(tmp_path):
         claimed = await store.claim_task("swarm-1", "agent-9")
         assert claimed is not None
         assert claimed.id == "t-1"
-        assert claimed.status == SwarmTaskStatus.CLAIMED
+        assert claimed.status == SwarmStepStatus.CLAIMED
         assert claimed.assigned_agent_id == "agent-9"
         assert claimed.claimed_at is not None
         assert claimed.version == 2
@@ -255,7 +255,7 @@ def test_claim_task_respects_dependencies(tmp_path):
         store = FilesystemSwarmStore(root=tmp_path)
         await store.create_run(_run())
         # t-dep not yet succeeded -> t-blocked must NOT be claimed.
-        await store.create_task(_task(task_id="t-dep", status=SwarmTaskStatus.PENDING))
+        await store.create_task(_task(task_id="t-dep", status=SwarmStepStatus.PENDING))
         await store.create_task(
             _task(task_id="t-blocked", dependencies=("t-dep",)),
         )
@@ -309,7 +309,7 @@ def test_complete_task_stores_result(tmp_path):
         completed = await store.complete_task(
             "t-1", result, expected_version=claimed.version
         )
-        assert completed.status == SwarmTaskStatus.SUCCEEDED
+        assert completed.status == SwarmStepStatus.SUCCEEDED
         assert completed.result.output == {"done": True}
         assert completed.result.metadata == {"m": "n"}
         assert completed.version == claimed.version + 1
@@ -325,7 +325,7 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
         claimed = await store.claim_task("swarm-1", "agent-a")
         err = RunErrorInfo(error_type="ValueError", message="boom", detail={"x": 1})
         failed = await store.fail_task("t-1", err, expected_version=claimed.version)
-        assert failed.status == SwarmTaskStatus.FAILED
+        assert failed.status == SwarmStepStatus.FAILED
         assert failed.error.error_type == "ValueError"
         assert failed.error.message == "boom"
         assert failed.attempts == 1
@@ -337,7 +337,7 @@ def test_fail_task_stores_error_and_increments_attempts(tmp_path):
 def test_complete_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FilesystemSwarmStore(root=tmp_path)
-        with pytest.raises(SwarmTaskNotFoundError):
+        with pytest.raises(SwarmStepNotFoundError):
             await store.complete_task(
                 "nope", RunResult(output=None), expected_version=1
             )
@@ -348,7 +348,7 @@ def test_complete_task_missing_raises_not_found(tmp_path):
 def test_fail_task_missing_raises_not_found(tmp_path):
     async def _run_case():
         store = FilesystemSwarmStore(root=tmp_path)
-        with pytest.raises(SwarmTaskNotFoundError):
+        with pytest.raises(SwarmStepNotFoundError):
             await store.fail_task(
                 "nope", RunErrorInfo(error_type="X", message="y"), expected_version=1
             )
@@ -444,7 +444,7 @@ def test_path_traversal_in_task_id_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. SwarmTaskAttempt: record -> list round-trip (design note contract)
+# 8. SwarmStepAttempt: record -> list round-trip (design note contract)
 # ---------------------------------------------------------------------------
 
 
@@ -458,8 +458,8 @@ def _attempt(
     started_at: "datetime | None" = None,
     finished_at: "datetime | None" = None,
     error: "RunErrorInfo | None" = None,
-) -> SwarmTaskAttempt:
-    return SwarmTaskAttempt(
+) -> SwarmStepAttempt:
+    return SwarmStepAttempt(
         id=attempt_id,
         task_id=task_id,
         run_id=run_id,

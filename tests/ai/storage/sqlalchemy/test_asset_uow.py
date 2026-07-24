@@ -131,9 +131,22 @@ def test_asset_idempotency_rolls_back_with_the_uow(tmp_path):
                 raise RuntimeError("fail after idempotent put")
 
     _run(_scenario())
-    # The idempotency record was rolled back with the UoW: a later replay with
-    # the same key is NOT a cached hit (the record is gone).
-    assert _run(storage.assets._primary.get_idempotency("put:k1")) is None
+    # The idempotency record was rolled back with the UoW: a later put with the
+    # SAME key but DIFFERENT content does NOT raise IdempotencyConflictError --
+    # had the record survived, the differing request hash would conflict. The
+    # record being gone (rolled back) is what makes the key free to reuse.
+    from linktools.ai.errors import IdempotencyConflictError
+
+    async def _replay():
+        async with storage.transaction() as tx:
+            await tx.assets.put(
+                path, b"different", options=WriteOptions(idempotency_key="k1")
+            )
+
+    try:
+        _run(_replay())
+    except IdempotencyConflictError:
+        pytest.fail("idempotency record survived the rolled-back UoW")
 
 
 def test_uow_write_is_invisible_outside_before_commit(tmp_path):
@@ -162,14 +175,14 @@ def test_move_in_one_session_bumps_revision_once(tmp_path):
         await storage.assets.put(src, b"payload", options=WriteOptions())
 
     _run(_seed())
-    before = _run(storage.assets._primary.revision())
+    before = int(_run(storage.assets._primary.revision()))
 
     async def _move():
         async with storage.transaction() as tx:
             await tx.assets.move(src, dst, options=WriteOptions())
 
     _run(_move())
-    after = _run(storage.assets._primary.revision())
+    after = int(_run(storage.assets._primary.revision()))
     # A single move is one state change -> exactly one revision bump.
     assert after - before == 1
 
@@ -186,7 +199,7 @@ def test_move_with_idempotency_key_replays_without_double_execution(tmp_path):
         await storage.assets.put(src, b"payload", options=WriteOptions())
 
     _run(_seed())
-    before = _run(storage.assets._primary.revision())
+    before = int(_run(storage.assets._primary.revision()))
 
     async def _move_pair():
         first = await storage.assets.move(
@@ -199,7 +212,7 @@ def test_move_with_idempotency_key_replays_without_double_execution(tmp_path):
         return first, second
 
     first, second = _run(_move_pair())
-    after = _run(storage.assets._primary.revision())
+    after = int(_run(storage.assets._primary.revision()))
     assert first.info.path == dst
     assert second.info.path == dst
     # One move executed (one revision bump) despite two calls.

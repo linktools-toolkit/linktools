@@ -11,10 +11,12 @@ Runtime -- no behavior change, only the container."""
 import asyncio
 from typing import TYPE_CHECKING, Any, Mapping
 
-from .lifecycle import prepare_run
+from .lifecycle import create_and_start_run, prepare_run
 from .models import RunInput
 from .preparation import RunPreparationCoordinator
 from ..errors import SwarmError
+from ..events.context import EventStreamContext, append_event
+from ..events.payloads import RunStarted
 from ..swarm.spec import SwarmSpec
 
 if TYPE_CHECKING:
@@ -79,11 +81,11 @@ class RunCoordinator:
         if isinstance(spec, SwarmSpec):
             if agents is None:
                 raise SwarmError("agents mapping is required to run a SwarmSpec")
-            # SwarmRunner owns the swarm snapshot creation (via the same
+            # SwarmEngine owns the swarm snapshot creation (via the same
             # RunPreparationCoordinator) so both Runtime- and test-driven swarm
             # runs persist a snapshot. No double-create: Runtime does not
             # pre-create for swarm.
-            return await self._components.swarm_runner.run(
+            return await self._components.swarm_engine.run(
                 spec, RunInput(prompt=prompt), prepared.context, agents=agents
             )
 
@@ -96,8 +98,32 @@ class RunCoordinator:
             context=prepared.context,
             model_bundle=compiled.model_bundle,
         )
+        run_input = RunInput(prompt=prompt)
+        # RunCoordinator creates + starts the RunRecord itself -- the single
+        # owner of this transition across every top-level entry point (mirrors
+        # what resume() already does for WAITING_APPROVAL -> RUNNING). The
+        # returned RUNNING version is handed to the runner so execute() skips
+        # its own get-or-create fallback (a real convergence-ownership step:
+        # the version read flows from the coordinator, the sole creator).
+        started = await create_and_start_run(
+            self._components.storage.runs, context=prepared.context, request=run_input
+        )
+        # Same relocation pattern for the RunStarted event: RunCoordinator
+        # emits it itself, then tells the runner not to duplicate it.
+        await append_event(
+            self._components.storage.events,
+            EventStreamContext.from_run_context(prepared.context),
+            RunStarted(
+                run_id=prepared.context.run_id,
+                runnable_id=prepared.context.runnable_id,
+            ),
+        )
         return await self._components.runner.run(
-            compiled, RunInput(prompt=prompt), prepared.context
+            compiled,
+            run_input,
+            prepared.context,
+            emit_run_started=False,
+            running_version=started.version,
         )
 
     async def _authorize_sensitive(
@@ -260,8 +286,23 @@ class RunCoordinator:
             context=prepared.context,
             model_bundle=compiled.model_bundle,
         )
+        run_input = RunInput(prompt=prompt)
+        # See run(): RunCoordinator owns create + PENDING -> RUNNING and the
+        # RunStarted event for every top-level entry point.
+        started = await create_and_start_run(
+            self._components.storage.runs, context=prepared.context, request=run_input
+        )
+        await append_event(
+            self._components.storage.events,
+            EventStreamContext.from_run_context(prepared.context),
+            RunStarted(
+                run_id=prepared.context.run_id,
+                runnable_id=prepared.context.runnable_id,
+            ),
+        )
         async for event in self._components.runner.run_stream(
-            compiled, RunInput(prompt=prompt), prepared.context
+            compiled, run_input, prepared.context, emit_run_started=False,
+            running_version=started.version,
         ):
             yield event
 

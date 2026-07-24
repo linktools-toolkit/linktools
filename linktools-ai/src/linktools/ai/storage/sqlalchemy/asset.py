@@ -4,11 +4,11 @@
 
 Concurrency model:
 
-- Revision counter bumps atomically via a single-statement SQLite UPSERT
-  (``INSERT ... ON CONFLICT DO UPDATE SET value = value + 1 RETURNING``):
-  seeds ``id=1`` on the first call, then server-side arithmetic guarantees
-  two concurrent writers always produce distinct revisions (one blocks on
-  the row lock, then re-evaluates against the new value). See
+- Revision counter bumps atomically via a portable UPDATE + SELECT loop
+  (no dialect-specific upsert, no RETURNING -- MySQL lacks RETURNING on
+  UPDATE): seeds ``id=1`` on the first call, then server-side arithmetic
+  guarantees two concurrent writers always produce distinct revisions (one
+  blocks on the row lock, then re-evaluates against the new value). See
   :meth:`_bump_revision`.
 - Asset updates use a conditional WHERE clause on ``version``:
   ``UPDATE ... WHERE path = :path AND version = :expected``. ``rowcount == 0``
@@ -17,6 +17,13 @@ Concurrency model:
 - ``If-Match`` enters the same UPDATE WHERE clause as ``AND etag = :if_match``,
   so the precondition is enforced by the DB rather than a Python
   pre-read that can race.
+- An idempotent no-op PUT (identical content already live) does not return on
+  the strength of the Python SELECT alone: a zero-effect ``UPDATE ... SET
+  version = version WHERE path = :path AND version = :expected AND etag =
+  :expected_etag`` (:meth:`_confirm_unchanged`) re-validates the row is STILL
+  exactly what was read before handing it back. ``rowcount == 0`` means a
+  concurrent writer changed the row after the read, so the caller retries
+  instead of returning an already-stale result.
 
 Each checked write (raw_put_checked / raw_delete_checked) runs precondition +
 idempotency + mutate in ONE transaction. The unique ``path`` constraint
@@ -24,6 +31,7 @@ backstops the INSERT race; the conditional UPDATE backstops the UPDATE race.
 Reads use their own short-lived session.
 """
 
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -50,8 +58,30 @@ from ...asset.models import (
     AssetPage,
     WriteOptions,
 )
-from ...asset.path import AssetPath, matches_asset_depth
-from ...errors import IdempotencyConflictError, AssetPreconditionFailedError
+from ...asset.path import AssetPath, _require_persistable_path, matches_asset_depth
+from ...errors import (
+    IdempotencyConflictError,
+    AssetPathHashCollisionError,
+    AssetPreconditionFailedError,
+)
+
+
+def _idempotency_key_hash(key: str) -> bytes:
+    """The AssetIdempotencyRow unique-index key, for the same MySQL
+    index-key-length reason as :func:`asset_path_hash`."""
+    return hashlib.sha256(key.encode("utf-8")).digest()
+
+
+def asset_path_hash(path: AssetPath) -> bytes:
+    """The AssetRow unique-index key: MySQL's index key-length limit is
+    exceeded by ``path``'s VARCHAR(1024) under a multi-byte charset, so the
+    full path cannot itself be the unique-constraint column on that dialect.
+    A collision (same hash, different path) is a real possibility over a
+    32-byte digest at scale; every insert/conflict path in this module
+    re-verifies the full ``path`` against the row it collided with and
+    raises :class:`AssetPathHashCollisionError` rather than silently
+    treating two different paths as the same row."""
+    return hashlib.sha256(path.value.encode("utf-8")).digest()
 
 
 def _row_to_info(row: AssetRow) -> AssetInfo:
@@ -127,6 +157,9 @@ class SqlAlchemyAssetBackend:
         # begin/commit/rollback -- the UoW owns the atomic scope. Unbound, each
         # call opens a short session and commits/rolls back itself.
         self._session = session
+        # Stable id the AssetStore overrides with the canonical primary/overlay
+        # tag; defaults to the backend's origin so it is never blank.
+        self.backend_id = "sqlalchemy"
         # The dialect strategy classifies integrity violations so the insert
         # path can react to a known unique-key conflict portably. Resolved here
         # when the caller (e.g. a test) does not inject one; the adapter passes
@@ -160,7 +193,28 @@ class SqlAlchemyAssetBackend:
         )
         return result.scalar_one_or_none()
 
+    async def _check_hash_collision(
+        self, session: AsyncSession, path: AssetPath
+    ) -> None:
+        """Called after an INSERT conflict on the ``path_hash`` unique index
+        when no row exists at the exact ``path`` we tried to write (the
+        normal "this path already has a row" case is handled by the caller's
+        retry against ``_get_row``, which matches on the full path). If a
+        DIFFERENT path collides on the same hash, raise rather than let the
+        retry loop spin until it exhausts its attempt budget with no
+        actionable error."""
+        colliding = await session.execute(
+            select(AssetRow.path).where(AssetRow.path_hash == asset_path_hash(path))
+        )
+        row = colliding.scalar_one_or_none()
+        if row is not None and row != path.value:
+            raise AssetPathHashCollisionError(
+                f"path {path.value!r} hashes to the same path_hash as "
+                f"existing path {row!r}"
+            )
+
     async def raw_get(self, path: AssetPath, *, include_content: bool = True):
+        _require_persistable_path(path)
         async with self._read_session() as session:
             row = await self._get_row(session, path)
             if row is None:
@@ -310,6 +364,38 @@ class SqlAlchemyAssetBackend:
     # PUT: conditional UPDATE on version + If-Match in WHERE
     # ------------------------------------------------------------------
 
+    async def _confirm_unchanged(
+        self,
+        session: AsyncSession,
+        path: AssetPath,
+        *,
+        expected_version: int,
+        expected_etag: str,
+    ) -> bool:
+        """No-op version fence: ``UPDATE ... SET version = version WHERE path
+        = :path AND version = :expected AND etag = :expected_etag``. An
+        idempotent PUT whose content already matches the live row must NOT
+        return early on the strength of a Python-side SELECT alone -- that
+        SELECT could be arbitrarily stale by the time the caller observes the
+        result. This zero-effect UPDATE re-validates the row is STILL exactly
+        what was read, atomically, at the moment of return: rowcount == 1
+        means the DB confirms the read was current; rowcount == 0 means a
+        concurrent writer changed the row between the read and this fence, so
+        the caller must retry rather than hand back a result that was already
+        stale when it was produced."""
+        stmt = (
+            update(AssetRow)
+            .where(
+                AssetRow.path == path.value,
+                AssetRow.version == expected_version,
+                AssetRow.etag == expected_etag,
+            )
+            .values(version=AssetRow.version)
+            .execution_options(synchronize_session=False)
+        )
+        result = await session.execute(stmt)
+        return result.rowcount == 1
+
     async def _conditional_update_row(
         self,
         session: AsyncSession,
@@ -429,6 +515,7 @@ class SqlAlchemyAssetBackend:
                 AssetRow,
                 {
                     "path": path.value,
+                    "path_hash": asset_path_hash(path),
                     "kind": "file",
                     "etag": sha256(content).hexdigest(),
                     "version": 1,
@@ -440,9 +527,10 @@ class SqlAlchemyAssetBackend:
                     "deleted_at": None,
                     "whiteout_version": None,
                 },
-                index_elements=["path"],
+                index_elements=["path_hash"],
             )
             if conflict:
+                await self._check_hash_collision(session, path)
                 if if_none_match:
                     raise AssetPreconditionFailedError(
                         f"asset already exists: {path}"
@@ -468,10 +556,10 @@ class SqlAlchemyAssetBackend:
                 )
             # no-op short-circuit: identical content + content_type +
             # metadata + live state is an idempotent no-op PUT, which must NOT
-            # bump version/revision. Python comparison is a tiny race window
-            # (another writer between our SELECT and return); the consequence is
-            # returning slightly stale info for a same-content PUT, which is
-            # benign (a same-content PUT changes nothing observable).
+            # bump version/revision. The Python comparison above is only a
+            # candidate check -- the row may have changed since our SELECT, so
+            # the DB-level no-op version fence below is what actually confirms
+            # the read is still current before returning it as truth.
             if (
                 row.deleted_at is None
                 and row.content == content
@@ -486,6 +574,14 @@ class SqlAlchemyAssetBackend:
                     raise AssetPreconditionFailedError(
                         f"if-match precondition failed: {path}"
                     )
+                confirmed = await self._confirm_unchanged(
+                    session,
+                    path,
+                    expected_version=row.version,
+                    expected_etag=row.etag,
+                )
+                if not confirmed:
+                    return None  # retry-able: the row changed after our SELECT
                 return _row_to_info(row)
             # conditional UPDATE on version. new_version is computed in
             # Python from the SELECTed row, but the conditional WHERE makes the
@@ -593,6 +689,7 @@ class SqlAlchemyAssetBackend:
         helper and retried (or, under If-None-Match, raised as a precondition
         failure). Non-unique IntegrityErrors are never blanket-converted -- they
         propagate unchanged."""
+        _require_persistable_path(path)
         idem_key = f"put:{options.idempotency_key}" if options.idempotency_key else None
         async with self._write_session() as session:
             if idem_key is not None:
@@ -672,11 +769,12 @@ class SqlAlchemyAssetBackend:
         already has a row at this path (the caller re-reads and re-runs its
         conditional mask); False if the tombstone was inserted. A non-unique
         IntegrityError propagates unchanged."""
-        return await self._strategy.execute_conflict_insert(
+        conflict = await self._strategy.execute_conflict_insert(
             session,
             AssetRow,
             {
                 "path": path.value,
+                "path_hash": asset_path_hash(path),
                 "kind": "file",
                 "etag": "",
                 "version": 0,
@@ -688,8 +786,11 @@ class SqlAlchemyAssetBackend:
                 "deleted_at": datetime.now(timezone.utc),
                 "whiteout_version": 1,
             },
-            index_elements=["path"],
+            index_elements=["path_hash"],
         )
+        if conflict:
+            await self._check_hash_collision(session, path)
+        return conflict
 
     async def _apply_delete_unconditional(
         self, session: AsyncSession, path: AssetPath
@@ -756,6 +857,7 @@ class SqlAlchemyAssetBackend:
         is pushed into the UPDATE WHERE (consistent with raw_put_checked):
         two concurrent deletes holding the same stale If-Match cannot
         both succeed."""
+        _require_persistable_path(path)
         idem_key = (
             f"delete:{options.idempotency_key}" if options.idempotency_key else None
         )
@@ -844,6 +946,8 @@ class SqlAlchemyAssetBackend:
         options.if_match / options.if_none_match are enforced against the
         target row via _put_with_retry (same code path as raw_put_checked, so
         If-Match enters the conditional UPDATE WHERE)."""
+        _require_persistable_path(source)
+        _require_persistable_path(target)
         idem_key = f"move:{options.idempotency_key}" if options.idempotency_key else None
         async with self._write_session() as session:
             if idem_key is not None:
@@ -947,81 +1051,35 @@ class SqlAlchemyAssetBackend:
         # an idempotent replay (the winner's record stands), a different one is a
         # key-reuse conflict. Any non-unique IntegrityError propagates unchanged
         # (the strategy re-raises OTHER) rather than being swallowed.
+        key_hash = _idempotency_key_hash(key)
         conflict = await self._strategy.execute_conflict_insert(
             session,
             AssetIdempotencyRow,
-            {"key": key, "request_hash": request_hash, "result_json": result_json},
-            index_elements=["key"],
+            {
+                "key": key,
+                "key_hash": key_hash,
+                "request_hash": request_hash,
+                "result_json": result_json,
+            },
+            index_elements=["key_hash"],
         )
         if not conflict:
             return
         existing = await session.execute(
-            select(AssetIdempotencyRow).where(AssetIdempotencyRow.key == key)
+            select(AssetIdempotencyRow).where(AssetIdempotencyRow.key_hash == key_hash)
         )
         row = existing.scalar_one_or_none()
+        if row is not None and row.key != key:
+            raise AssetPathHashCollisionError(
+                f"idempotency key {key!r} hashes to the same key_hash as "
+                f"existing key {row.key!r}"
+            )
         if row is not None and row.request_hash != request_hash:
             raise IdempotencyConflictError(
                 f"idempotency key {key!r} reused with a different request"
             )
 
-    async def revision(self) -> int:
+    async def revision(self) -> str:
         async with self._read_session() as session:
             row = await session.get(AssetRevisionRow, 1)
-            return row.value if row is not None else 0
-
-    async def get_idempotency(self, key: str) -> "IdempotencyRecord | None":
-        async with self._read_session() as session:
-            result = await session.execute(
-                select(AssetIdempotencyRow).where(AssetIdempotencyRow.key == key)
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                return None
-            result_info = None
-            if row.result_json is not None:
-                raw = json.loads(row.result_json)
-                result_info = AssetInfo(
-                    path=AssetPath(raw["path"]),
-                    kind=AssetKind(raw["kind"]),
-                    etag=raw["etag"],
-                    version=raw["version"],
-                    content_type=raw["content_type"],
-                    size=raw["size"],
-                    modified_at=datetime.fromisoformat(raw["modified_at"]),
-                    metadata=raw["metadata"],
-                )
-            return IdempotencyRecord(
-                key=row.key, request_hash=row.request_hash, result=result_info
-            )
-
-    async def put_idempotency(self, record: IdempotencyRecord) -> None:
-        result_json = None
-        if record.result is not None:
-            result_json = json.dumps(
-                {
-                    "path": record.result.path.value,
-                    "kind": record.result.kind.value,
-                    "etag": record.result.etag,
-                    "version": record.result.version,
-                    "content_type": record.result.content_type,
-                    "size": record.result.size,
-                    "modified_at": record.result.modified_at.isoformat(),
-                    "metadata": dict(record.result.metadata),
-                }
-            )
-        async with self._write_session() as session:
-            result = await session.execute(
-                select(AssetIdempotencyRow).where(AssetIdempotencyRow.key == record.key)
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                session.add(
-                    AssetIdempotencyRow(
-                        key=record.key,
-                        request_hash=record.request_hash,
-                        result_json=result_json,
-                    )
-                )
-            else:
-                row.request_hash = record.request_hash
-                row.result_json = result_json
+            return str(row.value if row is not None else 0)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Swarm domain models: SwarmRun/SwarmTask state, AgentRef, TaskInput, TokenUsage,
-and the SwarmStatus/SwarmTaskStatus enums + transition table. Mirrors the
+"""Swarm domain models: SwarmRun/SwarmStep state, AgentRef, TaskInput, TokenUsage,
+and the SwarmStatus/SwarmStepStatus enums + transition table. Mirrors the
 frozen-dataclass + str-Enum conventions of run/models.py and session/models.py."""
 
 from decimal import Decimal
@@ -20,9 +20,9 @@ class SwarmStatus(str, Enum):
     RECOVERABLE = "recoverable"
     # CANCELLING distinguishes "cancel requested" from "actually cancelled"
     # (mirrors RunStatus.CANCELLING):
-    # SwarmRunner.cancel() flips to CANCELLING while an in-flight swarm
+    # SwarmEngine.cancel() flips to CANCELLING while an in-flight swarm
     # coroutine is still unwinding; the CancelledError handler in
-    # SwarmRunner.run() transitions CANCELLING -> CANCELLED once actually
+    # SwarmEngine.run() transitions CANCELLING -> CANCELLED once actually
     # stopped.
     CANCELLING = "cancelling"
     SUCCEEDED = "succeeded"
@@ -30,7 +30,7 @@ class SwarmStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class SwarmTaskStatus(str, Enum):
+class SwarmStepStatus(str, Enum):
     PENDING = "pending"
     CLAIMED = "claimed"
     SUCCEEDED = "succeeded"
@@ -39,9 +39,9 @@ class SwarmTaskStatus(str, Enum):
 
 
 class AttemptStatus(str, Enum):
-    """Lifecycle of a single task execution attempt (SwarmTaskAttempt.status).
+    """Lifecycle of a single task execution attempt (SwarmStepAttempt.status).
 
-    Each (re)try of a SwarmTask records one SwarmTaskAttempt so
+    Each (re)try of a SwarmStep records one SwarmStepAttempt so
     retries, agent migrations, and failure recovery are fully auditable. A task
     that succeeds on the second try leaves attempt #1 = FAILED and #2 = SUCCEEDED.
     """
@@ -155,13 +155,13 @@ class SwarmCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTask:
+class SwarmStep:
     id: str
     swarm_run_id: str
     parent_task_id: "str | None"
     assigned_agent_id: "str | None"
     description: str
-    status: SwarmTaskStatus
+    status: SwarmStepStatus
     dependencies: "tuple[str, ...]"
     input: TaskInput
     result: "RunResult | None"
@@ -180,10 +180,10 @@ class SwarmTask:
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTaskAttempt:
-    """One execution attempt of a SwarmTask.
+class SwarmStepAttempt:
+    """One execution attempt of a SwarmStep.
 
-    A single SwarmTask may produce several SwarmTaskAttempts over its life:
+    A single SwarmStep may produce several SwarmStepAttempts over its life:
     retries inside one ``_run_task`` call each record their own attempt, as does
     a re-invocation of ``_run_task`` after a prior FAILED. The ``run_id`` is the
     child RunRecord id for that execution (NOT the task id), and the

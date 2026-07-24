@@ -9,6 +9,7 @@ import hashlib
 import pytest
 
 from linktools.ai.artifact import ArtifactStore
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.asset.memory import MemoryAssetBackend
 from linktools.ai.asset.models import WriteOptions
 from linktools.ai.asset.path import AssetPath
@@ -25,6 +26,7 @@ def _stores(tmp_path) -> "tuple[AssetStore, ArtifactStore]":
     artifacts = ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
+        InProcessArtifactDigestCoordinator(),
     )
     return assets, artifacts
 

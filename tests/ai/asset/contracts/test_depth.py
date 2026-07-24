@@ -66,10 +66,11 @@ def test_root_asset_path_constructs():
 async def test_one_at_root_lists_only_top_level_paths(make_store):
     store = make_store()
     page = await store.list(AssetPath("/"), depth=Depth.ONE, limit=100, cursor=None)
-    # Root's direct children are the top-level paths only (/a, /b.txt); the
-    # deeper descendants (/a/dir, /a/file.txt, /a/dir/deep.txt) are NOT direct
+    # ONE at root = root itself (synthesized by the Store; no backend stores a
+    # root record) plus the top-level paths (/a, /b.txt); the deeper
+    # descendants (/a/dir, /a/file.txt, /a/dir/deep.txt) are NOT direct
     # children of root and must not appear.
-    assert _paths(page) == ["/a", "/b.txt"]
+    assert _paths(page) == ["/", "/a", "/b.txt"]
 
 
 def test_matches_asset_depth_branches():

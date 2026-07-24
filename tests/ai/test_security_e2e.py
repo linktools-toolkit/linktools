@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """End-to-end smoke tests for the managed security governance path. Verifies
-the full chain: Runtime.build(security=...) -> AgentEngine.execute ->
+the full chain: build_runtime(security=...) -> AgentEngine.execute ->
 ManagedToolAdapter -> pipeline before/after_tool -> handler -> result."""
 
 import pytest
@@ -11,7 +11,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.errors import RunPaused
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.governance.security.baseline import SecurityBaseline
 from linktools.ai.governance.security.pipeline import (
     PipelineAction,
@@ -83,7 +83,7 @@ async def test_runtime_with_default_baseline_runs(tmp_path):
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
@@ -98,7 +98,7 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
     from linktools.ai.model.resolver import ModelResolver
 
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=_registry()),
         security=SecurityBaseline(enabled=False),
@@ -112,7 +112,7 @@ async def test_runtime_baseline_disabled_runs(tmp_path):
 async def test_default_baseline_denies_dangerous_command_without_pause_on_approval(
     tmp_path,
 ):
-    """Regression for the contract fix: Runtime.build's default SecurityBaseline
+    """Regression for the contract fix: build_runtime's default SecurityBaseline
     (enabled=True) must reach the compiler's GovernedToolInvoker even when
     pause_on_approval=False (the default) -- previously AgentCompiler silently
     built its OWN default denylist in that case, independent of ``security=``.
@@ -138,7 +138,7 @@ async def test_default_baseline_denies_dangerous_command_without_pause_on_approv
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=tmp_path),
@@ -165,7 +165,7 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
     tmp_path,
 ):
     """The exact bug contract closes: SecurityBaseline(enabled=False) passed to
-    Runtime.build (pause_on_approval at its False default) must genuinely
+    build_runtime (pause_on_approval at its False default) must genuinely
     produce zero command rules -- not have AgentCompiler reinstate its own
     default denylist underneath. Verified end-to-end: a real model bash("echo
     ok") call actually executes (the baseline does not deny it)."""
@@ -189,7 +189,7 @@ async def test_disabled_baseline_actually_disables_denylist_without_pause_on_app
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=tmp_path),
@@ -251,7 +251,7 @@ async def test_pipeline_attached_to_runtime(tmp_path):
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=tmp_path),
@@ -335,7 +335,7 @@ async def test_managed_tool_approval_pauses_and_resumes_end_to_end(tmp_path):
         "m", model=FunctionModel(_tool_calling_model_fn("read_file", {"path": "x"}))
     )
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=tmp_path),
@@ -442,7 +442,7 @@ async def test_pipeline_modify_arguments_e2e(tmp_path):
     registry = ModelRegistry()
     registry.register("m", model=FunctionModel(model_fn))
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=LocalSandbox(runtime_dir=tmp_path),
@@ -483,7 +483,7 @@ async def test_exposure_policy_default_hides_write_and_terminal_tools(tmp_path):
     )
     backend = LocalSandbox(runtime_dir=tmp_path)
     storage = FilesystemStorage(root=tmp_path)
-    rt = Runtime.build(
+    rt = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         sandbox=backend,

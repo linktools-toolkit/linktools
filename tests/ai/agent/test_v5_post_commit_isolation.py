@@ -131,7 +131,6 @@ def _build(tmp_path, *, pipeline=None, metrics=None):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         metrics=metrics,
         commit_coordinator=coordinator,

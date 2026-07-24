@@ -16,7 +16,7 @@ from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.models import RunStatus
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
@@ -37,7 +37,7 @@ def _build_runtime(tmp_path):
     registry = ModelRegistry()
     registry.register("test-model", model=FunctionModel(fn, stream_function=stream_fn))
     storage = FilesystemStorage(root=tmp_path)
-    runtime = Runtime.build(
+    runtime = build_runtime(
         storage=storage,
         model_resolver=ModelResolver(registry=registry),
         commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),

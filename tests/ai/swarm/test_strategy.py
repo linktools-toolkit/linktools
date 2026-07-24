@@ -40,8 +40,8 @@ from linktools.ai.swarm.models import (
     AgentRef,
     SwarmRun,
     SwarmStatus,
-    SwarmTask,
-    SwarmTaskStatus,
+    SwarmStep,
+    SwarmStepStatus,
     TaskInput,
     TokenUsage,
 )
@@ -67,8 +67,8 @@ _NOW = datetime.now(timezone.utc)
 class _MemorySwarmStore(SwarmStore):
     def __init__(self) -> None:
         self._runs: "dict[str, SwarmRun]" = {}
-        self._tasks: "dict[str, SwarmTask]" = {}
-        self._attempts: "dict[str, list]" = {}  # task_id -> [SwarmTaskAttempt, ...]
+        self._tasks: "dict[str, SwarmStep]" = {}
+        self._attempts: "dict[str, list]" = {}  # task_id -> [SwarmStepAttempt, ...]
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
         self._runs[run.id] = run
@@ -102,20 +102,20 @@ class _MemorySwarmStore(SwarmStore):
         self._runs[swarm_run_id] = updated
         return updated
 
-    async def create_task(self, task: SwarmTask) -> SwarmTask:
+    async def create_task(self, task: SwarmStep) -> SwarmStep:
         self._tasks[task.id] = task
         return task
 
     async def claim_task(
         self, swarm_run_id: str, agent_id: str, *, lease_seconds: "float | None" = None
-    ) -> "SwarmTask | None":
+    ) -> "SwarmStep | None":
         # FIFO: oldest PENDING task matching (swarm_run_id, agent_id).
         candidates = [
             t
             for t in self._tasks.values()
             if t.swarm_run_id == swarm_run_id
             and t.assigned_agent_id == agent_id
-            and t.status is SwarmTaskStatus.PENDING
+            and t.status is SwarmStepStatus.PENDING
         ]
         candidates.sort(key=lambda t: t.created_at)
         if not candidates:
@@ -124,11 +124,11 @@ class _MemorySwarmStore(SwarmStore):
         now = datetime.now(timezone.utc)
         claimed = replace(
             target,
-            status=SwarmTaskStatus.CLAIMED,
+            status=SwarmStepStatus.CLAIMED,
             claimed_at=now,
             # Match File/SqlAlchemy backends: claim does NOT bump attempts.
             # Only fail_task bumps attempts (a retry happened). This keeps
-            # SwarmTaskAttempt.attempt numbering consistent across backends.
+            # SwarmStepAttempt.attempt numbering consistent across backends.
             attempts=target.attempts,
             version=target.version + 1,
             updated_at=now,
@@ -138,11 +138,11 @@ class _MemorySwarmStore(SwarmStore):
 
     async def set_active_run(
         self, task_id: str, run_id: str, *, expected_version: int
-    ) -> SwarmTask:
-        from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+    ) -> SwarmStep:
+        from linktools.ai.errors import SwarmConflictError, SwarmStepNotFoundError
 
         if task_id not in self._tasks:
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = self._tasks[task_id]
         if current.version != expected_version:
             raise SwarmConflictError(
@@ -164,7 +164,7 @@ class _MemorySwarmStore(SwarmStore):
         *,
         expected_version: int,
         active_run_id=None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         current = self._tasks[task_id]
         if current.version != expected_version:
             raise SwarmConflictError(
@@ -177,7 +177,7 @@ class _MemorySwarmStore(SwarmStore):
             )
         done = replace(
             current,
-            status=SwarmTaskStatus.SUCCEEDED,
+            status=SwarmStepStatus.SUCCEEDED,
             result=result,
             version=current.version + 1,
             updated_at=datetime.now(timezone.utc),
@@ -192,7 +192,7 @@ class _MemorySwarmStore(SwarmStore):
         *,
         expected_version: int,
         active_run_id=None,
-    ) -> SwarmTask:
+    ) -> SwarmStep:
         current = self._tasks[task_id]
         if current.version != expected_version:
             raise SwarmConflictError(
@@ -205,7 +205,7 @@ class _MemorySwarmStore(SwarmStore):
             )
         failed = replace(
             current,
-            status=SwarmTaskStatus.FAILED,
+            status=SwarmStepStatus.FAILED,
             error=error,
             version=current.version + 1,
             updated_at=datetime.now(timezone.utc),
@@ -214,8 +214,8 @@ class _MemorySwarmStore(SwarmStore):
         return failed
 
     async def list_tasks(
-        self, swarm_run_id: str, *, status: "SwarmTaskStatus | None" = None
-    ) -> "tuple[SwarmTask, ...]":
+        self, swarm_run_id: str, *, status: "SwarmStepStatus | None" = None
+    ) -> "tuple[SwarmStep, ...]":
         result = [
             t
             for t in self._tasks.values()
@@ -224,7 +224,7 @@ class _MemorySwarmStore(SwarmStore):
         result.sort(key=lambda t: t.created_at)
         return tuple(result)
 
-    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmTask, ...]":
+    async def reclaim_expired_tasks(self, swarm_run_id: str) -> "tuple[SwarmStep, ...]":
         return ()
 
     async def record_attempt(self, attempt) -> Any:
@@ -246,11 +246,11 @@ class _MemorySwarmStore(SwarmStore):
 
     async def renew_lease(
         self, task_id: str, *, expected_version: int, lease_seconds: float
-    ) -> SwarmTask:
-        from linktools.ai.errors import SwarmConflictError, SwarmTaskNotFoundError
+    ) -> SwarmStep:
+        from linktools.ai.errors import SwarmConflictError, SwarmStepNotFoundError
 
         if task_id not in self._tasks:
-            raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+            raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
         current = self._tasks[task_id]
         if current.version != expected_version:
             raise SwarmConflictError(
@@ -356,7 +356,6 @@ def _build_ctx(
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         commit_coordinator=FilesystemRunCommitCoordinator(
             approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
             checkpoint_store=checkpoint_store,
@@ -470,9 +469,9 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
     assert all(c.parent_run_id == ctx.swarm_run.run_id for c in children)
     assert all(c.root_run_id == ctx.parent_context.root_run_id for c in children)
     assert all(c.status is RunStatus.SUCCEEDED for c in children)
-    # 2 SwarmTasks SUCCEEDED.
+    # 2 SwarmSteps SUCCEEDED.
     assert len(tasks) == 2
-    assert all(t.status is SwarmTaskStatus.SUCCEEDED for t in tasks)
+    assert all(t.status is SwarmStepStatus.SUCCEEDED for t in tasks)
     # coordinator was invoked exactly twice (round 1 produced work, round 2 empty -> stop).
     assert call_count["n"] == 2
 
@@ -552,7 +551,7 @@ def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
     assert len(children) == 3
     assert all(c.status is RunStatus.SUCCEEDED for c in children)
     assert len(tasks) == 3
-    assert all(t.status is SwarmTaskStatus.SUCCEEDED for t in tasks)
+    assert all(t.status is SwarmStepStatus.SUCCEEDED for t in tasks)
     # output is the CONCAT of 3 (same string repeated -> joined by newlines).
     assert str(result.output) == "same-out\nsame-out\nsame-out"
     assert result.metadata["task_count"] == 3
@@ -728,13 +727,13 @@ def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
     )
     # parent task (depth 1) already SUCCEEDED -> not claimable; it exists only
     # so the child's parent_task_id chain resolves to a real parent.
-    parent = SwarmTask(
+    parent = SwarmStep(
         id="parent-1",
         swarm_run_id="swarm-1",
         parent_task_id=None,
         assigned_agent_id="worker-a",
         description="parent",
-        status=SwarmTaskStatus.SUCCEEDED,
+        status=SwarmStepStatus.SUCCEEDED,
         dependencies=(),
         input=TaskInput(prompt="p"),
         result=None,
@@ -748,13 +747,13 @@ def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
     )
     # child task (depth 2) PENDING -> would be claimed, but the depth guard
     # fires first.
-    child = SwarmTask(
+    child = SwarmStep(
         id="child-1",
         swarm_run_id="swarm-1",
         parent_task_id="parent-1",
         assigned_agent_id="worker-a",
         description="child",
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=TaskInput(prompt="c"),
         result=None,
@@ -776,7 +775,7 @@ def test_run_task_raises_when_depth_exceeds_max_depth(tmp_path):
     # nothing was claimed -- the child is still PENDING (guard fired first).
     tasks = asyncio.run(swarm_store.list_tasks("swarm-1"))
     child_after = next(t for t in tasks if t.id == "child-1")
-    assert child_after.status is SwarmTaskStatus.PENDING
+    assert child_after.status is SwarmStepStatus.PENDING
 
 
 def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
@@ -814,13 +813,13 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
         spec=spec,
         swarm_store=swarm_store,
     )
-    grandparent = SwarmTask(
+    grandparent = SwarmStep(
         id="gp-1",
         swarm_run_id="swarm-1",
         parent_task_id=None,
         assigned_agent_id="worker-a",
         description="gp",
-        status=SwarmTaskStatus.SUCCEEDED,
+        status=SwarmStepStatus.SUCCEEDED,
         dependencies=(),
         input=TaskInput(prompt="g"),
         result=None,
@@ -832,13 +831,13 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
         created_at=_NOW,
         updated_at=_NOW,
     )
-    parent = SwarmTask(
+    parent = SwarmStep(
         id="p-1",
         swarm_run_id="swarm-1",
         parent_task_id="gp-1",
         assigned_agent_id="worker-a",
         description="p",
-        status=SwarmTaskStatus.SUCCEEDED,
+        status=SwarmStepStatus.SUCCEEDED,
         dependencies=(),
         input=TaskInput(prompt="p"),
         result=None,
@@ -850,13 +849,13 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
         created_at=_NOW,
         updated_at=_NOW,
     )
-    child = SwarmTask(
+    child = SwarmStep(
         id="c-1",
         swarm_run_id="swarm-1",
         parent_task_id="p-1",
         assigned_agent_id="worker-a",
         description="c",
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=TaskInput(prompt="c"),
         result=None,
@@ -879,7 +878,7 @@ def test_run_task_depth_chain_walks_multiple_ancestors(tmp_path):
 
 # --- 7. task.id != child RunRecord.id (active_run_id decoupling) ---
 #
-# design note contract: "禁止 SwarmTask.id == child_run_id". Each execution mints a
+# design note contract: "禁止 SwarmStep.id == child_run_id". Each execution mints a
 # fresh run_id and stores it on task.active_run_id via SwarmStore.set_active_run.
 
 
@@ -963,13 +962,13 @@ def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
         swarm_store=swarm_store,
     )
     # one PENDING task to execute twice.
-    task = SwarmTask(
+    task = SwarmStep(
         id="task-1",
         swarm_run_id="swarm-1",
         parent_task_id=None,
         assigned_agent_id="worker-a",
         description="x",
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         dependencies=(),
         input=TaskInput(prompt="do"),
         result=None,
@@ -995,7 +994,7 @@ def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
     # execute again. The NEW execution mints a fresh run_id.
     reset = replace(
         after_first,
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         result=None,
         active_run_id=None,
         version=after_first.version + 1,
@@ -1046,13 +1045,13 @@ def test_set_active_run_rejects_stale_expected_version(swarm_store_via_module=No
     )
     asyncio.run(
         store.create_task(
-            SwarmTask(
+            SwarmStep(
                 id="task-1",
                 swarm_run_id="swarm-1",
                 parent_task_id=None,
                 assigned_agent_id="worker-a",
                 description="x",
-                status=SwarmTaskStatus.PENDING,
+                status=SwarmStepStatus.PENDING,
                 dependencies=(),
                 input=TaskInput(prompt="x"),
                 result=None,
@@ -1089,9 +1088,9 @@ def test_set_active_run_rejects_stale_expected_version(swarm_store_via_module=No
 
 
 def test_set_active_run_missing_task_raises_not_found():
-    """set_active_run on a missing task id surfaces SwarmTaskNotFoundError
+    """set_active_run on a missing task id surfaces SwarmStepNotFoundError
     (mirrors complete_task / fail_task behavior)."""
-    from linktools.ai.errors import SwarmTaskNotFoundError
+    from linktools.ai.errors import SwarmStepNotFoundError
 
     store = _MemorySwarmStore()
     asyncio.run(
@@ -1109,28 +1108,28 @@ def test_set_active_run_missing_task_raises_not_found():
             )
         )
     )
-    with pytest.raises(SwarmTaskNotFoundError):
+    with pytest.raises(SwarmStepNotFoundError):
         asyncio.run(store.set_active_run("nope", "child-1", expected_version=1))
 
 
 # ---------------------------------------------------------------------------
-# SwarmTaskAttempt recording contract
+# SwarmStepAttempt recording contract
 # ---------------------------------------------------------------------------
 
 
 def _seed_worker_task(
     swarm_store, *, task_id: str = "task-1", agent_id: str = "worker-a"
 ):
-    """Seed a PENDING SwarmTask into the in-memory store for _run_task."""
+    """Seed a PENDING SwarmStep into the in-memory store for _run_task."""
     asyncio.run(
         swarm_store.create_task(
-            SwarmTask(
+            SwarmStep(
                 id=task_id,
                 swarm_run_id="swarm-1",
                 parent_task_id=None,
                 assigned_agent_id=agent_id,
                 description="x",
-                status=SwarmTaskStatus.PENDING,
+                status=SwarmStepStatus.PENDING,
                 dependencies=(),
                 input=TaskInput(prompt="do"),
                 result=None,
@@ -1149,7 +1148,7 @@ def _seed_worker_task(
 def test_run_task_records_one_succeeded_attempt_with_run_id_matching_active_run_id(
     tmp_path,
 ):
-    """A successful _run_task records exactly one SwarmTaskAttempt whose run_id
+    """A successful _run_task records exactly one SwarmStepAttempt whose run_id
     matches the task's active_run_id (child run) and whose attempt
     number is 1 (first execution: task.attempts started at 0 -> 0+1)."""
     from linktools.ai.swarm.models import AttemptStatus
@@ -1357,7 +1356,6 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
             run_store=run_store,
             session_store=session_store,
             event_store=event_store,
-            checkpoint_store=checkpoint_store,
             commit_coordinator=FilesystemRunCommitCoordinator(
                 approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
                 checkpoint_store=checkpoint_store,
@@ -1427,13 +1425,13 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
             run_definitions=FilesystemRunDefinitionStore(root=tmp_path / "definitions"),
         )
         await swarm_store.create_task(
-            SwarmTask(
+            SwarmStep(
                 id="task-1",
                 swarm_run_id="swarm-1",
                 parent_task_id=None,
                 assigned_agent_id="worker-flaky",
                 description="x",
-                status=SwarmTaskStatus.PENDING,
+                status=SwarmStepStatus.PENDING,
                 dependencies=(),
                 input=TaskInput(prompt="do"),
                 result=None,
@@ -1554,7 +1552,7 @@ def test_run_task_complete_task_conflict_after_worker_success_is_not_a_retry(tmp
     # fail_task was never called -- the task's real status (whatever the
     # reclaiming caller set it to) must be left alone.
     after = swarm_store._tasks["task-1"]
-    assert after.status is not SwarmTaskStatus.FAILED
+    assert after.status is not SwarmStepStatus.FAILED
 
     # The attempt's audit row is closed out, not left stuck RUNNING: it is
     # recorded FAILED (AttemptStatus has no other terminal state) but tagged
@@ -1603,7 +1601,7 @@ def test_run_task_set_active_run_conflict_on_retry_does_not_crash_or_refail(tmp_
         swarm_store._tasks["task-1"] = replace(
             current,
             version=current.version + 1,
-            status=SwarmTaskStatus.PENDING,
+            status=SwarmStepStatus.PENDING,
         )
         raise RuntimeError("transient boom")
 
@@ -1782,7 +1780,7 @@ def test_run_task_complete_task_stale_version_retries_write_once_and_succeeds(tm
     assert result.output == "done"
 
     after = swarm_store._tasks["task-1"]
-    assert after.status is SwarmTaskStatus.SUCCEEDED
+    assert after.status is SwarmStepStatus.SUCCEEDED
 
 
 def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
@@ -1843,12 +1841,12 @@ def _worker_ctx_and_task(tmp_path, model_fn, *, swarm_store=None):
 
 
 def test_run_task_complete_task_not_found_propagates(tmp_path):
-    """SwarmTaskNotFoundError from complete_task() is not a fencing conflict
+    """SwarmStepNotFoundError from complete_task() is not a fencing conflict
     _retry_fencing_conflict_once knows how to interpret (a task genuinely
     disappearing is not normal ownership transfer -- more likely data
     corruption or a wrong storage root) -- it must propagate out of
     _run_task, not be swallowed as a discarded attempt."""
-    from linktools.ai.errors import SwarmTaskNotFoundError
+    from linktools.ai.errors import SwarmStepNotFoundError
     from linktools.ai.swarm.strategy import _run_task
 
     def _model_fn(messages, info):
@@ -1857,11 +1855,11 @@ def test_run_task_complete_task_not_found_propagates(tmp_path):
     ctx, swarm_store = _worker_ctx_and_task(tmp_path, _model_fn)
 
     async def _not_found(task_id, result, *, expected_version, active_run_id=None):
-        raise SwarmTaskNotFoundError(f"swarm task not found: {task_id}")
+        raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
 
     swarm_store.complete_task = _not_found
 
-    with pytest.raises(SwarmTaskNotFoundError):
+    with pytest.raises(SwarmStepNotFoundError):
         asyncio.run(
             _run_task(
                 ctx,
@@ -1959,7 +1957,7 @@ def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_
     # test, which turns on status/version/active_run_id, not this field.
     reclaimed = replace(
         swarm_store._tasks["task-1"],
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         claimed_at=None,
         version=swarm_store._tasks["task-1"].version + 1,
     )
@@ -2006,7 +2004,7 @@ def test_set_active_run_conflict_discards_without_retrying_with_fresh_claim(tmp_
     after = swarm_store._tasks["task-1"]
     assert after.version == 4
     assert after.active_run_id is None
-    assert after.status is SwarmTaskStatus.CLAIMED
+    assert after.status is SwarmStepStatus.CLAIMED
 
 
 def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
@@ -2075,7 +2073,7 @@ def test_run_task_attempt_numbering_survives_a_superseded_attempt(tmp_path):
     stale = swarm_store._tasks["task-1"]
     swarm_store._tasks["task-1"] = replace(
         stale,
-        status=SwarmTaskStatus.PENDING,
+        status=SwarmStepStatus.PENDING,
         claimed_at=None,
         active_run_id=None,
         version=stale.version + 1,

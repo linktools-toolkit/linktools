@@ -180,7 +180,6 @@ def _make_runner(tmp_path, pipeline) -> AgentEngine:
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         middleware_pipeline=pipeline,
         capability_resolver=CapabilityResolver({"test": _PingProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),

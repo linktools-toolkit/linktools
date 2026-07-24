@@ -161,8 +161,8 @@ class SwarmRoundCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTaskCreated:
-    event_type: ClassVar[str] = 'SwarmTaskCreated'
+class SwarmStepCreated:
+    event_type: ClassVar[str] = 'SwarmStepCreated'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
@@ -170,8 +170,8 @@ class SwarmTaskCreated:
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTaskClaimed:
-    event_type: ClassVar[str] = 'SwarmTaskClaimed'
+class SwarmStepClaimed:
+    event_type: ClassVar[str] = 'SwarmStepClaimed'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
@@ -179,16 +179,16 @@ class SwarmTaskClaimed:
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTaskCompleted:
-    event_type: ClassVar[str] = 'SwarmTaskCompleted'
+class SwarmStepCompleted:
+    event_type: ClassVar[str] = 'SwarmStepCompleted'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmTaskFailed:
-    event_type: ClassVar[str] = 'SwarmTaskFailed'
+class SwarmStepFailed:
+    event_type: ClassVar[str] = 'SwarmStepFailed'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
@@ -502,10 +502,10 @@ EventPayload = Union[
     SwarmStarted,
     SwarmRoundStarted,
     SwarmRoundCompleted,
-    SwarmTaskCreated,
-    SwarmTaskClaimed,
-    SwarmTaskCompleted,
-    SwarmTaskFailed,
+    SwarmStepCreated,
+    SwarmStepClaimed,
+    SwarmStepCompleted,
+    SwarmStepFailed,
     SwarmCompleted,
     AssetChanged,
     CapabilityResolveStarted,

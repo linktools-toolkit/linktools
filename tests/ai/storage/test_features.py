@@ -32,6 +32,7 @@ def test_file_storage_features_match_spec():
         fencing=True,
         idempotency=True,
         streaming_artifacts=True,
+        artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
     )
 
 
@@ -49,6 +50,7 @@ def test_sqlalchemy_storage_features_match_spec():
         fencing=True,
         idempotency=True,
         streaming_artifacts=True,
+        artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
     )
 
 

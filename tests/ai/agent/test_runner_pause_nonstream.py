@@ -135,7 +135,6 @@ def _make_runner(tmp_path, *, approval_store=None, tool_executor=None) -> AgentE
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=CapabilityResolver({"test": _RiskyProvider()}),
         managed_tool_executor=tool_executor,
         commit_coordinator=FilesystemRunCommitCoordinator(

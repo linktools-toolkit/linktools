@@ -24,7 +24,6 @@ whether a duplicate side-effect occurred (e.g. a second blob or a partial temp
 file)."""
 
 import asyncio
-import hashlib
 import os
 import stat
 import tempfile
@@ -34,7 +33,9 @@ from typing import AsyncIterator
 
 import pytest
 
+from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactIntegrityError
+from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
 from linktools.ai.artifact.store import ArtifactStore
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 from linktools.ai.storage.filesystem.artifact import (
@@ -52,8 +53,8 @@ def _aiter(chunks: "list[bytes]") -> AsyncIterator[bytes]:
     return _g()
 
 
-def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _digest(data: bytes) -> ArtifactDigest:
+    return ArtifactDigest.from_bytes(data)
 
 
 def _run(coro):
@@ -93,7 +94,7 @@ def test_blob_put_if_absent_mid_stream_failure_publishes_no_partial_file(
     _run(run())
 
     # No blob at the final address.
-    final = tmp_path / "blobs" / claimed_digest[:2] / claimed_digest
+    final = tmp_path / "blobs" / claimed_digest.value[:2] / claimed_digest.value
     assert not final.exists(), (
         f"partial blob file leaked to the final address: {final}"
     )
@@ -144,7 +145,7 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = _FailingRecordStore(exc=_RecordWriteError("record store down"))
-    store = ArtifactStore(blob, records)
+    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
     payload = b"orphan-candidate-payload"
 
     async def run() -> None:
@@ -167,7 +168,6 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
     # sweeper sees it as unreferenced and (past the grace window) reaps it.
     from datetime import datetime, timedelta, timezone
 
-    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
     from linktools.ai.storage.orphan import sweep_orphan_blobs
 
     fs_records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
@@ -199,7 +199,7 @@ def test_open_stream_consumer_error_does_not_leak_file_handle(tmp_path: Path) ->
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records)
+    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
     payload = b"streamed-payload-for-fd-leak"
 
     class _ConsumerError(Exception):
@@ -356,7 +356,7 @@ def test_put_stream_staging_disk_failure_propagates_and_publishes_nothing(
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records)
+    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
     payload = b"never-staged-successfully"
 
     async def run() -> None:
@@ -403,7 +403,7 @@ def test_blob_put_if_absent_publish_dir_unwritable_propagates_and_cleans(
     # Compute the shard dir the backend would publish into, then make it (and
     # its parent) read-only so mkstemp cannot create a temp inside it. We use
     # the actual shard path the backend derives from the digest.
-    shard_dir = blob_root / digest[:2]
+    shard_dir = blob_root / digest.value[:2]
     shard_dir.mkdir(parents=True, exist_ok=True)
     parent_mode = stat.S_IMODE(shard_dir.stat().st_mode)
     try:
@@ -418,7 +418,7 @@ def test_blob_put_if_absent_publish_dir_unwritable_propagates_and_cleans(
         _run(run())
 
         # No final blob at the address.
-        assert not (shard_dir / digest).exists()
+        assert not (shard_dir / digest.value).exists()
         # No leftover temp file.
         leftover = list(shard_dir.glob("*.tmp"))
         assert not leftover, f"leftover staging temps after mkstemp failure: {leftover}"

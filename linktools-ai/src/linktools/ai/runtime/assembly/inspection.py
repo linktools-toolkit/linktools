@@ -67,7 +67,7 @@ async def _assemble_internal(
         sandbox=sandbox,
         security_event_emitter=security_event_emitter,
     )
-    return await resolver.assemble(spec, context)
+    return await resolver.resolve(spec, context)
 
 
 async def inspect_capabilities(

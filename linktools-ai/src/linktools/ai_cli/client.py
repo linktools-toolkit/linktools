@@ -285,7 +285,7 @@ class LocalRuntimeClient:
     """In-process ``RuntimeClient`` over a project bundle.
 
     Owns the Runtime + Storage + registries so neither the console nor the TUI
-    has to know how ``Runtime.build`` is wired."""
+    has to know how ``build_runtime`` is wired."""
 
     def __init__(self, bundle: CliRuntimeBundle) -> None:
         self._bundle = bundle

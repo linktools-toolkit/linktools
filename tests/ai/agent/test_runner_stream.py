@@ -177,7 +177,6 @@ def _make_runner(tmp_path):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         capability_resolver=CapabilityResolver({"test": _EchoProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         commit_coordinator=FilesystemRunCommitCoordinator(
@@ -329,10 +328,13 @@ def test_run_stream_real_stream_error_fails_the_run(tmp_path):
 
 
 def test_run_raises_run_invariant_error_when_no_result_persisted(tmp_path):
-    """When execute() completes without a persisted result (an invariant
-    violation), run() raises RunInvariantError instead of fabricating an empty
-    success. The execute() happy path does not read the record back, so
-    stripping ``result`` from the authoritative read isolates the tail check."""
+    """When the deferred success commit reports no persisted result (an
+    invariant violation), run() raises RunInvariantError instead of
+    fabricating an empty success. run() now reads the result from
+    commit_coordinator.complete()'s return value (WP9 step 3's deferred-
+    commit design), so stripping ``result`` from THAT response is what
+    isolates the tail check -- run_store.get() is no longer consulted on
+    this path."""
     import dataclasses
 
     from linktools.ai.errors import RunInvariantError
@@ -341,13 +343,13 @@ def test_run_raises_run_invariant_error_when_no_result_persisted(tmp_path):
     runner, compiled = _compile(tmp_path, fn, stream_fn)
     _seed_session(runner._session_store, "session-s1")
 
-    real_get = runner._run_store.get
+    real_complete = runner._commit_coordinator.complete
 
-    async def _stripped_get(run_id):
-        record = await real_get(run_id)
-        return None if record is None else dataclasses.replace(record, result=None)
+    async def _stripped_complete(command):
+        committed = await real_complete(command)
+        return dataclasses.replace(committed, result=None)
 
-    runner._run_store.get = _stripped_get  # type: ignore[assignment]
+    runner._commit_coordinator.complete = _stripped_complete  # type: ignore[assignment]
 
     with pytest.raises(RunInvariantError):
         asyncio.run(
@@ -357,6 +359,37 @@ def test_run_raises_run_invariant_error_when_no_result_persisted(tmp_path):
                 _run_context(run_id="run-inv", session_id="session-s1"),
             )
         )
+
+
+def test_run_fail_transitions_when_complete_commit_raises(tmp_path):
+    """When the complete-commit itself RAISES (after a successful model drain),
+    the collector drives the fail-transition (run -> FAILED) via
+    ``_fail_committed_run`` -- the case execute()'s own fail-closure cannot
+    cover, since the generator already exited cleanly before the commit. The
+    original error still propagates to the caller."""
+
+    fn, stream_fn = _text_pair(text="answer")
+    runner, compiled = _compile(tmp_path, fn, stream_fn)
+    _seed_session(runner._session_store, "session-s1")
+
+    async def _raising_complete(command):
+        raise RuntimeError("complete commit broke")
+
+    runner._commit_coordinator.complete = _raising_complete  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="complete commit broke"):
+        asyncio.run(
+            runner.run(
+                compiled,
+                RunInput(prompt="what is the answer?"),
+                _run_context(run_id="run-cf", session_id="session-s1"),
+            )
+        )
+
+    run_record = asyncio.run(runner._run_store.get("run-cf"))
+    assert run_record.status is RunStatus.FAILED, (
+        "a raising complete-commit must still transition the run to FAILED"
+    )
 
 
 def test_run_stream_yields_tool_and_text_events(tmp_path):

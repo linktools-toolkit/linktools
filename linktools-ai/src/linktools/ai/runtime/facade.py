@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Runtime: the top-level integration surface.
-Runtime.build() assembles Storage + AgentCompiler + AgentEngine + SwarmRunner +
+build_runtime() assembles Storage + AgentCompiler + AgentEngine + SwarmEngine +
 ModelResolver; Runtime.run(spec, prompt) compiles the spec, resolves (or creates)
 a Session, mints a RunContext, and delegates to AgentEngine (AgentSpec) or
-SwarmRunner (SwarmSpec).
+SwarmEngine (SwarmSpec).
 
-Capability Runtime: build() accepts a RuntimeDependencies + CapabilityRuntimeOptions,
+Capability Runtime: build_runtime() accepts a RuntimeDependencies + CapabilityRuntimeOptions,
 from which it builds a CapabilityResolver wired into AgentEngine. Declared
 AgentSpec.tools are then resolved into prompt sections + toolsets via the
 registered capability providers. Runtime is an async context manager that
 releases MCP connections on close.
 
-Runtime keeps only build/inspect/close + MCP-lifecycle ownership; every
+Runtime keeps only inspect/close + MCP-lifecycle ownership (construction is
+build_runtime(), a module-level function, not a Runtime classmethod); every
 run-lifecycle method (run/run_stream/cancel/approve/reject/resume) delegates
 to :class:`~linktools.ai.run.coordinator.RunCoordinator`, the single
 application service that owns create/pause/approve/reject/resume/cancel/
@@ -63,83 +64,6 @@ class Runtime:
     ) -> None:
         self._components = components
         self._coordinator = RunCoordinator(components)
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        storage: Storage,
-        commit_coordinator: "RunCommitCoordinator | None" = None,
-        topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS,
-        model_resolver: "ModelResolver | None" = None,
-        middleware_pipeline: "MiddlewarePipeline | None" = None,
-        retriever: "Retriever | None" = None,
-        sandbox: "Sandbox | None" = None,
-        tool_executor: "GovernedToolInvoker | None" = None,
-        mcp_connection_pool: "MCPConnectionPool | None" = None,
-        providers: "RuntimeDependencies | None" = None,
-        options: "CapabilityRuntimeOptions | None" = None,
-        allow_mcp_wildcard: bool = False,
-        security: Any = None,
-        local_trusted_mode: bool = False,
-        multi_tenant: bool = False,
-        cancellation: "RuntimeCancellationOptions | None" = None,
-        schema_registry: "OutputSchemaRegistry | None" = None,
-        metrics: "ObservabilityMetrics | None" = None,
-        authorization: Any = None,
-        skill_subagent: "SkillPrivateSubagentConfig | None" = None,
-        requirements: "RuntimeRequirements | None" = None,
-    ) -> "Runtime":
-        """Assemble a Runtime from optional sub-components + a RuntimeDependencies.
-
-        Capability providers come exclusively via ``providers`` (a
-        RuntimeDependencies); the direct ``Runtime.run(spec, ...)`` path stays the
-        shortest and needs no providers configured.
-
-        ``commit_coordinator`` (REQUIRED at the build-kernel level): the build
-        kernel no longer selects a coordinator from Storage type -- the caller
-        (the composition root) constructs the concrete coordinator for its
-        Storage and injects it. ``None`` is accepted at this layer only so a
-        caller that fails to inject one gets the build kernel's clear fail-fast
-        error rather than a ``TypeError``; production code always passes a real
-        coordinator.
-
-        ``topology`` (default SINGLE_PROCESS) declares the shape of the
-        process graph; the build kernel uses it to derive default capability
-        minimums when ``requirements`` is not supplied. ``requirements``, when
-        passed, takes precedence.
-
-        ``local_trusted_mode`` (default False): when False, cancel /
-        resume reject a missing ``principal`` (production-safe); when True the
-        Runtime is explicitly single-tenant / local and a missing principal is
-        allowed (with a deprecation warning)."""
-        config = RuntimeBuildConfig(
-            storage=storage,
-            commit_coordinator=commit_coordinator,
-            providers=providers or RuntimeDependencies(),
-            model_resolver=model_resolver,
-            middleware_pipeline=middleware_pipeline,
-            retriever=retriever,
-            sandbox=sandbox,
-            tool_executor=tool_executor,
-            security=security,
-            capability_options=options,
-            mcp_connection_pool=mcp_connection_pool,
-            settings=RuntimeSettings(
-                allow_mcp_wildcard=allow_mcp_wildcard,
-                local_trusted_mode=local_trusted_mode,
-                multi_tenant=multi_tenant,
-                cancellation=cancellation or RuntimeCancellationOptions(),
-                topology=topology,
-            ),
-            schema_registry=schema_registry,
-            metrics=metrics,
-            authorization=authorization,
-            skill_subagent=skill_subagent,
-            requirements=requirements,
-        )
-        c = build_runtime_components(config)
-        return cls(components=c)
 
     async def inspect(self, spec: AgentSpec) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
@@ -263,5 +187,84 @@ class Runtime:
             yield event
 
 
+def build_runtime(
+    *,
+    storage: Storage,
+    commit_coordinator: "RunCommitCoordinator | None" = None,
+    topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS,
+    model_resolver: "ModelResolver | None" = None,
+    middleware_pipeline: "MiddlewarePipeline | None" = None,
+    retriever: "Retriever | None" = None,
+    sandbox: "Sandbox | None" = None,
+    tool_executor: "GovernedToolInvoker | None" = None,
+    mcp_connection_pool: "MCPConnectionPool | None" = None,
+    providers: "RuntimeDependencies | None" = None,
+    options: "CapabilityRuntimeOptions | None" = None,
+    allow_mcp_wildcard: bool = False,
+    security: Any = None,
+    local_trusted_mode: bool = False,
+    multi_tenant: bool = False,
+    cancellation: "RuntimeCancellationOptions | None" = None,
+    schema_registry: "OutputSchemaRegistry | None" = None,
+    metrics: "ObservabilityMetrics | None" = None,
+    authorization: Any = None,
+    skill_subagent: "SkillPrivateSubagentConfig | None" = None,
+    requirements: "RuntimeRequirements | None" = None,
+) -> "Runtime":
+    """Assemble a Runtime from optional sub-components + a RuntimeDependencies.
+    The only public construction entry point -- Runtime takes only already-
+    assembled dependencies (``components=``); there is no ``build_runtime``/
+    ``Runtime.create``/``RuntimeFactory``.
+
+    Capability providers come exclusively via ``providers`` (a
+    RuntimeDependencies); the direct ``Runtime.run(spec, ...)`` path stays the
+    shortest and needs no providers configured.
+
+    ``commit_coordinator`` (REQUIRED at the build-kernel level): the build
+    kernel no longer selects a coordinator from Storage type -- the caller
+    (the composition root) constructs the concrete coordinator for its
+    Storage and injects it. ``None`` is accepted at this layer only so a
+    caller that fails to inject one gets the build kernel's clear fail-fast
+    error rather than a ``TypeError``; production code always passes a real
+    coordinator.
+
+    ``topology`` (default SINGLE_PROCESS) declares the shape of the
+    process graph; the build kernel uses it to derive default capability
+    minimums when ``requirements`` is not supplied. ``requirements``, when
+    passed, takes precedence.
+
+    ``local_trusted_mode`` (default False): when False, cancel /
+    resume reject a missing ``principal`` (production-safe); when True the
+    Runtime is explicitly single-tenant / local and a missing principal is
+    allowed (with a deprecation warning)."""
+    config = RuntimeBuildConfig(
+        storage=storage,
+        commit_coordinator=commit_coordinator,
+        providers=providers or RuntimeDependencies(),
+        model_resolver=model_resolver,
+        middleware_pipeline=middleware_pipeline,
+        retriever=retriever,
+        sandbox=sandbox,
+        tool_executor=tool_executor,
+        security=security,
+        capability_options=options,
+        mcp_connection_pool=mcp_connection_pool,
+        settings=RuntimeSettings(
+            allow_mcp_wildcard=allow_mcp_wildcard,
+            local_trusted_mode=local_trusted_mode,
+            multi_tenant=multi_tenant,
+            cancellation=cancellation or RuntimeCancellationOptions(),
+            topology=topology,
+        ),
+        schema_registry=schema_registry,
+        metrics=metrics,
+        authorization=authorization,
+        skill_subagent=skill_subagent,
+        requirements=requirements,
+    )
+    c = build_runtime_components(config)
+    return Runtime(components=c)
+
+
 # re-export for tooling that imports Runtime alongside these types
-__all__ = ["Runtime"]
+__all__ = ["Runtime", "build_runtime"]

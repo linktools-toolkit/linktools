@@ -179,7 +179,6 @@ def _make_runner(tmp_path, sink=None, metrics=None):
         run_store=run_store,
         session_store=session_store,
         event_store=event_store,
-        checkpoint_store=checkpoint_store,
         observability=sink,
         metrics=metrics,
         commit_coordinator=FilesystemRunCommitCoordinator(

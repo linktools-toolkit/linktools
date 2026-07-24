@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AggregationPolicy + aggregate(): reduces a tuple of completed SwarmTasks into
+"""AggregationPolicy + aggregate(): reduces a tuple of completed SwarmSteps into
 one RunResult (the value written back to the shared Session)."""
 
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 from ..run.models import RunResult
-from .models import SwarmTask
+from .models import SwarmStep
 
 
 class AggregationMode(str, Enum):
@@ -23,11 +23,11 @@ class AggregationPolicy:
     mode: AggregationMode = AggregationMode.CONCAT
 
 
-def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmTask, ...]") -> RunResult:
+def aggregate(policy: AggregationPolicy, tasks: "tuple[SwarmStep, ...]") -> RunResult:
     """Reduce the SUCCEEDED tasks' results per policy.mode. Returns RunResult
     whose ``token_usage`` carries the SUM of per-task input/output tokens (each
     worker RunResult.token_usage is populated by AgentEngine from the model's
-    usage) so SwarmRunner can enforce ``max_total_tokens`` , and a
+    usage) so SwarmEngine can enforce ``max_total_tokens`` , and a
     metadata dict carrying task_count."""
     succeeded = tuple(t for t in tasks if t.result is not None)
     outputs = [t.result.output for t in succeeded]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MetadataBackedPolicyProvider: the only real ToolPolicyProvider Runtime.build
+"""MetadataBackedPolicyProvider: the only real ToolPolicyProvider build_runtime
 wires. Verifies it produces tri-state ResolvedToolPolicy layers (None for
 fields the source ToolSpec has no opinion on) so merge_policies can never be
 clamped by a phantom concrete default (contract/contract)."""

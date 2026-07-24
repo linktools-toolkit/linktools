@@ -181,7 +181,7 @@ async def test_concurrent_puts_produce_distinct_revisions(tmp_path):
     paths = [AssetPath(f"/r/{i}.txt") for i in range(n)]
 
     # Establish baseline revision (should be 0 on a fresh DB).
-    baseline = await backend.revision()
+    baseline = int(await backend.revision())
     assert baseline == 0
 
     # Fire N concurrent puts to distinct paths -- each must bump the revision
@@ -192,7 +192,7 @@ async def test_concurrent_puts_produce_distinct_revisions(tmp_path):
 
     await asyncio.gather(*(one_put(p) for p in paths))
 
-    after = await backend.revision()
+    after = int(await backend.revision())
     assert after == n, (
         f"revision must advance by exactly {n} under {n} concurrent puts "
         f"(baseline={baseline}, after={after}); a smaller delta means the "
@@ -216,15 +216,15 @@ async def test_revision_increments_monotonically_under_sequential_puts(tmp_path)
     baseline=0 the test above asserts)."""
     engine, backend, store = await _make_store(tmp_path)
 
-    assert await backend.revision() == 0
+    assert int(await backend.revision()) == 0
     await store.put(AssetPath("/a.txt"), b"a")
-    assert await backend.revision() == 1
+    assert int(await backend.revision()) == 1
     await store.put(AssetPath("/b.txt"), b"b")
-    assert await backend.revision() == 2
+    assert int(await backend.revision()) == 2
     # Update an existing asset -- still bumps the revision (contract: a real
     # change is a change).
     await store.put(AssetPath("/a.txt"), b"a2")
-    assert await backend.revision() == 3
+    assert int(await backend.revision()) == 3
 
     await engine.dispose()
 

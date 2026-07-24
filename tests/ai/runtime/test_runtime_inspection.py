@@ -6,7 +6,7 @@ from linktools.ai.events.payloads import SecurityDegraded
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.runtime import RuntimeDependencies
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.storage.facade import FilesystemStorage
 from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
 
@@ -48,7 +48,7 @@ class _DegradingProvider:
 
 def _runtime(tmp_path, *capabilities) -> Runtime:
     storage = FilesystemStorage(root=tmp_path)
-    return Runtime.build(
+    return build_runtime(
         storage=storage,
         model_resolver=ModelResolver(),
         providers=RuntimeDependencies(capabilities=tuple(capabilities)),

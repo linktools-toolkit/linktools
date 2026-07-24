@@ -16,7 +16,12 @@ from .registry import (
     RuntimeModelConfig,
     model_registry,
 )
-from .resolver import ModelResolver, ModelRoutingError, ResolvedModel
+from .resolver import (
+    ModelResolver,
+    ModelRetryConfigurationError,
+    ModelRoutingError,
+    ResolvedModel,
+)
 
 __all__ = [
     "ModelPolicy",
@@ -30,4 +35,5 @@ __all__ = [
     "ModelResolver",
     "ResolvedModel",
     "ModelRoutingError",
+    "ModelRetryConfigurationError",
 ]

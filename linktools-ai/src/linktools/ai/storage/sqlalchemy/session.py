@@ -25,7 +25,7 @@ assigns fresh ones inside the inserting transaction.
   UnitOfWork are therefore not supported** and will surface as an
   unhandled ``IntegrityError`` propagating out of the transaction. This is a
   deliberate scope boundary, not an oversight: every current caller
-  (AgentEngine, SwarmRunner) drives at most one UoW-mode session append per
+  (AgentEngine, SwarmEngine) drives at most one UoW-mode session append per
   transaction, so the scenario does not arise in practice. If a future
   caller needs multiple concurrent UoW-mode writers to the same session, the
   fix is a dedicated ``ai_session_counters(session_id, next_sequence)`` table

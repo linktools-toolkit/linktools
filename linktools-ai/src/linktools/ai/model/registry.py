@@ -115,6 +115,86 @@ class ModelBundle:
         }
         return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
 
+    @classmethod
+    def from_config(
+        cls, config: "RuntimeModelConfig", *, request_retries: int
+    ) -> "ModelBundle":
+        """Build a config-backed OpenAI model bundle. The framework ALWAYS sets
+        the provider HTTP client's ``max_retries`` to ``request_retries`` --
+        including 0, which disables the SDK's own transient-HTTP retry. The
+        value is never inferred from the client default. ``request_retries`` is a
+        REQUEST-layer retry (the provider client retrying a transient HTTP
+        failure), not a registry-lookup retry."""
+        if config.protocol != "openai":
+            raise ModelClientUnavailable(
+                f"{config.model_type}: unsupported protocol '{config.protocol}' (use 'openai')"
+            )
+        from openai import AsyncOpenAI
+
+        # Always pass max_retries explicitly, including 0 (which the SDK treats
+        # as "do not retry"). Never fall back to the client's own default.
+        client = AsyncOpenAI(
+            base_url=_resolve_base_url(config),
+            api_key=config.token,
+            max_retries=request_retries,
+        )
+        provider = OpenAIProvider(openai_client=client)
+        # The gateway routes to various OpenAI-compatible models, including
+        # reasoning/"thinking mode" models (e.g. deepseek-v4-flash) that reject
+        # `tool_choice: "required"` with HTTP 400. Disabling this lets pydantic-ai
+        # fall back to `tool_choice: "auto"` for structured output.
+        profile = OpenAIModelProfile(openai_supports_tool_choice_required=False)
+        model = OpenAIChatModel(config.model or "", provider=provider, profile=profile)
+        raw = config.raw
+        settings = ModelSettings(
+            max_tokens=int(raw.get("max_output_tokens", 4096)),
+            timeout=float(config.timeout_seconds),
+            parallel_tool_calls=True,
+        )
+        max_turns = int(raw.get("max_turns", 10))
+        usage_limits = UsageLimits(request_limit=max(1, max_turns))
+        return cls(config=config, model=model, settings=settings, usage_limits=usage_limits)
+
+    @classmethod
+    def from_instance(
+        cls,
+        model_type: str,
+        model: "Model",
+        *,
+        request_retries: "int | None" = None,
+        settings: "ModelSettings | None" = None,
+        usage_limits: "UsageLimits | None" = None,
+    ) -> "ModelBundle":
+        """Wrap an already-constructed (prebuilt) Model. A prebuilt model owns its
+        own HTTP client and retry behavior, so the framework cannot configure
+        ``max_retries`` on it: ``request_retries`` MUST be None (the signal that
+        the prebuilt model manages its own retries). A non-None value is a
+        configuration error -- rejected explicitly, never silently ignored."""
+        from ..errors import ModelRetryConfigurationError
+
+        if request_retries is not None:
+            raise ModelRetryConfigurationError(
+                f"prebuilt model {model_type!r} cannot be configured with "
+                f"request_retries={request_retries!r}; pass request_retries=None "
+                f"so the prebuilt model manages its own retry behavior"
+            )
+        return cls(
+            config=RuntimeModelConfig(
+                model_type=model_type,
+                protocol="prebuilt",
+                model=None,
+                base_url=None,
+                api_key=None,
+                auth_token=None,
+                timeout_seconds=300,
+                raw={},
+            ),
+            model=model,
+            settings=settings
+            or ModelSettings(max_tokens=4096, timeout=300.0, parallel_tool_calls=True),
+            usage_limits=usage_limits or UsageLimits(request_limit=10),
+        )
+
 
 class ModelRegistry:
     """Process-wide model_type -> ModelBundle registry. Callers register every
@@ -138,25 +218,16 @@ class ModelRegistry:
         if (config is None) == (model is None):
             raise ValueError("register() requires exactly one of `config` or `model`")
         if config is not None:
-            bundle = _bundle_from_config(config)
+            # Config-backed: registered with request_retries=0 (the framework
+            # default); the resolver applies the policy's value at resolve time.
+            bundle = ModelBundle.from_config(config, request_retries=0)
         else:
-            bundle = ModelBundle(
-                config=RuntimeModelConfig(
-                    model_type=model_type,
-                    protocol="prebuilt",
-                    model=None,
-                    base_url=None,
-                    api_key=None,
-                    auth_token=None,
-                    timeout_seconds=300,
-                    raw={},
-                ),
-                model=model,
-                settings=settings
-                or ModelSettings(
-                    max_tokens=4096, timeout=300.0, parallel_tool_calls=True
-                ),
-                usage_limits=usage_limits or UsageLimits(request_limit=10),
+            # Prebuilt: no framework retry configuration (None).
+            bundle = ModelBundle.from_instance(
+                model_type,
+                model,
+                settings=settings,
+                usage_limits=usage_limits,
             )
         self._bundles[model_type] = bundle
 
@@ -195,52 +266,3 @@ def _resolve_base_url(config: RuntimeModelConfig) -> str:
             return base
         return f"{base}/v1"
     raise ModelClientUnavailable(f"{config.model_type}: invalid base_url_mode {mode!r}")
-
-
-def _bundle_from_config(
-    config: RuntimeModelConfig, *, request_retries: int = 0
-) -> ModelBundle:
-    """Build an `OpenAIChatModel` (+ settings/limits) for an already-resolved
-    `RuntimeModelConfig`. Callers resolve configuration however they want (file,
-    env vars, secrets manager, hardcoded for tests) and hand in the config directly
-    — this function only does the pydantic-ai model/provider/settings construction.
-
-    ``request_retries`` configures the provider HTTP client's own retry of
-    transient HTTP failures (passed to ``AsyncOpenAI`` as ``max_retries``); it is
-    a REQUEST-layer retry, not a registry-lookup retry, and is applied at resolve
-    time from the ModelPolicy."""
-    if config.protocol != "openai":
-        raise ModelClientUnavailable(
-            f"{config.model_type}: unsupported protocol '{config.protocol}' (use 'openai')"
-        )
-    if request_retries:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            base_url=_resolve_base_url(config),
-            api_key=config.token,
-            max_retries=request_retries,
-        )
-        provider = OpenAIProvider(openai_client=client)
-    else:
-        provider = OpenAIProvider(base_url=_resolve_base_url(config), api_key=config.token)
-    # The gateway routes to various OpenAI-compatible models, including reasoning/
-    # "thinking mode" models (e.g. deepseek-v4-flash) that reject `tool_choice:
-    # "required"` with HTTP 400. Disabling this lets pydantic-ai fall back to
-    # `tool_choice: "auto"` for structured output, which all backends accept.
-    profile = OpenAIModelProfile(openai_supports_tool_choice_required=False)
-    model = OpenAIChatModel(config.model or "", provider=provider, profile=profile)
-
-    raw = config.raw
-    settings = ModelSettings(
-        max_tokens=int(raw.get("max_output_tokens", 4096)),
-        timeout=float(config.timeout_seconds),
-        parallel_tool_calls=True,
-    )
-    # max_turns historically bounded the number of model requests per call; map it
-    # onto pydantic-ai's request limit (one request per turn).
-    max_turns = int(raw.get("max_turns", 10))
-    usage_limits = UsageLimits(request_limit=max(1, max_turns))
-    return ModelBundle(
-        config=config, model=model, settings=settings, usage_limits=usage_limits
-    )
