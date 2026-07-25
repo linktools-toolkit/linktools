@@ -2,13 +2,14 @@
 
 from functools import lru_cache
 
+try:
+    from importlib import metadata
+except ImportError:
+    import importlib_metadata as metadata
+
 
 @lru_cache(maxsize=1)
 def get_entry_points():
-    try:
-        from importlib import metadata
-    except ImportError:
-        import importlib_metadata as metadata
     return metadata.entry_points()
 
 

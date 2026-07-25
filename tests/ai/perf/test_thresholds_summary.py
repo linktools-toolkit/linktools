@@ -213,11 +213,21 @@ def _measure_event_append_p95(tmp_path: Path) -> "dict[str, Any]":
     return out
 
 
-def _measure_artifact_integrity_10k(root: Path) -> "dict[str, Any]":
-    from linktools.ai.storage.facade import FilesystemStorage
+def _measure_artifact_integrity_10k() -> "dict[str, Any]":
+    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
+    from linktools.ai.artifact.store import ArtifactStore
+
+    from external_adapter import (
+        InMemoryArtifactBlobStore,
+        InMemoryArtifactRecordStore,
+    )
 
     async def _run() -> "dict[str, Any]":
-        store = FilesystemStorage(root=root).artifacts
+        store = ArtifactStore(
+            InMemoryArtifactBlobStore(),
+            InMemoryArtifactRecordStore(),
+            InProcessKeyedCoordinator(),
+        )
         mismatches = 0
         for i in range(10000):
             content = f"payload-{i}".encode()
@@ -558,7 +568,7 @@ def test_thresholds_summary(tmp_path: Path) -> None:
 
     # --- Artifact integrity 10k ---
     try:
-        a = _measure_artifact_integrity_10k(storage_tmp / "artifacts")
+        a = _measure_artifact_integrity_10k()
         _record_result(
             results,
             name="artifact_integrity_10000_rw",

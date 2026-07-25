@@ -610,7 +610,12 @@ class Environ(BaseEnviron):
         """Load capability-owned definitions only when Tools is requested."""
         import json
         from ._entrypoint import select_entry_points
-        from ._tools import Tools, _deep_merge
+        from ._tools import (Tools, _deep_merge, _merge_tool_payload,
+                             _tool_payload, _validate_user_tool_payload)
+        from linktools.errors import ToolDefinitionError
+
+        def definition_error(message):
+            raise ToolDefinitionError("tool configuration: %s" % message)
 
         definitions = {}
         sources = {}
@@ -624,36 +629,31 @@ class Environ(BaseEnviron):
         seen_capabilities = set()
         for capability in capabilities:
             if capability.name in seen_capabilities:
-                raise ValueError("duplicate capability %s" % capability.name)
+                definition_error("duplicate capability %s" % capability.name)
             seen_capabilities.add(capability.name)
             develop = capability.get_asset_path("develop", "tools", "%s.yml" % capability.name)
             release = capability.get_asset_path("tools", "%s.json" % capability.name)
             path = develop if capability.develop and develop.exists() else release
             if not path.exists():
                 continue
-            if path.suffix == ".yml":
-                import yaml
-                payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            else:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            if (set(payload) - {"schema", "templates", "tools"} or
-                    payload.get("schema") != 1 or not isinstance(payload.get("tools"), dict)):
-                raise ValueError("invalid tools schema for %s: %s" % (capability.name, path))
-            for name, value in payload["tools"].items():
-                if name in definitions:
-                    raise ValueError("duplicate tool %s from %s (%s)" % (name, capability.name, path))
-                definitions[name] = value
-                sources[name] = "%s: %s" % (capability.name, path)
+            try:
+                if path.suffix == ".yml":
+                    import yaml
+                    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                else:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                definition_error("cannot read tools schema for capability %s at %s: %s" %
+                                 (capability.name, path, exc))
+            source = "%s: %s" % (capability.name, path)
+            _merge_tool_payload(definitions, sources, _tool_payload(payload, "capability %s" % capability.name, path), source)
         user_path = self.get_data_path("tools", "tools.json")
         if user_path.exists():
-            user = json.loads(user_path.read_text(encoding="utf-8"))
-            if (set(user) - {"schema", "templates", "tools"} or
-                    user.get("schema") != 1 or not isinstance(user.get("tools"), dict)):
-                raise ValueError("invalid user tools schema: %s" % user_path)
-            user_tools = user["tools"]
-            for name, value in user_tools.items():
-                if name not in definitions and isinstance(value, dict) and not ({"install", "run"} & set(value)):
-                    raise ValueError("user tool %s in %s is not a complete definition" % (name, user_path))
+            try:
+                user = json.loads(user_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                definition_error("cannot read user tools schema at %s: %s" % (user_path, exc))
+            user_tools = _validate_user_tool_payload(user, user_path, definitions)
             definitions = _deep_merge(definitions, user_tools)
             sources.update({name: "user: %s" % user_path for name in user_tools})
         return Tools(self, definitions, sources=sources)

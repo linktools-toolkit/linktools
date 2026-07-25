@@ -51,6 +51,31 @@ def _deep_merge(left, right):
     return result
 
 
+def _tool_payload(payload, owner, source):
+    if (not isinstance(payload, dict) or set(payload) - {"schema", "templates", "tools"} or
+            payload.get("schema") != 1 or not isinstance(payload.get("tools"), dict)):
+        raise ToolDefinitionError("tool configuration: invalid tools schema for %s at %s" % (owner, source))
+    return payload["tools"]
+
+
+def _merge_tool_payload(definitions, sources, tools, source):
+    for name, value in tools.items():
+        if name in definitions:
+            raise ToolDefinitionError("tool configuration: duplicate tool %s from %s and %s" %
+                                       (name, sources[name], source))
+        definitions[name] = value
+        sources[name] = source
+
+
+def _validate_user_tool_payload(payload, source, existing_names=()):
+    tools = _tool_payload(payload, "user tools", source)
+    for name, value in tools.items():
+        if name not in existing_names and isinstance(value, dict) and not ({"install", "run"} & set(value)):
+            raise ToolDefinitionError("tool configuration: user tool %s in %s is not a complete definition" %
+                                       (name, source))
+    return tools
+
+
 def _relative(value, name, source, field):
     if value is None:
         return None
@@ -114,6 +139,8 @@ class RunSpec(object):
         if not isinstance(self.environment, dict) or any(
                 not isinstance(k, str) or not isinstance(v, str) for k, v in self.environment.items()):
             _error(name, source, "run.environment must be a string mapping")
+        if any(not isinstance(item, str) for item in self.args):
+            _error(name, source, "run.args must be an array of strings")
         self.args = tuple(self.args)
         self.environment = dict(self.environment)
 
@@ -152,8 +179,6 @@ class ToolDefinition(object):
         unknown = set(data) - _TOP_KEYS
         if unknown:
             _error(name, source, "unknown fields: %s" % sorted(unknown))
-        if "name" in data:
-            _error(name, source, "name is defined by the tools mapping key")
         version = data.get("version", "")
         if not isinstance(version, str):
             _error(name, source, "version must be a string")
@@ -254,7 +279,7 @@ class Tool(object):
         self.artifact_path = self.content_dir / entry if entry else self.content_dir / (utils.guess_file_name(self._url) if self._url else self.name)
         self._lookup = self.name if install and self.definition.run.lookup is _MISSING else self.definition.run.lookup
         self._path = self._format(self.definition.run.path, "run.path")
-        self._args = tuple(self._format(str(x), "run.args") for x in self.definition.run.args)
+        self._args = tuple(self._format(x, "run.args") for x in self.definition.run.args)
         self.environment = {k: self._format(v, "run.environment") for k, v in self.definition.run.environment.items()}
         self._runner = self.definition.run.runner
         self._lookup_path = shutil.which(self._lookup) if self._lookup else None
@@ -269,7 +294,7 @@ class Tool(object):
         elif self._runner:
             self.command_path = None
         else:
-            self.command_path = self._path or (str(self.artifact_path) if self.artifact_path.exists() else None)
+            self.command_path = self._path or (str(self.artifact_path) if self.artifact_path.is_file() else None)
         self.argv = self._make_argv()
 
     def _make_argv(self):
@@ -289,7 +314,7 @@ class Tool(object):
 
     @property
     def exists(self):
-        return bool(self._lookup_path or (self._path and os.path.exists(self._path)) or self.artifact_path.exists())
+        return bool(self._lookup_path or (self._path and os.path.exists(self._path)) or self.artifact_path.is_file())
 
     def get_variable(self, name, default=None):
         return self.variables.get(name, default)
@@ -315,7 +340,7 @@ class Tool(object):
             return
         if not self._tools.installer.is_complete(self):
             self._tools.installer.install(self)
-        if not self.artifact_path.exists():
+        if not self.artifact_path.is_file():
             raise ToolNotFound(self.name)
         if not self._runner and os.name != "nt":
             self.artifact_path.chmod(self.artifact_path.stat().st_mode | stat.S_IXUSR)
@@ -370,7 +395,7 @@ class ToolInstaller(object):
     def is_complete(self, tool):
         target = tool.install_dir
         manifest_path = target / "manifest.json"
-        if not tool.artifact_path.exists() or not manifest_path.exists():
+        if not tool.artifact_path.is_file() or not manifest_path.is_file():
             return False
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -440,7 +465,7 @@ class ToolInstaller(object):
                     shutil.move(str(archive), str(destination))
                 entry = tool._format(tool.definition.install.entrypoint, "install.entrypoint")
                 artifact = (staging / tool._format(tool.definition.install.extract_dir, "install.extract_dir") if tool.definition.install.extract_dir else staging) / (entry or archive.name)
-                if not artifact.exists() or not utils.is_sub_path(str(artifact), str(staging)):
+                if not artifact.is_file() or not utils.is_sub_path(str(artifact), str(staging)):
                     raise ToolInstallError("entrypoint missing for %s" % tool.name)
                 files = sorted(p.relative_to(staging).as_posix() for p in staging.rglob("*") if p.is_file())
                 manifest = {"schema": 2, "name": tool.name, "version": tool.version,
@@ -478,7 +503,9 @@ class Tools(object):
         definitions = {}
         for name, data in raw.items():
             if name in self.all:
-                raise ToolDefinitionError("tool %s is reserved by the built-in definitions" % name)
+                source = sources.get(name)
+                raise ToolDefinitionError("tool %s%s is reserved by the built-in definitions" %
+                                           (name, " (%s)" % source if source else ""))
             source = sources.get(name)
             data = json.loads(json.dumps(data))
             prefix = name.replace("-", "_").replace(".", "_").upper()
@@ -501,6 +528,13 @@ class Tools(object):
                     target[parts[-1]] = value
             definitions[name] = ToolDefinition.from_mapping(name, data, source, self.environ.system, self.environ.machine)
         self._definitions = definitions
+        for name, definition in definitions.items():
+            references = tuple(definition.dependencies) + ((definition.run.runner,) if definition.run.runner else ())
+            for dependency in references:
+                if dependency not in definitions and dependency not in self.all:
+                    source = definition.source
+                    raise ToolDefinitionError("tool %s%s depends on missing tool %s" %
+                                               (name, " (%s)" % source if source else "", dependency))
         for name in definitions:
             self._ensure_tool(name)
         self._validate_dependencies()
@@ -527,12 +561,19 @@ class Tools(object):
         for name, deps in graph.items():
             for dep in deps:
                 if dep not in graph:
-                    raise ToolDefinitionError("tool %s depends on missing tool %s" % (name, dep))
+                    source = self.all[name].definition.source
+                    raise ToolDefinitionError("tool %s%s depends on missing tool %s" %
+                                               (name, " (%s)" % source if source else "", dep))
                 if dep == name:
-                    raise ToolDefinitionError("cyclic tool dependency: %s -> %s" % (name, name))
+                    source = self.all[name].definition.source
+                    raise ToolDefinitionError("tool %s%s has cyclic dependency: %s -> %s" %
+                                               (name, " (%s)" % source if source else "", name, name))
         def visit(name, stack):
             if name in stack:
-                raise ToolDefinitionError("cyclic tool dependency: %s" % " -> ".join(stack[stack.index(name):] + [name]))
+                source = self.all[name].definition.source
+                raise ToolDefinitionError("tool %s%s has cyclic dependency: %s" %
+                                           (name, " (%s)" % source if source else "",
+                                            " -> ".join(stack[stack.index(name):] + [name])))
             for dep in graph[name]: visit(dep, stack + [name])
         for name in graph: visit(name, [])
 

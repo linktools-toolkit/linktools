@@ -5,6 +5,9 @@ operation, run a lifecycle hook, or write a generated artifact/state/lock
 file -- and must reuse the same selection/arg-building logic real commands
 use."""
 import os
+import json
+import subprocess
+import sys
 
 import pytest
 
@@ -213,6 +216,33 @@ def test_dry_run_and_plan_command_share_one_model(fresh_manager, monkeypatch):
 
     assert len(recorded) == 2
     assert recorded[0] == recorded[1]
+
+
+@pytest.mark.parametrize("action", ["up", "restart", "down"])
+def test_dry_run_json_is_exposed_by_each_lifecycle_command(fresh_manager, monkeypatch, capsys, action):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    getattr(cntr_main.command, "on_command_" + action)(dry_run=True, as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == action
+    assert "commands" in payload
+
+
+@pytest.mark.parametrize("action", ["up", "restart", "down"])
+def test_json_without_dry_run_fails_before_side_effects(fresh_manager, monkeypatch, action):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    calls = []
+    monkeypatch.setattr(fresh_manager.compose_operations, action,
+                        lambda *args, **kwargs: calls.append(action))
+    with pytest.raises(ContainerError, match="--json requires --dry-run"):
+        getattr(cntr_main.command, "on_command_" + action)(as_json=True)
+    assert calls == []
+
+
+def test_cntr_help_has_no_removed_plan_command():
+    result = subprocess.run([sys.executable, "-m", "linktools.cntr.__main__", "--help"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "plan" not in result.stdout
 
 
 # -- Command exactness/redaction (review issues #1-#4) -----------------------

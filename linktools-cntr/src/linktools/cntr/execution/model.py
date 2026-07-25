@@ -4,7 +4,7 @@
 up/restart/down run (opt-in via ``--report``).
 
 ``ExecutionPlan`` holds no BaseContainer/Process/callable -- only plain,
-JSON-friendly values -- so it can be serialized for lifecycle dry-runs.
+JSON-friendly values -- so it can be serialized (``ct-cntr plan --json``)
 and unit-tested without any of that machinery. ``ExecutionRecord`` is
 stashed on the existing ``EventContext.metadata`` extension point rather
 than a new context field, so reporting stays additive. Not printed by

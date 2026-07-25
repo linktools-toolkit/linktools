@@ -178,7 +178,8 @@ ct-cntr status --json
 #######################
 
 ct-cntr up --dry-run
-ct-cntr up --dry-run
+ct-cntr restart --dry-run
+ct-cntr down --dry-run
 
 #######################
 # 诊断（只读；--json 输出结构化结果供 CI 使用）
@@ -206,7 +207,13 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 
 cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如未来的 `linktools-ai`）cntr 完全忽略。
 
-迁移表：`ct-cntr plan up|restart|down` 分别改为 `ct-cntr up|restart|down --dry-run`；旧 JSON 输出分别改为追加 `--json`。`--json` 必须与 `--dry-run` 同时使用。
+迁移表：
+
+- `ct-cntr plan up` → `ct-cntr up --dry-run`
+- `ct-cntr plan restart` → `ct-cntr restart --dry-run`
+- `ct-cntr plan down` → `ct-cntr down --dry-run`
+
+旧 JSON 输出分别改为追加 `--json`。`--json` 必须与 `--dry-run` 同时使用。
 
 ```bash
 ct-cntr repo status

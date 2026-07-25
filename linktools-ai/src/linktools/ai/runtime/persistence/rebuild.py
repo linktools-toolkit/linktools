@@ -7,13 +7,14 @@ so a developer can reset the local environment to a clean baseline.
 FilesystemStorage auto-mkdirs on construction (the data dir rebuilds by
 deleting the root and re-instantiating). The SQLite rebuild runs
 ``Base.metadata.create_all`` on a caller-provided engine -- the ENGINE itself
-is constructed by the caller or a test, never by this
+is constructed by the caller (the one-click script or a test), never by this
 module, honoring the adapter-boundary invariant that the core does not
 parse connection strings or construct engines. Each rebuild is verified by a
 RunStore round-trip.
 
-Callers invoke these helpers directly; this module has no command-line
-wrapper."""
+The one-click CLI that constructs the engine + calls these helpers lives in
+``linktools-ai/scripts/rebuild_dev_storage.py`` (a dev tool, outside the
+installable core)."""
 
 from __future__ import annotations
 

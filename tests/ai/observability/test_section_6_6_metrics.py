@@ -38,6 +38,7 @@ _REQUIRED_METRIC_NAMES = (
     "job_recovery_total",
     "approval_replay_reject_total",
     "catalog_revision_refresh_total",
+    "external_adapter_conformance_failure_total",
     "artifact_blob_upload_failure_total",
     "artifact_orphan_cleanup_failure_total",
 )
@@ -713,6 +714,41 @@ def test_catalog_revision_refresh_total_fires_on_revision_change():
 
     asyncio.run(_run())
     assert metrics.counters.get("catalog_revision_refresh_total") == 2
+
+
+# --- category 10: external adapter conformance failure ---
+
+
+def test_external_adapter_conformance_failure_total_fires_on_contract_failure():
+    """A contract test method that raises records the metric through the
+    contract's conformance_metrics sink before propagating the failure."""
+    from linktools.ai.testing.contracts import ArtifactBlobStoreContract
+
+    metrics = InMemoryMetrics()
+
+    class _FailingBlobStore:
+        async def put_if_absent(self, *, digest, source, size):
+            raise AssertionError("simulated contract failure")
+
+        @asynccontextmanager
+        async def open(self, *, digest):
+            async def _chunks():
+                yield b""
+
+            yield _chunks()
+
+    class _ContractSubclass(ArtifactBlobStoreContract):
+        conformance_metrics = metrics
+
+        def blob_store(self):
+            return _FailingBlobStore()
+
+    # The contract test method raises (the inner store's AssertionError) and
+    # records the metric first.
+    instance = _ContractSubclass()
+    with pytest.raises(AssertionError):
+        instance.test_put_if_absent_is_idempotent_on_digest()
+    assert metrics.counters.get("external_adapter_conformance_failure_total") == 1
 
 
 # --- category 11a: artifact blob upload failure ---

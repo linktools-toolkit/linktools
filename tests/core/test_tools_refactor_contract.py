@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from linktools.core._tools import InstallSpec, RunSpec, ToolDefinition, Tools
-from linktools.errors import ToolDefinitionError, ToolNotFound
+from linktools.errors import ToolDefinitionError, ToolInstallError, ToolNotFound
 
 
 class Env:
@@ -53,10 +53,14 @@ class Env:
 def test_explicit_specs_reject_unknown_fields_and_string_lists():
     assert InstallSpec(url="x").url == "x"
     assert RunSpec(args=["--ok"]).args == ("--ok",)
+    assert RunSpec(args=("--ok",)).args == ("--ok",)
     with pytest.raises(ToolDefinitionError):
         InstallSpec.from_mapping({"url": "x", "download_url": "y"})
     with pytest.raises(ToolDefinitionError):
         RunSpec.from_mapping({"args": "--bad"})
+    for invalid in ([1], [True], [None]):
+        with pytest.raises(ToolDefinitionError, match=r"demo.*mobile.*run\.args"):
+            RunSpec(name="demo", source="mobile: /tmp/mobile.json", args=invalid)
 
 
 def test_tool_definition_uses_mapping_key_as_name():
@@ -79,6 +83,23 @@ def test_extract_dir_is_part_of_runtime_install_layout(tmp_path):
     tool.prepare()
     assert tool.artifact_path == tool.content_dir / "bin" / "demo"
     assert (tool.install_dir / "nested" / "path" / "bin" / "demo").exists()
+
+
+def test_managed_directory_entrypoint_fails_before_manifest_and_active(tmp_path):
+    archive = tmp_path / "demo.zip"
+    with zipfile.ZipFile(str(archive), "w") as zf:
+        zf.writestr("bin/demo", "#!/bin/sh\n")
+    env = Env(tmp_path)
+    tools = Tools(env, {"demo": {
+        "version": "1",
+        "install": {"url": str(archive), "extract_dir": "payload", "entrypoint": "bin"},
+    }})
+    tool = tools["demo"]
+    with pytest.raises(ToolInstallError, match="entrypoint missing"):
+        tool.prepare()
+    assert not (tool.install_dir / "manifest.json").exists()
+    assert not (tmp_path / "data" / "tools" / "demo" / "active.json").exists()
+    assert not list((tmp_path / "data" / "tools" / "demo").glob(".staging-*"))
 
 
 def test_runtime_copy_only_accepts_version(tmp_path):
@@ -127,8 +148,30 @@ def test_explicit_path_never_falls_back_to_install(tmp_path):
 def test_entry_point_metadata_is_cached(monkeypatch):
     from linktools.core import _entrypoint
 
+    class EntryPoints(list):
+        def select(self, **kwargs):
+            return EntryPoints(item for item in self if item.group == kwargs["group"])
+
+    entries = EntryPoints([
+        type("EP", (), {"group": "linktools.capability", "name": "demo"})(),
+        type("EP", (), {"group": "linktools.command", "name": "command"})(),
+    ])
     calls = []
-    entries = [type("EP", (), {"group": "linktools.capability", "name": "demo"})()]
-    monkeypatch.setattr(_entrypoint, "get_entry_points", lambda: entries)
-    assert _entrypoint.select_entry_points("linktools.capability") == (entries[0],)
+    _entrypoint.get_entry_points.cache_clear()
+    monkeypatch.setattr(_entrypoint.metadata, "entry_points", lambda: calls.append(1) or entries)
+    assert _entrypoint.select_entry_points("linktools.capability")[0].name == "demo"
+    assert _entrypoint.select_entry_points("linktools.command")[0].name == "command"
+    assert calls == [1]
+    _entrypoint.get_entry_points.cache_clear()
+
+
+def test_entry_point_cache_supports_legacy_mapping(monkeypatch):
+    from linktools.core import _entrypoint
+
+    _entrypoint.get_entry_points.cache_clear()
+    monkeypatch.setattr(_entrypoint.metadata, "entry_points", lambda: {
+        "linktools.capability": ("demo",),
+    })
+    assert _entrypoint.select_entry_points("linktools.capability") == ("demo",)
     assert _entrypoint.select_entry_points("linktools.command") == ()
+    _entrypoint.get_entry_points.cache_clear()

@@ -180,9 +180,14 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
         )
     }
 
-    from linktools.ai.storage.facade import FilesystemStorage
+    # The public in-memory external Storage pattern lives in the sibling
+    # storage test package; import it through its package path so its
+    # internal relative imports resolve.
+    from external_adapter import (
+        build_in_memory_external_storage,
+    )
 
-    storage = FilesystemStorage(root=tmp_path)
+    storage = build_in_memory_external_storage(root=tmp_path)
     # Composition root: the caller constructs the concrete coordinator from
     # its concrete Storage and injects it. The build kernel never branches
     # on Storage type.
@@ -239,3 +244,4 @@ def test_missing_commit_coordinator_fails_fast(tmp_path):
     )
     with pytest.raises(RuntimeInitializationError, match="RunCommitCoordinator must be injected"):
         build_runtime_components(config)
+

@@ -84,7 +84,7 @@ eval "$(ct-env --silent java 17.0.11 --shell bash)"
 <details>
 <summary>常用命令</summary>
 
-所有声明的工具可通过各 capability 的 `assets/develop/tools/<capability>.yml` 查看，以下以 apktool 为例：
+所有声明的工具可通过[配置文件](https://github.com/linktools-toolkit/linktools/blob/master/linktools/src/linktools/assets/develop/tools.yml)查看，以下以 apktool 为例：
 
 ```bash
 # 初始化并执行 apktool 命令

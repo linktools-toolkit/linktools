@@ -116,7 +116,8 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             stub_path = str(get_stub_path())
             if stub_path not in paths:
                 paths.append(stub_path)
-            stub_path = str(environ.tools.stub_path)
+            from ..core._tools import get_tool_stub_path
+            stub_path = str(get_tool_stub_path(environ))
             if stub_path not in paths:
                 paths.append(stub_path)
 
@@ -207,7 +208,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             # PATH gets the real bin path, never a "$JAVA_HOME/bin" expression.
             script = ShellScript(shell)
             script.define_command("java", java.make_cmdargs())
-            script.set_env("JAVA_VERSION", java.get("version"))
+            script.set_env("JAVA_VERSION", java.version)
             if home_path:
                 script.set_env("JAVA_HOME", home_path)
                 script.prepend_path([os.path.join(str(home_path), "bin")])

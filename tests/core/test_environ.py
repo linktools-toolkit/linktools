@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for :class:`linktools.core._environ.Environ` isolation.
-
-Spec (first-batch checklist) and (ENV-001): ``BaseEnviron`` factories
-must resolve paths through ``self`` rather than the module-level ``environ``
-singleton, otherwise a custom :class:`Environment` instance silently shares
-state with the default global.
-"""
-import os
+"""Tests for :class:`linktools.core._environ.Environ` isolation."""
 
 import linktools.core._environ as env_mod
 from linktools.core._environ import Environ
@@ -34,10 +27,6 @@ def test_create_tools_resolves_paths_via_self_not_global_environ(monkeypatch):
 
     monkeypatch.setattr(env_mod.environ, "get_path", boom)
     monkeypatch.setattr(env_mod.environ, "get_data_path", boom)
-
-    # _create_tools appends the tool stub dir to PATH; snapshot so the test
-    # does not leak that mutation.
-    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
 
     # Must not raise (the global spies would otherwise fire).
     env._create_tools()
