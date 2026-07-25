@@ -619,18 +619,32 @@ class Environ(BaseEnviron):
 
         definitions = {}
         sources = {}
+        capability_group = metadata.__capability_group__
         capabilities = []
-        for ep in select_entry_points(metadata.__capability_group__):
-            capability = ep.load()
-            if isinstance(capability, type):
-                capability = capability()
-            capabilities.append(capability)
-        capabilities.sort(key=lambda item: item.name)
-        seen_capabilities = set()
-        for capability in capabilities:
+        for ep in select_entry_points(capability_group):
+            try:
+                capability = ep.load()
+                if isinstance(capability, type):
+                    capability = capability()
+            except Exception as exc:
+                raise ToolDefinitionError(
+                    "tool configuration: failed to load capability entry point "
+                    "group %r name %r value %r: %s: %s" %
+                    (capability_group, ep.name, ep.value,
+                     type(exc).__name__, exc)
+                ) from exc
+            capabilities.append((ep, capability))
+        capabilities.sort(key=lambda item: item[1].name)
+        seen_capabilities = {}
+        for ep, capability in capabilities:
             if capability.name in seen_capabilities:
-                definition_error("duplicate capability %s" % capability.name)
-            seen_capabilities.add(capability.name)
+                previous_ep = seen_capabilities[capability.name]
+                definition_error(
+                    "duplicate capability %s from entry points "
+                    "group %r name %r value %r and group %r name %r value %r" %
+                    (capability.name, capability_group, previous_ep.name,
+                     previous_ep.value, capability_group, ep.name, ep.value))
+            seen_capabilities[capability.name] = ep
             develop = capability.get_asset_path("develop", "tools", "%s.yml" % capability.name)
             release = capability.get_asset_path("tools", "%s.json" % capability.name)
             path = develop if capability.develop and develop.exists() else release

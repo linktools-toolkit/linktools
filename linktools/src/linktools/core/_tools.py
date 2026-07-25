@@ -314,7 +314,7 @@ class Tool(object):
 
     @property
     def exists(self):
-        return bool(self._lookup_path or (self._path and os.path.exists(self._path)) or self.artifact_path.is_file())
+        return bool(self._lookup_path or (self._path and os.path.isfile(self._path)) or self.artifact_path.is_file())
 
     def get_variable(self, name, default=None):
         return self.variables.get(name, default)
@@ -335,8 +335,8 @@ class Tool(object):
         if self._lookup_path:
             return
         if self._path:
-            if not os.path.exists(self._path):
-                raise ToolNotFound("explicit path does not exist: %s" % self._path)
+            if not os.path.isfile(self._path):
+                raise ToolNotFound("explicit path is not a regular file: %s" % self._path)
             return
         if not self._tools.installer.is_complete(self):
             self._tools.installer.install(self)

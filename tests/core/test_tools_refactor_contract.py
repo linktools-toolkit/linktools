@@ -145,6 +145,33 @@ def test_explicit_path_never_falls_back_to_install(tmp_path):
     assert "explicit path" in str(raised.value)
 
 
+def test_explicit_path_accepts_regular_file_and_file_symlink(tmp_path):
+    target = tmp_path / "program"
+    target.write_text("program", encoding="utf-8")
+
+    tools = Tools(Env(tmp_path), {"demo": {"run": {"path": str(target)}}})
+    assert tools["demo"].exists
+    tools["demo"].prepare()
+
+    link = tmp_path / "program-link"
+    link.symlink_to(target)
+    linked_tools = Tools(Env(tmp_path), {"demo": {"run": {"path": str(link)}}})
+    assert linked_tools["demo"].exists
+    linked_tools["demo"].prepare()
+
+
+@pytest.mark.parametrize("path", ["directory", "missing"])
+def test_explicit_path_rejects_non_regular_file(tmp_path, path):
+    explicit = tmp_path / path
+    if path == "directory":
+        explicit.mkdir()
+
+    tools = Tools(Env(tmp_path), {"demo": {"run": {"path": str(explicit)}}})
+    assert not tools["demo"].exists
+    with pytest.raises(ToolNotFound, match="explicit path is not a regular file"):
+        tools["demo"].prepare()
+
+
 def test_entry_point_metadata_is_cached(monkeypatch):
     from linktools.core import _entrypoint
 
