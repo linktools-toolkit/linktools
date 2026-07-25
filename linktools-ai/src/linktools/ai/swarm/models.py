@@ -8,9 +8,10 @@ from decimal import Decimal
 from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeAlias
 
 from ..run.models import RunErrorInfo, RunResult
+from ..session.models import NewSessionMessage
 
 
 class SwarmStatus(str, Enum):
@@ -201,3 +202,53 @@ class SwarmStepAttempt:
     started_at: datetime
     finished_at: "datetime | None"
     error: "RunErrorInfo | None"
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmUsage:
+    """Aggregate token/cost usage a swarm execution produced across all worker
+    runs -- the swarm analogue of agent RunUsage. ``total_cost`` is None until
+    per-token pricing is wired."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost: "float | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmCompleted:
+    """SwarmEngine drove the strategy to a final aggregate result. ``result`` is
+    the merged aggregate RunResult; ``aggregate_messages`` are the session
+    messages RunCoordinator persists to the parent/shared session; ``usage`` is
+    the cross-worker aggregate."""
+
+    result: RunResult
+    aggregate_messages: "tuple[NewSessionMessage, ...]"
+    usage: SwarmUsage
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmPaused:
+    """SwarmEngine suspended (e.g. a worker awaited approval). Carries the
+    SwarmCheckpoint RunCoordinator persists so a later resume replays only the
+    unfinished tasks."""
+
+    checkpoint: SwarmCheckpoint
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmFailed:
+    """SwarmEngine caught an expected strategy/worker/limit failure (the
+    redacted error is carried here). Configuration/invariant violations and
+    unknown programming errors propagate as raised exceptions instead -- the
+    swarm did not 'fail' in the expected sense."""
+
+    error: RunErrorInfo
+
+
+SwarmExecutionOutcome: TypeAlias = "SwarmCompleted | SwarmPaused | SwarmFailed"
+"""The sole return shape of SwarmEngine.execute(): a discriminated union so
+RunCoordinator can converge the driving Run's lifecycle (transition/checkpoint/
+session/event writes) from ONE outcome object. Invalid combinations (a paused
+swarm carrying a result, etc.) are not constructible -- callers dispatch with
+``isinstance()``."""

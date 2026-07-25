@@ -62,7 +62,6 @@ class ManagedToolAdapter:
         security_pipeline: "SecurityPipeline | None" = None,
         baseline_policy: "ResolvedToolPolicy | None" = None,
         run_context: "RunContext | None" = None,
-        event_store: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
         security_event_emitter: Any = None,
     ) -> None:
@@ -75,18 +74,12 @@ class ManagedToolAdapter:
         self._pipeline = security_pipeline
         self._baseline = baseline_policy
         self._run_context = run_context
-        self._event_store = event_store
         self._security_audit_failure_mode = getattr(
             security_audit_failure_mode, "value", security_audit_failure_mode
         )
-        if security_event_emitter is None and event_store is not None:
-            from ..governance.security.emitter import EventStoreSecurityEventEmitter
-
-            security_event_emitter = EventStoreSecurityEventEmitter(
-                event_store,
-                context=run_context,
-                failure_mode=security_audit_failure_mode,
-            )
+        # The emitter is the single seam for security/observability events --
+        # never a direct EventStore reference. None means no emission (the
+        # caller -- RunCoordinator -- always wires a durable, per-Run sink).
         self._security_event_emitter = security_event_emitter
 
     async def _emit_degraded(self, component: str, reason: str) -> None:
@@ -107,56 +100,20 @@ class ManagedToolAdapter:
         inferred from the payload class, so adding a new audit event can never be
         silently misrouted to the observability channel. A failure to persist is
         governed by the security failure mode -- fail_closed re-raises so an
-        unrecorded security decision blocks the call."""
-        if self._security_event_emitter is not None:
-            await self._security_event_emitter.emit_security(payload)
+        unrecorded security decision blocks the call. No-op when no emitter is
+        wired."""
+        if self._security_event_emitter is None:
             return
-        await self._append_to_store(payload, security=True)
+        await self._security_event_emitter.emit_security(payload)
 
     async def _emit_observability(self, payload: Any) -> None:
         """Persist an observability event (tool started/completed, pipeline
         before/after markers). Failure is always best-effort -- an observability
-        record must never mask the tool decision being audited."""
-        if self._security_event_emitter is not None:
-            await self._security_event_emitter.emit_observability(payload)
+        record must never mask the tool decision being audited. No-op when no
+        emitter is wired."""
+        if self._security_event_emitter is None:
             return
-        await self._append_to_store(payload, security=False)
-
-    async def _append_to_store(self, payload: Any, *, security: bool) -> None:
-        """Direct-to-EventStore fallback used when no SecurityEventEmitter is
-        wired (e.g. a standalone adapter in tests). ``security`` selects the
-        failure handling: a security event respects the configured failure mode;
-        an observability event is always best-effort."""
-        if self._event_store is None:
-            return
-        ctx = self._run_context
-        run_id = getattr(ctx, "run_id", None) if ctx else None
-        root = (getattr(ctx, "root_run_id", None) or run_id) if ctx else run_id
-        from ..events.context import EventStreamContext, append_event
-
-        try:
-            await append_event(
-                self._event_store,
-                EventStreamContext(
-                    stream_id=run_id or "",
-                    run_id=run_id,
-                    root_run_id=root,
-                    parent_run_id=getattr(ctx, "parent_run_id", None) if ctx else None,
-                    session_id=getattr(ctx, "session_id", None) if ctx else None,
-                    runnable_id=getattr(ctx, "runnable_id", None) if ctx else None,
-                ),
-                payload,
-            )
-        except Exception as exc:  # noqa: BLE001 - security events can fail closed
-            _LOGGER.debug(
-                "failed to emit %r for %r",
-                type(payload).__name__,
-                self._descriptor.name,
-            )
-            if security and self._security_audit_failure_mode != "best_effort":
-                raise ToolSecurityAuditError(
-                    f"failed to persist security audit event {type(payload).__name__}"
-                ) from exc
+        await self._security_event_emitter.emit_observability(payload)
 
     def _run_id_for_events(self) -> "str | None":
         ctx = self._run_context

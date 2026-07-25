@@ -19,7 +19,7 @@ import pytest
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
+from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
+    from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
 
     counter = {"n": 0}
     engines = []

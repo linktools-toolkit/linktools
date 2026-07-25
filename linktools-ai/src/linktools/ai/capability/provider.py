@@ -25,7 +25,9 @@ class CapabilityContext:
     """Per-resolution dynamic state handed to every CapabilityProvider. Fields
     are added as providers need them; the exposure policy and sandbox backend
     cover the builtin path. Identity fields make resolution failures precise.
-    ``event_store`` (optional) lets providers emit capability-lifecycle events."""
+    ``security_event_emitter`` (optional) lets providers emit capability-
+    lifecycle events through the SecurityEventEmitter Protocol -- never a direct
+    EventStore reference."""
 
     agent_id: str
     exposure_policy: CapabilityToolExposurePolicy
@@ -34,7 +36,6 @@ class CapabilityContext:
     root_run_id: "str | None" = None
     parent_run_id: "str | None" = None
     session_id: "str | None" = None
-    event_store: "EventStore | None" = None
     security_event_emitter: Any = None
     # Identity fields propagated to subagent child runs.
     user_id: "str | None" = None
@@ -79,27 +80,11 @@ async def _noop_emit(payload: Any) -> None:
 
 
 def make_event_emitter(context: "CapabilityContext | None"):
-    """Return an ``async emit(payload)`` bound to the context's EventStore + run
-    ids, or a no-op when no store/run is wired. Capability toolset closures use
-    this to fire per-operation events (skill.list, extension.content.read, ...)."""
-    if context is None or context.event_store is None or context.run_id is None:
+    """Return an ``async emit(payload)`` bound to the context's
+    SecurityEventEmitter, or a no-op when none is wired. Capability toolset
+    closures use this to fire per-operation events (skill.list,
+    extension.content.read, ...). The emitter is the single seam -- never a
+    direct EventStore reference."""
+    if context is None or context.security_event_emitter is None:
         return _noop_emit
-    if context.security_event_emitter is not None:
-        return context.security_event_emitter.emit_observability
-    store = context.event_store
-    run_id = context.run_id
-    from ..events.context import EventStreamContext, append_event
-
-    evt_ctx = EventStreamContext(
-        stream_id=run_id,
-        run_id=run_id,
-        root_run_id=context.root_run_id or run_id,
-        parent_run_id=context.parent_run_id,
-        session_id=context.session_id or run_id,
-        runnable_id=context.agent_id,
-    )
-
-    async def emit(payload: Any) -> None:
-        await append_event(store, evt_ctx, payload)
-
-    return emit
+    return context.security_event_emitter.emit_observability

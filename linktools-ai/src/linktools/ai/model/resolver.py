@@ -77,45 +77,75 @@ class ModelResolver:
         return ResolvedModel(FallbackModel(*models), revision, usage_limits)
 
 
+def effective_request_retries(
+    *,
+    bundle: ModelBundle,
+    requested: "int | None",
+) -> "int | None":
+    """The retry count that actually governs one candidate, normalized from the
+    policy's raw ``requested`` value. This is the SINGLE source of truth shared by
+    model selection (:func:`_candidate_model`) and revision computation
+    (:func:`_resolved_revision`) so the two can never diverge -- a revision that
+    disagrees with the executed retry count would let a resume mis-detect drift.
+
+    Config-backed (``openai`` protocol) model: the framework owns the provider
+    HTTP client, so ``None`` (the prebuilt signal) normalizes to ``0`` (the
+    config-file default) and a non-negative ``int`` is taken as-is.
+
+    Prebuilt model: it owns its own HTTP client, so ONLY ``None`` is accepted; an
+    ``int`` asks the framework to configure a client it does not own and is
+    rejected with :class:`ModelRetryConfigurationError`."""
+    if bundle.config.protocol == "openai":
+        return 0 if requested is None else requested
+    if requested is not None:
+        raise ModelRetryConfigurationError(
+            f"prebuilt model {bundle.config.model_type!r} cannot be configured with "
+            f"request_retries={requested!r}; pass request_retries=None so the "
+            f"prebuilt model manages its own retry behavior"
+        )
+    return None
+
+
 def _candidate_model(bundle: ModelBundle, request_retries: "int | None") -> Model:
-    """Pick the model for one candidate, applying the policy's retry semantics.
+    """Pick the model for one candidate, applying the policy's retry semantics
+    via :func:`effective_request_retries` (the shared normalization).
 
     Config-backed OpenAI model: the framework ALWAYS owns ``max_retries``. A
-    registration builds with ``max_retries=0``; when the policy asks for a
-    positive count the model is rebuilt so the provider client carries that count
+    registration builds with ``max_retries=0``; when the normalized count is
+    positive the model is rebuilt so the provider client carries that count
     (0 is already explicit at registration, so the registered model is reused).
-    ``request_retries=None`` on a config-backed model is treated as 0 (the
-    config-file default) -- None is the prebuilt signal, but a config-backed model
-    has a framework-managed client either way.
 
-    Prebuilt model: it owns its own HTTP client, so the framework cannot set
-    ``max_retries``. ``request_retries=None`` reuses it as-is; a non-None value is
-    a configuration error (the framework was asked to configure a client it does
-    not own) and is rejected with :class:`ModelRetryConfigurationError`."""
+    Prebuilt model: it owns its own HTTP client, so the normalized value is
+    ``None`` (reuse as-is); a non-None request is rejected inside
+    :func:`effective_request_retries` before this branch is reached."""
+    retries = effective_request_retries(bundle=bundle, requested=request_retries)
     if bundle.config.protocol == "openai":
-        retries = request_retries if isinstance(request_retries, int) else 0
         if retries > 0:
             return ModelBundle.from_config(
                 bundle.config, request_retries=retries
             ).model
         return bundle.model
-    if request_retries is not None:
-        raise ModelRetryConfigurationError(
-            f"prebuilt model {bundle.config.model_type!r} cannot be configured with "
-            f"request_retries={request_retries!r}; pass request_retries=None so the "
-            f"prebuilt model manages its own retry behavior"
-        )
     return bundle.model
 
 
-def _resolved_revision(bundles: "list[ModelBundle]", request_retries: int) -> str:
+def _resolved_revision(
+    bundles: "list[ModelBundle]", request_retries: "int | None"
+) -> str:
     """Revision of the resolved model: a stable hash of the ordered candidates'
-    own non-secret revisions plus ``request_retries``. Candidate order is
-    significant, so reordering the fallback chain changes the revision; each
-    candidate's own revision already excludes secrets, so key rotation does
-    not."""
+    own non-secret revisions plus each candidate's NORMALIZED retry count (via
+    :func:`effective_request_retries`). Candidate order is significant, so
+    reordering the fallback chain changes the revision; each candidate's own
+    revision already excludes secrets, so key rotation does not. Normalizing per
+    candidate means a config-backed model resolves ``None`` and ``0`` to the SAME
+    revision -- the two are execution-equivalent and must be revision-equivalent
+    too."""
     identity = [
-        {"revision": b.revision, "request_retries": request_retries}
+        {
+            "revision": b.revision,
+            "request_retries": effective_request_retries(
+                bundle=b, requested=request_retries
+            ),
+        }
         for b in bundles
     ]
     return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
@@ -126,4 +156,5 @@ __all__: "list[str]" = [
     "ModelResolver",
     "ModelRoutingError",
     "ModelRetryConfigurationError",
+    "effective_request_retries",
 ]

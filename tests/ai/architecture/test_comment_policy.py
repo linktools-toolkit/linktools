@@ -100,6 +100,18 @@ REPO_WIDE_PATTERNS: "tuple[str, ...]" = (
     r"兼容旧",
     r"currently\s+rejects",
     r"SQLite\s+UPSERT",
+    # work-package refs without the hyphen (WP9, not just WP-9), spec/section
+    # numeric refs in prose, explicit deferral markers, and three protective
+    # patterns that currently have zero baseline hits (preserves...exactly,
+    # temporary adapter/bridge/path, pending closure/migration/convergence) so
+    # the named bad forms can never reappear.
+    r"\bWP\d+\b",
+    r"\bspec(?:ification)?\s+(?:section\s+)?\d+(?:\.\d+)*\b",
+    r"\bsection\s+\d+(?:\.\d+)*\b",
+    r"\bfuture\s+increment\b",
+    r"\bpreserves?\s+.*\s+exactly\b",
+    r"\btemporary\s+(?:adapter|bridge|path)\b",
+    r"\bpending\s+(?:closure|migration|convergence)\b",
 )
 
 # §11.5 additions scoped to linktools-ai only (src/linktools/ai + ai_cli +
@@ -195,6 +207,32 @@ def _docstrings(path: Path) -> "list[tuple[int, str]]":
             doc = ast.get_docstring(node, clean=False)
             if doc:
                 out.append((getattr(node, "lineno", 1), doc))
+    # A docstring demoted by a statement placed before it is no longer returned
+    # by ast.get_docstring, but it is still a docstring-intent string that must
+    # be scanned -- otherwise the policy is defeated by mere reordering. Scan
+    # those demoted strings at the module level (only when the module has no
+    # real docstring, so a normal module docstring is not double-counted) and
+    # inside every function/class body (skipping body[0], which is the real
+    # docstring when one is present).
+    if ast.get_docstring(tree, clean=False) is None:
+        for stmt in getattr(tree, "body", []):
+            if (
+                isinstance(stmt, ast.Expr)
+                and isinstance(getattr(stmt, "value", None), ast.Constant)
+                and isinstance(stmt.value.value, str)
+            ):
+                out.append((stmt.lineno, stmt.value.value))
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            for stmt in getattr(node, "body", [])[1:]:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(getattr(stmt, "value", None), ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    out.append((stmt.lineno, stmt.value.value))
     return out
 
 

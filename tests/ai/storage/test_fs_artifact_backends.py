@@ -13,15 +13,10 @@ import pytest
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 from linktools.ai.artifact.digest import ArtifactDigest
-from linktools.ai.artifact.models import (
-    ArtifactBlobNotFoundError,
-    ArtifactIntegrityError,
-)
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
-from linktools.ai.storage.protocols import BlobInfo
+from linktools.ai.errors import StorageBlobIntegrityError, StorageBlobNotFoundError
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.storage.blob.protocols import BlobInfo
 
 
 def _aiter(chunks: "list[bytes]") -> AsyncIterator[bytes]:
@@ -49,7 +44,7 @@ def test_blob_put_if_absent_then_open_roundtrips_streaming(tmp_path: Path) -> No
     async def run() -> None:
         digest = _digest(payload)
         info = await blob.put_if_absent(
-            digest=digest,
+            digest=digest.value,
             source=_aiter([payload[i : i + 16384] for i in range(0, len(payload), 16384)]),
             size=len(payload),
         )
@@ -59,7 +54,7 @@ def test_blob_put_if_absent_then_open_roundtrips_streaming(tmp_path: Path) -> No
         # The blob lands at the sharded path blobs/<xx>/<sha>.
         assert (tmp_path / "blobs" / digest.value[:2] / digest.value).exists()
         collected: "list[bytes]" = []
-        async with blob.open(digest=digest) as chunks:
+        async with blob.open(digest=digest.value) as chunks:
             async for chunk in chunks:
                 collected.append(chunk)
         assert b"".join(collected) == payload
@@ -74,10 +69,10 @@ def test_blob_put_if_absent_is_idempotent_on_matching_digest(tmp_path: Path) -> 
 
     async def run() -> None:
         d = _digest(payload)
-        first = await blob.put_if_absent(digest=d, source=_aiter([payload]), size=len(payload))
+        first = await blob.put_if_absent(digest=d.value, source=_aiter([payload]), size=len(payload))
         # Second put of identical content: the blob already exists at the address;
         # put_if_absent returns success without overwriting or erroring.
-        second = await blob.put_if_absent(digest=d, source=_aiter([payload]), size=len(payload))
+        second = await blob.put_if_absent(digest=d.value, source=_aiter([payload]), size=len(payload))
         assert first.digest == second.digest == d.value
 
     asyncio.run(run())
@@ -92,7 +87,7 @@ def test_blob_put_if_absent_consumes_source_even_when_blob_exists(tmp_path: Path
 
     async def run() -> None:
         d = _digest(payload)
-        await blob.put_if_absent(digest=d, source=_aiter([payload]), size=len(payload))
+        await blob.put_if_absent(digest=d.value, source=_aiter([payload]), size=len(payload))
 
         consumed: "list[bytes]" = []
 
@@ -101,7 +96,7 @@ def test_blob_put_if_absent_consumes_source_even_when_blob_exists(tmp_path: Path
                 consumed.append(chunk)
                 yield chunk
 
-        info = await blob.put_if_absent(digest=d, source=_tracking(), size=len(payload))
+        info = await blob.put_if_absent(digest=d.value, source=_tracking(), size=len(payload))
         assert info.digest == d.value
         # The whole source was drained, not short-circuited by "blob exists".
         assert b"".join(consumed) == payload
@@ -118,10 +113,10 @@ def test_blob_put_if_absent_wrong_content_for_known_digest_fails(tmp_path: Path)
     digest = _digest(payload)
 
     async def run() -> None:
-        await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=len(payload))
-        with pytest.raises(ArtifactIntegrityError):
+        await blob.put_if_absent(digest=digest.value, source=_aiter([payload]), size=len(payload))
+        with pytest.raises(StorageBlobIntegrityError):
             await blob.put_if_absent(
-                digest=digest, source=_aiter([b"WRONG-content-same-claimed-digest"]),
+                digest=digest.value, source=_aiter([b"WRONG-content-same-claimed-digest"]),
                 size=len(b"WRONG-content-same-claimed-digest"),
             )
 
@@ -132,9 +127,9 @@ def test_blob_put_if_absent_rejects_digest_mismatch(tmp_path: Path) -> None:
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
 
     async def run() -> None:
-        with pytest.raises(ArtifactIntegrityError):
+        with pytest.raises(StorageBlobIntegrityError):
             await blob.put_if_absent(
-                digest=ArtifactDigest.parse(_VALID), source=_aiter([b"not-the-claimed-digest"]), size=19
+                digest=ArtifactDigest.parse(_VALID).value, source=_aiter([b"not-the-claimed-digest"]), size=19
             )
         # Nothing published on mismatch.
         assert not (tmp_path / "blobs").rglob("*") or not list(
@@ -151,13 +146,13 @@ def test_blob_put_if_absent_refuses_corrupt_existing(tmp_path: Path) -> None:
     digest = _digest(payload)
 
     async def run() -> None:
-        await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=7)
+        await blob.put_if_absent(digest=digest.value, source=_aiter([payload]), size=7)
         # Tamper the stored blob in place; a second put of the same digest must
         # refuse to record a reference to the corrupt blob.
         path = tmp_path / "blobs" / digest.value[:2] / digest.value
         path.write_bytes(b"TAMPERED")
-        with pytest.raises(ArtifactIntegrityError):
-            await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=7)
+        with pytest.raises(StorageBlobIntegrityError):
+            await blob.put_if_absent(digest=digest.value, source=_aiter([payload]), size=7)
 
     asyncio.run(run())
 
@@ -168,8 +163,8 @@ def test_blob_open_missing_raises(tmp_path: Path) -> None:
     async def run() -> None:
         # Missing (absent) blob surfaces the UNIFIED ArtifactBlobNotFoundError
         # , distinct from ArtifactIntegrityError (corrupt-but-present).
-        with pytest.raises(ArtifactBlobNotFoundError):
-            async with blob.open(digest=ArtifactDigest.parse(_VALID)) as _chunks:
+        with pytest.raises(StorageBlobNotFoundError):
+            async with blob.open(digest=ArtifactDigest.parse(_VALID).value) as _chunks:
                 pass
 
     asyncio.run(run())
@@ -181,14 +176,14 @@ def test_blob_stat_and_delete(tmp_path: Path) -> None:
     digest = _digest(payload)
 
     async def run() -> None:
-        assert await blob.stat(digest=digest) is None
-        await blob.put_if_absent(digest=digest, source=_aiter([payload]), size=7)
-        info = await blob.stat(digest=digest)
+        assert await blob.stat(digest=digest.value) is None
+        await blob.put_if_absent(digest=digest.value, source=_aiter([payload]), size=7)
+        info = await blob.stat(digest=digest.value)
         assert info is not None and info.size == 7
-        await blob.delete(digest=digest)
-        assert await blob.stat(digest=digest) is None
+        await blob.delete(digest=digest.value)
+        assert await blob.stat(digest=digest.value) is None
         # delete is idempotent (no error on missing).
-        await blob.delete(digest=digest)
+        await blob.delete(digest=digest.value)
 
     asyncio.run(run())
 
@@ -405,7 +400,7 @@ def test_record_iter_by_producer_indexes_provenance(tmp_path: Path) -> None:
 
 def test_filesystem_storage_artifacts_is_the_streaming_store(tmp_path: Path) -> None:
     from linktools.ai.artifact.store import ArtifactStore
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
     storage = FilesystemStorage(root=tmp_path / "data")
     # The artifact store is wired over the Filesystem backends, NOT the asset
@@ -440,9 +435,9 @@ def test_blob_iter_digests_with_mtime(tmp_path: Path) -> None:
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
 
     async def run() -> None:
-        await blob.put_if_absent(digest=_digest(b"a"), source=_aiter([b"a"]), size=1)
+        await blob.put_if_absent(digest=_digest(b"a").value, source=_aiter([b"a"]), size=1)
         await blob.put_if_absent(
-            digest=_digest(b"bb"), source=_aiter([b"bb"]), size=2
+            digest=_digest(b"bb").value, source=_aiter([b"bb"]), size=2
         )
         pairs = [(d, m) async for d, m in blob.iter_digests_with_mtime()]
         assert sorted(d for d, _ in pairs) == sorted(
@@ -463,12 +458,12 @@ def test_blob_put_if_absent_rejects_size_mismatch(tmp_path: Path) -> None:
     async def run() -> None:
         payload = b"payload"  # 7 bytes
         digest = _digest(payload)
-        with pytest.raises(ArtifactIntegrityError):
+        with pytest.raises(StorageBlobIntegrityError):
             await blob.put_if_absent(
-                digest=digest, source=_aiter([payload]), size=999
+                digest=digest.value, source=_aiter([payload]), size=999
             )
         # Nothing published on size mismatch.
-        assert await blob.stat(digest=digest) is None
+        assert await blob.stat(digest=digest.value) is None
 
     asyncio.run(run())
 

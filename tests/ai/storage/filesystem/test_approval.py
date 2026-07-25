@@ -19,7 +19,7 @@ from linktools.ai.errors import (
     ApprovalNotFoundError,
     InvalidApprovalTransitionError,
 )
-from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +263,60 @@ def test_path_traversal_approval_id_rejected(tmp_path):
             await store.reject("../evil", expected_version=1, resolved_by="x")
 
     asyncio.run(_run_case())
+
+
+# ---------------------------------------------------------------------------
+# 9. create_or_get_pending reuses the existing pending request for the same
+#    dedupe key (run_id, tool_call_id) -- the reuse happy path
+# ---------------------------------------------------------------------------
+
+
+def test_create_or_get_pending_reuses_existing_for_same_dedupe_key(tmp_path):
+    """create_or_get_pending dedups on (run_id, tool_call_id): a second call
+    with the SAME key + matching tool_name/arguments returns the EXISTING
+    pending ApprovalRequest (the reuse happy path), not a new one. A retry,
+    a duplicate model drive, or a re-entrant pause for the same tool_call
+    must not create a second PENDING request. (Replaces the deleted
+    test_sqla_pause_dedups_repeated_tool_call_id_to_one_pending_approval.)"""
+
+    async def _run_case():
+        store = FilesystemApprovalStore(root=tmp_path)
+        binding = {
+            "descriptor_fingerprint": "fp-1",
+            "handler_revision": "h-1",
+            "provider_revision": "p-1",
+            "policy_revision": "pol-1",
+            "capability_revision": "cap-1",
+            "result_processor_revision": "rp-1",
+            "arguments_hash": "ah-1",
+        }
+        first = await store.create_or_get_pending(
+            tenant_id="t1",
+            run_id="run-dedupe",
+            tool_call_id="call-dedupe",
+            tool_name="shell",
+            reason="review",
+            arguments={"cmd": "ls"},
+            approval_id="apv-1",
+            binding=binding,
+        )
+        # Second call with the SAME dedupe key + matching tool_name/arguments.
+        # The different proposed approval_id must be ignored (reuse, not new).
+        second = await store.create_or_get_pending(
+            tenant_id="t1",
+            run_id="run-dedupe",
+            tool_call_id="call-dedupe",
+            tool_name="shell",
+            reason="review",
+            arguments={"cmd": "ls"},
+            approval_id="apv-2",
+            binding=binding,
+        )
+        return first, second
+
+    first, second = asyncio.run(_run_case())
+    assert second.id == first.id, (
+        "create_or_get_pending must reuse the existing pending request for the "
+        "same (run_id, tool_call_id) -- not mint a second one"
+    )
+    assert second.id == "apv-1", "the reused request keeps the first approval_id"

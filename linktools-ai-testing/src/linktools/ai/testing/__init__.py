@@ -22,7 +22,6 @@ via the ``linktools-ai-testing/src`` entry on ``sys.path`` (see
 from .contracts import (
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
-    AssetStoreContract,
     EventStoreContract,
     JobStoreContract,
     LeaseCoordinatorContract,
@@ -33,7 +32,6 @@ from .contracts import (
 __all__: "list[str]" = [
     "ArtifactBlobStoreContract",
     "ArtifactRecordStoreContract",
-    "AssetStoreContract",
     "EventStoreContract",
     "JobStoreContract",
     "LeaseCoordinatorContract",

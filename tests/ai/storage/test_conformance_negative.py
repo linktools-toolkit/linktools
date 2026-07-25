@@ -14,7 +14,7 @@ from typing import AsyncIterator
 import pytest
 
 from linktools.ai.artifact.digest import ArtifactDigest
-from linktools.ai.storage.protocols import BlobInfo
+from linktools.ai.storage.blob.protocols import BlobInfo
 
 
 async def _aiter(chunks):
@@ -32,25 +32,25 @@ class _AsyncGenOpenBlobStore:
         self._blobs: "dict[str, bytes]" = {}
 
     async def put_if_absent(
-        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size: "int | None"
+        self, *, digest: str, source: AsyncIterator[bytes], size: "int | None"
     ) -> BlobInfo:
         acc: "list[bytes]" = []
         async for c in source:
             acc.append(c)
         data = b"".join(acc)
-        self._blobs[digest.value] = data
-        return BlobInfo(digest=digest.value, size=len(data), content_type=None)
+        self._blobs[digest] = data
+        return BlobInfo(digest=digest, size=len(data), content_type=None)
 
-    async def open(self, *, digest: ArtifactDigest) -> AsyncIterator[bytes]:
+    async def open(self, *, digest: str) -> AsyncIterator[bytes]:
         # NON-CONFORMANT: bare async generator, NOT @asynccontextmanager. An
         # async-generator object has no __aenter__/__aexit__.
-        data = self._blobs.get(digest.value, b"")
+        data = self._blobs.get(digest, b"")
         yield data
 
-    async def stat(self, *, digest: ArtifactDigest) -> "BlobInfo | None":
+    async def stat(self, *, digest: str) -> "BlobInfo | None":
         return None
 
-    async def delete(self, *, digest: ArtifactDigest) -> None:
+    async def delete(self, *, digest: str) -> None:
         pass
 
 
@@ -67,9 +67,9 @@ def test_contract_rejects_async_gen_open_that_is_not_a_context_manager():
     digest = ArtifactDigest.from_bytes(b"x")
 
     async def _run():
-        await bad.put_if_absent(digest=digest, source=_aiter([b"x"]), size=1)
+        await bad.put_if_absent(digest=digest.value, source=_aiter([b"x"]), size=1)
         with pytest.raises(TypeError):
-            async with bad.open(digest=digest) as chunks:
+            async with bad.open(digest=digest.value) as chunks:
                 async for _ in chunks:
                     pass
 
@@ -90,10 +90,10 @@ def test_conformant_backend_open_is_usable_as_async_with(tmp_path):
 
     async def _run():
         await store.put_if_absent(
-            digest=digest, source=_aiter([b"roundtrip"]), size=9
+            digest=digest.value, source=_aiter([b"roundtrip"]), size=9
         )
         collected: "list[bytes]" = []
-        async with store.open(digest=digest) as chunks:
+        async with store.open(digest=digest.value) as chunks:
             async for chunk in chunks:
                 collected.append(chunk)
         assert b"".join(collected) == b"roundtrip"

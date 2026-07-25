@@ -14,7 +14,7 @@ import pytest
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
+from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
 
 
 def _now() -> datetime:

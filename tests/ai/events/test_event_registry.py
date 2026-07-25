@@ -259,7 +259,7 @@ def test_file_store_reads_legacy_envelope_without_event_type(tmp_path) -> None:
     from datetime import datetime, timezone
 
     from linktools.ai.events.payloads import RunPaused
-    from linktools.ai.storage.filesystem.event import FilesystemEventStore
+    from linktools.ai.events.persistence.filesystem import FilesystemEventStore
 
     store = FilesystemEventStore(root=tmp_path)
     stream_dir = tmp_path / "legacy-stream"

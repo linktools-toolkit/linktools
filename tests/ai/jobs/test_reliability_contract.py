@@ -18,9 +18,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.filesystem.job import FilesystemJobStore
+from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
+from linktools.ai.jobs.persistence.sqlalchemy import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -180,7 +180,7 @@ async def _inject_ready_sibling(store, job_id: str, task_id: str, clock) -> None
         import json
 
         from linktools.ai.storage.sqlalchemy.models import TaskRow
-        from linktools.ai.storage.sqlalchemy.job import _store_dt, _task_envelope
+        from linktools.ai.jobs.persistence.sqlalchemy import _store_dt, _task_envelope
 
         async with store._session_factory() as session:
             session.add(

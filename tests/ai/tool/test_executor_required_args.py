@@ -11,7 +11,7 @@ import pytest
 
 from linktools.ai.errors import TransientToolError
 from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext, ToolRequest
-from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.persistence.filesystem import FilesystemIdempotencyStore
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.policy import EffectiveToolPolicy

@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.filesystem.job import FilesystemJobStore
+from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
+from linktools.ai.jobs.persistence.sqlalchemy import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,

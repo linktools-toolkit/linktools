@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset snapshotting: pin a live Asset into an immutable Artifact so task
+"""Asset snapshotting: pin a live object into an immutable Artifact so task
 retries and replay read the exact bytes that were used, not the latest version.
 
 The snapshot is content-addressed through ArtifactStore (which itself reuses the
-existing AssetStore), and the returned AssetSnapshotRef records the
+existing ObjectStore), and the returned AssetSnapshotRef records the
 original path/version/etag plus the artifact id and sha256 so a later replay can
 validate integrity before re-executing."""
 
 from ..artifact.models import ArtifactProvenance
 from ..artifact.store import ArtifactStore
-from ..asset.path import AssetPath
-from ..asset.store import AssetStore
+from ..storage.object.models import StorageKey
+from ..storage.object.store import ObjectStore
 from .models import AssetSnapshotRef
 
 
@@ -20,7 +20,7 @@ class AssetSnapshotError(Exception):
 
 
 async def snapshot_asset(
-    assets: AssetStore,
+    assets: ObjectStore,
     artifact_store: ArtifactStore,
     path: str,
     *,
@@ -36,7 +36,7 @@ async def snapshot_asset(
     come from one read -- a separate ``stat`` then ``get`` would be a TOCTOU
     window where the asset changes between the two calls and the snapshot
     pins stale metadata against new bytes."""
-    rpath = AssetPath(path)
+    rpath = StorageKey(path)
     asset = await assets.get(rpath)
     if asset is None:
         raise AssetSnapshotError(f"asset not found: {path}")

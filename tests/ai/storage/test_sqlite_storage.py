@@ -14,14 +14,16 @@ import pytest
 
 from linktools.ai.storage.features import (
     CoordinationScope,
-    StorageFeatures,
     TransactionScope,
+)
+from linktools.ai.runtime.persistence.features import (
+    StorageFeatures,
 )
 from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
 
 def test_sqlite_storage_builds_engine_sessionmaker_and_database_scope(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     storage = SqliteStorage(database=tmp_path / "ref.db")
     try:
@@ -37,7 +39,7 @@ def test_sqlite_storage_builds_engine_sessionmaker_and_database_scope(tmp_path) 
 
 
 def test_sqlite_storage_transaction_yields_session_bound_uow(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     storage = SqliteStorage(database=tmp_path / "tx.db")
     try:
@@ -56,7 +58,7 @@ def test_sqlite_storage_transaction_yields_session_bound_uow(tmp_path) -> None:
 def test_sqlite_blob_root_is_private_per_database(tmp_path) -> None:
     # Two databases in the SAME directory must resolve to DIFFERENT artifact
     # roots, so a shared ``parent / "blobs"`` can never cross-contaminate them.
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     storage_a = SqliteStorage(database=tmp_path / "a.db")
     storage_b = SqliteStorage(database=tmp_path / "b.db")
@@ -76,7 +78,7 @@ def test_sqlite_blob_root_is_private_per_database(tmp_path) -> None:
 
 
 def test_sqlite_sweep_over_one_db_does_not_touch_another(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     storage_a = SqliteStorage(database=tmp_path / "a.db")
     storage_b = SqliteStorage(database=tmp_path / "b.db")
@@ -103,7 +105,7 @@ def test_sqlite_sweep_over_one_db_does_not_touch_another(tmp_path) -> None:
 
 
 def test_sqlite_custom_artifact_root_is_honored(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     custom = tmp_path / "elsewhere"
     storage = SqliteStorage(database=tmp_path / "c.db", artifact_root=custom)
@@ -117,21 +119,21 @@ def test_sqlite_custom_artifact_root_is_honored(tmp_path) -> None:
 def test_sqlite_memory_without_artifact_root_fails(tmp_path) -> None:
     # An in-memory database has no filesystem path to derive a private root
     # from, so the caller MUST name one explicitly.
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     with pytest.raises(ValueError):
         SqliteStorage(database=":memory:")
 
 
 def test_sqlite_uri_without_artifact_root_fails(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     with pytest.raises(ValueError):
         SqliteStorage(database=f"file:{tmp_path}/u.db")
 
 
 def test_sqlite_dispose_does_not_delete_artifact_root(tmp_path) -> None:
-    from linktools.ai.storage.sqlite import SqliteStorage
+    from linktools.ai.runtime.persistence.sqlite import SqliteStorage
 
     storage = SqliteStorage(database=tmp_path / "d.db")
     root = storage._artifact_root

@@ -20,7 +20,7 @@ from linktools.ai.run.models import (
     RunResult,
     RunStatus,
 )
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
+from linktools.ai.run.persistence.run import FilesystemRunStore
 
 
 def _record(
@@ -58,7 +58,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
+    from linktools.ai.run.persistence.sqlalchemy.run import SqlAlchemyRunStore
 
     counter = {"n": 0}
     engines = []

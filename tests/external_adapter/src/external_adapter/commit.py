@@ -31,6 +31,8 @@ from linktools.ai.run.commit import (
     CompletedRunCommit,
     PauseRunCommand,
     PausedRunCommit,
+    StartRunCommand,
+    StartedRunCommit,
 )
 from linktools.ai.run.lifecycle import mark_completed
 from linktools.ai.run.models import NewRunCheckpoint, RunStatus
@@ -59,6 +61,11 @@ class InMemoryRunCommitCoordinator:
         self._sessions = session_store
         self._events = event_store
         self._lock = asyncio.Lock()
+        # Idempotency: commit_ids that have been fully applied. A retried
+        # commit (same commit_id) is a no-op replay rather than a duplicate
+        # write -- mirrors the Filesystem reference's journal-completion
+        # check, without the disk-backed journal.
+        self._completed_commits: "set[str]" = set()
 
     @classmethod
     def from_storage(cls, storage: Any) -> "InMemoryRunCommitCoordinator":
@@ -73,6 +80,29 @@ class InMemoryRunCommitCoordinator:
             session_store=storage.sessions,
             event_store=storage.events,
         )
+
+    async def start(self, command: StartRunCommand) -> StartedRunCommit:
+        """Create the RunRecord (already RUNNING) + append RunStarted.
+
+        Idempotent: a retried start finds the run already created and
+        returns it without re-creating. The in-memory coordinator has no
+        crash-recovery journal, so the idempotency key set is the only
+        replay guard."""
+        async with self._lock:
+            commit_id = command.commit_id or f"start:{command.record.id}"
+            if commit_id in self._completed_commits:
+                existing = await self._runs.get(command.record.id)
+                if existing is not None:
+                    return StartedRunCommit(record=existing)
+            created = await self._runs.create(command.record)
+            if command.event_context is not None and command.started_event is not None:
+                await append_event(
+                    self._events,
+                    context=command.event_context,
+                    payload=command.started_event,
+                )
+            self._completed_commits.add(commit_id)
+            return StartedRunCommit(record=created)
 
     async def pause(self, command: PauseRunCommand) -> PausedRunCommit:
         async with self._lock:

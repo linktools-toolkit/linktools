@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Storage package. ``Storage`` and ``FilesystemStorage`` are core (no optional deps);
-``SqlAlchemyStorage`` is loaded lazily on first access so ``import
-linktools.ai.storage`` succeeds without SQLAlchemy installed."""
+"""Storage kernel: the lowest layer of the storage stack. Holds only generic
+storage-kernel machinery -- object / cache / blob / coordination / backends --
+with NO dependency on any domain package (asset / artifact / run / jobs /
+runtime / capability). Domains depend on this kernel's narrow Protocols; the
+kernel never depends back.
 
-from .facade import FilesystemStorage, Storage
-from .features import StorageFeatures
+The runtime composition (``Storage`` + ``FilesystemStorage`` +
+``SqlAlchemyStorage`` + ``StorageFeatures`` + ``StorageUnitOfWork``) lives at
+``linktools.ai.runtime.persistence``. Importing ``linktools.ai.storage`` pulls
+only the storage kernel; it never pulls a domain package or a runtime
+composition."""
 
-__all__ = ["Storage", "StorageFeatures", "FilesystemStorage", "SqlAlchemyStorage"]
-
-
-def __getattr__(name: str):
-    if name == "SqlAlchemyStorage":
-        try:
-            from .sqlalchemy.facade import SqlAlchemyStorage
-        except ModuleNotFoundError as exc:
-            if exc.name and exc.name.split(".")[0] in {"sqlalchemy", "aiosqlite"}:
-                raise ImportError(
-                    "SqlAlchemyStorage requires optional dependencies. "
-                    "Install with: pip install 'linktools-ai[sqlite]' "
-                    "or pip install 'linktools-ai[sqlalchemy]'."
-                ) from exc
-            raise
-        return SqlAlchemyStorage
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__: "list[str]" = []

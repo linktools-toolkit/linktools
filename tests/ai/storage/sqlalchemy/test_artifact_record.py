@@ -24,7 +24,7 @@ from linktools.ai.artifact.models import (  # noqa: E402
     ArtifactRecord,
     ArtifactRef,
 )
-from linktools.ai.storage.sqlalchemy.artifact_record import (  # noqa: E402
+from linktools.ai.artifact.persistence.sqlalchemy import (  # noqa: E402
     SqlAlchemyArtifactRecordStore,
 )
 from linktools.ai.storage.sqlalchemy.models import Base  # noqa: E402

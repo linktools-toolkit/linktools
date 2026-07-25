@@ -9,20 +9,18 @@ import asyncio
 import pytest
 
 from linktools.ai.artifact import ArtifactIntegrityError, ArtifactStore, ANONYMOUS_PROVENANCE
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactProvenance
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
 
 def _store(tmp_path) -> ArtifactStore:
     return ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-        InProcessArtifactDigestCoordinator(),
+        InProcessKeyedCoordinator(),
     )
 
 
@@ -87,7 +85,7 @@ def test_blob_corruption_is_detected(tmp_path) -> None:
         # Corrupt the stored blob in place: overwrite the file at the sha256-keyd
         # path so its bytes no longer hash to the address. The Filesystem backend
         # keeps blobs at a sharded path under blobs_root.
-        path = store._blob._path(ArtifactDigest.parse(record.ref.sha256))
+        path = store._blob._path(record.ref.sha256)
         path.write_bytes(b"TAMPERED")
         with pytest.raises(ArtifactIntegrityError):
             await store.get(artifact_id=record.ref.id, tenant_id="t1")
@@ -106,7 +104,7 @@ def test_put_refuses_to_record_reference_to_corrupt_blob(tmp_path) -> None:
         record = await store.put(content=b"payload", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
         # Corrupt the stored blob in place (content no longer hashes to its
         # sha256-keyed path).
-        path = store._blob._path(ArtifactDigest.parse(record.ref.sha256))
+        path = store._blob._path(record.ref.sha256)
         path.write_bytes(b"TAMPERED")
         with pytest.raises(ArtifactIntegrityError):
             await store.put(content=b"payload", media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)

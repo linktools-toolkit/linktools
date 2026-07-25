@@ -35,8 +35,8 @@ def test_removed_public_and_compatibility_surfaces_stay_absent(tmp_path):
     import importlib.util
 
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     assert not hasattr(Runtime, "assemble")
     storage = FilesystemStorage(root=tmp_path)
@@ -87,7 +87,7 @@ def test_security_domain_imports():
 
 
 def test_storage_domain_imports():
-    from linktools.ai.storage import Storage
+    from linktools.ai.runtime.persistence import Storage
 
     assert Storage is not None
 
@@ -113,12 +113,15 @@ def test_tool_domain_imports():
 
 
 def test_storage_optional_dependency_is_lazy():
-    """Importing linktools.ai.storage must not require SQLAlchemy. The lazy
-    SqlAlchemyStorage accessor is exercised separately in the storage suite."""
-    import linktools.ai.storage as storage_pkg
+    """Importing linktools.ai.runtime.persistence must not require SQLAlchemy.
+    The lazy SqlAlchemyStorage accessor is exercised separately in the storage
+    suite. The storage kernel itself (linktools.ai.storage) has no Storage
+    composition at all post-Phase-7 -- it is the storage-kernel-only layer
+    (object / cache / blob / coordination / backends)."""
+    import linktools.ai.runtime.persistence as persistence_pkg
 
-    assert hasattr(storage_pkg, "Storage")
-    assert hasattr(storage_pkg, "FilesystemStorage")
+    assert hasattr(persistence_pkg, "Storage")
+    assert hasattr(persistence_pkg, "FilesystemStorage")
 
 
 def test_importing_root_does_not_pull_sqlalchemy():

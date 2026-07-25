@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
+from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
 from linktools.ai.storage.sqlalchemy.models import Base
 
 

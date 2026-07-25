@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from linktools.ai.run.models import NewRunCheckpoint
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
+from linktools.ai.run.persistence.checkpoint import FilesystemCheckpointStore
 
 
 def _new(run_id="run-1") -> NewRunCheckpoint:
@@ -36,7 +36,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
+    from linktools.ai.run.persistence.sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 
     counter = {"n": 0}
     engines = []

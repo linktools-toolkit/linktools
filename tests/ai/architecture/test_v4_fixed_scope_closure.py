@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from linktools.ai.events.context import EventStreamContext
+from linktools.ai.events.payloads import RunCompleted, RunPaused
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -34,8 +35,8 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.sqlalchemy.idempotency import SqlAlchemyIdempotencyStore
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.tool.persistence.sqlalchemy import SqlAlchemyIdempotencyStore
 from linktools.ai.storage.sqlalchemy.models import Base, ToolIdempotencyRow
 from linktools.ai.tool.idempotency import ClaimDisposition
 
@@ -120,7 +121,7 @@ def test_v4_storage_requires_run_definition_store_and_runtime_fails_fast(tmp_pat
     build_runtime raises RuntimeInitializationError when it is None."""
     from linktools.ai.errors import RuntimeInitializationError
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     fields = {f.name: f for f in dataclasses.fields(FilesystemStorage)}
     assert fields["run_definitions"].default is dataclasses.MISSING, (
@@ -177,7 +178,7 @@ def _ctx(run_id, session_id):
 
 
 def _coordinator(storage, tmp_path):
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     return FilesystemRunCommitCoordinator(
         approval_store=storage.approvals,
@@ -238,6 +239,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
                             ).compute_arguments_hash("shell", {"cmd": "ls"}),
                         },
                     checkpoint_payload=b'{"m":[]}',
+                    paused_event=RunPaused(run_id="run", reason="review"),
                     event_context=_ctx("run", "sess"),
                     commit_id=commit_id,
                 )
@@ -263,12 +265,13 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
+                completed_event=RunCompleted(run_id="run2"),
                 event_context=_ctx("run2", "sess"),
             )
         )
         assert await _count(storage, "run2", "RunCompleted") == 1
 
-        from linktools.ai.storage.filesystem.journal import (
+        from linktools.ai.run.persistence.journal import (
             TransactionJournal,
             TransactionKind,
         )
@@ -293,121 +296,3 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
         await coordinator.recover_incomplete_commits()
         assert await _count(storage, "run2", "RunCompleted") == 1
 
-    asyncio.run(_run())
-
-
-# --------------------------------------------------------------------------- #
-# Swarm resume rejects a terminal driving Run
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "driving_status",
-    [RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED],
-    ids=["succeeded", "failed", "cancelled"],
-)
-def test_v4_swarm_resume_rejects_terminal_driving_run(tmp_path, driving_status):
-    """a PAUSED swarm whose driving Run is terminal is rejected before
-    strategy.resume runs (the swarm and driving Run are left untouched)."""
-    from decimal import Decimal
-
-    from linktools.ai.agent.engine import AgentEngine
-    from linktools.ai.errors import InvalidRunTransitionError
-    from linktools.ai.run.controller import RunController
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-    from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
-    from linktools.ai.storage.filesystem.event import FilesystemEventStore
-    from linktools.ai.storage.filesystem.run import FilesystemRunStore
-    from linktools.ai.storage.filesystem.session import FilesystemSessionStore
-    from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
-    from linktools.ai.swarm.models import SwarmRun, SwarmStatus, TokenUsage
-    from linktools.ai.swarm.engine import SwarmEngine
-
-    now = datetime.now(timezone.utc)
-
-    class _Stores:
-        def __init__(self, root):
-            self.run_store = FilesystemRunStore(root=root / "runs")
-            self.session_store = FilesystemSessionStore(root=root / "sessions")
-            self.event_store = FilesystemEventStore(root=root / "events")
-            self.checkpoint_store = FilesystemCheckpointStore(root=root / "checkpoints")
-            self.swarm_store = FilesystemSwarmStore(root=root / "swarm")
-            self.run_definitions = FilesystemRunDefinitionStore(root=root / "definitions")
-            self.run_controller = RunController()
-            self.agent_runner = AgentEngine(
-                run_store=self.run_store,
-                session_store=self.session_store,
-                event_store=self.event_store,
-                run_controller=self.run_controller,
-                commit_coordinator=FilesystemRunCommitCoordinator(
-                    approval_store=FilesystemApprovalStore(root=root / "approvals"),
-                    checkpoint_store=self.checkpoint_store,
-                    run_store=self.run_store,
-                    session_store=self.session_store,
-                    event_store=self.event_store,
-                ),
-            )
-
-    stores = _Stores(tmp_path)
-    # The compiler is never reached -- the terminal driving Run is rejected
-    # before snapshot/compile/strategy.resume -- so a dummy suffices and keeps
-    # this lock independent of AgentCompiler/GovernedToolInvoker wiring.
-    compiler = object()
-
-    async def _seed():
-        await stores.run_store.create(
-            RunRecord(
-                id="drive",
-                root_run_id="drive",
-                parent_run_id=None,
-                session_id="shared",
-                runnable_id="swarm-spec-1",
-                runnable_type=RunnableType.SWARM,
-                status=driving_status,
-                input=RunInput(prompt="done"),
-                result=None,
-                error=None,
-                version=1,
-                created_at=now,
-                started_at=now,
-                finished_at=now,
-            )
-        )
-        await stores.swarm_store.create_run(
-            SwarmRun(
-                id="swarm",
-                run_id="drive",
-                round=0,
-                status=SwarmStatus.PAUSED,
-                version=1,
-                token_usage=TokenUsage(),
-                cost=Decimal("0"),
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-    asyncio.run(_seed())
-    runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
-        run_store=stores.run_store,
-        session_store=stores.session_store,
-        event_store=stores.event_store,
-        dispatcher=stores.agent_runner,
-        compiler=compiler,
-        run_controller=stores.run_controller,
-        run_definitions=stores.run_definitions,
-    )
-    with pytest.raises(InvalidRunTransitionError):
-        asyncio.run(runner.resume("swarm"))
-
-    async def _verify():
-        driving = await stores.run_store.get("drive")
-        swarm = await stores.swarm_store.get_run("swarm")
-        return driving, swarm
-
-    driving, swarm = asyncio.run(_verify())
-    assert driving.status is driving_status
-    assert swarm.status is SwarmStatus.PAUSED

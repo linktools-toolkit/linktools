@@ -25,7 +25,6 @@ These tests assert the invariant both ways:
 """
 
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -34,6 +33,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.dependencies import AgentDependencies
 from linktools.ai.agent.engine import AgentEngine
+from linktools.ai.agent.models import AgentInput
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.capability.models import CapabilityBundle
@@ -44,13 +44,10 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.governance.policy.engine import PolicyEngine, ToolContext
+from linktools.ai.run.cancellation import CancellationToken
 from linktools.ai.run.context import RunContext as AiRunContext
-from linktools.ai.run.models import RunInput, RunnableType
-from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.run.live_events import NullRunLiveEventSink, NullSecurityEventSink
+from linktools.ai.run.models import RunnableType
 from linktools.ai.tool.models import (
     ManagedToolDefinition,
     ToolContribution,
@@ -154,42 +151,27 @@ def _ping_definition() -> ManagedToolDefinition:
     )
 
 
-async def _seed_session(store, session_id) -> None:
-    now = datetime.now(timezone.utc)
-    await store.create(
-        SessionRecord(
-            id=session_id,
-            parent_id=None,
-            status=SessionStatus.ACTIVE,
-            version=1,
-            created_at=now,
-            updated_at=now,
-        )
+async def _drive(runner, compiled, run_id):
+    """Run one execute_pure pass with a distinct run_id (Store-free)."""
+    await runner.execute_pure(
+        compiled,
+        AgentInput(prompt="ping"),
+        _ai_run_context(run_id, f"session-{run_id}"),
+        cancellation=CancellationToken(),
+        live_events=NullRunLiveEventSink(),
+        security_events=NullSecurityEventSink(),
     )
 
 
-def _make_runner(tmp_path, pipeline) -> AgentEngine:
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-
-    run_store = FilesystemRunStore(root=tmp_path / "runs")
-    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
-    event_store = FilesystemEventStore(root=tmp_path / "events")
-    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+def _make_runner(pipeline) -> AgentEngine:
+    # FS-29: AgentEngine takes only its pure-execution dependencies -- no
+    # run/session/event/checkpoint Store, no commit_coordinator. The per-Run
+    # ToolContext threading under test lives entirely in execute_pure's
+    # capability/tool path.
     return AgentEngine(
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
         middleware_pipeline=pipeline,
         capability_resolver=CapabilityResolver({"test": _PingProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        commit_coordinator=FilesystemRunCommitCoordinator(
-            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=checkpoint_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-        ),
     )
 
 
@@ -219,15 +201,10 @@ async def test_sequential_reuse_each_run_sees_own_tool_context(tmp_path):
     mw = _ContextCapturingMiddleware()
     pipeline = MiddlewarePipeline(middlewares=(mw,))
     compiled = await _compiled(pipeline)
-    runner = _make_runner(tmp_path, pipeline)
-    await _seed_session(runner._session_store, "session-seq")
+    runner = _make_runner(pipeline)
 
-    await runner.run(
-        compiled, RunInput(prompt="ping"), _ai_run_context("run-A", "session-seq")
-    )
-    await runner.run(
-        compiled, RunInput(prompt="ping"), _ai_run_context("run-B", "session-seq")
-    )
+    await _drive(runner, compiled, "run-A")
+    await _drive(runner, compiled, "run-B")
 
     assert mw.observed == ["run-A", "run-B"], (
         f"expected each run to observe its own run_id in order, got {mw.observed!r}"

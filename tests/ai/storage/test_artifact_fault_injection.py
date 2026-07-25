@@ -35,14 +35,12 @@ import pytest
 
 from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactIntegrityError
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.store import ArtifactStore
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
-from linktools.ai.storage.protocols import BlobInfo
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.storage.blob.protocols import BlobInfo
 
 
 def _aiter(chunks: "list[bytes]") -> AsyncIterator[bytes]:
@@ -88,7 +86,7 @@ def test_blob_put_if_absent_mid_stream_failure_publishes_no_partial_file(
     async def run() -> None:
         with pytest.raises(_Boom):
             await blob.put_if_absent(
-                digest=claimed_digest, source=_bad_source(), size=None
+                digest=claimed_digest.value, source=_bad_source(), size=None
             )
 
     _run(run())
@@ -104,7 +102,7 @@ def test_blob_put_if_absent_mid_stream_failure_publishes_no_partial_file(
         f"staging temp files left behind after mid-stream failure: {leftover_tmps}"
     )
     # A stat confirms the absent address through the public surface too.
-    assert _run(blob.stat(digest=claimed_digest)) is None
+    assert _run(blob.stat(digest=claimed_digest.value)) is None
 
 
 # --- record write failure: orphan candidate ----------------------------------
@@ -145,7 +143,7 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = _FailingRecordStore(exc=_RecordWriteError("record store down"))
-    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
+    store = ArtifactStore(blob, records, InProcessKeyedCoordinator())
     payload = b"orphan-candidate-payload"
 
     async def run() -> None:
@@ -160,7 +158,7 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
     assert records.put_calls == 1, "record-store.put was not invoked exactly once"
     # The blob IS present on disk (the write succeeded before the record call).
     digest = _digest(payload)
-    blob_info = _run(blob.stat(digest=digest))
+    blob_info = _run(blob.stat(digest=digest.value))
     assert blob_info is not None and blob_info.size == len(payload), (
         "blob should be present (the orphan the sweeper reclaims)"
     )
@@ -168,15 +166,15 @@ def test_put_stream_blob_succeeds_record_failure_reports_no_success_and_leaves_o
     # sweeper sees it as unreferenced and (past the grace window) reaps it.
     from datetime import datetime, timedelta, timezone
 
-    from linktools.ai.storage.orphan import sweep_orphan_blobs
+    from linktools.ai.artifact.orphan import sweep_orphan_blobs
 
     fs_records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
     future = datetime.now(timezone.utc) + timedelta(hours=25)
-    stats = _run(sweep_orphan_blobs(blob, fs_records, InProcessArtifactDigestCoordinator(), now=future))
+    stats = _run(sweep_orphan_blobs(blob, fs_records, InProcessKeyedCoordinator(), now=future))
     assert stats.deleted == 1, (
         f"orphan sweeper did not reap the orphaned blob: {stats}"
     )
-    assert _run(blob.stat(digest=digest)) is None, "blob survived the sweep"
+    assert _run(blob.stat(digest=digest.value)) is None, "blob survived the sweep"
 
 
 # --- ArtifactStore.open_stream: consumer error does not leak the file handle --
@@ -199,7 +197,7 @@ def test_open_stream_consumer_error_does_not_leak_file_handle(tmp_path: Path) ->
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
+    store = ArtifactStore(blob, records, InProcessKeyedCoordinator())
     payload = b"streamed-payload-for-fd-leak"
 
     class _ConsumerError(Exception):
@@ -247,11 +245,11 @@ def test_blob_open_async_ctx_manager_releases_handle_on_enter_failure(
 
     async def run() -> None:
         await blob.put_if_absent(
-            digest=digest, source=_aiter([payload]), size=len(payload)
+            digest=digest.value, source=_aiter([payload]), size=len(payload)
         )
         fds_before = _count_open_fds()
         with pytest.raises(RuntimeError, match="body-error"):
-            async with blob.open(digest=digest) as _chunks:
+            async with blob.open(digest=digest.value) as _chunks:
                 raise RuntimeError("body-error")
         fds_after = _count_open_fds()
         if fds_before >= 0 and fds_after >= 0:
@@ -261,7 +259,7 @@ def test_blob_open_async_ctx_manager_releases_handle_on_enter_failure(
             )
         # The blob is still readable through a FRESH open (the previous handle
         # was released, the file was not locked / corrupted).
-        async with blob.open(digest=digest) as chunks:
+        async with blob.open(digest=digest.value) as chunks:
             collected = []
             async for c in chunks:
                 collected.append(c)
@@ -284,11 +282,11 @@ def test_blob_open_async_ctx_manager_releases_handle_on_iteration_error(
 
     async def run() -> None:
         await blob.put_if_absent(
-            digest=digest, source=_aiter([payload]), size=len(payload)
+            digest=digest.value, source=_aiter([payload]), size=len(payload)
         )
 
         async def _consume_with_mid_error() -> None:
-            async with blob.open(digest=digest) as chunks:
+            async with blob.open(digest=digest.value) as chunks:
                 async for _ in chunks:
                     raise RuntimeError("iteration-error")
                     yield  # pragma: no cover - unreachable, marks it a generator
@@ -356,7 +354,7 @@ def test_put_stream_staging_disk_failure_propagates_and_publishes_nothing(
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
+    store = ArtifactStore(blob, records, InProcessKeyedCoordinator())
     payload = b"never-staged-successfully"
 
     async def run() -> None:
@@ -374,7 +372,7 @@ def test_put_stream_staging_disk_failure_propagates_and_publishes_nothing(
     _run(run())
 
     # No blob was published.
-    assert _run(blob.stat(digest=_digest(payload))) is None
+    assert _run(blob.stat(digest=_digest(payload).value)) is None
     # No record was written.
     files_after = _recursive_tmp_count(tmp_path / "records")
     assert files_after == 0, f"records written despite staging failure: {files_after}"
@@ -412,7 +410,7 @@ def test_blob_put_if_absent_publish_dir_unwritable_propagates_and_cleans(
         async def run() -> None:
             with pytest.raises(OSError):
                 await blob.put_if_absent(
-                    digest=digest, source=_aiter([b"payload"]), size=7
+                    digest=digest.value, source=_aiter([b"payload"]), size=7
                 )
 
         _run(run())
@@ -499,7 +497,7 @@ def test_stale_fencing_token_commit_is_rejected_after_higher_token_observed(
     )
     from linktools.ai.jobs.protocols import TaskSuccess
     from linktools.ai.jobs.store import TaskClaimLostError
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     class _Clock:
         def __init__(self) -> None:

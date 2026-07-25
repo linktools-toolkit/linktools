@@ -25,9 +25,7 @@ class TestArtifactBlobStoreConformance(ArtifactBlobStoreContract):
         self._tmp_path = tmp_path
 
     def blob_store(self):
-        from linktools.ai.storage.filesystem.artifact import (
-            FilesystemArtifactBlobStore,
-        )
+        from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
         return FilesystemArtifactBlobStore(
             blobs_root=self._tmp_path / "blobs"
@@ -44,9 +42,7 @@ class TestArtifactRecordStoreConformance(ArtifactRecordStoreContract):
         self._tmp_path = tmp_path
 
     def record_store(self):
-        from linktools.ai.storage.filesystem.artifact import (
-            FilesystemArtifactRecordStore,
-        )
+        from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
         return FilesystemArtifactRecordStore(
             records_root=self._tmp_path / "records"

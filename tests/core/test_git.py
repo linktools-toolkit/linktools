@@ -370,7 +370,7 @@ class TestGit(unittest.TestCase):
         self.assertEqual(calls, [1])
 
     def test_checkout_or_create_acquires_the_lock_exactly_once(self):
-        """Verifies WP2-02's fix directly: checkout_or_create's create
+        """Verifies the fix directly: checkout_or_create's create
         branch must not nest two process_lock() acquisitions (which would
         deadlock a real file-based lock) -- it must acquire the lock
         exactly once for the whole operation."""

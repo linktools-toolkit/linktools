@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from linktools.ai.storage.sqlalchemy.idempotency import SqlAlchemyIdempotencyStore
+from linktools.ai.tool.persistence.sqlalchemy import SqlAlchemyIdempotencyStore
 from linktools.ai.storage.sqlalchemy.models import Base, ToolIdempotencyRow
 from linktools.ai.tool.idempotency import ClaimDisposition
 

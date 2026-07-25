@@ -27,7 +27,7 @@ from linktools.ai.errors import (
     ApprovalNotFoundError,
     InvalidApprovalTransitionError,
 )
-from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
+    from linktools.ai.agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
 
     counter = {"n": 0}
     engines = []

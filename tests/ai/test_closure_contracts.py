@@ -22,7 +22,7 @@ from linktools.ai.tool.managed import ManagedToolAdapter
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.retry import DefaultRetryPolicy
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 
 # --- contract: tools-only ToolContribution partial/full filtering ---
@@ -130,7 +130,7 @@ def test_retry_policy_permanent_error_not_retried():
 @pytest.mark.asyncio
 async def test_inspect_returns_immutable_capability_inspection(tmp_path):
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
     from linktools.ai.capability.models import CapabilityInspection
 
     storage = FilesystemStorage(root=tmp_path)
@@ -189,7 +189,7 @@ async def test_managed_builtin_policy_engine_runs_once_per_call(tmp_path):
     from linktools.ai.governance.policy.engine import PolicyEngine
     from linktools.ai.governance.policy.rule import PolicyDecision, PolicyDecisionKind
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
     from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.tool.executor import GovernedToolInvoker
@@ -300,7 +300,7 @@ async def test_idempotent_tool_runs_and_persists_through_runtime(tmp_path):
     )
     from linktools.ai.runtime import RuntimeDependencies
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
     from linktools.ai.sandbox.local import LocalSandbox
     from linktools.ai.capability.models import CapabilityRuntimeOptions
     from linktools.ai.capability.exposure import CapabilityToolExposurePolicy

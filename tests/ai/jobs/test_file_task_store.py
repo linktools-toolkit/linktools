@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.storage.filesystem.job import FilesystemJobStore
+from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -448,7 +448,7 @@ def test_recovery_converges_job_left_running_after_commit_crash(
 
 def test_recovery_fails_task_when_attempts_exhausted(task_store: FilesystemJobStore) -> None:
     # A task whose attempt_count has reached max_attempts is FAILED on lease
-    # recovery, not reset to READY (section 21.3 / 20.1 -- no infinite retry).
+    # recovery, not reset to READY (no infinite retry).
     clock = task_store._clock
 
     async def run() -> None:
@@ -627,7 +627,7 @@ def test_missing_dependency_does_not_crash(task_store: FilesystemJobStore) -> No
 def test_commit_success_rejects_too_many_commands(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Wired command-count limit (section 17.5): an outcome carrying more than
+    """Wired command-count limit: an outcome carrying more than
     MAX_COMMANDS commands is rejected before any write."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
     from linktools.ai.jobs.validation import MAX_COMMANDS
@@ -653,7 +653,7 @@ def test_commit_success_rejects_too_many_commands(
 def test_commit_success_rejects_oversized_output_artifact(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Wired output-payload limit (section 17.5): an output artifact larger than
+    """Wired output-payload limit: an output artifact larger than
     the ceiling is rejected at commit."""
     from linktools.ai.artifact.models import ArtifactRef
     from linktools.ai.jobs.protocols import TaskSuccess
@@ -683,7 +683,7 @@ def test_commit_success_rejects_oversized_output_artifact(
 def test_submit_signal_rejects_oversized_metadata(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Wired signal-metadata limit (section 17.5): inline signal JSON above the
+    """Wired signal-metadata limit: inline signal JSON above the
     metadata ceiling is rejected before the signal is persisted."""
     from linktools.ai.jobs.models import TaskSignalRecord
 
@@ -1063,7 +1063,7 @@ def test_recover_expired_reconciles_unconsumed_signal_to_waiting_task(
 def test_create_task_rejects_duplicate_key_within_job(
     task_store: FilesystemJobStore,
 ) -> None:
-    """Per-task key uniqueness within a job (section 13.3, the UNIQUE(job_id,key)
+    """Per-task key uniqueness within a job (the UNIQUE(job_id,key)
     invariant): a second child created with an already-used key is rejected
     rather than silently overwriting or stranding the parent."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess

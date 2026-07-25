@@ -1,29 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Spec section 12.9 architecture guard: ``AgentEngine`` (the agent package's
-model-loop driver) must not import the run-lifecycle Stores -- ``RunStore``,
-``CheckpointStore``, ``EventStore`` -- nor ``ApprovalStore``. Per section 12.2
-those Stores' lifecycle APIs are owned solely by ``RunCoordinator``; the engine
-owns only Prompt / Model loop / Tool calls / Outcome / Cancellation propagation.
+"""Architecture guard: ``AgentEngine`` (the agent package's Store-free model/tool
+loop) must not import ANY run-lifecycle Store -- ``RunStore``, ``SessionStore``,
+``EventStore``, ``CheckpointStore``, ``ApprovalStore`` -- nor the
+``commit_coordinator`` / ``run_controller``. All Run-lifecycle (RunRecord
+create/transition, checkpoint/session/approval persistence, pause/cancel/stream
+events, the cross-store commit) is RunCoordinator's sole job; the engine owns
+only the prompt-build -> model/tool drive -> outcome path (FS-29).
 
-Each forbidden symbol is its own parametrized case with ``xfail(strict=True)``:
-the WP9 step-3 deeper-form extraction (collapsing ``execute()`` to a Store-free
-``AgentExecutionOutcome`` return and crossing terminal-commit ownership into
-``RunCoordinator``) is the remaining multi-session core, so most symbols still
-XFAIL. ``strict`` makes each case a ratchet: the MOMENT a symbol's import is
-removed, that case XPASSES and fails the suite, forcing its owner to drop the
-``xfail`` mark so the rule becomes a hard, enforced boundary for that symbol.
-Two symbols are already closed -- ``CheckpointStore`` (the engine's
-``checkpoint_store`` constructor param was dead: checkpoints are written solely
-by ``commit_coordinator``, so it has been removed) and ``ApprovalStore``
-(approval writes are owned by ``commit_coordinator`` / ``ApprovalService``, so
-the engine never imported it). Both are enforced as hard boundaries.
-
-``SessionStore`` is deliberately NOT in the forbidden set -- section 12.2's
-forbidden list is RunStore / CheckpointStore / ApprovalStore / "EventStore
-lifecycle API" only, and reading session history for prompt building is part of
-the engine's Prompt responsibility. ``CompleteRunCommand`` / ``PauseRunCommand``
-(command value objects, not Stores) are also permitted."""
+Each forbidden symbol is its own parametrized case, enforced as a hard
+boundary (no xfail). Matching on the imported NAME means a forbidden Store
+cannot slip in under an alias. Prior-turn history reaches the engine via
+``AgentInput.message_history`` (loaded by RunCoordinator), so ``SessionStore``
+is forbidden too -- the engine never reads session persistence itself."""
 
 from __future__ import annotations
 
@@ -42,9 +31,15 @@ _AGENT_ENGINE = (
     / "engine.py"
 )
 
-# The Store symbols section 12.2 forbids AgentEngine from depending on. Match
-# on the imported NAME so a forbidden Store cannot slip in under an alias.
-_FORBIDDEN_STORE_SYMBOLS = ("RunStore", "CheckpointStore", "EventStore", "ApprovalStore")
+# The Store symbols AgentEngine must not depend on. Match on the imported NAME
+# so a forbidden Store cannot slip in under an alias.
+_FORBIDDEN_STORE_SYMBOLS = (
+    "RunStore",
+    "SessionStore",
+    "EventStore",
+    "CheckpointStore",
+    "ApprovalStore",
+)
 
 
 def _imported_names(file_path: Path) -> "set[str]":
@@ -62,34 +57,38 @@ def _imported_names(file_path: Path) -> "set[str]":
     return names
 
 
-@pytest.mark.parametrize(
-    "symbol",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="WP9 §12.2: AgentEngine still imports run-lifecycle Stores",
-            ),
-        )
-        for name in ("RunStore", "EventStore")
-    ],
-)
+@pytest.mark.parametrize("symbol", _FORBIDDEN_STORE_SYMBOLS)
 def test_agent_engine_does_not_import_lifecycle_store(symbol: str) -> None:
+    """FS-29: AgentEngine must not import any run-lifecycle Store. Hard
+    boundary -- a regression that re-imports one fails this test outright."""
     imported = _imported_names(_AGENT_ENGINE)
     assert symbol not in imported, (
         f"agent/engine.py imports forbidden lifecycle Store symbol: {symbol}"
     )
 
 
-@pytest.mark.parametrize("symbol", ["CheckpointStore", "ApprovalStore"])
-def test_agent_engine_does_not_import_closed_store(symbol: str) -> None:
-    """Symbols already closed: ``CheckpointStore`` (the engine's dead
-    ``checkpoint_store`` param was removed -- checkpoints are written solely by
-    ``commit_coordinator``) and ``ApprovalStore`` (approval writes are owned by
-    ``commit_coordinator`` / ``ApprovalService``, never imported by the engine).
-    These are hard, enforced boundaries -- not xfailed."""
-    imported = _imported_names(_AGENT_ENGINE)
-    assert symbol not in imported, (
-        f"agent/engine.py imports forbidden lifecycle Store symbol: {symbol}"
+def test_agent_engine_signature_rejects_lifecycle_params() -> None:
+    """FS-29: AgentEngine.__init__ must not accept any run-lifecycle Store,
+    commit_coordinator, or run_controller parameter. Guards against a regression
+    that re-adds one of the removed constructor knobs (the engine's only inputs
+    are pure-execution deps: middleware/memory/retriever/sandbox/capability/
+    security/metrics/pricing)."""
+    import inspect
+
+    from linktools.ai.agent.engine import AgentEngine
+
+    params = inspect.signature(AgentEngine.__init__).parameters
+    forbidden = {
+        "run_store",
+        "session_store",
+        "event_store",
+        "checkpoint_store",
+        "approval_store",
+        "commit_coordinator",
+        "run_controller",
+    }
+    present = forbidden & set(params)
+    assert not present, (
+        f"AgentEngine.__init__ must not accept run-lifecycle params, "
+        f"got {sorted(present)}"
     )

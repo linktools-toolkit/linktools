@@ -14,8 +14,8 @@ import asyncio
 import pytest
 
 from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 
 def _runtime(tmp_path) -> Runtime:

@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
+from linktools.ai.events.payloads import RunCompleted
 from linktools.ai.run.commit import CompleteRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -30,8 +31,8 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.journal import TransactionJournal, TransactionKind
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.journal import TransactionJournal, TransactionKind
 
 
 def _record(run_id, session_id, status, version, result=None):
@@ -70,7 +71,7 @@ def _ctx(run_id, session_id):
 
 
 def _coordinator(storage, tmp_path):
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     return FilesystemRunCommitCoordinator(
         approval_store=storage.approvals,
@@ -123,6 +124,7 @@ def test_normal_complete_publishes_session_messages(tmp_path):
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="answer"),
+                completed_event=RunCompleted(run_id="run-h"),
                 event_context=_ctx("run-h", "sess-h"),
             )
         )
@@ -268,6 +270,7 @@ def test_complete_event_failure_retains_journal_then_retry_writes_once(tmp_path)
         ),
         checkpoint_payload=b'{"m":[]}',
         result=RunResult(output="answer"),
+        completed_event=RunCompleted(run_id="run-e"),
         event_context=_ctx("run-e", "sess-e"),
     )
 

@@ -57,14 +57,17 @@ _SRC_ROOT = _PKG_ROOT / "src" / "external_adapter"
 # Modules that are NOT part of the public wheel surface: the private runtime
 # kernel and the in-repo reference backends. An adapter importing any of these
 # would only resolve against the source tree, defeating the wheel-only proof.
-# names all three reference backends (Filesystem / SQLite / SQLAlchemy)
-# plus the coordination impl as forbidden adapter imports.
+# The storage-kernel coordination PROTOCOLS + the process-local reference
+# IMPLEMENTATIONS (KeyedCoordinator / LeaseCoordinator / LeaseToken /
+# InProcessKeyedCoordinator / ProcessLocalLeaseCoordinator) ARE public -- an
+# external adapter either IMPLEMENTS the Protocols or REUSES the in-repo
+# process-local reference. ``storage.coordination`` is part of the
+# storage-kernel terminal directory and ships on the wheel.
 _FORBIDDEN_PREFIXES = (
     "linktools.ai._",  # private kernel + underscore modules
     "linktools.ai.storage.filesystem",
     "linktools.ai.storage.sqlite",
     "linktools.ai.storage.sqlalchemy",
-    "linktools.ai.storage.coordination",
 )
 
 

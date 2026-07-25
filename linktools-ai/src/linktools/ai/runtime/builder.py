@@ -29,17 +29,17 @@ from .dependencies import RuntimeDependencies
 from .dispatcher import LateBoundRunDispatcher
 from ..run.commit import RunCommitCoordinator
 from ..run.controller import RunController
-from ..run.events_bus import RunEventBus
 from ..run.options import RuntimeCancellationOptions
 from ..run.requirements import (
     RuntimeRequirements,
     RuntimeTopology,
     derive_runtime_requirements,
+    merge_runtime_requirements,
 )
 from ..run.schema_registry import OutputSchemaRegistry
 from ..observability.metrics import InMemoryMetrics
 from ..skill.provider import SkillProvider
-from ..storage.facade import Storage
+from .persistence.facade import Storage
 from ..subagent.provider import SubagentProvider
 from ..swarm.engine import SwarmEngine
 from ..tool.executor import GovernedToolInvoker
@@ -104,6 +104,7 @@ class RuntimeComponents:
     sandbox: "Sandbox | None"
     mcp_connection_pool: "MCPConnectionPool | None"
     commit_coordinator: Any = None
+    run_coordinator: Any = None
     settings: RuntimeSettings = dataclasses.field(default_factory=RuntimeSettings)
     schema_registry: OutputSchemaRegistry = dataclasses.field(default_factory=OutputSchemaRegistry)
     metrics: Any = dataclasses.field(default_factory=InMemoryMetrics)
@@ -257,33 +258,37 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         raise RuntimeInitializationError(
             "RunDefinitionStore is required for resumable runs"
         )
-    # Pure-capability gate: derive the effective requirements from the
-    # caller's explicit declaration OR the declared topology (single-process
-    # -> no minimums; multi-worker -> distributed coordination + leasing +
-    # fencing), then refuse a Storage whose StorageFeatures fall below them.
-    # The gate runs unconditionally -- topology-derived defaults and
-    # caller-supplied explicit minimums hit the same enforcement path.
+    # Pure-capability gate: ALWAYS derive the topology baseline first
+    # (single-process -> no minimums; multi-worker -> distributed coordination +
+    # leasing + fencing), then MERGE any explicit requirements on top so the
+    # effective requirements meet-or-exceed BOTH -- an explicit declaration can
+    # only STRENGTHEN what the topology demands, never replace/weaken it (the old
+    # replace semantics let ``MULTI_WORKER + RuntimeRequirements()`` bypass the
+    # distributed-coordination/leasing/fencing the topology requires). The gate
+    # then refuses a Storage whose StorageFeatures fall below the merged result.
     from ..errors import StorageRequirementsNotMetError
     from ..run.requirements import (
         enforce_storage_capability_gate,
         enforce_storage_feature_consistency,
     )
 
-    effective_requirements = (
+    baseline = derive_runtime_requirements(
+        settings=config.settings,
+        # The gate reads dependencies.storage / .run_commit_coordinator for
+        # real-object checks; populate them from the composition root so the
+        # effective dependencies carry the wired objects, not the
+        # spec-providers-only bundle the caller may have passed.
+        dependencies=dataclasses.replace(
+            config.providers,
+            storage=config.storage,
+            run_commit_coordinator=config.commit_coordinator,
+        ),
+    )
+    effective_requirements = merge_runtime_requirements(
+        baseline,
         config.requirements
         if config.requirements is not None
-        else derive_runtime_requirements(
-            settings=config.settings,
-            # The gate reads dependencies.storage / .run_commit_coordinator for
-            # real-object checks; populate them from the composition root so the
-            # effective dependencies carry the wired objects, not the
-            # spec-providers-only bundle the caller may have passed.
-            dependencies=dataclasses.replace(
-                config.providers,
-                storage=config.storage,
-                run_commit_coordinator=config.commit_coordinator,
-            ),
-        )
+        else RuntimeRequirements(),
     )
     build_metrics = config.metrics
     try:
@@ -381,14 +386,14 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     mcp_manager = None
     if bundle.mcp_servers is not None:
         mcp_manager = config.mcp_connection_pool or MCPConnectionPool()
+    # The LateBoundRunDispatcher is always created so BOTH SubagentExecutor and
+    # SwarmEngine resolve child-run dispatch to the same CoordinatorRunDispatcher
+    # (bound after RunCoordinator is constructed below). It is no longer bound
+    # to the AgentEngine -- AgentEngine is a pure execution loop with no
+    # dispatch/run lifecycle entry of its own.
+    dispatcher_handle = LateBoundRunDispatcher()
     sub_executor = None
-    dispatcher_handle = None
     if bundle.entrypoints is not None or bundle.subagents is not None:
-        # The executor owns the subagent domain flow; the build kernel only
-        # constructs it. ``runner`` (the real dispatcher) is bound below, after
-        # it exists -- the runner depends on the capability resolver, which
-        # depends on this executor.
-        dispatcher_handle = LateBoundRunDispatcher()
         sub_executor = SubagentExecutor(
             storage=config.storage,
             compiler=compiler,
@@ -407,13 +412,9 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
     )
 
     runner = AgentEngine(
-        run_store=config.storage.runs,
-        session_store=config.storage.sessions,
-        event_store=config.storage.events,
         middleware_pipeline=config.middleware_pipeline,
         memory_store=config.storage.memories,
         retriever=config.retriever,
-        run_controller=run_controller,
         sandbox=config.sandbox,
         capability_options=resolved_options,
         capability_resolver=resolver,
@@ -424,20 +425,11 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         security_audit_failure_mode=getattr(
             baseline, "audit_failure_mode", "fail_closed"
         ),
-        commit_coordinator=config.commit_coordinator,
-        event_bus=RunEventBus(),
     )
-    if dispatcher_handle is not None:
-        dispatcher_handle.bind(runner)
     swarm_engine = SwarmEngine(
         swarm_store=config.storage.swarms,
-        run_store=config.storage.runs,
-        session_store=config.storage.sessions,
-        event_store=config.storage.events,
         compiler=compiler,
-        dispatcher=runner,
-        run_controller=run_controller,
-        run_definitions=config.storage.run_definitions,
+        dispatcher=dispatcher_handle,
     )
 
     if config.authorization is None:
@@ -446,6 +438,38 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         authorization = ScopeAuthorization() if config.settings.local_trusted_mode else DenyAllAuthorization()
     else:
         authorization = config.authorization
+
+    # RunCoordinator (sole Run-lifecycle owner) with explicit deps, built after
+    # agent_engine + swarm_engine so it can wrap both. CoordinatorRunDispatcher
+    # then resolves the LateBoundRunDispatcher so Swarm/Subagent child-run
+    # dispatch goes through the Coordinator (not AgentEngine).
+    from ..clock import SystemClock
+    from ..run.coordinator import RunCoordinator
+    from ..run.live_events import RunLiveEventHub
+    from ..run.preparation import RunPreparationCoordinator
+    from ..session.reader import SessionReader
+    from .dispatcher import CoordinatorRunDispatcher
+
+    schema_registry = config.schema_registry or OutputSchemaRegistry()
+    metrics = config.metrics or InMemoryMetrics()
+    run_coordinator = RunCoordinator(
+        storage=config.storage,
+        compiler=compiler,
+        agent_engine=runner,
+        swarm_engine=swarm_engine,
+        commit_coordinator=config.commit_coordinator,
+        run_controller=run_controller,
+        live_event_hub=RunLiveEventHub(),
+        session_reader=SessionReader(config.storage.sessions),
+        preparation=RunPreparationCoordinator(config.storage.run_definitions),
+        clock=SystemClock(),
+        authorization=authorization,
+        settings=config.settings,
+        schema_registry=schema_registry,
+        metrics=metrics,
+        model_resolver=model_resolver,
+    )
+    dispatcher_handle.bind(CoordinatorRunDispatcher(run_coordinator))
 
     return RuntimeComponents(
         storage=config.storage,
@@ -460,9 +484,10 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         tool_executor=resolved_executor,
         sandbox=config.sandbox,
         mcp_connection_pool=mcp_manager,
-        commit_coordinator=runner._commit_coordinator,
+        commit_coordinator=config.commit_coordinator,
+        run_coordinator=run_coordinator,
         settings=config.settings,
-        schema_registry=config.schema_registry or OutputSchemaRegistry(),
-        metrics=config.metrics or InMemoryMetrics(),
+        schema_registry=schema_registry,
+        metrics=metrics,
         authorization=authorization,
     )

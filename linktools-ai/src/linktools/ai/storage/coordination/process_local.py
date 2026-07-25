@@ -24,10 +24,14 @@ reclaimed -- even though the stale holder still believes it owns the lock.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import AsyncIterator
 
 from ...errors import StorageConcurrencyNotSupportedError
-from ..protocols import LeaseToken
+from ..features import CoordinationScope
+from .protocols import LeaseToken
 
 
 def _utcnow() -> datetime:
@@ -112,4 +116,67 @@ class ProcessLocalLeaseCoordinator:
                 self._holders.pop(token.key, None)
 
 
-__all__: "list[str]" = ["ProcessLocalLeaseCoordinator"]
+@dataclass
+class _LockEntry:
+    """One in-process key lock plus a reference count of every coroutine
+    currently relying on it -- the holder AND each waiter. The entry is reaped
+    when the count returns to zero and the lock is free, so the registry cannot
+    grow without bound over the lifetime of a long-running process."""
+
+    lock: asyncio.Lock
+    references: int = 0
+
+
+class InProcessKeyedCoordinator:
+    """Process-local per-key mutex: one ``asyncio.Lock`` per key, refcounted.
+    Declares PROCESS_LOCAL scope only -- it coordinates within a single
+    process, so a multi-worker deployment MUST inject a distributed
+    coordinator instead. The generic KeyedCoordinator used by in-repo
+    Memory/Filesystem/SqlAlchemy storage and by tests -- the artifact domain
+    uses a digest as the key, a downstream Capability store uses a capability
+    path.
+
+    The registry is bounded: every ``hold`` registers (references +1, counting
+    the holder and each waiter), and every exit path -- normal release, holder
+    cancellation, waiter cancellation -- decrements. An entry whose count
+    reaches zero and whose lock is free is deleted, so a process that churns
+    through many unique keys does not accumulate stale entries."""
+
+    scope = CoordinationScope.PROCESS_LOCAL
+
+    def __init__(self) -> None:
+        self._entries: "dict[str, _LockEntry]" = {}
+        self._registry_lock = asyncio.Lock()
+
+    @property
+    def active_entry_count(self) -> int:
+        """Read-only count of currently-registered key entries (held or
+        awaited). Returns to zero when no coroutine is relying on any lock."""
+        return len(self._entries)
+
+    @asynccontextmanager
+    async def hold(self, key: str) -> "AsyncIterator[None]":
+        async with self._registry_lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _LockEntry(lock=asyncio.Lock())
+                self._entries[key] = entry
+            # references counts this coroutine (the about-to-be holder/waiter);
+            # every exit path below decrements it.
+            entry.references += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            # Reached on normal release AND on cancellation (holder or waiter):
+            # the per-key lock is released by ``async with`` on the way out,
+            # and the registry reference this coroutine held is returned. When
+            # no coroutine references the entry and the lock is free, the entry
+            # is reaped so the registry stays bounded.
+            async with self._registry_lock:
+                entry.references -= 1
+                if entry.references <= 0 and not entry.lock.locked():
+                    self._entries.pop(key, None)
+
+
+__all__: "list[str]" = ["InProcessKeyedCoordinator", "ProcessLocalLeaseCoordinator"]

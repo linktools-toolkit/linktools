@@ -24,7 +24,7 @@ from linktools.ai.errors import (
     SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
-from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
+from linktools.ai.swarm.persistence.filesystem import FilesystemSwarmStore
 from linktools.ai.swarm.models import (
     SwarmRun,
     SwarmStatus,
@@ -116,7 +116,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+    from linktools.ai.swarm.persistence.sqlalchemy import SqlAlchemySwarmStore
 
     counter = {"n": 0}
     engines = []

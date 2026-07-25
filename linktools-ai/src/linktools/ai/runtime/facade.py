@@ -41,11 +41,10 @@ from ..model.resolver import ModelResolver
 from ..mcp.client import MCPConnectionPool
 from ..observability.metrics import ObservabilityMetrics
 from ..run.commit import RunCommitCoordinator
-from ..run.coordinator import RunCoordinator
 from ..run.options import RuntimeCancellationOptions
 from ..run.requirements import RuntimeRequirements, RuntimeTopology
 from ..run.schema_registry import OutputSchemaRegistry
-from ..storage.facade import Storage
+from .persistence.facade import Storage
 from ..swarm.spec import SwarmSpec
 from ..tool.executor import GovernedToolInvoker
 
@@ -63,7 +62,7 @@ class Runtime:
         components: RuntimeComponents,
     ) -> None:
         self._components = components
-        self._coordinator = RunCoordinator(components)
+        self._coordinator = components.run_coordinator
 
     async def inspect(self, spec: AgentSpec) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
@@ -229,9 +228,12 @@ def build_runtime(
     coordinator.
 
     ``topology`` (default SINGLE_PROCESS) declares the shape of the
-    process graph; the build kernel uses it to derive default capability
-    minimums when ``requirements`` is not supplied. ``requirements``, when
-    passed, takes precedence.
+    process graph; the build kernel ALWAYS derives the topology's default
+    capability minimums first, then MERGES any explicit ``requirements`` on
+    top so the effective requirements meet-or-exceed BOTH -- an explicit
+    declaration can only strengthen what the topology demands, never replace
+    or weaken it (so ``MULTI_WORKER + RuntimeRequirements()`` can no longer
+    bypass the distributed-coordination/leasing/fencing the topology requires).
 
     ``local_trusted_mode`` (default False): when False, cancel /
     resume reject a missing ``principal`` (production-safe); when True the

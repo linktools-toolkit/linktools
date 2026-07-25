@@ -12,7 +12,7 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.session.persistence.filesystem import FilesystemSessionStore
 
 
 def _record(session_id="session-1") -> SessionRecord:
@@ -46,7 +46,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.session import SqlAlchemySessionStore
+    from linktools.ai.session.persistence.sqlalchemy import SqlAlchemySessionStore
 
     counter = {"n": 0}
     engines = []

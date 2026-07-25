@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """DirectEvalExecutor tests: reads the case input artifact, runs the target via
 Runtime, and wraps the result (or a target error) in an EvalExecution."""
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 import asyncio
 from types import SimpleNamespace
 
 from linktools.ai.artifact import ArtifactStore
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.evaluation.executors import DirectEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
 
 def _artifacts(tmp_path) -> ArtifactStore:
     return ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-        InProcessArtifactDigestCoordinator(),
+        InProcessKeyedCoordinator(),
     )
 
 

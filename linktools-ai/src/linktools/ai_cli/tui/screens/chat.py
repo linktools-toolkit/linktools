@@ -115,7 +115,7 @@ class ChatScreen(Screen):
             phase = escape(str(event.get("phase", "")))
             log.write(f"[dim]\\[tool: {name} {phase}{ok}][/dim]")
         elif kind == "failed":
-            # The Outcome model (spec 12.3) reports run failure as a stream
+            # The Outcome model reports run failure as a stream
             # event rather than a raised exception -- render it the same way
             # ``on_run_failed_message`` renders a genuinely raised error.
             error_type = escape(str(event.get("error_type", "")))

@@ -33,69 +33,7 @@ class PrincipalAccessDeniedError(SecurityError):
 
 
 class AssetError(LinktoolsAIError):
-    """Base class for AssetStore-related errors."""
-
-
-class AssetNotFoundError(AssetError):
-    pass
-
-
-class AssetConflictError(AssetError):
-    pass
-
-
-class AssetPreconditionFailedError(AssetError):
-    pass
-
-
-class AssetReadOnlyError(AssetError):
-    pass
-
-
-class AssetUnsupportedError(AssetError):
-    pass
-
-
-class AssetMoveNotSupportedError(AssetError):
-    """A move was requested for a source that lives only in an overlay backend.
-    Atomic move is defined only for primary-resident sources; copying across
-    backends plus a whiteout is not an atomic move and is refused rather than
-    faked as one."""
-
-
-class InvalidAssetPathError(AssetError):
-    pass
-
-
-class AssetRootMutationError(AssetError):
-    """The namespace root (``AssetPath("/")``) was targeted by an operation
-    that loads or mutates content (get/put/delete/move). The root is a
-    synthetic directory, not a persistable Asset -- only list/stat/revision
-    accept it."""
-
-
-class InvalidAssetCursorError(AssetError):
-    """A multi-backend Asset list page token failed to decode: malformed
-    structure, an unsupported version, a tampered/mismatched HMAC tag, or a
-    decoded size over the byte cap. Raised fail-closed rather than silently
-    falling back to a fresh listing."""
-
-
-class StaleAssetCursorError(AssetError):
-    """A decoded Asset list cursor no longer matches the live backend set --
-    a backend's revision changed, or the backend id/count differs from what
-    the cursor was minted against. The listing is not silently resumed
-    against a possibly-inconsistent backend state."""
-
-
-class AssetPathHashCollisionError(AssetError):
-    """Two DIFFERENT values (an AssetPath, or an idempotency key) hashed to
-    the same digest on one of the SqlAlchemy asset backend's hash-based
-    unique indexes (``AssetRow.path_hash`` / `AssetIdempotencyRow.key_hash`).
-    The full path/key is always the actual identity; the unique constraint is
-    on the hash only because the full value cannot safely be a MySQL index
-    key. Raised fail-closed rather than letting one value silently shadow the
-    other."""
+    """Base class for skill-asset-related errors."""
 
 
 class SkillAssetAccessError(AssetError):
@@ -180,6 +118,30 @@ class StorageLeaseNotSupportedError(StorageCapabilityError):
     """leasing is False but a caller (e.g. swarm claim) requested a lease."""
 
 
+class StorageCoordinationNotSupportedError(StorageCapabilityError):
+    """Raised when a KeyedCoordinator that cannot provide the required
+    coordination scope is constructed (e.g. a filesystem flock coordinator on
+    a non-POSIX platform), or when a deployment that needs a distributed
+    coordinator did not inject one. Fail-closed: never silently degrade to a
+    lockless fallback."""
+
+
+class StorageBlobError(StorageError):
+    """Base for BlobStore-level errors. Generic and domain-agnostic -- the
+    BlobStore Protocol has no artifact-domain type, so it raises these rather
+    than an artifact-specific error; a domain facade (e.g. ArtifactStore)
+    translates at its own boundary into its own error types."""
+
+
+class StorageBlobNotFoundError(StorageBlobError):
+    """Raised when a requested blob does not exist at the given digest."""
+
+
+class StorageBlobIntegrityError(StorageBlobError):
+    """Raised when a blob's actual bytes do not match the digest it was
+    stored or requested under (missing, truncated, or tampered)."""
+
+
 class IdempotencyConflictError(LinktoolsAIError):
     """Same idempotency key reused with a different request hash."""
 
@@ -233,6 +195,13 @@ class RunInvariantError(RunError):
     """A run completed without the authoritative state the runtime contract
     requires (e.g. no terminal RunResult after a non-pausing execute). Raised
     instead of fabricating an empty success result that would mask the bug."""
+
+
+class RunLiveStreamAlreadyOpenError(RunError):
+    """Raised by RunLiveEventHub.open when a live stream handle for the same
+    run_id is already active. A run has at most one live consumer at a time;
+    a second concurrent open would silently split the event fan-out between
+    two handles, so this is refused rather than allowed to race."""
 
 
 class RunPaused(RunError):

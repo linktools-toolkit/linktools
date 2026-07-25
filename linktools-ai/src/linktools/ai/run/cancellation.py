@@ -5,7 +5,7 @@
 Cancellation must reach the actual execution points (model
 call, tool call, swarm iteration), not just flip the database status. The
 token is the propagation channel -- Runtime.cancel sets it via RunController,
-and AgentEngine.execute() checks it at the documented await points via
+and AgentEngine.execute_pure checks it at the documented await points via
 ``await token.raise_if_cancelled()``.
 
 The token is asyncio-safe (built on ``asyncio.Event``) but NOT thread-safe:
@@ -20,13 +20,13 @@ import asyncio
 class CancellationToken:
     """Cooperative cancellation signal. Checked at execution points.
 
-    A token is created per Run by AgentEngine.execute() and registered with
-    RunController. The token has two states -- not-set (run is in flight) and
-    set (cancel requested). The runner awaits ``raise_if_cancelled()`` before
-    and after the model call; RunController.cancel() calls ``cancel()`` which
-    flips the state, so the next ``raise_if_cancelled()`` raises
-    ``asyncio.CancelledError`` and the lifecycle's outer handler lands the run
-    in CANCELLED via CANCELLING.
+    A token is created per Run by RunCoordinator._claim_and_fence and
+    registered with RunController; execute_pure receives it as a parameter and
+    awaits ``raise_if_cancelled()`` before and after the model call. The token
+    has two states -- not-set (run is in flight) and set (cancel requested).
+    RunController.cancel() calls ``cancel()`` which flips the state, so the
+    next ``raise_if_cancelled()`` raises ``asyncio.CancelledError`` and the
+    lifecycle's outer handler lands the run in CANCELLED via CANCELLING.
 
     Deliberately tiny: the complexity lives in *where* to check the token, not
     in the token itself. Keep this class minimal so the cancellation contract

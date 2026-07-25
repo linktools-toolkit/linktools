@@ -20,8 +20,8 @@ from linktools.ai.run.models import (
     RunRecord,
     RunStatus,
 )
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.rebuild import (
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.rebuild import (
     rebuild_dev_storage,
     rebuild_filesystem_storage,
     rebuild_sqlite_storage,
@@ -86,7 +86,7 @@ def test_sqlite_rebuild_wipes_and_reconstructs(tmp_path):
     pytest.importorskip("aiosqlite")
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
 
     db_path = tmp_path / "dev.db"
 

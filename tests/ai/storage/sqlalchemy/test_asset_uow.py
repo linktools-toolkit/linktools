@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset is part of the SQLAlchemy Unit of Work.
-The session-bound SqlAlchemyAssetBackend reuses the UoW's AsyncSession, so an
+"""Assets are part of the SQLAlchemy Unit of Work.
+The session-bound SqlAlchemyObjectBackend reuses the UoW's AsyncSession, so an
 asset mutation commits or rolls back with every other store in the unit. These
 tests prove the shared-transaction semantics: atomic commit, atomic rollback,
 CAS-conflict rollback, revision/idempotency rollback, UoW write-then-read
@@ -12,10 +12,10 @@ import asyncio
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.asset.path import AssetPath
-from linktools.ai.asset.models import WriteOptions
-from linktools.ai.storage import SqlAlchemyStorage
+from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
+from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
 
 
 def _storage(tmp_path):
@@ -24,6 +24,7 @@ def _storage(tmp_path):
     async def _create():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ObjectBase.metadata.create_all)
         await engine.dispose()
 
     asyncio.run(_create())
@@ -40,7 +41,7 @@ def _run(coro):
 
 def test_asset_write_commits_with_the_uow(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/a.md")
+    path = StorageKey("/agents/a.md")
 
     async def _scenario():
         async with storage.transaction() as tx:
@@ -55,7 +56,7 @@ def test_asset_write_commits_with_the_uow(tmp_path):
 
 def test_asset_write_rolls_back_when_the_uow_aborts(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/rollback.md")
+    path = StorageKey("/agents/rollback.md")
 
     async def _scenario():
         with pytest.raises(RuntimeError):
@@ -71,7 +72,7 @@ def test_asset_write_rolls_back_when_the_uow_aborts(tmp_path):
 
 def test_asset_cas_conflict_rolls_back_the_uow(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/cas.md")
+    path = StorageKey("/agents/cas.md")
 
     async def _seed():
         await storage.assets.put(path, b"v1", options=WriteOptions())
@@ -96,7 +97,7 @@ def test_asset_cas_conflict_rolls_back_the_uow(tmp_path):
 
 def test_asset_revision_rolls_back_with_the_uow(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/rev.md")
+    path = StorageKey("/agents/rev.md")
 
     async def _seed():
         await storage.assets.put(path, b"first", options=WriteOptions())
@@ -118,7 +119,7 @@ def test_asset_revision_rolls_back_with_the_uow(tmp_path):
 
 def test_asset_idempotency_rolls_back_with_the_uow(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/idem.md")
+    path = StorageKey("/agents/idem.md")
 
     async def _scenario():
         with pytest.raises(RuntimeError):
@@ -151,7 +152,7 @@ def test_asset_idempotency_rolls_back_with_the_uow(tmp_path):
 
 def test_uow_write_is_invisible_outside_before_commit(tmp_path):
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/hidden.md")
+    path = StorageKey("/agents/hidden.md")
 
     async def _txn():
         async with storage.transaction() as tx:
@@ -168,8 +169,8 @@ def test_uow_write_is_invisible_outside_before_commit(tmp_path):
 
 def test_move_in_one_session_bumps_revision_once(tmp_path):
     storage = _storage(tmp_path)
-    src = AssetPath("/agents/src.md")
-    dst = AssetPath("/agents/dst.md")
+    src = StorageKey("/agents/src.md")
+    dst = StorageKey("/agents/dst.md")
 
     async def _seed():
         await storage.assets.put(src, b"payload", options=WriteOptions())
@@ -192,8 +193,8 @@ def test_move_with_idempotency_key_replays_without_double_execution(tmp_path):
     # section: a replay with the same key returns the cached result and does
     # NOT execute the move twice (revision bumps once for the pair).
     storage = _storage(tmp_path)
-    src = AssetPath("/agents/src.md")
-    dst = AssetPath("/agents/dst.md")
+    src = StorageKey("/agents/src.md")
+    dst = StorageKey("/agents/dst.md")
 
     async def _seed():
         await storage.assets.put(src, b"payload", options=WriteOptions())
@@ -213,8 +214,8 @@ def test_move_with_idempotency_key_replays_without_double_execution(tmp_path):
 
     first, second = _run(_move_pair())
     after = int(_run(storage.assets._primary.revision()))
-    assert first.info.path == dst
-    assert second.info.path == dst
+    assert first.info.key == dst
+    assert second.info.key == dst
     # One move executed (one revision bump) despite two calls.
     assert after - before == 1
 
@@ -233,7 +234,7 @@ def test_asset_run_session_commit_together(tmp_path):
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/x.md")
+    path = StorageKey("/agents/x.md")
     now = datetime.now(timezone.utc)
 
     async def _scenario():
@@ -275,7 +276,7 @@ def test_asset_run_session_rollback_together(tmp_path):
     from linktools.ai.session.models import SessionRecord, SessionStatus
 
     storage = _storage(tmp_path)
-    path = AssetPath("/agents/rollback.md")
+    path = StorageKey("/agents/rollback.md")
     now = datetime.now(timezone.utc)
 
     async def _scenario():

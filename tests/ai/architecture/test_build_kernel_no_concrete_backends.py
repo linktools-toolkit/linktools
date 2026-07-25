@@ -160,7 +160,7 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
         build_runtime_components,
     )
     from linktools.ai.runtime.dependencies import RuntimeDependencies
-    from linktools.ai.storage.filesystem.commit import (
+    from linktools.ai.run.persistence.commit import (
         FilesystemRunCommitCoordinator,
     )
 
@@ -233,7 +233,7 @@ def test_missing_commit_coordinator_fails_fast(tmp_path):
     )
     from linktools.ai.runtime.dependencies import RuntimeDependencies
     from linktools.ai.errors import RuntimeInitializationError
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
     storage = FilesystemStorage(root=tmp_path)
     config = RuntimeBuildConfig(

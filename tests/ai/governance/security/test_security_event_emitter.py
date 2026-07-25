@@ -13,7 +13,7 @@ from linktools.ai.governance.security.emitter import (
     DefaultSecurityEventSanitizer,
     EventStoreSecurityEventEmitter,
 )
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.events.persistence.filesystem import FilesystemEventStore
 
 
 def _oversized_mapping() -> "Mapping[str, Any]":

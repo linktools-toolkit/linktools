@@ -4,12 +4,10 @@
 backends so a regression in either the Contracts or the backends is caught
 here, not in a downstream adapter's CI.
 
-This module wires the four Contracts added for audit closure C5
-(AssetStoreContract, EventStoreContract, JobStoreContract,
+This module wires the three Contracts added for audit closure C5
+(EventStoreContract, JobStoreContract,
 StorageTransactionManagerContract) against the in-repo reference backends:
 
-* AssetStoreContract -> FilesystemStorage.assets (FileAssetBackend under an
-  AssetStore primary+overlay composition).
 * EventStoreContract -> FilesystemStorage.events (FilesystemEventStore).
 * JobStoreContract -> FilesystemStorage.jobs (FilesystemJobStore).
 * StorageTransactionManagerContract -> BOTH SqlAlchemyStorage._transaction_manager
@@ -27,7 +25,6 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.testing import (
-    AssetStoreContract,
     ArtifactBlobStoreContract,
     ArtifactRecordStoreContract,
     EventStoreContract,
@@ -38,16 +35,15 @@ from linktools.ai.testing import (
 )
 
 
-def test_public_testkit_exports_all_eight_contracts() -> None:
-    """The testkit surface must expose all eight Contracts so a downstream
+def test_public_testkit_exports_all_seven_contracts() -> None:
+    """The testkit surface must expose all seven Contracts so a downstream
     adapter can subclass each one and run the contract suite in its own CI.
-    The eighth, StorageFeaturesContract, pins feature self-consistency: a
+    The seventh, StorageFeaturesContract, pins feature self-consistency: a
     Storage's declared StorageFeatures must match what its stores actually
     support (transactions=DATABASE yields a real UoW; NONE raises)."""
     import linktools.ai.testing as testing
 
     expected = {
-        "AssetStoreContract",
         "ArtifactBlobStoreContract",
         "ArtifactRecordStoreContract",
         "EventStoreContract",
@@ -60,28 +56,13 @@ def test_public_testkit_exports_all_eight_contracts() -> None:
     assert set(testing.__all__) == expected
 
 
-class TestAssetStoreConformance(AssetStoreContract):
-    """AssetStoreContract against FilesystemStorage.assets -- the in-repo
-    reference FileAssetBackend under the primary+overlay AssetStore
-    composition."""
-
-    @pytest.fixture(autouse=True)
-    def _build_storage(self, tmp_path) -> None:
-        from linktools.ai.storage.facade import FilesystemStorage
-
-        self._storage = FilesystemStorage(root=tmp_path)
-
-    def asset_store(self):
-        return self._storage.assets
-
-
 class TestEventStoreConformance(EventStoreContract):
     """EventStoreContract against FilesystemStorage.events -- the in-repo
     reference FilesystemEventStore."""
 
     @pytest.fixture(autouse=True)
     def _build_storage(self, tmp_path) -> None:
-        from linktools.ai.storage.facade import FilesystemStorage
+        from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
         self._storage = FilesystemStorage(root=tmp_path)
 
@@ -95,7 +76,7 @@ class TestJobStoreConformance(JobStoreContract):
 
     @pytest.fixture(autouse=True)
     def _build_storage(self, tmp_path) -> None:
-        from linktools.ai.storage.facade import FilesystemStorage
+        from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
         self._storage = FilesystemStorage(root=tmp_path)
 
@@ -108,19 +89,6 @@ class TestJobStoreConformance(JobStoreContract):
 # type: Memory + Filesystem + SqlAlchemy for assets; Filesystem + SqlAlchemy +
 # the external in-memory adapter for events and jobs. A backend that fails the
 # contract here is a backend regression, not a contract bug.
-
-class TestMemoryAssetStoreConformance(AssetStoreContract):
-    """AssetStoreContract against AssetStore(primary=MemoryAssetBackend()) --
-    the in-repo in-memory AssetBackend. Each factory call returns a fresh,
-    empty AssetStore so a test cannot observe state written by an earlier
-    one."""
-
-    def asset_store(self):
-        from linktools.ai.asset.memory import MemoryAssetBackend
-        from linktools.ai.asset.store import AssetStore
-
-        return AssetStore(primary=MemoryAssetBackend())
-
 
 class TestExternalEventStoreConformance(EventStoreContract):
     """EventStoreContract against the in-memory external adapter's
@@ -158,7 +126,7 @@ class TestNoCrossStoreTransactionsConformance(StorageTransactionManagerContract)
         return False
 
     def transaction_manager(self):
-        from linktools.ai.storage.transaction import NoCrossStoreTransactions
+        from linktools.ai.runtime.persistence.transaction import NoCrossStoreTransactions
 
         return NoCrossStoreTransactions(backend_name="TestBackend")
 
@@ -172,7 +140,7 @@ class TestFilesystemStorageFeaturesConformance(StorageFeaturesContract):
 
     @pytest.fixture(autouse=True)
     def _build_storage(self, tmp_path) -> None:
-        from linktools.ai.storage.facade import FilesystemStorage
+        from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
         self._storage = FilesystemStorage(root=tmp_path)
 
@@ -192,14 +160,16 @@ pytest.importorskip("aiosqlite")
 def _build_sqlalchemy_storage(tmp_path):
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from linktools.ai.storage import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence import SqlAlchemyStorage
     from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/contract.db")
 
     async def _create():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ObjectBase.metadata.create_all)
         await engine.dispose()
 
     asyncio.run(_create())
@@ -208,21 +178,6 @@ def _build_sqlalchemy_storage(tmp_path):
     return SqlAlchemyStorage(
         session_factory=session_factory, blobs_root=tmp_path / "blobs"
     )
-
-
-class TestSqlAlchemyAssetStoreConformance(AssetStoreContract):
-    """AssetStoreContract against SqlAlchemyStorage.assets -- the DB-backed
-    SqlAlchemyAssetBackend under the AssetStore primary composition. Shares
-    the same engine/session_factory pattern as the transaction contract so a
-    regression in the SQL asset path is caught here, not only in downstream
-    adapter CI."""
-
-    @pytest.fixture(autouse=True)
-    def _build_storage(self, tmp_path) -> None:
-        self._storage = _build_sqlalchemy_storage(tmp_path)
-
-    def asset_store(self):
-        return self._storage.assets
 
 
 class TestSqlAlchemyEventStoreConformance(EventStoreContract):

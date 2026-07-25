@@ -37,7 +37,6 @@ Filesystem reference's ``from ...jobs.store import (...)``. The typed errors
 are part of the public surface -- callers catch them by type (never by
 string), so an adapter that raised stdlib ``ValueError`` / ``KeyError`` would
 silently break the semantics callers depend on."""
-
 import asyncio
 import dataclasses
 import uuid
@@ -53,10 +52,10 @@ from linktools.ai.agent.approval import (
     build_approval_request,
     check_dedupe_conflict,
 )
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.store import ArtifactStore
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.backends.memory.object import MemoryObjectBackend
+from linktools.ai.storage.object.store import ObjectStore
 from linktools.ai.errors import (
     ApprovalConflictError,
     ApprovalNotFoundError,
@@ -142,9 +141,9 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage.facade import Storage
-from linktools.ai.storage.features import FILE_STORAGE_FEATURES
-from linktools.ai.storage.transaction import NoCrossStoreTransactions
+from linktools.ai.runtime.persistence.facade import Storage
+from linktools.ai.runtime.persistence.features import FILE_STORAGE_FEATURES
+from linktools.ai.runtime.persistence.transaction import NoCrossStoreTransactions
 from linktools.ai.swarm.models import (
     ALLOWED_SWARM_TRANSITIONS,
     AttemptStatus,
@@ -2556,7 +2555,7 @@ def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
     ``NoCrossStoreTransactions``. Coordination is the existing
     ``InMemoryLeaseCoordinator``; artifacts reuse the existing
     ``InMemoryArtifactBlobStore`` / ``InMemoryArtifactRecordStore``; assets
-    use the public ``AssetStore(primary=MemoryAssetBackend())`` composition;
+    use the public ``ObjectStore(primary=MemoryObjectBackend())`` composition;
     tasks uses the new ``InMemoryJobStore`` so a downstream wiring
     ``JobRuntime`` on
     this Storage gets a real JobStore (not None)."""
@@ -2576,8 +2575,8 @@ def build_in_memory_external_storage(*, root: Path) -> InMemoryExternalStorage:
     # state), so the in-process digest coordinator is the honest declaration --
     # matching FILE_STORAGE_FEATURES.artifact_coordination_scope=PROCESS_LOCAL
     # below.
-    artifacts = ArtifactStore(blob_store, record_store, InProcessArtifactDigestCoordinator())
-    assets = AssetStore(primary=MemoryAssetBackend())
+    artifacts = ArtifactStore(blob_store, record_store, InProcessKeyedCoordinator())
+    assets = ObjectStore(primary=MemoryObjectBackend())
     jobs = InMemoryJobStore()
     root_path = Path(root)
     root_path.mkdir(parents=True, exist_ok=True)

@@ -7,8 +7,8 @@ from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 _DEGRADE_KIND = "degrade"
 

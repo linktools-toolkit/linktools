@@ -33,11 +33,11 @@ _SUBPROCESS = textwrap.dedent(
     # 1-3: core imports must succeed without the optional deps.
     import linktools.ai              # noqa
     import linktools.ai.storage      # noqa
-    from linktools.ai.storage import Storage, FilesystemStorage  # noqa
+    from linktools.ai.runtime.persistence import Storage, FilesystemStorage  # noqa
 
     # 4: SqlAlchemyStorage access must raise ImportError carrying an install hint.
     try:
-        linktools.ai.storage.SqlAlchemyStorage
+        linktools.ai.runtime.persistence.SqlAlchemyStorage
         raise SystemExit("FAIL: no ImportError when accessing SqlAlchemyStorage")
     except ImportError as exc:
         msg = str(exc)

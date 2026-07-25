@@ -28,24 +28,37 @@ CANCELLED transitions for stale/cross-process records."""
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Mapping
 
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
 from ..agent.spec import AgentSpec
+from ..clock import Clock, SystemClock
 from ..errors import (
     InvalidRunTransitionError,
+    InvalidSwarmTransitionError,
+    MCPToolError,
+    ModelInvocationDeniedError,
+    ModelOutputValidationError,
+    ModelPolicyExceededError,
+    ModelResultDeniedError,
+    ModelRoutingError,
     RunNotFoundError,
+    SwarmConflictError,
     SwarmError,
     SwarmLimitExceededError,
     SwarmRunNotFoundError,
     SwarmResumeUnsupportedError,
+    SwarmStepConflictError,
+    SwarmStepNotFoundError,
+    ToolError,
+    ToolSchemaError,
 )
 
 from ..events.payloads import SwarmCompleted, SwarmStarted
 from ..events.context import EventStreamContext, append_event
+from ..run.live_events import NullSwarmEventSink, SwarmEventSink
 from ..events.store import EventStore
 from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
@@ -63,7 +76,17 @@ from ..run.models import (
 from ..run.store import RunStore
 from ..session.models import MessageRole, NewSessionMessage
 from ..session.store import SessionStore
-from .models import SwarmCheckpoint, SwarmRun, SwarmStatus, SwarmStepStatus, TokenUsage
+from .models import (
+    SwarmCheckpoint,
+    SwarmCompleted as SwarmCompletedOutcome,
+    SwarmExecutionOutcome,
+    SwarmFailed as SwarmFailedOutcome,
+    SwarmRun,
+    SwarmStatus,
+    SwarmStepStatus,
+    SwarmUsage,
+    TokenUsage,
+)
 
 if TYPE_CHECKING:
     from ..run.definition import RunDefinitionStore
@@ -78,20 +101,45 @@ from .strategy import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# A driving Run in any of these states must not be resumed -- the swarm already
-# reached a terminal outcome, so re-entering the strategy could re-drive worker
-# side effects. Non-terminal states (RUNNING for an in-flight recoverable
-# swarm) remain resumable. The driving Run is the SwarmRun's own RunRecord; a
-# swarm pause is tracked in SwarmRun.status, so the driving Run stays RUNNING
-# while paused and only leaves RUNNING when the swarm finishes.
-_DRIVING_TERMINAL_STATUSES = frozenset(
-    {
-        RunStatus.SUCCEEDED,
-        RunStatus.FAILED,
-        RunStatus.CANCELLED,
-    }
+# Exception types that count as EXPECTED swarm/strategy/model/tool failures
+# for execute()'s outcome classification. Only these are turned into a
+# SwarmFailed outcome; every other exception (configuration / invariant /
+# protocol violations such as RuntimeInitializationError, RunInvariantError,
+# CapabilityResolutionError, MCPConnectionError, and all unknown programming
+# errors like TypeError/AttributeError/KeyError) propagates unchanged -- the
+# spec explicitly forbids an except-Exception catch-all that swallows them
+# into a SwarmFailed outcome. This mirrors the agent path's allowlist.
+#
+# SwarmError is the base for the legitimate expected failures execute() raises
+# itself (a round timeout, a missing referenced agent), so it stays in the
+# allowlist -- but its conflict / invariant / not-found / unsupported subtypes
+# are NOT per-run failures (a version conflict on the SUCCEEDED transition
+# would otherwise mislabel a swarm that actually completed). They are carved
+# out and re-raised, mirroring how the agent path excludes RunConflictError /
+# RunInvariantError. ToolSchemaError subclasses ToolError but is a contract/
+# config violation, so it is likewise re-raised rather than swallowed.
+_EXPECTED_SWARM_FAILURES: "tuple[type[BaseException], ...]" = (
+    SwarmError,
+    ModelRoutingError,
+    ModelPolicyExceededError,
+    ModelOutputValidationError,
+    ModelInvocationDeniedError,
+    ModelResultDeniedError,
+    ToolError,
+    MCPToolError,
 )
 
+# SwarmError subtypes that are conflict / invariant / not-found / unsupported
+# violations rather than expected per-run failures -- propagate even though
+# their base (SwarmError) is in the allowlist above.
+_SWARM_INVARIANT_FAILURES: "tuple[type[BaseException], ...]" = (
+    SwarmConflictError,
+    InvalidSwarmTransitionError,
+    SwarmStepConflictError,
+    SwarmRunNotFoundError,
+    SwarmStepNotFoundError,
+    SwarmResumeUnsupportedError,
+)
 
 class SwarmEngine:
     """Orchestrates one Swarm invocation end-to-end. Construct once, call
@@ -113,147 +161,89 @@ class SwarmEngine:
         self,
         *,
         swarm_store: SwarmStore,
-        run_store: RunStore,
-        session_store: SessionStore,
-        event_store: EventStore,
         compiler: AgentCompiler,
         dispatcher: RunDispatcher,
-        run_controller: "RunController | None" = None,
-        run_definitions: "RunDefinitionStore",
+        clock: "Clock | None" = None,
     ) -> None:
-        if run_definitions is None:
-            # Defense in depth: build_runtime rejects this up front, but a
-            # hand-built SwarmEngine must also fail rather than silently
-            # skipping worker snapshots.
-            raise SwarmError("SwarmEngine requires a RunDefinitionStore")
         self._swarm_store = swarm_store
-        self._run_store = run_store
-        self._session_store = session_store
-        self._event_store = event_store
+        # Injected Clock so timestamp logic is deterministic under test
+        # (FakeClock) and uses the wall clock in production (the default).
+        self._clock = clock if clock is not None else SystemClock()
         self._compiler = compiler
         self._dispatcher = dispatcher
-        self._run_controller = run_controller
-        self._run_definitions = run_definitions
-        self._resume_locks: "dict[str, asyncio.Lock]" = {}
-        # Single owner of the swarm RunDefinitionSnapshot (the prior double-create
-        # with Runtime is gone -- Runtime delegates swarm snapshot creation here).
-        from ..run.preparation import RunPreparationCoordinator
-
-        self._prepare = RunPreparationCoordinator(run_definitions)
 
     # -- run() ----------------------------------------------------------------
-
-    async def run(
+    async def execute(
         self,
         spec: SwarmSpec,
         request: RunInput,
         context: RunContext,
         *,
         agents: "Mapping[str, AgentSpec]",
-    ) -> RunResult:
-        compiled_agents = await self._compile_members(spec, agents)
-        now = datetime.now(timezone.utc)
-        # Initialized to None so a failure during snapshot preparation does not
-        # leave the best-effort FAILED cleanup with unbound names.
-        driving_running = None
-        swarm_run = None
-        swarm_version = None
+        cancellation: "CancellationToken",
+        swarm_event_sink: "SwarmEventSink | None" = None,
+    ) -> "SwarmExecutionOutcome":
+        """The target swarm execution loop. Drives the strategy + manages
+        SwarmRun/SwarmStep domain state and returns a
+        SwarmExecutionOutcome -- it does NOT create/transition the driving
+        RunRecord, write the parent-session aggregate, or own the driving Run's
+        execution claim/heartbeat/fencing (RunCoordinator owns all of that,
+        mirroring the agent path). On an explicit cancellation the SwarmRun is
+        transitioned CANCELLED and CancelledError re-raises so the Coordinator
+        can converge the driving Run to CANCELLED.
 
-        # 0. Persist the immutable run-definition snapshot BEFORE any state is
-        # created. A non-serializable spec (e.g. strategy coordinator_fn) fails
-        # fast here -- no orphan Run/SwarmRun left in RUNNING.
-        await self._prepare.prepare_swarm_run(
-            spec=spec, members=agents, context=context
-        )
-
-        # 1. driving RunRecord (the Swarm itself is a row in RunStore).
-        record = RunRecord(
-            id=context.run_id,
-            root_run_id=context.root_run_id,
-            parent_run_id=context.parent_run_id,
-            session_id=context.session_id,
-            runnable_id=spec.id,
-            runnable_type=RunnableType.SWARM,
-            status=RunStatus.PENDING,
-            input=request,
-            result=None,
-            error=None,
-            version=1,
-            created_at=now,
-            started_at=None,
-            finished_at=None,
-        )
-        created = await self._run_store.create(record)
-        driving_running = await self._run_store.transition(
-            context.run_id, RunStatus.RUNNING, expected_version=created.version
-        )
-
-        # 2. SwarmRun.
-        swarm_run = SwarmRun(
-            id=str(uuid.uuid4()),
-            run_id=context.run_id,
-            round=0,
-            status=SwarmStatus.PENDING,
-            version=1,
-            token_usage=TokenUsage(),
-            cost=Decimal("0"),
-            created_at=now,
-            updated_at=now,
-        )
-        created_swarm = await self._swarm_store.create_run(swarm_run)
-        swarm_run = await self._swarm_store.update_run(
-            swarm_run.id,
-            expected_version=created_swarm.version,
-            status=SwarmStatus.RUNNING,
-        )
-        # version is now 2 after the PENDING -> RUNNING update.
-        swarm_version = swarm_run.version
-
-        # register the driving coroutine
-        # + a fresh CancellationToken with run_controller, mirroring
-        # AgentEngine.execute()'s own registration. Runtime.cancel(run_id) /
-        # SwarmEngine.cancel() can then call run_controller.cancel(run_id)
-        # to actually interrupt this coroutine (task.cancel()) instead of
-        # only flipping store status. None (default) preserves the old
-        # store-only behavior for callers that don't wire a controller.
-        token: "CancellationToken | None" = None
-        if self._run_controller is not None:
-            token = CancellationToken()
-            current_task = asyncio.current_task()
-            if current_task is not None:
-                await self._run_controller.register(context.run_id, current_task, token)
+        ``run()`` (the legacy full-lifecycle entry, kept on the fix branch)
+        remains the path tests/direct callers use until they migrate."""
+        now = self._clock.now()
+        swarm_run: "SwarmRun | None" = None
+        swarm_version: "int | None" = None
+        # The Coordinator owns the swarm event sink (durable, per-Run); direct
+        # callers pass None for a null audit trail. SwarmEngine never appends the
+        # EventStore itself.
+        sink = swarm_event_sink or NullSwarmEventSink()
 
         try:
-            if token is not None:
-                await token.raise_if_cancelled()
-            # 3. SwarmStarted event (store assigns the next sequence).
-            await append_event(
-                self._event_store,
-                EventStreamContext.from_run_context(context),
-                SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id),
+            await cancellation.raise_if_cancelled()
+            compiled_agents = await self._compile_members(spec, agents)
+
+            # 1. SwarmRun (the driving RunRecord + run-definition snapshot are the
+            # Coordinator's concern -- prepared before the start command).
+            swarm_run = SwarmRun(
+                id=str(uuid.uuid4()),
+                run_id=context.run_id,
+                round=0,
+                status=SwarmStatus.PENDING,
+                version=1,
+                token_usage=TokenUsage(),
+                cost=Decimal("0"),
+                created_at=now,
+                updated_at=now,
+            )
+            created_swarm = await self._swarm_store.create_run(swarm_run)
+            swarm_run = await self._swarm_store.update_run(
+                swarm_run.id,
+                expected_version=created_swarm.version,
+                status=SwarmStatus.RUNNING,
+            )
+            swarm_version = swarm_run.version
+
+            # 2. SwarmStarted event (swarm-domain; emitted via the
+            # Coordinator-owned sink, never SwarmEngine's own EventStore).
+            await sink.emit(
+                SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id)
             )
 
-            # 4. build the context the strategy consumes + delegate the round loop.
+            # 3. Build the context the strategy consumes + delegate the round loop.
             ctx = SwarmExecutionContext(
                 spec=spec,
                 swarm_run=swarm_run,
                 request=request,
                 parent_context=context,
                 dispatcher=self._dispatcher,
-                compiler=self._compiler,
                 agents=compiled_agents,
                 swarm_store=self._swarm_store,
-                run_store=self._run_store,
-                session_store=self._session_store,
-                event_store=self._event_store,
-                run_definitions=self._run_definitions,
             )
             strategy = build_strategy(spec.strategy)
-            # : SwarmLimits.timeout_seconds wraps the strategy
-            # round loop in asyncio.wait_for. On timeout the TimeoutError is
-            # translated to SwarmError("swarm timeout: ...") so the generic
-            # FAILED handler below records a descriptive message; timeout_seconds
-            # None means no timeout wrapper is needed.
             timeout = spec.limits.timeout_seconds
             try:
                 if timeout is not None:
@@ -263,13 +253,6 @@ class SwarmEngine:
             except asyncio.TimeoutError:
                 raise SwarmError(f"swarm timeout: exceeded timeout_seconds={timeout}")
 
-            # enforce SwarmLimits.max_total_tokens. aggregate() sums each
-            # worker RunResult.token_usage (populated by AgentEngine from the
-            # model's usage) into the aggregate result, so one comparison here
-            # covers every task. max_total_cost is declared on SwarmLimits but
-            # not enforced -- no cost-per-token rates are configured. The accumulated
-            # usage is also persisted onto the SwarmRun (bumping its version,
-            # which the trailing SUCCEEDED update_run picks up via swarm_version).
             limits = spec.limits
             acc_input = int(result.token_usage.get("input_tokens", 0))
             acc_output = int(result.token_usage.get("output_tokens", 0))
@@ -291,105 +274,76 @@ class SwarmEngine:
             )
             swarm_version = swarm_run.version
 
-            # re-check right before committing success -- a cancel
-            # that raced in while strategy.run() was wrapping up (and didn't
-            # happen to land on an in-flight await) must not still write a
-            # successful result.
-            if token is not None:
-                await token.raise_if_cancelled()
+            await cancellation.raise_if_cancelled()
 
-            # 5. write ONLY the final aggregate to the shared/parent Session.
-            if spec.context_policy.write_aggregate_to_session:
-                await self._write_aggregate(context, result)
-
-            # 6. transition driving Run + SwarmRun to SUCCEEDED.
-            await mark_completed(
-                self._run_store,
-                context.run_id,
-                expected_version=driving_running.version,
-                result=result,
-            )
+            # 4. Transition SwarmRun SUCCEEDED + SwarmCompleted event. The
+            # driving RunRecord + parent-session aggregate write are the
+            # Coordinator's job (it reads them off SwarmCompleted).
             await self._swarm_store.update_run(
                 swarm_run.id,
                 expected_version=swarm_version,
                 status=SwarmStatus.SUCCEEDED,
             )
-
-            # 7. SwarmCompleted event (store assigns the next sequence).
-            await append_event(
-                self._event_store,
-                EventStreamContext.from_run_context(context),
-                SwarmCompleted(swarm_run_id=swarm_run.id),
+            await sink.emit(SwarmCompleted(swarm_run_id=swarm_run.id))
+            aggregate_messages: "tuple[NewSessionMessage, ...]" = ()
+            if spec.context_policy.write_aggregate_to_session:
+                aggregate_messages = (
+                    NewSessionMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=str(result.output),
+                        run_id=context.run_id,
+                    ),
+                )
+            return SwarmCompletedOutcome(
+                result=result,
+                aggregate_messages=aggregate_messages,
+                usage=SwarmUsage(input_tokens=acc_input, output_tokens=acc_output),
             )
-            return result
         except asyncio.CancelledError:
-            # real
-            # cancel path -- CancelledError surfaces here either from
-            # task.cancel() interrupting an in-flight await inside
-            # strategy.run() (child agent call, store I/O, ...) or from one of
-            # the token.raise_if_cancelled() checks above. Mirrors
-            # AgentEngine.execute()'s own CancelledError handler exactly,
-            # including the race AgentEngine defends against: Runtime.cancel(
-            # run_id) may have ALREADY transitioned the driving Run to
-            # CANCELLING (via
-            # run_controller.cancel(), which is what triggered this
-            # CancelledError in the first place) before this handler runs. A
-            # naive "always transition RUNNING -> CANCELLING first" would then
-            # hit InvalidRunTransitionError (CANCELLING is not a valid SOURCE
-            # for a CANCELLING target) and never reach CANCELLED, leaving the
-            # run stuck in CANCELLING forever. _finalize_cancelled_run/
-            # _finalize_cancelled_swarm_run re-read current status and either
-            # (a) skip if already terminal, (b) go straight to CANCELLED if
-            # already CANCELLING, or (c) do the normal two-step transition.
-            try:
-                await self._finalize_cancelled_run(context.run_id)
-            except Exception as transition_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition driving run %s to CANCELLED: %s",
-                    context.run_id,
-                    transition_exc,
-                )
-            try:
-                await self._finalize_cancelled_swarm_run(swarm_run.id)
-            except Exception as swarm_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition swarm run %s to CANCELLED: %s",
-                    swarm_run.id,
-                    swarm_exc,
-                )
+            # Explicit cancellation: transition SwarmRun CANCELLED (swarm
+            # domain), then re-raise so the Coordinator cancels the driving Run.
+            if swarm_run is not None and swarm_version is not None:
+                try:
+                    await self._finalize_cancelled_swarm_run(swarm_run.id)
+                except Exception as swarm_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "failed to transition swarm run %s to CANCELLED: %s",
+                        swarm_run.id,
+                        swarm_exc,
+                    )
+            # Best-effort swarm-domain cancel event via the Coordinator-owned
+            # sink (the Coordinator separately persists run-domain RunCancelled
+            # via the acknowledge_cancel commit). Never masks the cancellation.
+            if swarm_run is not None:
+                try:
+                    from ..events.payloads import SwarmCancelled
+
+                    await sink.emit(SwarmCancelled(swarm_run_id=swarm_run.id))
+                except Exception as swarm_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "failed to emit SwarmCancelled event for swarm %s",
+                        swarm_run.id,
+                        swarm_exc,
+                    )
             raise
-        except Exception as exc:
-            # Best-effort cleanup: flip both records to FAILED, then re-raise.
-            # The driving Run's expected version is the post-RUNNING version
-            # captured in driving_running.version (no intermediate transition
-            # bumps it inside the try block above); the SwarmRun's is tracked in
-            # swarm_version.
-            #
-            # The FAILED transitions are kept
-            # best-effort ONLY because we are already in the failing path:
-            # letting either transition error escape would replace the ORIGINAL
-            # exc (the actual cause) with a store/version error, losing the
-            # cause for the caller. The warnings keep the transition failures
-            # visible rather than silent.
+        except _EXPECTED_SWARM_FAILURES as exc:
+            # Conflict / invariant / not-found swarm subtypes are NOT per-run
+            # failures (a version conflict on the SUCCEEDED transition would
+            # otherwise mislabel a swarm that actually completed) -- propagate
+            # them, mirroring the agent path's RunConflictError/RunInvariantError
+            # exclusion. A malformed tool schema (ToolSchemaError) is likewise a
+            # contract/config violation, not a per-run tool failure -- even
+            # though it subclasses ToolError, it must propagate instead of
+            # becoming a SwarmFailed outcome.
+            if isinstance(exc, _SWARM_INVARIANT_FAILURES) or isinstance(
+                exc, ToolSchemaError
+            ):
+                raise
             from ..governance.security.redact import redact_exception
 
             error_info = RunErrorInfo(
                 error_type=type(exc).__name__, message=redact_exception(exc)
             )
-            if driving_running is not None:
-                try:
-                    await mark_failed(
-                        self._run_store,
-                        context.run_id,
-                        expected_version=driving_running.version,
-                        error=error_info,
-                    )
-                except Exception as transition_exc:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "failed to transition driving run %s to FAILED: %s",
-                        context.run_id,
-                        transition_exc,
-                    )
             if swarm_run is not None and swarm_version is not None:
                 try:
                     await self._swarm_store.update_run(
@@ -403,518 +357,23 @@ class SwarmEngine:
                         swarm_run.id,
                         swarm_exc,
                     )
-            # Best-effort terminal SwarmFailed event  A failure here is
-            # an observability gap, not state corruption (the FAILED transition
-            # above is the authoritative signal).
             try:
                 from ..events.payloads import SwarmFailed
 
-                await append_event(
-                    self._event_store,
-                    EventStreamContext.from_run_context(context),
+                await sink.emit(
                     SwarmFailed(
-                        swarm_run_id=swarm_run.id,
+                        swarm_run_id=swarm_run.id if swarm_run else "",
                         error=f"{type(exc).__name__}: {redact_exception(exc)}",
-                    ),
+                    )
                 )
             except Exception:  # noqa: BLE001
                 _LOGGER.warning(
-                    "failed to append SwarmFailed event for swarm %s", swarm_run.id
+                    "failed to emit SwarmFailed event for swarm %s",
+                    swarm_run.id if swarm_run else "?",
                 )
-            raise
-        finally:
-            if self._run_controller is not None:
-                await self._run_controller.unregister(context.run_id)
+            return SwarmFailedOutcome(error=error_info)
 
     # -- resume() -------------------------------------------------------------
-
-    async def resume(
-        self,
-        swarm_run_id: str,
-    ) -> RunResult:
-        """Resume a paused swarm from its immutable persisted definition. Loads
-        the SwarmSpec + member agents from the RunDefinitionSnapshot so the
-        caller cannot inject a different spec or identity."""
-        swarm_run = await self._swarm_store.get_run(swarm_run_id)
-        if swarm_run is None:
-            raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
-        driving = await self._run_store.get(swarm_run.run_id)
-        if driving is None:
-            raise RunNotFoundError(f"driving run not found: {swarm_run.run_id}")
-
-        # Only explicit pause/recovery states have a checkpointed resume
-        # protocol. RUNNING is never treated as implicitly recoverable.
-        _TERMINAL = (
-            SwarmStatus.SUCCEEDED,
-            SwarmStatus.FAILED,
-            SwarmStatus.CANCELLED,
-        )
-        if swarm_run.status in _TERMINAL or swarm_run.status not in (
-            SwarmStatus.PAUSED,
-            SwarmStatus.RECOVERABLE,
-        ):
-            raise InvalidRunTransitionError(
-                f"cannot resume swarm run in terminal status {swarm_run.status}"
-            )
-        # The driving Run must also be non-terminal: a SUCCEEDED/FAILED/CANCELLED
-        # driving Run means the swarm already reached its outcome, so resuming
-        # would re-enter the strategy and could re-drive worker side effects.
-        # Checked BEFORE the snapshot/compile/strategy.resume so a terminal
-        # driving Run never reaches execution.
-        if driving.status in _DRIVING_TERMINAL_STATUSES:
-            raise InvalidRunTransitionError(
-                f"cannot resume swarm when driving run is in terminal status "
-                f"{driving.status}"
-            )
-        resume_lock = self._resume_locks.setdefault(swarm_run.id, asyncio.Lock())
-        if resume_lock.locked():
-            raise InvalidRunTransitionError(
-                f"swarm resume already claimed: {swarm_run.id}"
-            )
-        await resume_lock.acquire()
-
-        # Restore the immutable swarm definition (spec + member agents).
-        try:
-            snapshot = await self._run_definitions.get(swarm_run.run_id)
-            if snapshot is None:
-                raise SwarmRunNotFoundError(
-                    f"no run-definition snapshot for swarm run: {swarm_run_id}"
-                )
-            from ..run.definition import deserialize_agent_spec, deserialize_swarm_spec
-
-            spec_data = snapshot.serialized_spec
-            spec = deserialize_swarm_spec(spec_data["spec"])
-            agents = {
-                aid: deserialize_agent_spec(a)
-                for aid, a in spec_data.get("members", {}).items()
-            }
-
-            compiled_agents = await self._compile_members(spec, agents)
-        except Exception:
-            resume_lock.release()
-            raise
-        # Restore the ORIGINAL identity from the snapshot (user/tenant/workspace)
-        # + lineage from the driving record -- never caller-supplied.
-        parent_context = RunContext(
-            run_id=driving.id,
-            root_run_id=driving.root_run_id,
-            parent_run_id=driving.parent_run_id,
-            session_id=driving.session_id,
-            runnable_id=driving.runnable_id,
-            runnable_type=driving.runnable_type,
-            user_id=snapshot.user_id,
-            tenant_id=snapshot.tenant_id,
-            workspace=snapshot.workspace,
-        )
-        # Capture the versions we read so the SUCCEEDED/FAILED transitions below
-        # use the exact optimistic-concurrency token the store currently holds.
-        driving_version = driving.version
-        swarm_version = swarm_run.version
-        swarm_run = await self._swarm_store.update_run(
-            swarm_run.id,
-            expected_version=swarm_run.version,
-            status=SwarmStatus.RUNNING,
-        )
-        swarm_version = swarm_run.version
-
-        try:
-            ctx = SwarmExecutionContext(
-                spec=spec,
-                swarm_run=swarm_run,
-                request=driving.input,
-                parent_context=parent_context,
-                dispatcher=self._dispatcher,
-                compiler=self._compiler,
-                agents=compiled_agents,
-                swarm_store=self._swarm_store,
-                run_store=self._run_store,
-                session_store=self._session_store,
-                event_store=self._event_store,
-                run_definitions=self._run_definitions,
-            )
-            strategy = build_strategy(spec.strategy)
-            tasks = await self._swarm_store.list_tasks(swarm_run.id)
-            checkpoint = SwarmCheckpoint(
-                completed_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmStepStatus.SUCCEEDED
-                ),
-                failed_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmStepStatus.FAILED
-                ),
-                pending_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmStepStatus.PENDING
-                ),
-                active_task_ids=tuple(
-                    t.id for t in tasks if t.status is SwarmStepStatus.CLAIMED
-                ),
-                task_outputs={t.id: t.result for t in tasks if t.result is not None},
-            )
-            if not isinstance(strategy, ResumableSwarmStrategy):
-                raise SwarmResumeUnsupportedError(
-                    f"strategy {spec.strategy.kind!r} does not support resume"
-                )
-            result = await strategy.resume(ctx, checkpoint)
-
-            if spec.context_policy.write_aggregate_to_session:
-                await self._write_aggregate(parent_context, result)
-
-            # The driving Run is non-terminal here (terminal driving Runs were
-            # rejected before the snapshot was loaded), so it is always safe to
-            # mark it SUCCEEDED with the version captured at read time.
-            await mark_completed(
-                self._run_store,
-                parent_context.run_id,
-                expected_version=driving_version,
-                result=result,
-            )
-            await self._swarm_store.update_run(
-                swarm_run.id,
-                expected_version=swarm_version,
-                status=SwarmStatus.SUCCEEDED,
-            )
-
-            # SwarmCompleted event -- the store assigns the next sequence
-            # (events from the original run already occupy the low ones).
-            await append_event(
-                self._event_store,
-                EventStreamContext.from_run_context(parent_context),
-                SwarmCompleted(swarm_run_id=swarm_run.id),
-            )
-            return result
-        except Exception as exc:
-            from ..governance.security.redact import redact_exception
-
-            error_info = RunErrorInfo(
-                error_type=type(exc).__name__, message=redact_exception(exc)
-            )
-            # The driving Run is non-terminal here (terminal driving Runs were
-            # rejected before the snapshot was loaded), so transition it to
-            # FAILED. Kept best-effort ONLY because we are already in the
-            # failing path -- letting the transition error escape would replace
-            # the ORIGINAL exc with a store/version error. The warning keeps the
-            # failure visible rather than silent.
-            try:
-                await self._run_store.transition(
-                    parent_context.run_id,
-                    RunStatus.FAILED,
-                    expected_version=driving_version,
-                    error=error_info,
-                )
-            except Exception as transition_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition driving run %s to FAILED: %s",
-                    parent_context.run_id,
-                    transition_exc,
-                )
-            try:
-                await self._swarm_store.update_run(
-                    swarm_run.id,
-                    expected_version=swarm_version,
-                    status=SwarmStatus.FAILED,
-                )
-            except Exception as swarm_exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to transition swarm run %s to FAILED: %s",
-                    swarm_run.id,
-                    swarm_exc,
-                )
-            raise
-        finally:
-            resume_lock.release()
-
-    # -- cancel() -------------------------------------------------------------
-
-    async def cancel(self, swarm_run_id: str) -> None:
-        """Real cancel when a RunController is wired: transitions the SwarmRun
-        and driving Run to
-        CANCELLING and signals ``run_controller.cancel()`` for the driving
-        run and every active child run, so an in-flight asyncio.Task (the
-        swarm's own coroutine, or a child AgentEngine.execute()) actually
-        stops -- not just a store-level status flip. Falls back to the old
-        store-only CANCELLED transition when no controller is wired, or when
-        a given run/child has no live registration (e.g. a stale record from
-        a crashed worker, or cross-process where RunController cannot see
-        the other process's tasks).
-
-        Idempotent: a SwarmRun already in a terminal status is a no-op."""
-        current = await self._swarm_store.get_run(swarm_run_id)
-        if current is None:
-            raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
-        if current.status in (
-            SwarmStatus.SUCCEEDED,
-            SwarmStatus.FAILED,
-            SwarmStatus.CANCELLED,
-        ):
-            return  # already terminal -- no-op
-
-        driving_run_id = current.run_id
-        driving_in_flight = (
-            self._run_controller is not None
-            and self._run_controller.get_token(driving_run_id) is not None
-        )
-        if driving_in_flight:
-            # CANCELLING first: the driving run()'s own
-            # CancelledError handler finishes CANCELLING -> CANCELLED once it
-            # actually stops. Both the SwarmRun and the driving RunRecord go
-            # through this two-step transition.
-            driving_record = await self._run_store.get(driving_run_id)
-            if driving_record is not None and driving_record.status not in (
-                RunStatus.SUCCEEDED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-                RunStatus.CANCELLING,
-            ):
-                await self._run_store.transition(
-                    driving_run_id,
-                    RunStatus.CANCELLING,
-                    expected_version=driving_record.version,
-                )
-            await self._swarm_store.update_run(
-                swarm_run_id,
-                expected_version=current.version,
-                status=SwarmStatus.CANCELLING,
-            )
-            await self._run_controller.cancel(driving_run_id)
-        else:
-            # No in-flight task (or no controller wired) -- nothing to
-            # actually stop, so go straight to CANCELLED
-            # behavior, preserved for the store-only / cross-process case).
-            await self._swarm_store.update_run(
-                swarm_run_id,
-                expected_version=current.version,
-                status=SwarmStatus.CANCELLED,
-            )
-            # Best-effort terminal SwarmCancelled event.
-            await self._emit_swarm_terminal(
-                driving_run_id, swarm_run_id, "SwarmCancelled"
-            )
-
-        claimed = await self._swarm_store.list_tasks(
-            swarm_run_id, status=SwarmStepStatus.CLAIMED
-        )
-        for task in claimed:
-            # The child RunRecord's id is task.active_run_id (NOT
-            # task.id). A CLAIMED task with active_run_id is None means the
-            # strategy claimed it but crashed before set_active_run -- nothing
-            # to cancel in RunStore, skip. Read the child's current version
-            # rather than assuming it tracks task.version.
-            #
-            # best-effort per child: a child that
-            # already completed or was cancelled concurrently is not a cancel
-            # failure, and one stubborn child must not abort the rest of the
-            # loop -- but the failure is logged (not silent) so a genuinely
-            # unexpected error (e.g., OSError from a corrupted store) surfaces.
-            if task.active_run_id is None:
-                continue
-            try:
-                child = await self._run_store.get(task.active_run_id)
-                if child is None:
-                    continue
-                if child.status in (
-                    RunStatus.SUCCEEDED,
-                    RunStatus.FAILED,
-                    RunStatus.CANCELLED,
-                ):
-                    continue
-                child_in_flight = (
-                    self._run_controller is not None
-                    and self._run_controller.get_token(task.active_run_id) is not None
-                )
-                if child_in_flight:
-                    if child.status != RunStatus.CANCELLING:
-                        child = await self._run_store.transition(
-                            task.active_run_id,
-                            RunStatus.CANCELLING,
-                            expected_version=child.version,
-                        )
-                    # The child's OWN AgentEngine.execute() -- registered with
-                    # this SAME run_controller instance -- has its own
-                    # CancelledError handler that finishes CANCELLING ->
-                    # CANCELLED once it actually stops.
-                    await self._run_controller.cancel(task.active_run_id)
-                else:
-                    await self._run_store.transition(
-                        task.active_run_id,
-                        RunStatus.CANCELLED,
-                        expected_version=child.version,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to cancel child run %s for swarm run %s: %s",
-                    task.active_run_id,
-                    swarm_run_id,
-                    exc,
-                )
-
-    async def _emit_swarm_terminal(
-        self, driving_run_id: str, swarm_run_id: str, payload_name: str
-    ) -> None:
-        """Best-effort terminal swarm event (SwarmCancelled/SwarmFailed). Builds
-        the EventStreamContext from the driving run's lineage; a failure here is an
-        observability gap, not state corruption."""
-        try:
-            from ..events.payloads import SwarmCancelled, SwarmFailed
-
-            driving = await self._run_store.get(driving_run_id)
-            if driving is None:
-                return
-            ctx = EventStreamContext(
-                stream_id=driving.id,
-                run_id=driving.id,
-                root_run_id=driving.root_run_id or driving.id,
-                parent_run_id=driving.parent_run_id,
-                session_id=driving.session_id,
-                runnable_id=driving.runnable_id,
-            )
-            payload = (
-                SwarmCancelled(swarm_run_id=swarm_run_id)
-                if payload_name == "SwarmCancelled"
-                else SwarmFailed(swarm_run_id=swarm_run_id, error="swarm error")
-            )
-            await append_event(self._event_store, ctx, payload)
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning(
-                "failed to append %s event for swarm %s", payload_name, swarm_run_id
-            )
-
-    # -- recover() -------------------------------------------------------------
-
-    async def recover(self, swarm_run_id: str) -> None:
-        """Best-effort restart-time scan. Walks every CLAIMED
-        task whose lease has lapsed and reconciles it with the child RunRecord's
-        current state:
-
-          * Run SUCCEEDED -> ``complete_task`` (the strategy crashed between the
-            child Run's SUCCEEDED transition and its ``complete_task`` call).
-          * Run FAILED    -> ``fail_task`` (same gap, failed side).
-          * Run RUNNING   -> leave alone. The worker may yet finish; this is the
-            "禁止仅根据时间过期就盲目重复执行副作用任务" guard.
-          * active_run_id is None / Run missing / Run CANCELLED or PENDING ->
-            skip here, then ``reclaim_expired_tasks`` resets them to PENDING so
-            the next ``resume()`` can pick them up.
-
-        This is NOT distributed coordination. The caller MUST ensure no live
-        worker is still processing this swarm run before invoking recover();
-        otherwise a slow worker will have its task snatched on a stale lease.
-        On FilesystemSwarmStore ``reclaim_expired_tasks`` is a no-op (single-process:
-        nothing to reclaim at rest), so the requeue path effectively only fires
-        on SqlAlchemySwarmStore -- which is the only backend that observes
-        cross-process lease expiry anyway."""
-        swarm_run = await self._swarm_store.get_run(swarm_run_id)
-        if swarm_run is None:
-            raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
-
-        claimed = await self._swarm_store.list_tasks(
-            swarm_run_id,
-            status=SwarmStepStatus.CLAIMED,
-        )
-        now = datetime.now(timezone.utc)
-        for task in claimed:
-            # A task whose lease hasn't lapsed is presumed still being worked --
-            # leave it alone (don't blindly re-run side-effecting tasks).
-            if task.lease_expires_at is not None and task.lease_expires_at > now:
-                continue
-            # No active_run_id: the strategy crashed between claim_task and
-            # set_active_run. Nothing to reconcile -- reclaim_expired_tasks
-            # below will reset it to PENDING.
-            if task.active_run_id is None:
-                continue
-            try:
-                child = await self._run_store.get(task.active_run_id)
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "recover: failed to read child run %s for task %s: %s",
-                    task.active_run_id,
-                    task.id,
-                    exc,
-                )
-                continue
-            # Missing Run record: lost. Reset to PENDING via reclaim below.
-            if child is None:
-                continue
-            # Reconcile by terminal state. Best-effort per task so one bad
-            # transition doesn't abort the whole recovery pass.
-            try:
-                if child.status == RunStatus.SUCCEEDED and child.result is not None:
-                    await self._swarm_store.complete_task(
-                        task.id,
-                        child.result,
-                        expected_version=task.version,
-                        active_run_id=task.active_run_id,
-                    )
-                elif child.status == RunStatus.FAILED and child.error is not None:
-                    await self._swarm_store.fail_task(
-                        task.id,
-                        child.error,
-                        expected_version=task.version,
-                        active_run_id=task.active_run_id,
-                    )
-                elif child.status == RunStatus.RUNNING:
-                    # Worker may still be alive -- leave it. If the worker is
-                    # actually dead, the next recover() pass after this Run
-                    # reaches a terminal state will catch it.
-                    pass
-                # CANCELLED / PENDING Runs: leave for reclaim_expired_tasks.
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "recover: failed to reconcile task %s from child run %s (%s): %s",
-                    task.id,
-                    task.active_run_id,
-                    child.status,
-                    exc,
-                )
-
-        # Reset everything still CLAIMED with an expired lease (cases above we
-        # didn't reconcile: no active_run_id, missing Run, non-terminal Run
-        # state) to PENDING so resume() can re-drive them. On FilesystemSwarmStore
-        # this is a documented no-op.
-        await self._swarm_store.reclaim_expired_tasks(swarm_run_id)
-
-    # -- cancellation finalization ---------------------------------------------
-
-    async def _finalize_cancelled_run(self, run_id: str) -> None:
-        """Drive the driving RunRecord to CANCELLED after a real
-        ``CancelledError`` was observed. Mirrors ``AgentEngine.execute()``'s own
-        CancelledError
-        handler: re-reads current status rather than assuming RUNNING, since
-        ``Runtime.cancel(run_id)`` may have ALREADY transitioned it to
-        CANCELLING (that transition is precisely what preceded the
-        ``run_controller.cancel()`` call that produced this CancelledError).
-
-        * Already terminal (SUCCEEDED/FAILED/CANCELLED): no-op -- a
-          concurrent terminal transition winning this race is not an error.
-        * Already CANCELLING: go straight to CANCELLED -- attempting
-          RUNNING/WAITING_APPROVAL/PAUSED -> CANCELLING again would hit
-          InvalidRunTransitionError (CANCELLING is not a valid source for a
-          CANCELLING target) and never reach CANCELLED.
-        * Otherwise: the normal two-step CANCELLING -> CANCELLED transition."""
-        current = await self._run_store.get(run_id)
-        if current is None:
-            return
-        if current.status in (
-            RunStatus.SUCCEEDED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-        ):
-            return
-        if current.status == RunStatus.CANCELLING:
-            await self._run_store.transition(
-                run_id,
-                RunStatus.CANCELLED,
-                expected_version=current.version,
-            )
-            return
-        cancelling = await self._run_store.transition(
-            run_id,
-            RunStatus.CANCELLING,
-            expected_version=current.version,
-        )
-        await self._run_store.transition(
-            run_id,
-            RunStatus.CANCELLED,
-            expected_version=cancelling.version,
-        )
-
     async def _finalize_cancelled_swarm_run(self, swarm_run_id: str) -> None:
         """Same finalization semantics as :meth:`_finalize_cancelled_run`,
         for the SwarmRun record."""
@@ -963,18 +422,3 @@ class SwarmEngine:
         for agent_id in needed:
             compiled[agent_id] = await self._compiler.compile(agents[agent_id])
         return compiled
-
-    async def _write_aggregate(self, context: RunContext, result: RunResult) -> None:
-        """Append the single aggregate assistant message to the shared/parent
-        Session. Sequence is assigned by the SessionStore itself, not
-        computed here from `len(prior_messages) + 1`."""
-        await self._session_store.append_messages(
-            context.session_id,
-            (
-                NewSessionMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=str(result.output),
-                    run_id=context.run_id,
-                ),
-            ),
-        )

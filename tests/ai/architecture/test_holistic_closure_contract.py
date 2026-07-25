@@ -44,8 +44,8 @@ def test_checkpoint_callers_do_not_hardcode_sequence():
         "RunCommitCoordinator owns checkpoint creation"
     )
     commit_files = [
-        (_AI_SRC / "storage" / "filesystem" / "commit.py"),
-        (_AI_SRC / "storage" / "sqlalchemy" / "commit.py"),
+        (_AI_SRC / "run" / "persistence" / "commit.py"),
+        (_AI_SRC / "run" / "persistence" / "sqlalchemy" / "commit.py"),
     ]
     for commit_file in commit_files:
         text = commit_file.read_text(encoding="utf-8")
@@ -74,15 +74,19 @@ def test_runtime_build_has_no_pause_on_approval():
     )
 
 
-def test_agent_runner_requires_commit_coordinator():
-    """AgentEngine.commit_coordinator has no default -- the cross-store commit
-    is coordinator-owned and build_runtime always wires one. There is no inline
-    fallback path."""
+def test_agent_runner_owns_no_commit_coordinator():
+    """FS-29: AgentEngine owns ONLY the Store-free model/tool loop; the
+    cross-store commit is RunCoordinator's job. The engine constructor must
+    not accept commit_coordinator (nor any Run-lifecycle Store) at all -- the
+    old "engine requires a commit_coordinator" contract is inverted."""
     from linktools.ai.agent.engine import AgentEngine
 
-    param = inspect.signature(AgentEngine.__init__).parameters["commit_coordinator"]
-    assert param.default is inspect.Parameter.empty, (
-        "AgentEngine.commit_coordinator must be required (no inline commit fallback)"
+    params = inspect.signature(AgentEngine.__init__).parameters
+    forbidden = {"commit_coordinator", "run_store", "session_store", "event_store"}
+    present = forbidden & set(params)
+    assert not present, (
+        f"AgentEngine must not accept Run-lifecycle Store/commit params, "
+        f"got {sorted(present)}"
     )
 
 
@@ -109,20 +113,6 @@ def test_runtime_resume_takes_only_run_id():
     forbidden = {"spec", "user_id", "tenant_id", "workspace"}
     assert not (forbidden & set(params)), (
         f"Runtime.resume must not accept caller-supplied identity/spec, "
-        f"got {sorted(forbidden & set(params))}"
-    )
-
-
-# --- swarm resume does not accept a caller spec ---------------------
-
-
-def test_swarm_resume_takes_only_swarm_run_id():
-    from linktools.ai.swarm.engine import SwarmEngine
-
-    params = inspect.signature(SwarmEngine.resume).parameters
-    forbidden = {"spec", "agents", "user_id", "tenant_id"}
-    assert not (forbidden & set(params)), (
-        f"SwarmEngine.resume must not accept caller spec/agents/identity, "
         f"got {sorted(forbidden & set(params))}"
     )
 

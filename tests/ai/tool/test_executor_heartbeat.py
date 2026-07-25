@@ -13,7 +13,7 @@ import pytest
 
 from linktools.ai.errors import LostIdempotencyClaimError
 from linktools.ai.governance.policy.engine import PolicyEngine
-from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.persistence.filesystem import FilesystemIdempotencyStore
 from linktools.ai.tool.executor import GovernedToolInvoker, ToolContext, ToolRequest
 from linktools.ai.tool.idempotency import ToolIdempotencyOptions
 from linktools.ai.tool.models import ToolDescriptor

@@ -164,9 +164,12 @@ def test_managed_adapter_does_not_route_events_by_class_name():
 
 @pytest.mark.asyncio
 async def test_security_audit_failure_is_fail_closed_via_store():
-    # With no emitter wired, a security event that cannot be persisted to the
-    # event store must fail closed; an observability event must always be
-    # best-effort. Drives the adapter's own store fallback.
+    # A security event whose persistence fails must fail closed; an
+    # observability event is always best-effort. The store-backed emitter
+    # wraps the persistence failure into ToolSecurityAuditError; the adapter
+    # propagates it so an unrecorded security decision blocks the call.
+    from linktools.ai.governance.security.emitter import EventStoreSecurityEventEmitter
+
     class _FailingStore:
         async def append(self, **kw):
             raise RuntimeError("disk full")
@@ -178,10 +181,36 @@ async def test_security_audit_failure_is_fail_closed_via_store():
         descriptor=_descriptor(),
         handler=handler,
         tool_executor=_executor(),
-        event_store=_FailingStore(),
         security_audit_failure_mode="fail_closed",
+        security_event_emitter=EventStoreSecurityEventEmitter(
+            _FailingStore(), failure_mode="fail_closed"
+        ),
     )
     # The first event is the ToolPolicyResolved security audit; fail_closed
     # turns the store failure into ToolSecurityAuditError before execution.
     with pytest.raises(ToolSecurityAuditError):
         await adapter.invoke(x="hi")
+
+
+@pytest.mark.asyncio
+async def test_security_event_sink_emitter_fail_closed_vs_best_effort():
+    """The production SecurityEventSinkEmitter bridge (used by execute_pure)
+    must propagate a sink persistence failure on emit_security (fail-closed:
+    an unrecorded security decision blocks the call) but swallow it on
+    emit_observability (best-effort: an observability record never masks the
+    decision being audited). This is the bridge the legacy
+    EventStoreSecurityEventEmitter used to provide directly."""
+    from linktools.ai.run.live_events import SecurityEventSinkEmitter
+
+    class _FailingSink:
+        async def emit(self, event):
+            raise RuntimeError("sink down")
+
+    emitter = SecurityEventSinkEmitter(_FailingSink())
+
+    # emit_security propagates the failure.
+    with pytest.raises(RuntimeError, match="sink down"):
+        await emitter.emit_security(object())
+
+    # emit_observability swallows it (no raise).
+    await emitter.emit_observability(object())

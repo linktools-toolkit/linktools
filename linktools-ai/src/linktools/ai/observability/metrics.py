@@ -32,7 +32,6 @@ HARDENING_METRICS = (
     "storage_capability_validation_failure_total",
     "event_codec_failure_total",
     "critical_event_persist_failure_total",
-    "asset_cas_conflict_total",
     "artifact_digest_mismatch_total",
     "artifact_orphan_total",
     "job_lease_expiry_total",

@@ -16,13 +16,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from linktools.ai.artifact import ArtifactStore, ANONYMOUS_PROVENANCE
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.identity.principal import ScopeSet
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 from linktools.ai.jobs.handlers.runtime import (
     MappingRunnableResolver,
     RuntimeTaskHandler,
@@ -207,7 +205,7 @@ def _handler(runtime, resolver, tmp_path=None, **kwargs):
         artifact_store=ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=root / "blobs"),
             FilesystemArtifactRecordStore(records_root=root / "records"),
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
         ),
         **kwargs)
 
@@ -631,7 +629,7 @@ def test_handler_rejects_runnable_drift_after_rebind(tmp_path) -> None:
             artifact_store=ArtifactStore(
                 FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
                 FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-                InProcessArtifactDigestCoordinator(),
+                InProcessKeyedCoordinator(),
             ),
         )
         ct = CancellationToken()

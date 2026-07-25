@@ -7,12 +7,14 @@ per-store so the consistency gate can cross-check each declared component
 against a wired store."""
 
 from linktools.ai.storage.features import (
-    FILE_STORAGE_FEATURES,
-    SQLALCHEMY_STORAGE_FEATURES,
     CoordinationScope,
     StorageComponent,
-    StorageFeatures,
     TransactionScope,
+)
+from linktools.ai.runtime.persistence.features import (
+    FILE_STORAGE_FEATURES,
+    SQLALCHEMY_STORAGE_FEATURES,
+    StorageFeatures,
 )
 
 _ALL = frozenset(StorageComponent)

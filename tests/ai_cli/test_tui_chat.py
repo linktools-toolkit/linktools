@@ -105,7 +105,7 @@ class TestTuiChatStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", log.write.call_args.args[0])
 
     def test_render_failed_event_shows_error(self):
-        """The Outcome model (spec 12.3) reports run failure as a stream
+        """The Outcome model reports run failure as a stream
         event rather than a raised exception -- the chat screen must render
         it the same way it renders a genuinely raised error."""
         screen = ChatScreen(client=FakeRuntimeClient())

@@ -13,13 +13,14 @@ import asyncio
 from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
+from linktools.ai.events.payloads import RunCompleted, RunPaused
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus
 from linktools.ai.run.models import RunnableType
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
 # The approval store enforces a complete execution binding as a security
@@ -93,7 +94,7 @@ def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
         created = await storage.runs.create(
             _record("run-1", "sess-1", RunStatus.RUNNING, 1)
         )
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
         coordinator = FilesystemRunCommitCoordinator(
             approval_store=storage.approvals,
@@ -122,6 +123,7 @@ def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
                 ),
                 checkpoint_payload=b'{"messages": []}',
                 result=result,
+                completed_event=RunCompleted(run_id="run-1"),
                 event_context=EventStreamContext.from_run_context(
                     _context("run-1", "sess-1")
                 ),
@@ -152,7 +154,7 @@ def test_pause_persists_approval_checkpoint_and_transition(tmp_path):
         created = await storage.runs.create(
             _record("run-2", "sess-2", RunStatus.RUNNING, 1)
         )
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
         coordinator = FilesystemRunCommitCoordinator(
             approval_store=storage.approvals,
@@ -174,6 +176,7 @@ def test_pause_persists_approval_checkpoint_and_transition(tmp_path):
                     **_APPROVAL_BINDING,
                 },
                 checkpoint_payload=b'{"messages": []}',
+                paused_event=RunPaused(run_id="run-2", reason="needs review"),
                 event_context=EventStreamContext.from_run_context(
                     _context("run-2", "sess-2")
                 ),
@@ -208,7 +211,7 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
             )
         )
         await storage.runs.create(_record("run-j", "sess-j", RunStatus.RUNNING, 1))
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
         coordinator = FilesystemRunCommitCoordinator(
             approval_store=storage.approvals,
@@ -233,6 +236,7 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
+                completed_event=RunCompleted(run_id="run-j"),
                 event_context=EventStreamContext.from_run_context(
                     _context("run-j", "sess-j")
                 ),
@@ -252,8 +256,8 @@ def test_recovery_marks_run_failed_when_complete_did_not_reach_commit_point(tmp_
 
     async def _run():
         storage = FilesystemStorage(root=tmp_path)
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-        from linktools.ai.storage.filesystem.journal import (
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.run.persistence.journal import (
             TransactionJournal,
             TransactionKind,
         )
@@ -298,8 +302,8 @@ def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
 
     async def _run():
         storage = FilesystemStorage(root=tmp_path)
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-        from linktools.ai.storage.filesystem.journal import (
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.run.persistence.journal import (
             TransactionJournal,
             TransactionKind,
         )

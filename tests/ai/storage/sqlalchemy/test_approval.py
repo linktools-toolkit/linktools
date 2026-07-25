@@ -24,7 +24,7 @@ from linktools.ai.errors import (
     ApprovalNotFoundError,
     InvalidApprovalTransitionError,
 )
-from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
+from linktools.ai.agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
 from linktools.ai.storage.sqlalchemy.models import Base
 
 

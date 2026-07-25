@@ -79,12 +79,12 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
         async def _run() -> None:
             info1 = await store.put_if_absent(
-                digest=digest, source=_aiter(content), size=len(content)
+                digest=digest.value, source=_aiter(content), size=len(content)
             )
             # Second put with the same digest is a no-op reuse (idempotent),
             # not an error.
             info2 = await store.put_if_absent(
-                digest=digest, source=_aiter(content), size=len(content)
+                digest=digest.value, source=_aiter(content), size=len(content)
             )
             assert info1.digest == info2.digest == digest.value
 
@@ -94,11 +94,11 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         store = self.blob_store()
 
         async def _run() -> None:
-            from linktools.ai.artifact.models import ArtifactIntegrityError
+            from linktools.ai.errors import StorageBlobIntegrityError
 
-            with __import__("pytest").raises(ArtifactIntegrityError):
+            with __import__("pytest").raises(StorageBlobIntegrityError):
                 await store.put_if_absent(
-                    digest=_ZERO_DIGEST,
+                    digest=_ZERO_DIGEST.value,
                     source=_aiter(b"not-the-claimed-digest"),
                     size=21,
                 )
@@ -122,20 +122,20 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         claimed_digest = ArtifactDigest.from_bytes(b"complete-content")
 
         async def _run() -> None:
-            from linktools.ai.artifact.models import ArtifactIntegrityError
+            from linktools.ai.errors import StorageBlobIntegrityError
 
             async def _bad_source():
                 yield b"partial"
                 raise RuntimeError("source-failed-mid-stream")
 
-            with __import__("pytest").raises((RuntimeError, ArtifactIntegrityError)):
+            with __import__("pytest").raises((RuntimeError, StorageBlobIntegrityError)):
                 await store.put_if_absent(
-                    digest=claimed_digest, source=_bad_source(), size=None
+                    digest=claimed_digest.value, source=_bad_source(), size=None
                 )
             # The error path MUST leave the store untouched at the claimed
             # address. A stat returning a BlobInfo here would mean a partial
             # blob leaked through the failure path.
-            assert (await store.stat(digest=claimed_digest)) is None, (
+            assert (await store.stat(digest=claimed_digest.value)) is None, (
                 "put_if_absent published a blob at the claimed digest even "
                 "though the source errored mid-stream"
             )
@@ -149,10 +149,10 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
         async def _run() -> None:
             await store.put_if_absent(
-                digest=digest, source=_aiter(content), size=len(content)
+                digest=digest.value, source=_aiter(content), size=len(content)
             )
             chunks = []
-            async with store.open(digest=digest) as stream:
+            async with store.open(digest=digest.value) as stream:
                 async for chunk in stream:
                     chunks.append(chunk)
             assert b"".join(chunks) == content
@@ -161,17 +161,17 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
     def test_open_missing_digest_raises(self) -> None:
         """Opening a digest that was never published MUST surface the UNIFIED
-        :class:`ArtifactBlobNotFoundError` -- silently returning an
+        :class:`StorageBlobNotFoundError` -- silently returning an
         empty stream would let a reader believe it had fetched the (absent)
-        blob's bytes. Distinct from :class:`ArtifactIntegrityError` (blob EXISTS
+        blob's bytes. Distinct from :class:`StorageBlobIntegrityError` (blob EXISTS
         but is corrupt): a caller can tell 'absent' apart from 'corrupt'."""
         store = self.blob_store()
 
         async def _run() -> None:
-            from linktools.ai.artifact.models import ArtifactBlobNotFoundError
+            from linktools.ai.errors import StorageBlobNotFoundError
 
-            with __import__("pytest").raises(ArtifactBlobNotFoundError):
-                async with store.open(digest=_ZERO_DIGEST) as stream:
+            with __import__("pytest").raises(StorageBlobNotFoundError):
+                async with store.open(digest=_ZERO_DIGEST.value) as stream:
                     async for _ in stream:
                         pass
 
@@ -184,7 +184,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         store = self.blob_store()
 
         async def _run() -> None:
-            assert (await store.stat(digest=_ZERO_DIGEST)) is None
+            assert (await store.stat(digest=_ZERO_DIGEST.value)) is None
 
         self._contract_run(_run)
 
@@ -194,7 +194,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         store = self.blob_store()
 
         async def _run() -> None:
-            await store.delete(digest=_ZERO_DIGEST)  # no error
+            await store.delete(digest=_ZERO_DIGEST.value)  # no error
 
         self._contract_run(_run)
 
@@ -213,9 +213,9 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
-            await store.put_if_absent(digest=digest, source=_src(), size=len(content))
+            await store.put_if_absent(digest=digest.value, source=_src(), size=len(content))
             chunks = []
-            async with store.open(digest=digest) as stream:
+            async with store.open(digest=digest.value) as stream:
                 async for chunk in stream:
                     chunks.append(chunk)
             assert b"".join(chunks) == content
@@ -227,7 +227,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
     def test_put_if_absent_rejects_size_mismatch(self) -> None:
         """A claimed ``size`` that does not match the actual content length
-        MUST fail (ArtifactIntegrityError). A backend that ignored size would
+        MUST fail (StorageBlobIntegrityError). A backend that ignored size would
         let a caller pin a wrong content-length on the BlobInfo, breaking the
         buffered-size-cap decision in the facade."""
         store = self.blob_store()
@@ -235,11 +235,11 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
         digest = ArtifactDigest.from_bytes(content)
 
         async def _run() -> None:
-            from linktools.ai.artifact.models import ArtifactIntegrityError
+            from linktools.ai.errors import StorageBlobIntegrityError
 
-            with __import__("pytest").raises(ArtifactIntegrityError):
+            with __import__("pytest").raises(StorageBlobIntegrityError):
                 await store.put_if_absent(
-                    digest=digest, source=_aiter(content), size=999
+                    digest=digest.value, source=_aiter(content), size=999
                 )
 
         self._contract_run(_run)
@@ -257,14 +257,14 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
         async def _run() -> None:
             await store.put_if_absent(
-                digest=digest, source=_aiter(content), size=len(content)
+                digest=digest.value, source=_aiter(content), size=len(content)
             )
             cancelled_read = asyncio.ensure_future(self._drain_then_cancel(store, digest))
             await asyncio.wait({cancelled_read}, timeout=5.0)
             # After the cancelled read, a fresh open must still work (resource
             # was released) and yield the full content.
             chunks = []
-            async with store.open(digest=digest) as stream:
+            async with store.open(digest=digest.value) as stream:
                 async for chunk in stream:
                     chunks.append(chunk)
             assert b"".join(chunks) == content
@@ -275,7 +275,7 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
     async def _drain_then_cancel(store: Any, digest: str) -> None:
         task = asyncio.current_task()
         try:
-            async with store.open(digest=digest) as stream:
+            async with store.open(digest=digest.value) as stream:
                 async for _ in stream:
                     if task is not None:
                         task.cancel()
@@ -294,13 +294,13 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
         async def _run() -> None:
             results = await asyncio.gather(
-                store.put_if_absent(digest=digest, source=_aiter(content), size=len(content)),
-                store.put_if_absent(digest=digest, source=_aiter(content), size=len(content)),
+                store.put_if_absent(digest=digest.value, source=_aiter(content), size=len(content)),
+                store.put_if_absent(digest=digest.value, source=_aiter(content), size=len(content)),
             )
             for info in results:
                 assert info is not None
                 assert info.digest == digest.value
-            stat = await store.stat(digest=digest)
+            stat = await store.stat(digest=digest.value)
             assert stat is not None
 
         self._contract_run(_run)
@@ -316,9 +316,9 @@ class ArtifactBlobStoreContract(_ConformanceRecorderMixin):
 
         async def _run() -> None:
             await store.put_if_absent(
-                digest=digest, source=_aiter(content), size=len(content)
+                digest=digest.value, source=_aiter(content), size=len(content)
             )
-            cm = store.open(digest=digest)
+            cm = store.open(digest=digest.value)
             # The result of open() must be usable as `async with`.
             assert hasattr(cm, "__aenter__") and hasattr(cm, "__aexit__"), (
                 "open() must return an async context manager, not a bare "
@@ -571,151 +571,6 @@ class ArtifactRecordStoreContract(_ConformanceRecorderMixin):
             "ArtifactRecordStore.get must not accept a digest -- a digest alone "
             "must never be enough to fetch a tenant-owned record"
         )
-
-
-class AssetStoreContract(_ConformanceRecorderMixin):
-    """Conformance for the :class:`AssetStore` class: the primary+overlay
-    composition a downstream adapter sits under.
-
-    Subclasses must implement ``asset_store()`` returning a fresh, empty
-    AssetStore. The contract verifies the guarantees the resource and
-    artifact layers rely on: put/get/delete CRUD round-trip, a missing path
-    returns None, putting the same path bumps version, and list paginates
-    with depth filtering. The contract is backend-agnostic -- it never probes
-    the underlying AssetBackend, only the observable AssetStore surface.
-    """
-
-    def asset_store(self) -> Any:
-        raise NotImplementedError
-
-    def test_put_get_roundtrip(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            path = AssetPath("/contract/roundtrip.txt")
-            await store.put(path, b"hello")
-            fetched = await store.get(path)
-            assert fetched is not None
-            assert fetched.content == b"hello"
-
-        self._contract_run(_run)
-
-    def test_get_missing_returns_none(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            assert (await store.get(AssetPath("/contract/never-existed"))) is None
-
-        self._contract_run(_run)
-
-    def test_delete_removes_resource(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            path = AssetPath("/contract/deleted.txt")
-            await store.put(path, b"x")
-            await store.delete(path)
-            assert (await store.get(path)) is None
-
-        self._contract_run(_run)
-
-    def test_delete_is_path_scoped(self) -> None:
-        """A delete of one path MUST NOT touch a different path's resource.
-        The positive test above cannot distinguish a correct backend from a
-        backend whose delete() wipes the whole store (or every sibling under
-        the parent): both would leave the deleted path empty. This test puts
-        two siblings, deletes one, and asserts the OTHER survives with its
-        original content -- catching an over-broad delete implementation."""
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            keep = AssetPath("/contract/kept.txt")
-            sibling = AssetPath("/contract/sibling.txt")
-            await store.put(keep, b"keep-me")
-            await store.put(sibling, b"sibling")
-            await store.delete(sibling)
-            fetched = await store.get(keep)
-            assert fetched is not None, (
-                "delete of a sibling path removed the kept resource -- "
-                "delete is not path-scoped"
-            )
-            assert fetched.content == b"keep-me"
-
-        self._contract_run(_run)
-
-    def test_delete_missing_is_silent(self) -> None:
-        """Delete on a never-stored path MUST NOT raise -- idempotent delete
-        is the contract every sweeper / GC loop relies on."""
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            await store.delete(AssetPath("/contract/never-existed"))
-
-        self._contract_run(_run)
-
-    def test_put_same_path_bumps_version(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.path import AssetPath
-
-            path = AssetPath("/contract/versioned.txt")
-            first = await store.put(path, b"v1")
-            second = await store.put(path, b"v2")
-            assert second.info.version > first.info.version
-
-        self._contract_run(_run)
-
-    def test_list_depth_one_lists_immediate_children_only(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.models import Depth
-            from linktools.ai.asset.path import AssetPath
-
-            parent = AssetPath("/contract/depth-one")
-            await store.put(parent.child("a"), b"a")
-            await store.put(parent.child("b"), b"b")
-            await store.put(parent.child("sub").child("c"), b"c")
-            page = await store.list(parent, depth=Depth.ONE, limit=50)
-            paths = {info.path.value for info in page.items}
-            assert parent.child("a").value in paths
-            assert parent.child("b").value in paths
-            # Depth ONE excludes grandchildren.
-            assert parent.child("sub").child("c").value not in paths
-
-        self._contract_run(_run)
-
-    def test_list_paginates_via_cursor(self) -> None:
-        store = self.asset_store()
-
-        async def _run() -> None:
-            from linktools.ai.asset.models import Depth
-            from linktools.ai.asset.path import AssetPath
-
-            parent = AssetPath("/contract/paginate")
-            for i in range(5):
-                await store.put(parent.child(f"f{i}"), b"x")
-            first = await store.list(parent, depth=Depth.ONE, limit=2)
-            assert len(first.items) == 2
-            assert first.cursor is not None  # more pages available
-            second = await store.list(
-                parent, depth=Depth.ONE, limit=2, cursor=first.cursor
-            )
-            seen = {info.path.value for info in (*first.items, *second.items)}
-            assert len(seen) == 4  # no overlap across the two pages
-
-        self._contract_run(_run)
 
 
 class EventStoreContract(_ConformanceRecorderMixin):
@@ -1720,7 +1575,6 @@ async def _aiter(content: bytes):
 __all__: "list[str]" = [
     "ArtifactBlobStoreContract",
     "ArtifactRecordStoreContract",
-    "AssetStoreContract",
     "EventStoreContract",
     "JobStoreContract",
     "LeaseCoordinatorContract",

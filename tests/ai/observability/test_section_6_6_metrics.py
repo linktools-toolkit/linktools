@@ -6,7 +6,7 @@ Every test triggers the actual code path that increments the counter and
 asserts the InMemoryMetrics sink observed it."""
 
 from linktools.ai.artifact import ANONYMOUS_PROVENANCE
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 
 import asyncio
 import hashlib
@@ -24,14 +24,13 @@ from linktools.ai.observability.metrics import (
 )
 
 
-# Names required by the floor (15 instruments across the 11 categories;
+# Names required by the floor (14 instruments across the 10 categories;
 # categories 5, 6, 11 split into more than one instrument).
 _REQUIRED_METRIC_NAMES = (
     "runtime_build_failure_total",
     "storage_capability_validation_failure_total",
     "event_codec_failure_total",
     "critical_event_persist_failure_total",
-    "asset_cas_conflict_total",
     "artifact_digest_mismatch_total",
     "artifact_orphan_total",
     "job_lease_expiry_total",
@@ -63,9 +62,9 @@ def test_runtime_build_failure_total_fires_on_capability_gate_shortfall(tmp_path
     from linktools.ai.runtime.dependencies import RuntimeDependencies
     from linktools.ai.errors import StorageRequirementsNotMetError
     from linktools.ai.run.requirements import RuntimeRequirements
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
     from linktools.ai.storage.features import CoordinationScope
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     metrics = InMemoryMetrics()
     storage = FilesystemStorage(root=tmp_path)
@@ -140,14 +139,15 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
     failure during critical-event reappend records the metric instead of
     silently dropping the journal."""
     from linktools.ai.events.context import EventStreamContext
+    from linktools.ai.events.payloads import RunCompleted
     from linktools.ai.run.commit import CompleteRunCommand
     from linktools.ai.run.context import RunContext
     from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus, RunnableType
     from linktools.ai.session.models import MessageRole, NewSessionMessage
     from linktools.ai.session.models import SessionRecord, SessionStatus
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-    from linktools.ai.storage.filesystem.journal import (
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.journal import (
         TransactionJournal,
         TransactionKind,
     )
@@ -222,6 +222,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
+                completed_event=RunCompleted(run_id="run-x"),
                 event_context=EventStreamContext.from_run_context(
                     RunContext(
                         run_id="run-x",
@@ -268,38 +269,6 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
     asyncio.run(_run())
 
 
-# --- category 4: asset CAS conflict ---
-
-
-def test_asset_cas_conflict_total_fires_on_idempotency_key_reuse():
-    """An AssetStore.put that reuses an idempotency key with a different body
-    raises IdempotencyConflictError and records asset_cas_conflict_total."""
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.models import WriteOptions
-    from linktools.ai.asset.path import AssetPath
-    from linktools.ai.asset.store import AssetStore
-    from linktools.ai.errors import IdempotencyConflictError
-
-    metrics = InMemoryMetrics()
-    store = AssetStore(primary=MemoryAssetBackend(), metrics=metrics)
-
-    async def _run():
-        await store.put(
-            AssetPath("/p"),
-            b"first",
-            options=WriteOptions(idempotency_key="k1"),
-        )
-        with pytest.raises(IdempotencyConflictError):
-            await store.put(
-                AssetPath("/p"),
-                b"different-body",
-                options=WriteOptions(idempotency_key="k1"),
-            )
-
-    asyncio.run(_run())
-    assert metrics.counters.get("asset_cas_conflict_total") == 1
-
-
 # --- category 5a: artifact digest mismatch ---
 
 
@@ -307,9 +276,10 @@ def test_artifact_digest_mismatch_total_fires_on_corrupt_blob():
     """A get() that reads back content whose sha256 does not match the pinned
     record digest raises ArtifactIntegrityError and records
     artifact_digest_mismatch_total."""
-    from linktools.ai.artifact.store import ArtifactStore
     from linktools.ai.artifact.models import ArtifactIntegrityError
-    from linktools.ai.storage.protocols import ArtifactBlobStore, ArtifactRecordStore
+    from linktools.ai.artifact.store import ArtifactStore
+    from linktools.ai.artifact.persistence.protocols import ArtifactRecordStore
+    from linktools.ai.storage.blob.protocols import BlobStore
 
     metrics = InMemoryMetrics()
 
@@ -320,7 +290,7 @@ def test_artifact_digest_mismatch_total_fires_on_corrupt_blob():
         async def put_if_absent(self, *, digest, source, size):
             async for _ in source:
                 pass
-            from linktools.ai.storage.protocols import BlobInfo
+            from linktools.ai.storage.blob.protocols import BlobInfo
             return BlobInfo(digest=digest, size=size, content_type=None)
 
         @asynccontextmanager
@@ -345,7 +315,7 @@ def test_artifact_digest_mismatch_total_fires_on_corrupt_blob():
     store = ArtifactStore(
         _CorruptBlobStore(),
         _MemRecordStore(),
-        InProcessArtifactDigestCoordinator(),
+        InProcessKeyedCoordinator(),
         metrics=metrics,
     )
 
@@ -370,12 +340,10 @@ def test_artifact_digest_mismatch_total_fires_on_corrupt_blob():
 
 def test_artifact_orphan_total_fires_when_sweep_deletes_orphan(tmp_path):
     """Each blob the sweep deletes increments artifact_orphan_total."""
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-        FilesystemArtifactRecordStore,
-    )
-    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
-    from linktools.ai.storage.orphan import (
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+    from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
+    from linktools.ai.artifact.orphan import (
         OrphanSweepConfig,
         sweep_orphan_blobs,
     )
@@ -393,13 +361,13 @@ def test_artifact_orphan_total_fires_when_sweep_deletes_orphan(tmp_path):
         async def _src():
             yield content
 
-        await blobs.put_if_absent(digest=digest, source=_src(), size=len(content))
+        await blobs.put_if_absent(digest=digest.value, source=_src(), size=len(content))
         # Make the orphan past the grace window by anchoring "now" far in the
         # future; the mtime stored by the filesystem backend is recent.
         stats = await sweep_orphan_blobs(
             blobs,
             records,
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
             OrphanSweepConfig(grace_period=timedelta(seconds=0)),
             now=datetime.now(timezone.utc) + timedelta(days=2),
             metrics=metrics,
@@ -432,7 +400,7 @@ def test_job_lease_expiry_and_recovery_total_fire_on_recover_expired(tmp_path):
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.runtime import JobRuntimeOptions
     from linktools.ai.jobs.worker import JobWorker
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     metrics = InMemoryMetrics()
 
@@ -560,7 +528,7 @@ def test_job_stale_fence_total_fires_on_lost_claim(tmp_path):
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.runtime import JobRuntimeOptions
     from linktools.ai.jobs.worker import JobWorker
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     metrics = InMemoryMetrics()
 
@@ -661,7 +629,7 @@ def test_approval_replay_reject_total_fires_on_dedupe_conflict(tmp_path):
     """A create_or_get_pending call whose (run_id, tool_call_id) already exists
     with a different tool_name/arguments is rejected and records
     approval_replay_reject_total."""
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
     from linktools.ai.errors import ApprovalConflictError
 
     metrics = InMemoryMetrics()
@@ -790,10 +758,8 @@ def test_artifact_blob_upload_failure_total_fires_on_digest_mismatch(tmp_path):
     """A put_if_absent whose claimed digest does not match the bytes' actual
     sha256 raises ArtifactIntegrityError and records
     artifact_blob_upload_failure_total at the blob-store level."""
-    from linktools.ai.artifact.models import ArtifactIntegrityError
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-    )
+    from linktools.ai.errors import StorageBlobIntegrityError
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
     metrics = InMemoryMetrics()
     blobs = FilesystemArtifactBlobStore(
@@ -804,9 +770,9 @@ def test_artifact_blob_upload_failure_total_fires_on_digest_mismatch(tmp_path):
         async def _src():
             yield b"not-the-claimed-digest"
 
-        with pytest.raises(ArtifactIntegrityError):
+        with pytest.raises(StorageBlobIntegrityError):
             await blobs.put_if_absent(
-                digest=ArtifactDigest.parse("0" * 64), source=_src(), size=21
+                digest=ArtifactDigest.parse("0" * 64).value, source=_src(), size=21
             )
 
     asyncio.run(_run())
@@ -819,10 +785,8 @@ def test_artifact_blob_upload_failure_total_fires_on_size_mismatch(tmp_path):
     artifact_blob_upload_failure_total."""
     import hashlib
 
-    from linktools.ai.artifact.models import ArtifactIntegrityError
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-    )
+    from linktools.ai.errors import StorageBlobIntegrityError
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
     metrics = InMemoryMetrics()
     blobs = FilesystemArtifactBlobStore(
@@ -835,9 +799,9 @@ def test_artifact_blob_upload_failure_total_fires_on_size_mismatch(tmp_path):
         async def _src():
             yield payload
 
-        with pytest.raises(ArtifactIntegrityError):
+        with pytest.raises(StorageBlobIntegrityError):
             await blobs.put_if_absent(
-                digest=digest, source=_src(), size=999  # wrong size
+                digest=digest.value, source=_src(), size=999  # wrong size
             )
 
     asyncio.run(_run())
@@ -850,10 +814,8 @@ def test_artifact_blob_upload_failure_total_fires_on_corrupt_existing(tmp_path):
     records artifact_blob_upload_failure_total."""
     import hashlib
 
-    from linktools.ai.artifact.models import ArtifactIntegrityError
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-    )
+    from linktools.ai.errors import StorageBlobIntegrityError
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 
     metrics = InMemoryMetrics()
     blobs = FilesystemArtifactBlobStore(
@@ -866,12 +828,12 @@ def test_artifact_blob_upload_failure_total_fires_on_corrupt_existing(tmp_path):
         async def _src():
             yield payload
 
-        await blobs.put_if_absent(digest=digest, source=_src(), size=7)
+        await blobs.put_if_absent(digest=digest.value, source=_src(), size=7)
         # Tamper the stored blob in place; the second put's dedup path re-hashes
         # it and refuses to record a reference to the corrupt blob.
         (tmp_path / "blobs" / digest.value[:2] / digest.value).write_bytes(b"TAMPERED")
-        with pytest.raises(ArtifactIntegrityError):
-            await blobs.put_if_absent(digest=digest, source=_src(), size=7)
+        with pytest.raises(StorageBlobIntegrityError):
+            await blobs.put_if_absent(digest=digest.value, source=_src(), size=7)
 
     asyncio.run(_run())
     assert metrics.counters.get("artifact_blob_upload_failure_total") == 1
@@ -883,12 +845,10 @@ def test_artifact_blob_upload_failure_total_fires_on_corrupt_existing(tmp_path):
 def test_artifact_orphan_cleanup_failure_total_fires_on_delete_error(tmp_path):
     """A delete failure during the sweep records
     artifact_orphan_cleanup_failure_total and does not stall the sweep."""
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-        FilesystemArtifactRecordStore,
-    )
-    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
-    from linktools.ai.storage.orphan import (
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+    from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
+    from linktools.ai.artifact.orphan import (
         OrphanSweepConfig,
         sweep_orphan_blobs,
     )
@@ -908,11 +868,11 @@ def test_artifact_orphan_cleanup_failure_total_fires_on_delete_error(tmp_path):
         async def _src():
             yield content
 
-        await blobs.put_if_absent(digest=digest, source=_src(), size=len(content))
+        await blobs.put_if_absent(digest=digest.value, source=_src(), size=len(content))
         stats = await sweep_orphan_blobs(
             blobs,
             records,
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
             OrphanSweepConfig(grace_period=timedelta(seconds=0)),
             now=datetime.now(timezone.utc) + timedelta(days=2),
             metrics=metrics,

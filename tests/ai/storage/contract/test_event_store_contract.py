@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 from linktools.ai.events.payloads import RunStarted
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.events.persistence.filesystem import FilesystemEventStore
 
 
 async def _append(
@@ -50,7 +50,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.event import SqlAlchemyEventStore
+    from linktools.ai.events.persistence.sqlalchemy import SqlAlchemyEventStore
 
     counter = {"n": 0}
     engines = []

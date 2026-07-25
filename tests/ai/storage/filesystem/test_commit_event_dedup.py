@@ -22,6 +22,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
+from linktools.ai.events.payloads import RunCompleted, RunPaused
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -33,7 +34,7 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
 _APPROVAL_BINDING = {
@@ -81,7 +82,7 @@ def _context(run_id: str, session_id: str) -> RunContext:
 
 
 def _make_coordinator(storage, tmp_path):
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     return FilesystemRunCommitCoordinator(
         approval_store=storage.approvals,
@@ -146,6 +147,7 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
                 ),
                 checkpoint_payload=b'{"m":[]}',
                 result=RunResult(output="ok"),
+                completed_event=RunCompleted(run_id="run-c"),
                 event_context=_event_ctx("run-c", "sess-c"),
             )
         )
@@ -159,7 +161,7 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
         # commit_id matches the one that already wrote the event. The run is
         # already SUCCEEDED (the commit point), so recovery re-appends critical
         # events best-effort -- and must NOT duplicate RunCompleted.
-        from linktools.ai.storage.filesystem.journal import (
+        from linktools.ai.run.persistence.journal import (
             TransactionJournal,
             TransactionKind,
         )
@@ -214,6 +216,7 @@ def test_two_distinct_approvals_each_persist_their_events(tmp_path):
                         **_APPROVAL_BINDING,
                     },
                     checkpoint_payload=b'{"m":[]}',
+                    paused_event=RunPaused(run_id="run-d", reason="needs review"),
                     event_context=_event_ctx("run-d", "sess-d"),
                     commit_id=commit_id,
                 )
@@ -265,6 +268,7 @@ def test_retried_identical_pause_command_does_not_duplicate(tmp_path):
                         **_APPROVAL_BINDING,
                     },
                     checkpoint_payload=b'{"m":[]}',
+                    paused_event=RunPaused(run_id="run-e", reason="needs review"),
                     event_context=_event_ctx("run-e", "sess-e"),
                     commit_id="commit-same",
                 )

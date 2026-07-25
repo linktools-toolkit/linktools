@@ -91,7 +91,11 @@ class ModelBundle:
     invalidate every resumable run."""
 
     config: RuntimeModelConfig
-    model: OpenAIChatModel
+    # ``Model``, not a concrete provider class: the registry accepts any
+    # ``pydantic_ai.models.Model`` via ``from_instance`` (FunctionModel,
+    # FallbackModel, TestModel, ...), so the public type must not bind callers
+    # to the OpenAI implementation that ``from_config`` happens to build.
+    model: Model
     settings: ModelSettings
     usage_limits: UsageLimits
 

@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.events.context import EventStreamContext
+from linktools.ai.events.payloads import RunCompleted, RunPaused
 from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -32,7 +33,7 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.storage import SqlAlchemyStorage
+from linktools.ai.runtime.persistence import SqlAlchemyStorage
 from linktools.ai.storage.sqlalchemy.models import Base
 
 
@@ -127,7 +128,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
     _seed(storage, "run-1", "sess-1")
 
     async def _run():
-        from linktools.ai.storage.sqlalchemy.commit import (
+        from linktools.ai.run.persistence.sqlalchemy.commit import (
             SqlAlchemyRunCommitCoordinator,
         )
 
@@ -141,6 +142,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
                 messages=_messages("run-1"),
                 checkpoint_payload=b'{"messages": []}',
                 result=result,
+                completed_event=RunCompleted(run_id="run-1"),
                 event_context=EventStreamContext.from_run_context(_ctx("run-1", "sess-1")),
             )
         )
@@ -167,7 +169,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
     _seed(storage, "run-2", "sess-2")
 
     async def _run():
-        from linktools.ai.storage.sqlalchemy.commit import (
+        from linktools.ai.run.persistence.sqlalchemy.commit import (
             SqlAlchemyRunCommitCoordinator,
         )
 
@@ -185,6 +187,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
                     **_APPROVAL_BINDING,
                 },
                 checkpoint_payload=b'{"messages": []}',
+                paused_event=RunPaused(run_id="run-2", reason="review"),
                 event_context=EventStreamContext.from_run_context(_ctx("run-2", "sess-2")),
             )
         )
@@ -215,7 +218,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
     _seed(storage, "run-3", "sess-3")
 
     async def _run():
-        from linktools.ai.storage.sqlalchemy.commit import (
+        from linktools.ai.run.persistence.sqlalchemy.commit import (
             SqlAlchemyRunCommitCoordinator,
         )
 
@@ -273,6 +276,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
                     messages=_messages("run-3"),
                     checkpoint_payload=b'{"messages": []}',
                     result=RunResult(output="x"),
+                    completed_event=RunCompleted(run_id="run-3"),
                     event_context=EventStreamContext.from_run_context(
                         _ctx("run-3", "sess-3")
                     ),
@@ -304,7 +308,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
     _seed(storage, "run-4", "sess-4")
 
     async def _run():
-        from linktools.ai.storage.sqlalchemy.commit import (
+        from linktools.ai.run.persistence.sqlalchemy.commit import (
             SqlAlchemyRunCommitCoordinator,
         )
 
@@ -357,6 +361,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                         **_APPROVAL_BINDING,
                     },
                     checkpoint_payload=b'{"messages": []}',
+                    paused_event=RunPaused(run_id="run-4", reason="review"),
                     event_context=EventStreamContext.from_run_context(
                         _ctx("run-4", "sess-4")
                     ),

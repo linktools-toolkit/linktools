@@ -32,7 +32,7 @@ def main() -> int:
     args = parser.parse_args()
 
     # The core rebuild helpers do not construct engines; this dev tool does.
-    from linktools.ai.storage.rebuild import rebuild_dev_storage
+    from linktools.ai.runtime.persistence.rebuild import rebuild_dev_storage
 
     sqlite_engine = None
     if args.db_path is not None:

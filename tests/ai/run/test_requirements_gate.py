@@ -15,11 +15,12 @@ from linktools.ai.run.requirements import (
 )
 from linktools.ai.storage.features import (
     CoordinationScope,
-    FILE_STORAGE_FEATURES,
-    SQLALCHEMY_STORAGE_FEATURES,
     StorageComponent,
-    StorageFeatures,
     TransactionScope,
+)
+from linktools.ai.runtime.persistence.features import (
+    FILE_STORAGE_FEATURES,
+    StorageFeatures,
 )
 
 
@@ -88,8 +89,8 @@ def test_gate_through_runtime_build_rejects_process_local_for_distributed(tmp_pa
     # rejected when the caller declares a distributed-coordination requirement.
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
     with pytest.raises(_Err, match="coordination"):
@@ -107,8 +108,8 @@ def test_gate_through_runtime_build_passes_when_met(tmp_path):
     # the reference Filesystem storage DOES meet (process-local coordination)
     # also succeeds.
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)
     build_runtime(
@@ -264,8 +265,8 @@ def test_runtime_dependencies_carries_composition_root_fields():
     # leaves them None (the common case); the build kernel populates them on
     # the effective dependencies it hands derive_runtime_requirements.
     from linktools.ai.runtime.dependencies import RuntimeDependencies
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import (
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import (
         FilesystemRunCommitCoordinator,
     )
 
@@ -286,8 +287,8 @@ def test_multi_worker_jobs_rejects_process_local_storage(tmp_path):
     # storage -- no silent fallback to the in-process coordinator.
     from linktools.ai.errors import StorageRequirementsNotMetError as _Err
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     rt_storage = FilesystemStorage(root=tmp_path)  # process-local coordination
     with pytest.raises(_Err, match="coordination"):
@@ -359,6 +360,71 @@ def test_feature_consistency_accepts_an_honest_inrepo_storage(tmp_path):
     # The in-repo FilesystemStorage wires every object its features declare, so
     # the consistency gate admits it.
     from linktools.ai.run.requirements import enforce_storage_feature_consistency
-    from linktools.ai.storage.facade import FilesystemStorage
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
     enforce_storage_feature_consistency(FilesystemStorage(root=tmp_path))
+
+
+# --- monotonic requirements merge (explicit can only strengthen) ---
+
+
+def test_merge_requirements_preserves_topology_baseline_under_empty_explicit():
+    # An empty explicit RuntimeRequirements() must NOT weaken a topology-derived
+    # baseline -- the merge takes the stronger on every capability.
+    from linktools.ai.run.requirements import merge_runtime_requirements
+
+    base = RuntimeRequirements.for_multi_worker_jobs()
+    merged = merge_runtime_requirements(base, RuntimeRequirements())
+    assert merged.coordination == CoordinationScope.DISTRIBUTED
+    assert merged.artifact_coordination == CoordinationScope.DISTRIBUTED
+    assert merged.leasing is True
+    assert merged.fencing is True
+
+
+def test_merge_requirements_rejects_weakening():
+    # An explicit PROCESS_LOCAL cannot weaken a DISTRIBUTED baseline.
+    from linktools.ai.run.requirements import merge_runtime_requirements
+
+    base = RuntimeRequirements.for_multi_worker_jobs()
+    merged = merge_runtime_requirements(
+        base, RuntimeRequirements(coordination=CoordinationScope.PROCESS_LOCAL)
+    )
+    assert merged.coordination == CoordinationScope.DISTRIBUTED
+
+
+def test_merge_requirements_strengthens():
+    # An explicit DISTRIBUTED on a single-process (empty) baseline strengthens it.
+    from linktools.ai.run.requirements import merge_runtime_requirements
+
+    merged = merge_runtime_requirements(
+        RuntimeRequirements(),
+        RuntimeRequirements(coordination=CoordinationScope.DISTRIBUTED),
+    )
+    assert merged.coordination == CoordinationScope.DISTRIBUTED
+
+
+def test_multi_worker_topology_with_empty_requirements_still_rejects_process_local(
+    tmp_path,
+):
+    # THE bug fix: previously explicit requirements REPLACED the
+    # topology baseline, so MULTI_WORKER + RuntimeRequirements() bypassed the
+    # distributed-coordination/leasing/fencing the topology demands. After the
+    # merge, the empty explicit cannot weaken the baseline, so a process-local
+    # Filesystem storage is still rejected under MULTI_WORKER topology.
+    from linktools.ai.errors import StorageRequirementsNotMetError as _Err
+    from linktools.ai.runtime import Runtime, build_runtime
+    from linktools.ai.run.requirements import RuntimeTopology
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
+
+    rt_storage = FilesystemStorage(root=tmp_path)
+    with pytest.raises(_Err, match="coordination"):
+        build_runtime(
+            storage=rt_storage,
+            requirements=RuntimeRequirements(),  # empty -- must NOT bypass
+            commit_coordinator=FilesystemRunCommitCoordinator.from_storage(rt_storage),
+            topology=RuntimeTopology.MULTI_WORKER,
+        )
+
+
+

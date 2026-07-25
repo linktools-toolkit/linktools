@@ -3,13 +3,13 @@
 """ArtifactStore: the artifact domain facade over content-addressed blobs and
 per-write lineage records.
 
-The facade depends on the stable :class:`ArtifactBlobStore` and
-:class:`ArtifactRecordStore` Protocols -- never on a concrete backend. That
-decouples the artifact domain from any specific storage backend entirely
-(this module imports no backend symbol). The in-repo reference
-implementations (filesystem, SQLAlchemy) live in the storage infrastructure
-layer; an external object store or DB can implement the same Protocols and be
-injected via the constructor.
+The facade depends on the stable :class:`BlobStore` (generic, storage-owned)
+and :class:`ArtifactRecordStore` (artifact-owned) Protocols -- never on a
+concrete backend. That decouples the artifact domain from any specific
+storage backend entirely (this module imports no backend symbol). The
+in-repo reference implementations (filesystem, SQLAlchemy) live in the
+storage infrastructure layer; an external object store or DB can implement
+the same Protocols and be injected via the constructor.
 
 Domain rules the facade owns: content deduplication by sha256 (identical bytes
 share one blob), a fresh UUID :class:`ArtifactRecord` per put (each production
@@ -29,10 +29,13 @@ from typing import TYPE_CHECKING, AsyncIterator
 if TYPE_CHECKING:
     from ..observability.metrics import ObservabilityMetrics
 
-from ..storage.protocols import ArtifactBlobStore, ArtifactRecordStore
-from .coordination import ArtifactDigestCoordinator
+from ..errors import StorageBlobIntegrityError, StorageBlobNotFoundError
+from ..storage.blob.protocols import BlobStore
+from ..storage.coordination.protocols import KeyedCoordinator
 from .digest import ArtifactDigest
+from .persistence.protocols import ArtifactRecordStore
 from .models import (
+    ArtifactBlobNotFoundError,
     ArtifactBufferedSizeLimitError,
     ArtifactIntegrityError,
     ArtifactProvenance,
@@ -159,6 +162,22 @@ def record_from_jsonable(data: dict) -> ArtifactRecord:
     )
 
 
+@asynccontextmanager
+async def _translate_blob_errors() -> AsyncIterator[None]:
+    """The BlobStore Protocol is generic (no artifact-domain type), so it
+    raises :class:`StorageBlobNotFoundError`/:class:`StorageBlobIntegrityError`.
+    The facade translates those into the artifact domain's own error types at
+    this boundary -- a caller of :class:`ArtifactStore` only ever sees
+    :class:`ArtifactBlobNotFoundError`/:class:`ArtifactIntegrityError`, never a
+    storage-layer type."""
+    try:
+        yield
+    except StorageBlobNotFoundError as exc:
+        raise ArtifactBlobNotFoundError(str(exc)) from exc
+    except StorageBlobIntegrityError as exc:
+        raise ArtifactIntegrityError(str(exc)) from exc
+
+
 async def _bytes_to_async_iter(content: bytes) -> AsyncIterator[bytes]:
     yield content
 
@@ -174,7 +193,7 @@ async def _empty_chunks() -> AsyncIterator[bytes]:
 
 class ArtifactStore:
     """Content-addressed blobs with per-write lineage records, over the
-    :class:`ArtifactBlobStore` and :class:`ArtifactRecordStore` Protocols.
+    :class:`BlobStore` and :class:`ArtifactRecordStore` Protocols.
 
     CONTENT is deduplicated by sha256 (identical bytes share one blob). A
     fresh RECORD is minted per put (a UUID id), so each production event --
@@ -185,9 +204,9 @@ class ArtifactStore:
 
     def __init__(
         self,
-        blob_store: ArtifactBlobStore,
+        blob_store: BlobStore,
         record_store: ArtifactRecordStore,
-        coordinator: ArtifactDigestCoordinator,
+        coordinator: KeyedCoordinator,
         *,
         metrics: "ObservabilityMetrics | None" = None,
         staging_dir: "Path | None" = None,
@@ -199,8 +218,9 @@ class ArtifactStore:
         # ArtifactStore constructed without one fails at construction rather than
         # silently defaulting to a scope the caller may not have intended (e.g. a
         # MULTI_WORKER deployment that meant to inject a distributed coordinator).
-        # A single-process caller passes InProcessArtifactDigestCoordinator()
-        # explicitly.
+        # A single-process caller passes InProcessKeyedCoordinator() explicitly;
+        # the digest's string value (``ArtifactDigest.value``) is the
+        # coordination key.
         self._coordinator = coordinator
         # Optional ObservabilityMetrics sink. When wired, a digest mismatch on
         # read increments ``artifact_digest_mismatch_total`` and a put failure
@@ -210,6 +230,14 @@ class ArtifactStore:
         # Optional staging directory for the streaming-put spool
         # (caller-configurable). None = the tempfile module default.
         self._staging_dir = staging_dir
+
+    @property
+    def coordination_scope(self):
+        # Public read on the wired coordinator's declared scope, so the Runtime
+        # consistency gate verifies the Storage's declared
+        # artifact_coordination_scope matches the coordinator actually wired in
+        # without reaching into the private ``_coordinator`` attribute.
+        return self._coordinator.scope
 
     async def put(
         self,
@@ -233,13 +261,14 @@ class ArtifactStore:
         # Hold the per-digest lock across blob reuse AND record create so the
         # orphan sweeper cannot observe the blob as unreferenced and delete it
         # in the window between the two.
-        async with self._coordinator.hold(digest):
+        async with self._coordinator.hold(digest.value):
             # Content dedup: put_if_absent is idempotent on digest and verifies the
             # claimed digest matches the bytes.
             try:
-                await self._blob.put_if_absent(
-                    digest=digest, source=_bytes_to_async_iter(content), size=len(content)
-                )
+                async with _translate_blob_errors():
+                    await self._blob.put_if_absent(
+                        digest=digest.value, source=_bytes_to_async_iter(content), size=len(content)
+                    )
             except Exception:
                 # The blob-store-level mismatch already records itself when its
                 # own sink is wired; record at the facade too so a caller that
@@ -279,9 +308,10 @@ class ArtifactStore:
                 f"limit); use open_stream() to read it without buffering"
             )
         chunks_acc: "list[bytes]" = []
-        async with self._blob.open(digest=ArtifactDigest.parse(record.ref.sha256)) as chunks:
-            async for chunk in chunks:
-                chunks_acc.append(chunk)
+        async with _translate_blob_errors():
+            async with self._blob.open(digest=record.ref.sha256) as chunks:
+                async for chunk in chunks:
+                    chunks_acc.append(chunk)
         content = b"".join(chunks_acc)
         # Integrity: verify BOTH size and sha256. Size first (cheap) then
         # digest -- a tampered, truncated, or extended blob fails one of the two
@@ -336,7 +366,7 @@ class ArtifactStore:
             # straight into put_if_absent under that digest, then pin the
             # record -- both under the per-digest lock so the sweeper cannot
             # delete the blob between the two.
-            async with self._coordinator.hold(digest):
+            async with self._coordinator.hold(digest.value):
                 final_size = await self._put_stream_with_known_digest(
                     source=source, digest=digest, declared_size=size
                 )
@@ -351,7 +381,7 @@ class ArtifactStore:
             source, staging_dir=self._staging_dir
         )
         digest = ArtifactDigest.parse(digest_hex)
-        async with self._coordinator.hold(digest):
+        async with self._coordinator.hold(digest.value):
             try:
                 final_size = await self._put_staged_blob(
                     digest=digest, staged=staged, staged_size=staged_size
@@ -409,9 +439,10 @@ class ArtifactStore:
                 yield chunk
 
         try:
-            info = await self._blob.put_if_absent(
-                digest=digest, source=_verifying(), size=declared_size
-            )
+            async with _translate_blob_errors():
+                info = await self._blob.put_if_absent(
+                    digest=digest.value, source=_verifying(), size=declared_size
+                )
         except Exception:
             if self._metrics is not None:
                 self._metrics.counter(
@@ -446,9 +477,10 @@ class ArtifactStore:
                 yield chunk
 
         try:
-            await self._blob.put_if_absent(
-                digest=digest, source=_file_chunks(), size=staged_size
-            )
+            async with _translate_blob_errors():
+                await self._blob.put_if_absent(
+                    digest=digest.value, source=_file_chunks(), size=staged_size
+                )
         except Exception:
             if self._metrics is not None:
                 self._metrics.counter(
@@ -479,34 +511,33 @@ class ArtifactStore:
         if record is None:
             yield _empty_chunks()
             return
-        async with self._blob.open(
-            digest=ArtifactDigest.parse(record.ref.sha256)
-        ) as blob_chunks:
-            hasher = hashlib.sha256()
-            seen = 0
+        async with _translate_blob_errors():
+            async with self._blob.open(digest=record.ref.sha256) as blob_chunks:
+                hasher = hashlib.sha256()
+                seen = 0
 
-            async def _verified() -> AsyncIterator[bytes]:
-                nonlocal seen
-                async for chunk in blob_chunks:
-                    hasher.update(chunk)
-                    seen += len(chunk)
-                    yield chunk
-                if seen != record.ref.size:
-                    if self._metrics is not None:
-                        self._metrics.counter("artifact_digest_mismatch_total")
-                    raise ArtifactIntegrityError(
-                        f"artifact {artifact_id} blob size mismatch on stream: "
-                        f"claimed {record.ref.size}, actual {seen}"
-                    )
-                if hasher.hexdigest() != record.ref.sha256:
-                    if self._metrics is not None:
-                        self._metrics.counter("artifact_digest_mismatch_total")
-                    raise ArtifactIntegrityError(
-                        f"artifact {artifact_id} blob sha256 mismatch on stream: "
-                        f"{hasher.hexdigest()[:12]}"
-                    )
+                async def _verified() -> AsyncIterator[bytes]:
+                    nonlocal seen
+                    async for chunk in blob_chunks:
+                        hasher.update(chunk)
+                        seen += len(chunk)
+                        yield chunk
+                    if seen != record.ref.size:
+                        if self._metrics is not None:
+                            self._metrics.counter("artifact_digest_mismatch_total")
+                        raise ArtifactIntegrityError(
+                            f"artifact {artifact_id} blob size mismatch on stream: "
+                            f"claimed {record.ref.size}, actual {seen}"
+                        )
+                    if hasher.hexdigest() != record.ref.sha256:
+                        if self._metrics is not None:
+                            self._metrics.counter("artifact_digest_mismatch_total")
+                        raise ArtifactIntegrityError(
+                            f"artifact {artifact_id} blob sha256 mismatch on stream: "
+                            f"{hasher.hexdigest()[:12]}"
+                        )
 
-            yield _verified()
+                yield _verified()
 
 
 __all__: "list[str]" = ["ArtifactStore"]

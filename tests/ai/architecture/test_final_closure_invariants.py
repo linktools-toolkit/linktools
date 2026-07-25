@@ -118,7 +118,7 @@ _PARSER = (
 
 
 def test_resource_backed_revision_is_not_constant_zero():
-    """SpecLoader.from_assets must compute a real revision (not ``return 0``)
+    """SpecLoader.from_objects must compute a real revision (not ``return 0``)
     or the registry cache would pin the first read forever."""
     source = _PARSER.read_text(encoding="utf-8")
     assert "return 0" not in source, (
@@ -147,32 +147,30 @@ def test_filesystem_revision_uses_nanosecond_mtime():
 
 @pytest.mark.asyncio
 async def test_resource_backed_registry_refreshes_after_change():
-    """A asset-backed AgentCatalog re-reads after its underlying asset
+    """An object-backed AgentCatalog re-reads after its underlying object
     is modified (the cache invalidates on revision change) -- the
-    asset-refresh gain must hold through a real registry."""
+    object-refresh gain must hold through a real registry."""
     from linktools.ai.agent.catalog import AgentCatalog
     from linktools.ai.catalog.parsing import SpecLoader
-    from linktools.ai.asset.memory import MemoryAssetBackend
-    from linktools.ai.asset.models import WriteOptions
-    from linktools.ai.asset.path import AssetPath
-    from linktools.ai.asset.store import AssetStore
+    from linktools.ai.storage.backends.memory.object import MemoryObjectStore
+    from linktools.ai.storage.object.models import StorageKey, WriteOptions
 
-    store = AssetStore(primary=MemoryAssetBackend())
+    store = MemoryObjectStore()
     await store.put(
-        AssetPath("/specs/agents/a.md"),
+        StorageKey("/specs/agents/a.md"),
         b"---\nname: a\nmodel:\n  primary: gpt\n---\nv1",
         options=WriteOptions(content_type="text/markdown"),
     )
-    registry = AgentCatalog.from_specloader(SpecLoader.from_assets(store, prefix="specs/agents"))
+    registry = AgentCatalog.from_specloader(SpecLoader.from_objects(store, prefix="specs/agents"))
     assert "v1" in (await registry.get("a")).instructions.instructions
 
     await store.put(
-        AssetPath("/specs/agents/a.md"),
+        StorageKey("/specs/agents/a.md"),
         b"---\nname: a\nmodel:\n  primary: gpt\n---\nv2",
         options=WriteOptions(content_type="text/markdown"),
     )
     assert "v2" in (await registry.get("a")).instructions.instructions, (
-        "registry must refresh after the asset is modified"
+        "registry must refresh after the object is modified"
     )
 
 

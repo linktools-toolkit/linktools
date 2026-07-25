@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import (
     ArtifactProvenance,
@@ -17,11 +17,9 @@ from linktools.ai.artifact.models import (
     ArtifactRef,
     ArtifactRecordCorruptError,
 )
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
-from linktools.ai.storage.orphan import (
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.artifact.orphan import (
     OrphanSweepConfig,
     sweep_orphan_blobs,
 )
@@ -32,7 +30,7 @@ def _stores(tmp_path):
     record_store = FilesystemArtifactRecordStore(
         records_root=tmp_path / "records"
     )
-    coordinator = InProcessArtifactDigestCoordinator()
+    coordinator = InProcessKeyedCoordinator()
     return blob_store, record_store, coordinator
 
 
@@ -61,14 +59,14 @@ def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
         ref_content = b"referenced"
         ref_sha = _sha(ref_content)
         await blob_store.put_if_absent(
-            digest=ref_sha, source=_aiter(ref_content), size=len(ref_content)
+            digest=ref_sha.value, source=_aiter(ref_content), size=len(ref_content)
         )
         await record_store.put(_record("art-ref", ref_sha.value))
         # An orphan blob: written but NO record pins it.
         orphan_content = b"orphan"
         orphan_sha = _sha(orphan_content)
         await blob_store.put_if_absent(
-            digest=orphan_sha, source=_aiter(orphan_content), size=len(orphan_content)
+            digest=orphan_sha.value, source=_aiter(orphan_content), size=len(orphan_content)
         )
         return ref_sha, orphan_sha
 
@@ -83,8 +81,8 @@ def test_orphan_blob_past_grace_is_deleted_referenced_blob_is_kept(tmp_path):
     assert stats.in_use == 1
     assert stats.kept_within_grace == 0
     # The orphan is gone; the referenced blob survives.
-    assert _run(blob_store.stat(digest=orphan_sha)) is None
-    assert _run(blob_store.stat(digest=ref_sha)) is not None
+    assert _run(blob_store.stat(digest=orphan_sha.value)) is None
+    assert _run(blob_store.stat(digest=ref_sha.value)) is not None
 
 
 def test_orphan_blob_within_grace_is_kept(tmp_path):
@@ -96,7 +94,7 @@ def test_orphan_blob_within_grace_is_kept(tmp_path):
         orphan_content = b"fresh-orphan"
         orphan_sha = _sha(orphan_content)
         await blob_store.put_if_absent(
-            digest=orphan_sha, source=_aiter(orphan_content), size=len(orphan_content)
+            digest=orphan_sha.value, source=_aiter(orphan_content), size=len(orphan_content)
         )
         return orphan_sha
 
@@ -108,7 +106,7 @@ def test_orphan_blob_within_grace_is_kept(tmp_path):
 
     assert stats.deleted == 0
     assert stats.kept_within_grace == 1
-    assert _run(blob_store.stat(digest=orphan_sha)) is not None
+    assert _run(blob_store.stat(digest=orphan_sha.value)) is not None
 
 
 def test_sweep_is_idempotent(tmp_path):
@@ -120,7 +118,7 @@ def test_sweep_is_idempotent(tmp_path):
         orphan_content = b"gone"
         orphan_sha = _sha(orphan_content)
         await blob_store.put_if_absent(
-            digest=orphan_sha, source=_aiter(orphan_content), size=len(orphan_content)
+            digest=orphan_sha.value, source=_aiter(orphan_content), size=len(orphan_content)
         )
         return orphan_sha
 
@@ -143,7 +141,7 @@ def test_custom_grace_period_governs_deletion(tmp_path):
         content = b"short-fuse"
         sha = _sha(content)
         await blob_store.put_if_absent(
-            digest=sha, source=_aiter(content), size=len(content)
+            digest=sha.value, source=_aiter(content), size=len(content)
         )
         return sha
 
@@ -154,7 +152,7 @@ def test_custom_grace_period_governs_deletion(tmp_path):
     future = datetime.now(timezone.utc) + timedelta(minutes=5)
     stats = _run(sweep_orphan_blobs(blob_store, record_store, coordinator, config, now=future))
     assert stats.deleted == 1
-    assert _run(blob_store.stat(digest=sha)) is None
+    assert _run(blob_store.stat(digest=sha.value)) is None
 
 
 def _run(coro):
@@ -174,7 +172,7 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
         ref_content = b"referenced"
         ref_sha = _sha(ref_content)
         await blob_store.put_if_absent(
-            digest=ref_sha, source=_aiter(ref_content), size=len(ref_content)
+            digest=ref_sha.value, source=_aiter(ref_content), size=len(ref_content)
         )
         await record_store.put(_record("art-ref", ref_sha.value))
         # An orphan blob past the grace window that the sweeper WOULD delete if
@@ -182,7 +180,7 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
         orphan_content = b"would-be-deleted"
         orphan_sha = _sha(orphan_content)
         await blob_store.put_if_absent(
-            digest=orphan_sha, source=_aiter(orphan_content), size=len(orphan_content)
+            digest=orphan_sha.value, source=_aiter(orphan_content), size=len(orphan_content)
         )
         return ref_sha, orphan_sha
 
@@ -198,5 +196,5 @@ def test_corrupt_record_aborts_sweep_fail_closed(tmp_path):
 
     # Nothing was deleted: the orphan survives because the scan aborted, and the
     # referenced blob is untouched.
-    assert _run(blob_store.stat(digest=orphan_sha)) is not None
-    assert _run(blob_store.stat(digest=ref_sha)) is not None
+    assert _run(blob_store.stat(digest=orphan_sha.value)) is not None
+    assert _run(blob_store.stat(digest=ref_sha.value)) is not None

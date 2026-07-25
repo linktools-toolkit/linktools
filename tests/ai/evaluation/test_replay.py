@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """Replay + snapshot validation tests (sections 25.2 / 25.3)."""
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 import asyncio
 
 import pytest
 
 from linktools.ai.artifact import ArtifactStore
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.evaluation.models import EvalExecution, EvalTarget
 from linktools.ai.evaluation.replay import (
     SnapshotValidationError,
@@ -16,17 +16,15 @@ from linktools.ai.evaluation.replay import (
     validate_snapshot,
 )
 from linktools.ai.evaluation.snapshot import RunSnapshot
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
 
 def _artifacts(tmp_path) -> ArtifactStore:
     return ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-        InProcessArtifactDigestCoordinator(),
+        InProcessKeyedCoordinator(),
     )
 
 

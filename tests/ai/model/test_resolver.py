@@ -222,3 +222,54 @@ def test_from_instance_rejects_int_retries():
     # None is allowed (the prebuilt-manages-its-own signal).
     bundle = ModelBundle.from_instance("m", FunctionModel(_fn("x")))
     assert bundle.config.protocol == "prebuilt"
+
+
+def test_config_backed_none_and_zero_request_retries_share_revision():
+    # effective_request_retries normalizes a config-backed model's None and 0 to
+    # the SAME effective count (0), so the resolved revision MUST be identical --
+    # the two are execution-equivalent and must be revision-equivalent too (a
+    # divergent revision would let a resume mis-detect drift where there is none).
+    registry = ModelRegistry()
+    registry.register("m", config=_config("m", base_url="http://x", api_key="k"))
+    rev_none = ModelResolver(registry=registry).resolve(
+        ModelPolicy(primary="m", request_retries=None)
+    ).revision
+    rev_zero = ModelResolver(registry=registry).resolve(
+        ModelPolicy(primary="m", request_retries=0)
+    ).revision
+    assert rev_none == rev_zero
+
+
+def test_effective_request_retries_normalization_rules():
+    # The single normalization source: config-backed None->0, int preserved;
+    # prebuilt None->None, int rejected.
+    from linktools.ai.model.resolver import effective_request_retries
+
+    config_bundle = ModelBundle.from_config(
+        _config("m", base_url="http://x", api_key="k"), request_retries=0
+    )
+    prebuilt_bundle = ModelBundle.from_instance("p", FunctionModel(_fn("x")))
+    assert effective_request_retries(bundle=config_bundle, requested=None) == 0
+    assert effective_request_retries(bundle=config_bundle, requested=0) == 0
+    assert effective_request_retries(bundle=config_bundle, requested=5) == 5
+    assert effective_request_retries(bundle=prebuilt_bundle, requested=None) is None
+    with pytest.raises(ModelRetryConfigurationError):
+        effective_request_retries(bundle=prebuilt_bundle, requested=0)
+    with pytest.raises(ModelRetryConfigurationError):
+        effective_request_retries(bundle=prebuilt_bundle, requested=7)
+
+
+def test_model_bundle_model_field_accepts_generic_model():
+    # ModelBundle.model is typed as the generic Model (not a concrete provider
+    # class), so any pydantic_ai Model instance constructs a bundle and is
+    # returned by the resolver unchanged.
+    bundle = ModelBundle.from_instance("m", FunctionModel(_fn("x")))
+    # The annotation is Model; a FunctionModel is a Model and is held as-is.
+    from pydantic_ai.models import Model as ModelProtocol
+
+    assert isinstance(bundle.model, ModelProtocol)
+    registry = ModelRegistry()
+    registry.register("m", model=FunctionModel(_fn("y")))
+    resolved = ModelResolver(registry=registry).resolve(ModelPolicy(primary="m"))
+    assert isinstance(resolved.model, FunctionModel)
+

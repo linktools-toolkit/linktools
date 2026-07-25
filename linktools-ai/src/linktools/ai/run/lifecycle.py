@@ -15,7 +15,7 @@ from .models import RunInput, RunRecord, RunStatus
 from ..run.models import RunnableType
 
 if TYPE_CHECKING:
-    from ..storage.facade import Storage
+    from ..runtime.persistence.facade import Storage
     from .store import RunStore
 
 

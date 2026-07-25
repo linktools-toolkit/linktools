@@ -6,8 +6,8 @@
 Runs one agent task against a freshly-built client, streams the events to the
 console renderer, and returns the exit codes: ``0`` on completion, ``4`` when
 the run pauses for approval (with run_id/approval_id printed), ``1`` when the
-run ends FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model,
-spec section 12.3, reports run failure this way instead of raising), ``130``
+run ends FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model
+reports run failure this way instead of raising), ``130``
 on a ``{"type": "cancelled", ...}`` event OR Ctrl+C (the latter cancels the
 run through the runtime, not just the process)."""
 

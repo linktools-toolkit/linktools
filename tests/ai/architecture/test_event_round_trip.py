@@ -15,7 +15,7 @@ from typing import Any, get_args
 
 from linktools.ai.events import payloads as _payloads
 from linktools.ai.events.payloads import EventPayload
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
+from linktools.ai.events.persistence.filesystem import FilesystemEventStore
 
 
 def _value_for(field: "dataclasses.Field[Any]") -> Any:

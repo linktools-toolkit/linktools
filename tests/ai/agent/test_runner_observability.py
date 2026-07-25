@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for AgentEngine observability integration.
+"""Tests for AgentEngine observability integration (via the Store-free
+execute_pure).
 
 Verifies that when ``observability`` and ``metrics`` are wired into AgentEngine:
 - a successful run opens exactly one outer "agent.run" span and one nested
   "agent.model" span (model span parented to run span), records
   counter("agent.run.completed") and histogram("agent.run.duration_ms");
-- a failed run (model raises) records counter("agent.run.failed"), the outer
-  span still ends (use_span ends on exception), and the exception re-raises;
-- with both kwargs default-None, run() behaves exactly as before (no sink is
-  consulted) -- the regression guard alongside the existing test_runner.py."""
+- an expected model failure (ModelRoutingError) records
+  counter("agent.run.failed") with error_type, both spans still end, and the
+  outcome is AgentFailed;
+- with both kwargs default-None, execute_pure behaves exactly as before (no
+  sink is consulted) -- the regression guard.
+
+FS-29: the legacy ``run()`` is gone; these now drive ``execute_pure`` directly.
+execute_pure records agent.run.failed only for the narrow
+``_EXPECTED_RUN_FAILURES`` set (a bare programming error propagates without
+that counter), so the failure case uses ``ModelRoutingError`` -- the canonical
+model-layer failure an expected-failure counter is meant to track."""
 
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.engine import AgentEngine
+from linktools.ai.agent.models import AgentCompleted, AgentFailed, AgentInput
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.errors import ModelRoutingError
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.observability.tracing import Span
+from linktools.ai.run.cancellation import CancellationToken
 from linktools.ai.run.context import RunContext
-from linktools.ai.run.models import RunInput, RunnableType
-from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.run.live_events import NullRunLiveEventSink, NullSecurityEventSink
+from linktools.ai.run.models import RunnableType
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 
@@ -109,7 +115,7 @@ def _model_fn(text: str = '{"response": {"answer": 42}}'):
 
 def _boom_model_fn():
     def _fn(messages, info: AgentInfo) -> ModelResponse:
-        raise RuntimeError("model exploded")
+        raise ModelRoutingError("model exploded")
 
     return _fn
 
@@ -134,22 +140,6 @@ def _run_context(run_id="run-1", session_id="session-1") -> RunContext:
     )
 
 
-def _seed_session(store, session_id) -> None:
-    now = datetime.now(timezone.utc)
-    asyncio.run(
-        store.create(
-            SessionRecord(
-                id=session_id,
-                parent_id=None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-    )
-
-
 def _compile(model_fn):
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
@@ -167,44 +157,35 @@ def _compile(model_fn):
     )
 
 
-def _make_runner(tmp_path, sink=None, metrics=None):
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-
-    run_store = FilesystemRunStore(root=tmp_path / "runs")
-    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
-    event_store = FilesystemEventStore(root=tmp_path / "events")
-    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
-    return AgentEngine(
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
-        observability=sink,
-        metrics=metrics,
-        commit_coordinator=FilesystemRunCommitCoordinator(
-            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=checkpoint_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-        ),
+def _execute_pure(runner, compiled, prompt="hi"):
+    return asyncio.run(
+        runner.execute_pure(
+            compiled,
+            AgentInput(prompt=prompt),
+            _run_context(),
+            cancellation=CancellationToken(),
+            live_events=NullRunLiveEventSink(),
+            security_events=NullSecurityEventSink(),
+        )
     )
+
+
+def _make_runner(*, sink=None, metrics=None):
+    # FS-29: AgentEngine takes only its pure-execution dependencies -- no
+    # run/session/event/checkpoint Store, no commit_coordinator. observability
+    # + metrics are the only wiring these tests exercise.
+    return AgentEngine(observability=sink, metrics=metrics)
 
 
 def test_observability_records_run_and_model_spans_with_metrics_on_success(tmp_path):
     sink = _RecordingSink()
     metrics = _RecordingMetrics()
     compiled = _compile(_model_fn())
-    runner = _make_runner(tmp_path, sink=sink, metrics=metrics)
-    _seed_session(runner._session_store, "session-1")
+    runner = _make_runner(sink=sink, metrics=metrics)
 
-    async def _run():
-        return await runner.run(
-            compiled, RunInput(prompt="what is the answer?"), _run_context()
-        )
-
-    result = asyncio.run(_run())
-    assert "42" in str(result.output)
+    outcome = _execute_pure(runner, compiled, prompt="what is the answer?")
+    assert isinstance(outcome, AgentCompleted)
+    assert "42" in str(outcome.result.output)
 
     # Exactly one outer "agent.run" span and one nested "agent.model" span.
     assert [s.name for s in sink.started] == ["agent.run", "agent.model"]
@@ -234,16 +215,14 @@ def test_observability_records_failed_counter_and_ends_span_on_model_error(tmp_p
     sink = _RecordingSink()
     metrics = _RecordingMetrics()
     compiled = _compile(_boom_model_fn())
-    runner = _make_runner(tmp_path, sink=sink, metrics=metrics)
-    _seed_session(runner._session_store, "session-1")
+    runner = _make_runner(sink=sink, metrics=metrics)
 
-    async def _run():
-        await runner.run(compiled, RunInput(prompt="hi"), _run_context())
+    outcome = _execute_pure(runner, compiled)
 
-    with pytest.raises(RuntimeError):
-        asyncio.run(_run())
-
-    # Both spans still started+ended (use_span ends on exception, LIFO order).
+    # An expected model failure (ModelRoutingError) converges to AgentFailed --
+    # not re-raised -- and both spans still started+ended (use_span ends on
+    # exception, LIFO order).
+    assert isinstance(outcome, AgentFailed)
     assert [s.name for s in sink.started] == ["agent.run", "agent.model"]
     assert [s.name for s in sink.ended] == ["agent.model", "agent.run"]
     # Failed counter recorded exactly once; no completed counter, no histogram.
@@ -258,17 +237,14 @@ def test_observability_records_failed_counter_and_ends_span_on_model_error(tmp_p
 
 
 def test_default_none_observability_is_a_noop(tmp_path):
-    # Default runner (observability=None, metrics=None): run succeeds exactly as
-    # today; no sink is consulted, no metrics recorded. This is the regression
-    # guard -- the existing test_runner.py also still passes unchanged.
+    # Default runner (observability=None, metrics=None): execute_pure succeeds
+    # exactly as today; no sink is consulted, no metrics recorded. This is the
+    # regression guard.
     compiled = _compile(_model_fn())
-    runner = _make_runner(tmp_path)  # no sink/metrics -> defaults to None
+    runner = _make_runner()  # no sink/metrics -> defaults to None
     assert runner._observability is None
     assert runner._metrics is None
-    _seed_session(runner._session_store, "session-1")
 
-    async def _run():
-        return await runner.run(compiled, RunInput(prompt="hi"), _run_context())
-
-    result = asyncio.run(_run())
-    assert "42" in str(result.output)
+    outcome = _execute_pure(runner, compiled)
+    assert isinstance(outcome, AgentCompleted)
+    assert "42" in str(outcome.result.output)

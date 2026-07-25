@@ -5,7 +5,7 @@ bound engine's dialect name at adapter construction, so an unsupported dialect
 fails immediately rather than on first write.
 
 The dialect layer is the ONLY place core branches on a dialect name -- the
-adapter facade and the asset backend stay dialect-neutral and delegate conflict
+adapter facade and the object backend stay dialect-neutral and delegate conflict
 classification here."""
 
 from typing import TYPE_CHECKING

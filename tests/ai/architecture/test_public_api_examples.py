@@ -12,8 +12,12 @@ import pytest
 # public path. (module_path, [names])
 PUBLIC_IMPORTS = [
     ("linktools.ai.runtime", ["Runtime", "build_runtime"]),
-    ("linktools.ai.storage", ["Storage", "FilesystemStorage"]),
-    ("linktools.ai.asset", ["AssetStore"]),
+    # The Storage composition + FilesystemStorage reference live at
+    # runtime.persistence (the composition root), not storage. -- the
+    # storage kernel (linktools.ai.storage) carries only the generic
+    # object/cache/blob/coordination machinery and is free of domain imports.
+    ("linktools.ai.runtime.persistence", ["Storage", "FilesystemStorage"]),
+    ("linktools.ai.asset", ["compose_assets"]),
     ("linktools.ai.artifact", ["ArtifactStore"]),
     ("linktools.ai.model", ["ModelResolver", "ModelPolicy"]),
     ("linktools.ai.sandbox", ["Sandbox"]),

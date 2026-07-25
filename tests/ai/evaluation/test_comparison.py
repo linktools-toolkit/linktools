@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Comparison aggregation + baseline-vs-candidate delta tests (section 25.4)."""
+"""Comparison aggregation + baseline-vs-candidate delta tests."""
 
 from linktools.ai.evaluation.comparison import aggregate, compare
 from linktools.ai.evaluation.models import EvalResult

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """streaming-RSS cap: the headline 1 GiB benchmark.
 
 The op 1-3 requires a REAL RSS measurement on a REAL 1 GiB stream of
@@ -30,6 +29,7 @@ the ≤ 64 MiB cap unconditionally rather than only opt-in.
 The benchmark writes a JSON + Markdown summary capturing the measured numbers
 under ``PERF_RESULTS_DIR`` (default ``.docs/review-fix``) so a reviewer can
 see the actual RSS rather than just a pass/fail bit."""
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 import asyncio
 import gc
@@ -45,12 +45,10 @@ from typing import AsyncIterator, Callable
 
 import pytest
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.store import ArtifactStore
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
 _GIB = 1024 ** 3
 _MIB = 1024 ** 2
@@ -207,7 +205,7 @@ def test_put_stream_and_open_stream_extra_rss_under_64mib(tmp_path: Path) -> Non
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
+    store = ArtifactStore(blob, records, InProcessKeyedCoordinator())
 
     pre_baseline_kib = _read_vm_rss_kib()
     assert pre_baseline_kib is not None

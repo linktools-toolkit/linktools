@@ -21,7 +21,7 @@ from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.governance.security.pipeline import validate_model_decision
 from linktools.ai.governance.security.secured_model import SecuredModel
 from linktools.ai.session.models import SessionRecord
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
 # --- symlink reads confined to resolved roots -----------------------
@@ -83,7 +83,7 @@ def test_v5_runtime_recovery_is_serialized():
     # The crash-recovery guard lives on RunCoordinator (Runtime delegates all
     # run-lifecycle methods there); the lock is created per-instance.
     from linktools.ai.run.coordinator import RunCoordinator
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     assert hasattr(RunCoordinator, "_ensure_recovered")
     import tempfile
@@ -101,7 +101,7 @@ def test_v5_runtime_recovery_is_serialized():
 
 
 def test_v5_file_complete_publishes_messages_after_run_transition():
-    from linktools.ai.storage.filesystem import commit as commit_mod
+    from linktools.ai.run.persistence import commit as commit_mod
 
     src = inspect.getsource(commit_mod.FilesystemRunCommitCoordinator.complete)
     # Session messages are appended AFTER the run transition (commit point).
@@ -116,7 +116,7 @@ def test_v5_file_complete_publishes_messages_after_run_transition():
 
 
 def test_v5_file_critical_event_helper_does_not_swallow():
-    from linktools.ai.storage.filesystem import commit as commit_mod
+    from linktools.ai.run.persistence import commit as commit_mod
 
     src = inspect.getsource(
         commit_mod.FilesystemRunCommitCoordinator._append_critical_event_once
@@ -133,14 +133,20 @@ def test_v5_file_critical_event_helper_does_not_swallow():
 
 
 def test_v5_runner_runs_after_run_before_complete():
+    """FS-29 layer split: after_run fires inside AgentEngine.execute_pure (the
+    Store-free loop) and the run commit lives in RunCoordinator._commit_outcome
+    -- which runs only AFTER execute_pure returns. So after_run necessarily
+    precedes the commit: a failure in after_run propagates out of execute_pure
+    before RunCoordinator ever commits, so it can never corrupt an already-
+    committed run. Lock the split: execute_pure runs after_run AND holds no
+    commit_coordinator reference at all."""
     from linktools.ai.agent.engine import AgentEngine
 
-    src = inspect.getsource(AgentEngine.execute)
-    pos_after_run = src.index("run_after_run")
-    pos_complete = src.index("_commit_coordinator.complete")
-    assert pos_after_run < pos_complete, (
-        "after_run must run before the commit so its failure does not corrupt a "
-        "committed run"
+    src = inspect.getsource(AgentEngine.execute_pure)
+    assert "run_after_run" in src, "execute_pure must run the after_run hook"
+    assert "_commit_coordinator" not in src, (
+        "execute_pure must not reference a commit_coordinator -- the commit is "
+        "RunCoordinator's job, so after_run (in the engine) always precedes it"
     )
 
 
@@ -150,7 +156,7 @@ def test_v5_runner_runs_after_run_before_complete():
 def test_v5_runner_persists_original_prompt_not_model_prompt():
     from linktools.ai.agent import engine as runner_mod
 
-    src = inspect.getsource(runner_mod.AgentEngine.execute)
+    src = inspect.getsource(runner_mod.AgentEngine.execute_pure)
     assert "user_content = prompt" not in src, (
         "the USER session message must be request.prompt, never the concatenated "
         "model prompt"

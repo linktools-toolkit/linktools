@@ -42,15 +42,15 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
     return data
 
 
-def _stable_asset_revision(items: "Sequence[Any]") -> int:
-    """Process-stable revision over a asset-info set: a SHA-256 digest of
-    each item's path/etag/version/modified_at/size, so changing one item,
+def _stable_object_revision(items: "Sequence[Any]") -> int:
+    """Process-stable revision over an ObjectInfo set: a SHA-256 digest of
+    each item's key/etag/version/modified_at/size, so changing one item,
     adding one, or removing one yields a different revision and a registry
-    refreshes its cache. Sorted by path so reordering does not perturb the
+    refreshes its cache. Sorted by key so reordering does not perturb the
     hash; ``sort_keys=True`` makes the JSON deterministic."""
     state = [
         {
-            "path": info.path.value,
+            "key": info.key.value,
             "etag": info.etag,
             "version": info.version,
             "modified_at": (
@@ -58,7 +58,7 @@ def _stable_asset_revision(items: "Sequence[Any]") -> int:
             ),
             "size": info.size,
         }
-        for info in sorted(items, key=lambda v: v.path.value)
+        for info in sorted(items, key=lambda v: v.key.value)
     ]
     digest = hashlib.sha256(
         json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -67,7 +67,7 @@ def _stable_asset_revision(items: "Sequence[Any]") -> int:
 
 
 class SpecLoader:
-    """Reads spec text + lists ids from either the filesystem or a AssetStore."""
+    """Reads spec text + lists ids from either the filesystem or an ObjectStore."""
 
     def __init__(self, *, read, list_ids, revision) -> None:
         self._read = read
@@ -121,56 +121,56 @@ class SpecLoader:
         return cls(read=read, list_ids=list_ids, revision=revision)
 
     @classmethod
-    def from_assets(cls, asset_store: Any, *, prefix: str) -> "SpecLoader":
-        # AssetStore exposes get(AssetPath) + list(AssetPath); there is no global
-        # revision() to call, so the revision below is a stable hash over the live
-        # metadata. Build paths via AssetPath so the store's own normalization +
-        # sandbox apply. The hash is over path/etag/version/modified_at/size so
-        # the registry cache refreshes after any add/modify/delete instead of
-        # pinning to a constant.
-        from ..asset.models import Depth
-        from ..asset.path import AssetPath
+    def from_objects(cls, object_store: Any, *, prefix: str) -> "SpecLoader":
+        # An ObjectStore exposes get(StorageKey) + list(StorageKey); there is
+        # no global revision() to call on a plain (non-revisioned) store, so
+        # the revision below is a stable hash over the live metadata. Build
+        # keys via StorageKey so the store's own normalization applies. The
+        # hash is over key/etag/version/modified_at/size so the registry
+        # cache refreshes after any add/modify/delete instead of pinning to
+        # a constant.
+        from ..storage.object.models import Depth, StorageKey
 
         base = prefix.strip("/")
 
-        def _full(path: str) -> "AssetPath":
+        def _full(path: str) -> "StorageKey":
             joined = f"{base}/{path.strip('/')}" if base else path.strip("/")
             if not joined or ".." in joined.split("/"):
-                raise RegistryNotFoundError(f"invalid spec asset path: {path!r}")
-            return AssetPath(f"/{joined}")
+                raise RegistryNotFoundError(f"invalid spec object key: {path!r}")
+            return StorageKey(f"/{joined}")
 
         async def _list_items() -> "list[Any]":
-            # Follow list cursor pagination so the full asset set is read
+            # Follow list cursor pagination so the full object set is read
             # (the revision must reflect every item, not just the first page).
-            root = AssetPath(f"/{base}") if base else AssetPath("/")
+            root = StorageKey(f"/{base}") if base else StorageKey("/")
             items: "list[Any]" = []
             cursor = None
             while True:
-                page = await asset_store.list(
+                page = await object_store.list(
                     root, depth=Depth.ONE, limit=1000, cursor=cursor
                 )
                 items.extend(page.items)
-                if page.cursor is None:
+                if page.next_cursor is None:
                     return items
-                cursor = page.cursor
+                cursor = page.next_cursor
 
         async def read(path: str) -> str:
             full = _full(path)
-            asset = await asset_store.get(full)
-            if asset is None:
-                raise RegistryNotFoundError(f"spec asset not found: {full.value}")
-            return asset.text()
+            obj = await object_store.get(full)
+            if obj is None:
+                raise RegistryNotFoundError(f"spec object not found: {full.value}")
+            return obj.content.decode("utf-8")
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
             ids: "list[str]" = []
             for item in await _list_items():
-                name = item.path.value.rstrip("/").rsplit("/", 1)[-1]
+                name = item.key.value.rstrip("/").rsplit("/", 1)[-1]
                 if name.endswith(suffix):
                     ids.append(name[: -len(suffix)])
             return tuple(sorted(ids))
 
         async def revision() -> int:
-            return _stable_asset_revision(await _list_items())
+            return _stable_object_revision(await _list_items())
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 

@@ -6,13 +6,6 @@ import pytest
 
 from linktools.ai.errors import (
     LinktoolsAIError,
-    AssetError,
-    AssetNotFoundError,
-    AssetConflictError,
-    AssetPreconditionFailedError,
-    AssetReadOnlyError,
-    AssetUnsupportedError,
-    InvalidAssetPathError,
     StorageError,
     StorageCapabilityError,
     IdempotencyConflictError,
@@ -22,13 +15,6 @@ from linktools.ai.errors import (
 @pytest.mark.parametrize(
     "exc_type,base_type",
     [
-        (AssetError, LinktoolsAIError),
-        (AssetNotFoundError, AssetError),
-        (AssetConflictError, AssetError),
-        (AssetPreconditionFailedError, AssetError),
-        (AssetReadOnlyError, AssetError),
-        (AssetUnsupportedError, AssetError),
-        (InvalidAssetPathError, AssetError),
         (StorageError, LinktoolsAIError),
         (StorageCapabilityError, StorageError),
         (IdempotencyConflictError, LinktoolsAIError),

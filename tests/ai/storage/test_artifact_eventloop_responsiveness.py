@@ -17,13 +17,11 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
-from linktools.ai.storage.orphan import OrphanSweepConfig, sweep_orphan_blobs
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.artifact.orphan import OrphanSweepConfig, sweep_orphan_blobs
 
 
 def _digest(data: bytes) -> ArtifactDigest:
@@ -55,7 +53,7 @@ def test_large_upload_does_not_block_event_loop_heartbeat(tmp_path: Path) -> Non
         hb = asyncio.create_task(_heartbeat_until_cancelled(0.005))
         try:
             await blob.put_if_absent(
-                digest=digest, source=slow_source(), size=len(chunk) * n_chunks
+                digest=digest.value, source=slow_source(), size=len(chunk) * n_chunks
             )
         finally:
             beats = await _cancel(hb)
@@ -79,7 +77,7 @@ def test_large_download_does_not_block_event_loop(tmp_path: Path) -> None:
         async def _src():
             yield payload
 
-        await blob.put_if_absent(digest=digest, source=_src(), size=len(payload))
+        await blob.put_if_absent(digest=digest.value, source=_src(), size=len(payload))
 
     asyncio.run(seed())
 
@@ -87,7 +85,7 @@ def test_large_download_does_not_block_event_loop(tmp_path: Path) -> None:
         hb = asyncio.create_task(_heartbeat_until_cancelled(0.003))
         try:
             collected = 0
-            async with blob.open(digest=digest) as chunks:
+            async with blob.open(digest=digest.value) as chunks:
                 async for c in chunks:
                     collected += len(c)
             assert collected == len(payload)
@@ -115,7 +113,7 @@ def test_orphan_scan_does_not_block_event_loop(tmp_path: Path) -> None:
         for i in range(300):
             data = f"blob-{i}".encode()
             await blob.put_if_absent(
-                digest=_digest(data), source=_src(data), size=len(data)
+                digest=_digest(data).value, source=_src(data), size=len(data)
             )
 
     asyncio.run(seed())
@@ -126,7 +124,7 @@ def test_orphan_scan_does_not_block_event_loop(tmp_path: Path) -> None:
             await sweep_orphan_blobs(
                 blob,
                 record_store,
-                InProcessArtifactDigestCoordinator(),
+                InProcessKeyedCoordinator(),
                 OrphanSweepConfig(
                     grace_period=__import__("datetime").timedelta(seconds=0)
                 ),
@@ -172,7 +170,7 @@ def test_parallel_runs_not_blocked_by_artifact_hash(tmp_path: Path) -> None:
                 await asyncio.sleep(0.01)
 
         await blob.put_if_absent(
-            digest=digest, source=src(), size=len(payload)
+            digest=digest.value, source=src(), size=len(payload)
         )
         return tag
 

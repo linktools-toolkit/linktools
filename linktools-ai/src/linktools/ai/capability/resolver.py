@@ -32,26 +32,24 @@ if TYPE_CHECKING:
 
 
 async def _emit(context: CapabilityContext, payload) -> None:
-    """Append a capability-lifecycle event when an EventStore is wired on the
-    context; a no-op otherwise so resolution stays side-effect-free by default."""
-    store = context.event_store
-    run_id = context.run_id
-    if store is None or run_id is None:
-        return
-    from ..events.context import EventStreamContext, append_event
+    """Emit a capability-lifecycle event through the context's
+    SecurityEventEmitter when one is wired; a no-op otherwise so resolution
+    stays side-effect-free by default. Never a direct EventStore reference.
 
-    await append_event(
-        store,
-        EventStreamContext(
-            stream_id=run_id,
-            run_id=run_id,
-            root_run_id=context.root_run_id or run_id,
-            parent_run_id=context.parent_run_id,
-            session_id=context.session_id or run_id,
-            runnable_id=context.agent_id,
-        ),
-        payload,
-    )
+    Routing follows the payload's criticality: a SECURITY_CRITICAL event
+    (e.g. ToolExposureDenied -- an audit record of an exposure-policy denial)
+    goes through emit_security so a persistence failure blocks (fail-closed,
+    preserving the audit trail); OBSERVABILITY lifecycle markers go through
+    emit_observability (best-effort)."""
+    emitter = context.security_event_emitter
+    if emitter is None:
+        return
+    from ..events.criticality import EventCriticality
+
+    if getattr(type(payload), "criticality", None) is EventCriticality.SECURITY_CRITICAL:
+        await emitter.emit_security(payload)
+    else:
+        await emitter.emit_observability(payload)
 
 
 class CapabilityResolver:

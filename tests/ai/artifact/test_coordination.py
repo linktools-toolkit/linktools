@@ -18,15 +18,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactProvenance
 from linktools.ai.artifact.store import ArtifactStore
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
-from linktools.ai.storage.orphan import OrphanSweepConfig, sweep_orphan_blobs
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.artifact.orphan import OrphanSweepConfig, sweep_orphan_blobs
 
 
 def _sha(content: bytes) -> ArtifactDigest:
@@ -64,12 +62,12 @@ class _PausableRecords:
 async def test_sweep_keeps_blob_a_concurrent_put_is_pinning(tmp_path):
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
 
     content = b"reused-blob"
     sha = _sha(content)
     # Pre-seed the blob as an UNREFERENCED orphan (no record yet).
-    await blob.put_if_absent(digest=sha, source=_aiter(content), size=len(content))
+    await blob.put_if_absent(digest=sha.value, source=_aiter(content), size=len(content))
 
     entered = asyncio.Event()
     proceed = asyncio.Event()
@@ -107,7 +105,7 @@ async def test_sweep_keeps_blob_a_concurrent_put_is_pinning(tmp_path):
 
     assert stats.deleted == 0, "sweeper deleted a blob a concurrent put was pinning"
     # The blob survives and is now pinned by the put's record.
-    assert await blob.stat(digest=sha) is not None
+    assert await blob.stat(digest=sha.value) is not None
     assert await records.is_digest_referenced(sha) is True
 
 
@@ -115,17 +113,17 @@ async def test_sweep_keeps_blob_a_concurrent_put_is_pinning(tmp_path):
 async def test_sweep_deletes_a_true_orphan_under_lock(tmp_path):
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
 
     content = b"true-orphan"
     sha = _sha(content)
-    await blob.put_if_absent(digest=sha, source=_aiter(content), size=len(content))
+    await blob.put_if_absent(digest=sha.value, source=_aiter(content), size=len(content))
 
     future = datetime.now(timezone.utc) + timedelta(hours=25)
     stats = await sweep_orphan_blobs(blob, records, coord, now=future)
 
     assert stats.deleted == 1
-    assert await blob.stat(digest=sha) is None
+    assert await blob.stat(digest=sha.value) is None
 
 
 @pytest.mark.asyncio
@@ -134,7 +132,7 @@ async def test_per_digest_lock_does_not_serialize_unrelated_digests(tmp_path):
     # shards by digest, so there is no global artifact bottleneck.
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     store = ArtifactStore(blob, records, coord)
 
     inflight = asyncio.Semaphore(0)

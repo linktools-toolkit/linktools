@@ -12,18 +12,15 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.artifact import ArtifactStore
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.models import Asset, AssetInfo, AssetKind
-from linktools.ai.asset.path import AssetPath
-from linktools.ai.asset.store import AssetStore
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.storage.backends.memory.object import MemoryObjectBackend
+from linktools.ai.storage.object.models import ObjectInfo, StorageKey, StoredObject
+from linktools.ai.storage.object.store import ObjectStore
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 from linktools.ai.storage.sqlalchemy.models import Base, TaskRow
-from linktools.ai.storage.sqlalchemy.job import (
+from linktools.ai.jobs.persistence.sqlalchemy import (
     TASK_ENVELOPE_SCHEMA_VERSION,
     SqlAlchemyJobStore,
     _store_dt,
@@ -301,10 +298,10 @@ async def _insert_task_row(store, task_id, now, env, *, key="k") -> None:
 
 
 class _CountingResource:
-    """Wraps a AssetStore to count get/stat calls so the snapshot's
+    """Wraps an ObjectStore to count get/stat calls so the snapshot's
     single-read contract (no stat) can be asserted."""
 
-    def __init__(self, inner: AssetStore) -> None:
+    def __init__(self, inner: ObjectStore) -> None:
         self._inner = inner
         self.get_calls = 0
         self.stat_calls = 0
@@ -323,13 +320,13 @@ def test_snapshot_uses_single_resource_read(tmp_path) -> None:
     version/etag and the sealed content come from the same read (no TOCTOU)."""
 
     async def run() -> None:
-        from linktools.ai.asset.models import WriteOptions
+        from linktools.ai.storage.object.models import WriteOptions
 
         from linktools.ai.jobs.snapshot import snapshot_asset
 
-        assets = AssetStore(primary=MemoryAssetBackend())
+        assets = ObjectStore(primary=MemoryObjectBackend())
         await assets.put(
-            AssetPath("/data/file.txt"),
+            StorageKey("/data/file.txt"),
             b"snapshot-me",
             options=WriteOptions(content_type="text/plain"),
         )
@@ -339,7 +336,7 @@ def test_snapshot_uses_single_resource_read(tmp_path) -> None:
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
         )
         snap = await snapshot_asset(
             counter, artifacts, "/data/file.txt", tenant_id="t1"
@@ -366,12 +363,12 @@ def test_snapshot_picks_consistent_revision_under_concurrent_change(
         class _MutatingResource:
             async def get(self, path):
                 # The single read returns the NEW content + its own info.
-                return Asset(
-                    info=AssetInfo(
-                        path=path,
-                        kind=AssetKind.FILE,
+                return StoredObject(
+                    info=ObjectInfo(
+                        key=path,
                         etag="etag-new",
                         version=7,
+                        commit_revision=None,
                         content_type="text/plain",
                         size=len(b"new-bytes"),
                         modified_at=datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc),
@@ -385,7 +382,7 @@ def test_snapshot_picks_consistent_revision_under_concurrent_change(
         artifacts = ArtifactStore(
             FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
             FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
         )
         snap = await snapshot_asset(
             _MutatingResource(), artifacts, "/data/x", tenant_id="t1"
@@ -475,7 +472,7 @@ def test_resolve_effective_scopes_never_expands() -> None:
 def test_root_task_inherits_job_scopes_at_creation(tmp_path) -> None:
     """A root task with no explicit scopes inherits the job's actor-chain scopes
     at creation (persisted, not left as an unresolved None)."""
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     async def run() -> None:
         store = FilesystemJobStore(tmp_path / "t")

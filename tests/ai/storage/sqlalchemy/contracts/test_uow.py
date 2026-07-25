@@ -11,10 +11,10 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from linktools.ai.asset.models import WriteOptions
-from linktools.ai.asset.path import AssetPath
-from linktools.ai.storage import SqlAlchemyStorage
+from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
+from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
 
 # Reuse the dialect-parametrized builder + DSN-skip logic from the shared
 # contracts conftest so this file exercises SQLite always and MySQL/PostgreSQL
@@ -34,6 +34,7 @@ async def sql_storage(request, tmp_path):
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(ObjectBase.metadata.drop_all)
     except Exception:
         pass
     await engine.dispose()
@@ -44,7 +45,7 @@ async def test_idempotency_record_rolls_back_with_asset_mutation(sql_storage):
     # the asset row and the idempotency record must disappear together -- a
     # later replay with the same key must execute again, not return the cached
     # (rolled-back) result.
-    path = AssetPath("/contract/uow-rollback.txt")
+    path = StorageKey("/contract/uow-rollback.txt")
 
     async def _abort():
         async with sql_storage.transaction() as tx:
@@ -69,7 +70,7 @@ async def test_idempotency_record_commits_with_asset_mutation(sql_storage):
     # The converse: a committed UoW persists both the asset and the idempotency
     # record, so a replay with the same key AND same content returns the cached
     # result (no second write -- the etag is unchanged).
-    path = AssetPath("/contract/uow-commit.txt")
+    path = StorageKey("/contract/uow-commit.txt")
 
     async with sql_storage.transaction() as tx:
         first = await tx.assets.put(path, b"v1", options=WriteOptions(idempotency_key="uow-k2"))

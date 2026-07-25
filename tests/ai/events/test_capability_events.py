@@ -50,13 +50,17 @@ class _SkillSrc:
 
 
 def _ctx(store):
+    from linktools.ai.governance.security.emitter import EventStoreSecurityEventEmitter
+
+    # Capability-lifecycle events route through the SecurityEventEmitter
+    # (emit_observability), never a direct EventStore reference on the context.
     return CapabilityContext(
         agent_id="a1",
         exposure_policy=CapabilityToolExposurePolicy(),
         run_id="r1",
         root_run_id="r1",
         session_id="s1",
-        event_store=store,
+        security_event_emitter=EventStoreSecurityEventEmitter(store),
     )
 
 

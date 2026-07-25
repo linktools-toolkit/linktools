@@ -16,7 +16,7 @@ from linktools.ai.run.manifest import (
 )
 from linktools.ai.run.models import RunnableType
 from linktools.ai.run.preparation import RunPreparationCoordinator
-from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
+from linktools.ai.run.persistence.definition import FilesystemRunDefinitionStore
 
 
 def _spec() -> AgentSpec:

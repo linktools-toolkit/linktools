@@ -15,7 +15,7 @@ import pytest
 
 from linktools.ai.runtime.assembly.lifecycle import resolve_session
 from linktools.ai.errors import SessionAccessDeniedError, SessionError
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
 def _run(coro):

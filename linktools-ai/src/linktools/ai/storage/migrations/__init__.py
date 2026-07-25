@@ -1,158 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""One-shot layout migrations for the asset domain.
-
-The runtime code reads only the new schema (``ai_assets`` / ``ai_asset_*`` tables;
-``{root}/assets`` directory). These functions migrate EXISTING data written under
-the old names so a deployment does not have to rebuild its store from scratch.
-They are explicit, one-shot tools -- the runtime never auto-migrates (it cannot
-tell, in the shared-directory case, which blobs belong to which database)."""
+"""One-shot data migration for a SQLite deployment's artifact blob root."""
 
 
 import hashlib
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
-    "migrate_asset_layout",
-    "migrate_asset_path_hash_index",
-    "migrate_asset_path_hash_index_downgrade",
-    "migrate_sql_asset_tables",
-    "migrate_sql_asset_tables_downgrade",
     "migrate_sqlite_artifact_root",
     "SqliteArtifactRootMigrationReport",
 ]
-
-async def migrate_asset_path_hash_index(engine) -> None:
-    """Live migration for an EXISTING ``ai_assets`` / ``ai_asset_idempotency``
-    database created before ``path_hash`` / ``key_hash`` existed (spec
-    section 7.4). Thin dispatcher: the actual dialect-specific SQL lives in
-    :mod:`storage.sqlalchemy.dialects._hash_migration` -- the ``dialects/``
-    package is the one place core is allowed to branch on a dialect name, so
-    this module stays dialect-neutral."""
-    from ..sqlalchemy.dialects._hash_migration import run_hash_index_migration
-
-    await run_hash_index_migration(engine)
-
-
-async def migrate_asset_path_hash_index_downgrade(engine) -> None:
-    """Reverse of :func:`migrate_asset_path_hash_index`. Exists only for
-    rollback -- runtime code never calls it."""
-    from ..sqlalchemy.dialects._hash_migration import run_hash_index_migration_downgrade
-
-    await run_hash_index_migration_downgrade(engine)
-
-
-def migrate_asset_layout(root: "str | Path") -> None:
-    """Rename a FilesystemAssetBackend root's old ``resources`` directory to
-    ``assets`` in place.
-
-    Rules:
-    * ``resources`` exists, ``assets`` does not -> atomic ``os.replace``.
-    * ``resources`` does not exist, ``assets`` exists -> no-op.
-    * neither exists -> create ``assets``.
-    * both exist -> fail closed (a human must resolve the split -- silently
-      merging or picking one could lose data).
-
-    The atomic rename means a crash mid-migration cannot leave the store half-
-    renamed: ``os.replace`` is atomic on the same filesystem."""
-    root_path = Path(root)
-    resources = root_path / "resources"
-    assets = root_path / "assets"
-    if resources.exists() and assets.exists():
-        raise RuntimeError(
-            f"migrate_asset_layout({root!r}): both 'resources' and 'assets' "
-            f"exist -- resolve the split manually before migrating"
-        )
-    if resources.exists():
-        os.replace(resources, assets)
-        return
-    if assets.exists():
-        return
-    assets.mkdir(parents=True, exist_ok=True)
-
-
-async def migrate_sql_asset_tables(engine) -> None:
-    """Rename the old asset tables on an EXISTING SQLAlchemy database to the
-    new names, idempotently. Renames:
-
-    * ``ai_resources``            -> ``ai_assets``
-    * ``ai_resource_idempotency`` -> ``ai_asset_idempotency``
-    * ``ai_resource_revision``    -> ``ai_asset_revision``
-
-    A table that already has the new name (or never had the old one) is a no-op
-    for that table. The index/constraint names derived from SQLAlchemy's naming
-    convention are recreated by the ORM metadata on the next ``create_all``; this
-    migration only moves the data-bearing tables. Run once against a live engine.
-    To revert, call :func:`migrate_sql_asset_tables_downgrade` (the same rename
-    in reverse)."""
-    from sqlalchemy import text
-
-    renames = (
-        ("ai_resources", "ai_assets"),
-        ("ai_resource_idempotency", "ai_asset_idempotency"),
-        ("ai_resource_revision", "ai_asset_revision"),
-    )
-    async with engine.begin() as conn:
-        for old, new in renames:
-            old_exists = await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
-                ),
-                {"n": old},
-            )
-            if old_exists.first() is None:
-                continue
-            new_exists = await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
-                ),
-                {"n": new},
-            )
-            if new_exists.first() is not None:
-                # Both present -- refuse rather than risk clobbering.
-                raise RuntimeError(
-                    f"migrate_sql_asset_tables: both {old!r} and {new!r} exist -- "
-                    f"resolve manually"
-                )
-            await conn.execute(text(f"ALTER TABLE {old} RENAME TO {new}"))
-
-
-async def migrate_sql_asset_tables_downgrade(engine) -> None:
-    """Reverse of :func:`migrate_sql_asset_tables`: rename the new asset tables
-    back to the old resource names. Exists only for rollback -- runtime code
-    never calls it. Same idempotency + fail-closed-on-both-present rules as the
-    upgrade direction."""
-    from sqlalchemy import text
-
-    renames = (
-        ("ai_assets", "ai_resources"),
-        ("ai_asset_idempotency", "ai_resource_idempotency"),
-        ("ai_asset_revision", "ai_resource_revision"),
-    )
-    async with engine.begin() as conn:
-        for old, new in renames:
-            old_exists = await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
-                ),
-                {"n": old},
-            )
-            if old_exists.first() is None:
-                continue
-            new_exists = await conn.execute(
-                text(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
-                ),
-                {"n": new},
-            )
-            if new_exists.first() is not None:
-                raise RuntimeError(
-                    f"migrate_sql_asset_tables_downgrade: both {old!r} and "
-                    f"{new!r} exist -- resolve manually"
-                )
-            await conn.execute(text(f"ALTER TABLE {old} RENAME TO {new}"))
 
 
 @dataclass

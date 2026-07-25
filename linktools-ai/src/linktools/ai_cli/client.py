@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from linktools.ai.agent.approval import ApprovalStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.cli import CommandError
 from linktools.system import get_user
 

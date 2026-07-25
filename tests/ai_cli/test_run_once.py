@@ -3,8 +3,8 @@
 """``run_once`` exit-code contract.
 
 0 = completed; 4 = paused for approval (run_id/approval_id printed); 1 = the
-run ended FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model,
-spec section 12.3, reports this way instead of raising); 130 = a
+run ended FAILED (a ``{"type": "failed", ...}`` event -- the Outcome model
+reports this way instead of raising); 130 = a
 ``{"type": "cancelled", ...}`` event OR Ctrl+C after cancelling the run
 through the runtime (not just the process). Drives the console layer with
 ``FakeRuntimeClient`` so no real Runtime/model is needed."""

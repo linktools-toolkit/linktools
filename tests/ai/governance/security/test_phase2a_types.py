@@ -14,6 +14,7 @@ from linktools.ai.governance.security.pipeline import (
 from linktools.ai.errors import RunPaused, ToolDeniedError, ToolTimeoutError
 from linktools.ai.tool.models import ManagedToolDefinition, ToolContribution
 from linktools.ai.tool.managed import ManagedToolAdapter
+from linktools.ai.governance.security.emitter import EventStoreSecurityEventEmitter
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.policy import (
@@ -499,7 +500,7 @@ async def test_adapter_provider_failure_emits_degraded_event_and_denies():
         descriptor=_descriptor(),
         handler=handler,
         policy_provider=_BoomProvider(),
-        event_store=store,
+        security_event_emitter=EventStoreSecurityEventEmitter(store, context=ctx),
         run_context=ctx,
     )
     with pytest.raises(ToolDeniedError, match="policy resolution failed"):

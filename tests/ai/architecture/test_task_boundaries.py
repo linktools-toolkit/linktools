@@ -58,7 +58,7 @@ def test_rejected_durable_namespace_stays_absent() -> None:
 
 
 def test_storage_facade_field_set_snapshot() -> None:
-    from linktools.ai.storage.facade import Storage
+    from linktools.ai.runtime.persistence.facade import Storage
 
     fields = {f.name for f in dataclasses.fields(Storage)}
     # The facade. added optional `jobs` (renamed from `tasks`); phase
@@ -92,11 +92,11 @@ def test_existing_storage_backends_remain_importable() -> None:
     # The extension reuses (does not replace) the existing storage backends.
     from linktools.ai.storage import filesystem as file_storage
     from linktools.ai.storage import sqlalchemy as sa_storage
-    from linktools.ai.asset.store import AssetStore
+    from linktools.ai.storage.object.store import ObjectStore
 
     assert file_storage is not None
     assert sa_storage is not None
-    assert AssetStore is not None
+    assert ObjectStore is not None
 
 
 def test_importing_jobs_does_not_load_sqlalchemy_or_langgraph() -> None:

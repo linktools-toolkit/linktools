@@ -8,8 +8,8 @@ branches on a dialect name. These tests pin:
 - ``resolve_dialect_strategy`` maps sqlite -> SqliteDialectStrategy and rejects
   an unknown dialect with ``UnsupportedSqlAlchemyDialectError`` at adapter
   construction (not on first write);
-- each classifier maps the asset-domain unique-key conflicts to
-  ASSET_KEY / IDEMPOTENCY_KEY and everything else to OTHER.
+- each classifier maps the object-kernel unique-key conflicts to
+  OBJECT_KEY / IDEMPOTENCY_KEY and everything else to OTHER.
 
 Classifier logic is exercised with SYNTHETIC IntegrityErrors (the classifiers
 read ``error.orig`` via getattr), so all three dialects are verified here
@@ -105,7 +105,7 @@ def test_resolve_rejects_unknown_dialect():
 async def test_adapter_construction_resolves_dialect(tmp_path):
     # Constructing the adapter runs the construct-time gate: a real SQLite
     # factory resolves cleanly (the gate is at construction, not first write).
-    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/gate.db")
     try:
@@ -125,13 +125,13 @@ async def test_adapter_construction_resolves_dialect(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_sqlite_classifier_recognizes_asset_and_idempotency_keys():
+def test_sqlite_classifier_recognizes_object_and_idempotency_keys():
     strategy = SqliteDialectStrategy()
     assert strategy.classify_integrity_error(
-        _Err(_Orig("UNIQUE constraint failed: ai_assets.path_hash"))
-    ) is IntegrityViolationKind.ASSET_KEY
+        _Err(_Orig("UNIQUE constraint failed: storage_objects.key_hash"))
+    ) is IntegrityViolationKind.OBJECT_KEY
     assert strategy.classify_integrity_error(
-        _Err(_Orig("UNIQUE constraint failed: ai_asset_idempotency.key"))
+        _Err(_Orig("UNIQUE constraint failed: storage_object_idempotency.key_hash"))
     ) is IntegrityViolationKind.IDEMPOTENCY_KEY
 
 
@@ -142,7 +142,7 @@ def test_sqlite_classifier_returns_other_for_unrelated_unique_violation():
     ) is IntegrityViolationKind.OTHER
     # a non-unique IntegrityError (NOT NULL etc.) is also OTHER
     assert strategy.classify_integrity_error(
-        _Err(_Orig("NOT NULL constraint failed: ai_assets.etag"))
+        _Err(_Orig("NOT NULL constraint failed: storage_objects.etag"))
     ) is IntegrityViolationKind.OTHER
 
 
@@ -154,10 +154,10 @@ def test_sqlite_classifier_returns_other_for_unrelated_unique_violation():
 def test_postgresql_classifier_uses_constraint_name_from_diag():
     strategy = PostgreSqlDialectStrategy()
     assert strategy.classify_integrity_error(
-        _Err(_Orig(constraint="uq_ai_assets_tenant_path"))
-    ) is IntegrityViolationKind.ASSET_KEY
+        _Err(_Orig(constraint="uq_storage_objects_key_hash"))
+    ) is IntegrityViolationKind.OBJECT_KEY
     assert strategy.classify_integrity_error(
-        _Err(_Orig(constraint="uq_ai_asset_idempotency_tenant_key"))
+        _Err(_Orig(constraint="uq_storage_object_idempotency_key_hash"))
     ) is IntegrityViolationKind.IDEMPOTENCY_KEY
 
 
@@ -169,10 +169,10 @@ def test_postgresql_classifier_falls_back_to_message_constraint_name():
         _Err(
             _Orig(
                 'duplicate key value violates unique constraint '
-                '"uq_ai_assets_tenant_path"'
+                '"uq_storage_objects_key_hash"'
             )
         )
-    ) is IntegrityViolationKind.ASSET_KEY
+    ) is IntegrityViolationKind.OBJECT_KEY
 
 
 def test_postgresql_classifier_returns_other_for_unrelated_constraint():
@@ -192,15 +192,15 @@ def test_mysql_classifier_recognizes_duplicate_key_with_named_constraint():
     assert strategy.classify_integrity_error(
         _Err(
             _Orig(
-                "Duplicate entry 'x' for key 'uq_ai_assets_tenant_path'",
+                "Duplicate entry 'x' for key 'uq_storage_objects_key_hash'",
                 code=1062,
             )
         )
-    ) is IntegrityViolationKind.ASSET_KEY
+    ) is IntegrityViolationKind.OBJECT_KEY
     assert strategy.classify_integrity_error(
         _Err(
             _Orig(
-                "Duplicate entry 'y' for key 'uq_ai_asset_idempotency_tenant_key'",
+                "Duplicate entry 'y' for key 'uq_storage_object_idempotency_key_hash'",
                 code=1062,
             )
         )
@@ -217,7 +217,7 @@ def test_mysql_classifier_returns_other_for_non_duplicate_key_code():
 
 def test_mysql_classifier_returns_other_for_duplicate_key_unknown_constraint():
     strategy = MySqlDialectStrategy()
-    # 1062 but on a constraint the asset domain does not own
+    # 1062 but on a constraint the object kernel does not own
     assert strategy.classify_integrity_error(
         _Err(_Orig("Duplicate entry 'z' for key 'uq_event_stream_sequence'", code=1062))
     ) is IntegrityViolationKind.OTHER

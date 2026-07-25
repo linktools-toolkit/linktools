@@ -9,7 +9,7 @@ FilesystemJobStore with real asyncio timing (tiny intervals) and a SystemClock.
 import asyncio
 import dataclasses
 
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -291,7 +291,7 @@ def test_transient_commit_error_is_retried_without_rerun(tmp_path) -> None:
     """A transient store error at commit must not re-run the handler: the
     worker retries the COMMIT (re-reading to confirm it still holds the claim),
     never the handler."""
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.worker import JobWorker
 
@@ -347,7 +347,7 @@ class _FlakyRenewStore:
 
 
 def test_heartbeat_renew_failure_is_counted_not_silently_dropped(tmp_path) -> None:
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
     from linktools.ai.jobs.metrics import CountersTaskMetrics
     from linktools.ai.jobs.protocols import SystemClock
     from linktools.ai.jobs.worker import JobWorker
@@ -392,7 +392,7 @@ def test_heartbeat_cancels_when_renew_failures_burn_past_lease(tmp_path) -> None
     import types
     from datetime import datetime, timedelta, timezone
 
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
     from linktools.ai.jobs.metrics import CountersTaskMetrics
     from linktools.ai.jobs.worker import JobWorker
 
@@ -532,11 +532,11 @@ def test_metrics_emit_task_retry_total_on_retryable_failure(tmp_path) -> None:
 
 def test_orphan_run_reconciler_cancels_superseded_runs(tmp_path) -> None:
     """When recovery supersedes an attempt that had bound a run, the run
-    canceler is invoked so the orphaned Run is not left RUNNING (section 21.5)."""
+    canceler is invoked so the orphaned Run is not left RUNNING."""
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
 
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     class _FakeClock:
         def __init__(self, start):

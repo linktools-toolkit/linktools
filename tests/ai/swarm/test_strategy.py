@@ -28,12 +28,13 @@ from linktools.ai.model.resolver import ModelResolver
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.dispatch import RunDispatcher
 from linktools.ai.run.models import RunInput, RunStatus, RunnableType
+from tests.ai.swarm._dispatch_double import StrategyTestDispatcher
 from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-from linktools.ai.storage.filesystem.definition import FilesystemRunDefinitionStore
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.run.persistence.checkpoint import FilesystemCheckpointStore
+from linktools.ai.run.persistence.definition import FilesystemRunDefinitionStore
+from linktools.ai.events.persistence.filesystem import FilesystemEventStore
+from linktools.ai.run.persistence.run import FilesystemRunStore
+from linktools.ai.session.persistence.filesystem import FilesystemSessionStore
 from linktools.ai.swarm.aggregation import AggregationPolicy
 from linktools.ai.swarm.limits import SwarmLimits
 from linktools.ai.swarm.models import (
@@ -349,21 +350,11 @@ def _build_ctx(
     session_store = FilesystemSessionStore(root=tmp_path / "sessions")
     event_store = FilesystemEventStore(root=tmp_path / "events")
     checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+    run_definitions = FilesystemRunDefinitionStore(root=tmp_path / "definitions")
+    from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
+    from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
-    runner = AgentEngine(
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
-        commit_coordinator=FilesystemRunCommitCoordinator(
-            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=checkpoint_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-        ),
-    )
+    runner = AgentEngine()
     # pre-seed the shared session so the driving RunContext is consistent.
     asyncio.run(
         session_store.create(
@@ -377,23 +368,19 @@ def _build_ctx(
             )
         )
     )
-    compiler = AgentCompiler(
-        tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        model_resolver=ModelResolver(registry=ModelRegistry()),
-    )
     return SwarmExecutionContext(
         spec=spec,
         swarm_run=_swarm_run(),
         request=RunInput(prompt="do the work"),
         parent_context=_parent_context(),
-        dispatcher=runner,
-        compiler=compiler,
+        dispatcher=StrategyTestDispatcher(
+            runner,
+            session_store=session_store,
+            run_store=run_store,
+            run_definitions=run_definitions,
+        ),
         agents=agents,
         swarm_store=swarm_store or _MemorySwarmStore(),
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
-        run_definitions=FilesystemRunDefinitionStore(root=tmp_path / "definitions"),
     )
 
 
@@ -460,7 +447,7 @@ def test_coordinator_delegation_runs_two_workers_and_aggregates(tmp_path):
 
     # 2 child Runs exist in run_store, correctly parented.
     async def _verify():
-        children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
+        children = await ctx.dispatcher.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
 
@@ -543,7 +530,7 @@ def test_parallel_fan_out_runs_three_tasks_on_one_worker(tmp_path):
 
     # 3 child Runs, all SUCCEEDED.
     async def _verify():
-        children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
+        children = await ctx.dispatcher.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
 
@@ -569,6 +556,11 @@ class _ConcurrencyTrackingDispatcher:
         self._inner = inner
         self.current = 0
         self.max = 0
+
+    async def open_child(self, parent_context, session_policy, metadata):
+        # Forward id allocation to the inner dispatcher (only dispatch is
+        # counted -- open_child is pure and does not consume a worker slot).
+        return await self._inner.open_child(parent_context, session_policy, metadata)
 
     async def dispatch(self, request):
         self.current += 1
@@ -910,7 +902,7 @@ def test_task_id_is_different_from_child_run_id(tmp_path):
     asyncio.run(_run())
 
     async def _verify():
-        children = await ctx.run_store.list_children(ctx.swarm_run.run_id)
+        children = await ctx.dispatcher.run_store.list_children(ctx.swarm_run.run_id)
         tasks = await swarm_store.list_tasks(ctx.swarm_run.id)
         return children, tasks
 
@@ -1014,7 +1006,7 @@ def test_two_executions_of_same_task_produce_different_active_run_ids(tmp_path):
     # both child RunRecords exist in RunStore (different ids, both parented to
     # the driving swarm run).
     async def _children():
-        return await ctx.run_store.list_children(ctx.swarm_run.run_id)
+        return await ctx.dispatcher.run_store.list_children(ctx.swarm_run.run_id)
 
     children = asyncio.run(_children())
     assert {first_active, second_active}.issubset({c.id for c in children})
@@ -1303,8 +1295,8 @@ def test_run_task_records_failed_attempt_then_succeeded_on_retry_with_incrementi
     session_1 = f"swarm:swarm-1:task-1:{attempts[0].run_id}"
     session_2 = f"swarm:swarm-1:task-1:{attempts[1].run_id}"
     assert session_1 != session_2
-    assert asyncio.run(ctx.session_store.get(session_1)) is not None
-    assert asyncio.run(ctx.session_store.get(session_2)) is not None
+    assert asyncio.run(ctx.dispatcher.session_store.get(session_1)) is not None
+    assert asyncio.run(ctx.dispatcher.session_store.get(session_2)) is not None
     # FAILED attempt carries the error
     assert attempts[0].error is not None
     assert attempts[0].error.error_type == "RuntimeError"
@@ -1329,7 +1321,7 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
     from linktools.ai.model.registry import ModelRegistry
     from linktools.ai.model.resolver import ModelResolver
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.run import SqlAlchemyRunStore
+    from linktools.ai.run.persistence.sqlalchemy.run import SqlAlchemyRunStore
     from linktools.ai.swarm.strategy import _run_task
 
     call_state = {"n": 0}
@@ -1349,21 +1341,10 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
         session_store = FilesystemSessionStore(root=tmp_path / "sessions")
         event_store = FilesystemEventStore(root=tmp_path / "events")
         checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
-        from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-        from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+        from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
+        from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
-        runner = AgentEngine(
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-            commit_coordinator=FilesystemRunCommitCoordinator(
-                approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-                checkpoint_store=checkpoint_store,
-                run_store=run_store,
-                session_store=session_store,
-                event_store=event_store,
-            ),
-        )
+        runner = AgentEngine()
         await session_store.create(
             SessionRecord(
                 id="shared-session",
@@ -1410,19 +1391,20 @@ def test_run_task_retry_survives_sqlalchemy_run_store_primary_key(tmp_path):
             agents=(AgentRef("coord"), AgentRef("worker-flaky")),
             coordinator=AgentRef("coord"),
         )
+        run_definitions = FilesystemRunDefinitionStore(root=tmp_path / "definitions")
         ctx = SwarmExecutionContext(
             spec=spec,
             swarm_run=_swarm_run(),
             request=RunInput(prompt="do the work"),
             parent_context=_parent_context(),
-            dispatcher=runner,
-            compiler=compiler,
+            dispatcher=StrategyTestDispatcher(
+                runner,
+                session_store=session_store,
+                run_store=run_store,
+                run_definitions=run_definitions,
+            ),
             agents={"coord": compiled_flaky, "worker-flaky": compiled_flaky},
             swarm_store=swarm_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-            run_definitions=FilesystemRunDefinitionStore(root=tmp_path / "definitions"),
         )
         await swarm_store.create_task(
             SwarmStep(

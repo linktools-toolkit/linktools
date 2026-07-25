@@ -6,25 +6,26 @@ under a parent run.
 Moved out of the Runtime composition root (it lived as a builder closure before)
 so the build kernel only ASSEMBLES this executor -- it never creates sessions,
 child runs, or drives execution itself (the builder constructs only). The
-executor owns the subagent domain flow once assembled: child-session creation,
-child-run creation, skill isolation for the child, timeout enforcement,
-subagent event emission, and structured error redaction.
+executor owns the subagent domain flow once assembled: child-run allocation via
+the dispatcher, skill isolation for the child, timeout enforcement, subagent
+event emission, and structured error redaction.
 
-Dependencies: the storage (sessions / events / run definitions), the compiler
+The executor does NOT create the child SessionRecord / RunRecord / RunDefinition
+itself -- the RunDispatcher does (``open_child`` allocates the id + lineage
+purely; ``dispatch`` creates the session + RunRecord + snapshot and drives the
+full lifecycle). The executor only compiles the child AgentSpec and hands the
+handle + compiled agent to ``dispatch``.
+
+Dependencies: the storage (events, for subagent lifecycle events), the compiler
 (to compile the child AgentSpec), and the run dispatcher -- a late-bound handle
 resolved to the real runner once the runner exists, because the runner depends
 on the capability resolver, which depends on this executor (a genuine
 self-reference, confined to the single bind-once seam)."""
 
 import asyncio
-import uuid
-from datetime import datetime, timezone
 from typing import Any
 
-from ..run.lifecycle import create_and_start_run
-from ..run.preparation import RunPreparationCoordinator
-from ..session.models import SessionRecord, SessionStatus
-from ..storage.facade import Storage
+from ..runtime.persistence.facade import Storage
 from .models import SubagentResult
 
 
@@ -43,10 +44,6 @@ class SubagentExecutor:
         self._storage = storage
         self._compiler = compiler
         self._dispatcher = dispatcher
-        # A child agent run (subagent / extension entrypoint) gets the same
-        # resumable snapshot as a top-level run: if one of its tools pauses on
-        # approval, Runtime.resume(child_run_id) can restore its spec + identity.
-        self._preparation = RunPreparationCoordinator(storage.run_definitions)
 
     async def execute(
         self,
@@ -58,45 +55,32 @@ class SubagentExecutor:
         scope: "Any | None",
         timeout_seconds: "float | None",
     ) -> SubagentResult:
-        from ..run.context import RunContext
-        from ..run.dispatch import RunDispatchRequest
-        from ..run.models import RunnableType, RunInput
+        from ..run.dispatch import ChildSessionPolicy, RunDispatchRequest
+        from ..run.models import RunInput
 
-        parent_run_id = parent.run_id if parent is not None else None
-        parent_session_id = parent.session_id if parent is not None else None
-        child_session = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        await self._storage.sessions.create(
-            SessionRecord(
-                id=child_session,
-                parent_id=parent_session_id,
-                # A subagent child session inherits its parent's principal, so a
-                # worker pause/resume stays within the same ownership domain.
-                user_id=parent.user_id if parent is not None else None,
-                tenant_id=parent.tenant_id if parent is not None else None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
+        parent_run_id = parent.run_id
+        parent_session_id = parent.session_id
+
+        # Allocate the child run id + scratch session via the dispatcher (the
+        # sole id authority). open_child is pure -- the session + RunRecord +
+        # snapshot are created only when dispatch runs, so a failure before
+        # dispatch leaves no orphan. The scratch session is linked under the
+        # parent's session so a worker pause/resume stays within the same
+        # ownership domain.
+        handle = await self._dispatcher.open_child(
+            parent,
+            ChildSessionPolicy(
+                kind="scratch", parent_session_id=parent_session_id
+            ),
+            # No session_id_format -> the dispatcher mints a uuid session id;
+            # the child RunRecord.runnable_id is compiled.spec.id (== agent_spec.id
+            # here, no alias indirection), sourced by dispatch_child's fallback.
+            {},
         )
-        child_run = str(uuid.uuid4())
-        effective_root = (
-            (parent.root_run_id if parent is not None else None)
-            or parent_run_id
-            or child_run
-        )
-        run_ctx = RunContext(
-            run_id=child_run,
-            root_run_id=effective_root,
-            parent_run_id=parent_run_id,
-            session_id=child_session,
-            runnable_id=agent_spec.id,
-            runnable_type=RunnableType.AGENT,
-            user_id=parent.user_id if parent is not None else None,
-            tenant_id=parent.tenant_id if parent is not None else None,
-            workspace=parent.workspace if parent is not None else None,
-        )
+        child_run = handle.run_id
+        child_session = handle.session_id
+        effective_root = handle.root_run_id
+
         scope_dict = None
         if scope is not None:
             scope_dict = {
@@ -113,24 +97,14 @@ class SubagentExecutor:
 
             skill_token = set_active_skill(None)
             try:
-                await self._preparation.prepare_agent_run(
-                    spec=agent_spec, context=run_ctx
-                )
                 compiled = await self._compiler.compile(agent_spec)
-                # Create + start the child RunRecord here (WP9 step 5 --
-                # spec 12.8: "SubagentExecutor creates and executes the child
-                # Run" -- the same create_and_start_run RunCoordinator uses
-                # for a top-level Run) so the dispatcher's own get-or-create
-                # fallback (AgentEngine.execute(), for direct-engine callers
-                # that skip this ownership entirely) is never reached here.
-                await create_and_start_run(
-                    self._storage.runs,
-                    context=run_ctx,
-                    request=RunInput(prompt=task),
-                )
+                # The dispatcher creates the child session + RunRecord +
+                # resumable snapshot, then drives start/fence/execute/commit.
                 return await self._dispatcher.dispatch(
                     RunDispatchRequest(
-                        agent=compiled, input=RunInput(prompt=task), context=run_ctx
+                        compiled_agent=compiled,
+                        input=RunInput(prompt=task),
+                        handle=handle,
                     )
                 )
             finally:

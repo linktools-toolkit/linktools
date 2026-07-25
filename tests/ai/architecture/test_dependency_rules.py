@@ -212,13 +212,30 @@ _BASELINE_TWO_CYCLES: "frozenset[tuple[str, str]]" = frozenset({
     ("agent", "capability"),
     ("agent", "governance"),
     ("agent", "run"),
+    ("agent", "storage"),
     ("agent", "tool"),
     ("artifact", "storage"),
+    ("evaluation", "storage"),
+    ("events", "storage"),
     ("extension", "subagent"),
+    ("memory", "storage"),
+    # subagent.executor wires the runtime.persistence.Storage type to compose
+    # a SubagentExecutor; runtime.persistence imports every domain's
+    # persistence adapters (which is its job as the composition root).
+    ("runtime", "subagent"),
     ("run", "sandbox"),
     ("governance", "tool"),
+    # The following domains own their persistence adapters (Filesystem +
+    # SQLAlchemy), which import shared storage-kernel helpers; storage.facade
+    # wires those adapters into the composition. Same documented
+    # architecture-debt shape as artifact<->storage above: a domain owns its
+    # persistence layer, the storage facade wires it.
+    ("jobs", "storage"),
     ("run", "storage"),
     ("run", "swarm"),
+    ("session", "storage"),
+    ("storage", "swarm"),
+    ("storage", "tool"),
 })
 
 

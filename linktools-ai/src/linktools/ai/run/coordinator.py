@@ -1,43 +1,140 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """RunCoordinator: the single application service for a Run's lifecycle --
-create/start, pause (via the runner's own state machine), approve/reject,
-resume, cancel, commit (via commit_coordinator), terminal convergence.
+create/start, pause, approve/reject, resume, cancel, commit (via
+commit_coordinator), terminal convergence. The SOLE owner of RunRecord
+creation/transition, checkpoint/session/approval persistence, execution
+claim/heartbeat/fencing, and commit retry/recovery. AgentEngine (the
+``agent_engine`` dep) is a pure execution loop that returns an
+AgentExecutionOutcome and writes NO Store state itself.
 
-Runtime is a thin facade delegating every run-lifecycle method here; it keeps
-only build/inspect/close + MCP-lifecycle ownership. Moved verbatim out of
-Runtime -- no behavior change, only the container."""
+Runtime is a thin facade delegating every run-lifecycle method here."""
 
 import asyncio
+import contextlib
+import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
-from .lifecycle import create_and_start_run, prepare_run
-from .models import RunInput
+from .cancellation import CancellationToken
+from .commit import (
+    AcknowledgeCancelRunCommand,
+    CompleteRunCommand,
+    FailRunCommand,
+    PauseRunCommand,
+    StartRunCommand,
+)
+from .dispatch import ChildRunHandle
+from .lifecycle import prepare_run
+from .models import RunErrorInfo, RunInput, RunRecord, RunStatus
 from .preparation import RunPreparationCoordinator
-from ..errors import SwarmError
+from ..agent.models import (
+    AgentCancelled,
+    AgentCompleted,
+    AgentExecutionOutcome,
+    AgentFailed,
+    AgentInput,
+    AgentPaused,
+    CompiledAgent,
+)
+from ..clock import Clock
+from ..errors import RunConflictError, SwarmError
 from ..events.context import EventStreamContext, append_event
-from ..events.payloads import RunStarted
+from ..events.payloads import (
+    RunCancelled as RunCancelledEvent,
+    RunCompleted as RunCompletedEvent,
+    RunFailed as RunFailedEvent,
+    RunPaused as RunPausedEvent,
+    RunResumed as RunResumedEvent,
+    RunStarted as RunStartedEvent,
+)
+from ..session.reader import SessionReader
+from ..swarm.models import (
+    SwarmCompleted as SwarmCompletedType,
+    SwarmFailed as SwarmFailedType,
+)
 from ..swarm.spec import SwarmSpec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ..runtime.builder import RuntimeComponents
+    from ..agent.engine import AgentEngine
     from ..agent.spec import AgentSpec
+    from ..governance.security.emitter import SecurityEventSanitizer
     from ..identity.principal import PrincipalContext
+    from ..observability.metrics import ObservabilityMetrics
+    from ..run.controller import RunController
+    from ..run.live_events import RunLiveEventHub, RunLiveEventSink, SecurityEventSink
+    from ..runtime.persistence.facade import Storage
+    from ..swarm.engine import SwarmEngine
+    from .commit import RunCommitCoordinator
+
+
+# How often the Coordinator renews its execution claim while a run is in
+# flight. A renewal failure (lost fencing) cancels the engine task so a stale
+# worker can never commit a terminal side effect.
+_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+
+class _EventStoreEventSink:
+    """Interim Coordinator-owned event sink: appends a domain event (a
+    SecurityEventSink payload such as ToolExposureApplied, or a swarm lifecycle
+    event such as SwarmStarted) to the EventStore under the Run's stream, so the
+    audit trail is preserved while AgentEngine/SwarmEngine are Store-free. This
+    is the single-``emit`` shape RunCoordinator passes in; the durable,
+    fencing-token-bound sink that replaces it lands with the event-sink
+    decoupling."""
+
+    def __init__(self, event_store: Any, context: Any) -> None:
+        self._event_store = event_store
+        self._context = context
+
+    async def emit(self, event: Any) -> None:
+        await append_event(
+            self._event_store,
+            EventStreamContext.from_run_context(self._context),
+            event,
+        )
 
 
 class RunCoordinator:
-    def __init__(self, components: "RuntimeComponents") -> None:
-        self._components = components
-        # Single owner of RunDefinitionSnapshot creation across every entry point.
-        self._prepare = RunPreparationCoordinator(components.storage.run_definitions)
+    def __init__(
+        self,
+        *,
+        storage: "Storage",
+        compiler: Any,
+        agent_engine: "AgentEngine",
+        swarm_engine: "SwarmEngine",
+        commit_coordinator: "RunCommitCoordinator",
+        run_controller: "RunController | None",
+        live_event_hub: "RunLiveEventHub",
+        session_reader: SessionReader,
+        preparation: RunPreparationCoordinator,
+        clock: Clock,
+        authorization: Any = None,
+        settings: Any = None,
+        schema_registry: Any = None,
+        metrics: "ObservabilityMetrics | None" = None,
+        model_resolver: Any = None,
+    ) -> None:
+        self._storage = storage
+        self._compiler = compiler
+        self._agent_engine = agent_engine
+        self._swarm_engine = swarm_engine
+        self._commit_coordinator = commit_coordinator
+        self._run_controller = run_controller
+        self._live_event_hub = live_event_hub
+        self._session_reader = session_reader
+        self._prepare = preparation
+        self._clock = clock
+        self._authorization = authorization
+        self._settings = settings
+        self._schema_registry = schema_registry
+        self._metrics = metrics
+        self._model_resolver = model_resolver
         # One-time crash-recovery guard: the File coordinator's journal is
         # replayed before the first run/resume so an interrupted pause/complete
         # is made consistent. No-op for coordinators without recovery (SQL) and
-        # idempotent (recovery discards each journal it resolves). The lock +
-        # double-check serialize concurrent first-callers, and the flag is set
-        # only after recovery succeeds so a failed recovery can be retried.
+        # idempotent (recovery discards each journal it resolves).
         self._recovery_done = False
         self._recovery_lock = asyncio.Lock()
 
@@ -47,12 +144,9 @@ class RunCoordinator:
         async with self._recovery_lock:
             if self._recovery_done:
                 return
-            coordinator = self._components.commit_coordinator
-            recover = getattr(coordinator, "recover_incomplete_commits", None)
+            recover = getattr(self._commit_coordinator, "recover_incomplete_commits", None)
             if recover is not None:
                 await recover()
-            # Only flag done after recovery succeeds; a raise leaves the flag
-            # False so the next entry point retries.
             self._recovery_done = True
 
     async def run(
@@ -69,7 +163,7 @@ class RunCoordinator:
     ):
         await self._ensure_recovered()
         prepared = await prepare_run(
-            storage=self._components.storage,
+            storage=self._storage,
             spec=spec,
             session_id=session_id,
             run_id=run_id,
@@ -81,15 +175,26 @@ class RunCoordinator:
         if isinstance(spec, SwarmSpec):
             if agents is None:
                 raise SwarmError("agents mapping is required to run a SwarmSpec")
-            # SwarmEngine owns the swarm snapshot creation (via the same
-            # RunPreparationCoordinator) so both Runtime- and test-driven swarm
-            # runs persist a snapshot. No double-create: Runtime does not
-            # pre-create for swarm.
-            return await self._components.swarm_engine.run(
-                spec, RunInput(prompt=prompt), prepared.context, agents=agents
+            run_input = RunInput(prompt=prompt)
+            # prepare + snapshot (the immutable run-definition snapshot lives in
+            # the Coordinator now, before the start command -- SwarmEngine no
+            # longer writes it), then the atomic driving-Run start, then the
+            # swarm lifecycle template: claim/heartbeat -> SwarmEngine.execute ->
+            # outcome switch -> commit. SwarmEngine owns only the SwarmRun/
+            # strategy; the driving Run is the Coordinator's.
+            await self._prepare.prepare_swarm_run(
+                spec=spec, members=agents, context=prepared.context
+            )
+            started = await self._start_run(prepared.context, run_input)
+            return await self._drive_swarm(
+                spec,
+                run_input,
+                prepared.context,
+                agents=agents,
+                running_version=started.version,
             )
 
-        compiled = await self._components.compiler.compile(spec)
+        compiled = await self._compiler.compile(spec)
         # Persist the immutable run-definition snapshot AFTER compile (single
         # owner) so the resolved model bundle's revision is captured in the
         # manifest -- resume refuses if the provider config has since drifted.
@@ -99,30 +204,18 @@ class RunCoordinator:
             model_bundle=compiled.model_bundle,
         )
         run_input = RunInput(prompt=prompt)
-        # RunCoordinator creates + starts the RunRecord itself -- the single
-        # owner of this transition across every top-level entry point (mirrors
-        # what resume() already does for WAITING_APPROVAL -> RUNNING). The
-        # returned RUNNING version is handed to the runner so execute() skips
-        # its own get-or-create fallback (a real convergence-ownership step:
-        # the version read flows from the coordinator, the sole creator).
-        started = await create_and_start_run(
-            self._components.storage.runs, context=prepared.context, request=run_input
-        )
-        # Same relocation pattern for the RunStarted event: RunCoordinator
-        # emits it itself, then tells the runner not to duplicate it.
-        await append_event(
-            self._components.storage.events,
-            EventStreamContext.from_run_context(prepared.context),
-            RunStarted(
-                run_id=prepared.context.run_id,
-                runnable_id=prepared.context.runnable_id,
-            ),
-        )
-        return await self._components.runner.run(
+        # Atomic Run start: commit_coordinator.start creates the RUNNING record
+        # AND appends RunStarted in one commit -- never create_and_start_run()
+        # followed by a separate append_event(RunStarted) (the old two-step
+        # left a crash window between the record and the event). RunStarted is
+        # always emitted, exactly once, with no skip flag.
+        started = await self._start_run(prepared.context, run_input)
+        return await self._drive_agent(
             compiled,
-            run_input,
             prepared.context,
-            emit_run_started=False,
+            run_input,
+            resuming=False,
+            message_history=(),
             running_version=started.version,
         )
 
@@ -140,12 +233,12 @@ class RunCoordinator:
         from .sensitive import authorize_sensitive_operation
 
         await authorize_sensitive_operation(
-            storage=self._components.storage,
-            local_trusted_mode=self._components.settings.local_trusted_mode,
+            storage=self._storage,
+            local_trusted_mode=self._settings.local_trusted_mode,
             run_id=run_id,
             principal=principal,
             action=action,
-            authorization=self._components.authorization,
+            authorization=self._authorization,
         )
 
     async def cancel(
@@ -161,10 +254,10 @@ class RunCoordinator:
         the RunController:
 
         * **In-flight task registered** -- the run is actually being driven by
-          AgentEngine.execute(). Transition the store to CANCELLING
+          RunCoordinator (execute_pure). Transition the store to CANCELLING
           (distinguishes "cancel requested" from "actually cancelled"), then
           call ``run_controller.cancel(run_id)`` which (a) sets the
-          CancellationToken so the runner's next execution-point check raises
+          CancellationToken so execute_pure's next execution-point check raises
           CancelledError, and (b) calls ``task.cancel()`` so any hanging await
           inside the model call also unblocks.
 
@@ -184,8 +277,8 @@ class RunCoordinator:
         from ..errors import RunConflictError, RunNotFoundError
         from .models import RunStatus
 
-        storage = self._components.storage
-        controller = self._components.run_controller
+        storage = self._storage
+        controller = self._run_controller
         # Gate before any state change (and before revealing run state), so
         # the sensitive op never acts on a bare id.
         await self._authorize_sensitive(run_id, principal, action="cancel")
@@ -242,12 +335,12 @@ class RunCoordinator:
         else:
             # A worker-owned run must be acknowledged by that worker before
             # it can claim the terminal state. Legacy records without fencing
-            # metadata retain the old seeded/local behavior for migration.
+            # metadata retain the old seeded/local behavior for back-compat.
             target = RunStatus.CANCELLING if record.worker_id else RunStatus.CANCELLED
             await storage.runs.transition(
                 run_id, target, expected_version=record.version, **audit
             )
-        self._components.metrics.counter("run_cancellation_requested_total")
+        self._metrics.counter("run_cancellation_requested_total")
 
     async def run_stream(
         self,
@@ -268,7 +361,7 @@ class RunCoordinator:
 
         await self._ensure_recovered()
         prepared = await prepare_run(
-            storage=self._components.storage,
+            storage=self._storage,
             spec=spec,
             session_id=session_id,
             run_id=run_id,
@@ -277,7 +370,7 @@ class RunCoordinator:
             context_metadata=context_metadata,
         )
 
-        compiled = await self._components.compiler.compile(spec)
+        compiled = await self._compiler.compile(spec)
         # Persist the immutable run-definition snapshot AFTER compile (single
         # owner) so the resolved model bundle's revision is captured in the
         # manifest for drift detection on resume.
@@ -287,21 +380,14 @@ class RunCoordinator:
             model_bundle=compiled.model_bundle,
         )
         run_input = RunInput(prompt=prompt)
-        # See run(): RunCoordinator owns create + PENDING -> RUNNING and the
-        # RunStarted event for every top-level entry point.
-        started = await create_and_start_run(
-            self._components.storage.runs, context=prepared.context, request=run_input
-        )
-        await append_event(
-            self._components.storage.events,
-            EventStreamContext.from_run_context(prepared.context),
-            RunStarted(
-                run_id=prepared.context.run_id,
-                runnable_id=prepared.context.runnable_id,
-            ),
-        )
-        async for event in self._components.runner.run_stream(
-            compiled, run_input, prepared.context, emit_run_started=False,
+        # Atomic Run start -- see run(). RunStarted always emitted, exactly once.
+        started = await self._start_run(prepared.context, run_input)
+        async for event in self._drive_agent_stream(
+            compiled,
+            prepared.context,
+            run_input,
+            resuming=False,
+            message_history=(),
             running_version=started.version,
         ):
             yield event
@@ -316,7 +402,7 @@ class RunCoordinator:
         """Approve through the Principal-bound service, never a caller id."""
         from ..agent.approval_service import ApprovalService
 
-        return await ApprovalService(self._components.storage.approvals, self._components.authorization).approve(
+        return await ApprovalService(self._storage.approvals, self._authorization).approve(
             approval_id, principal=principal, expected_version=expected_version
         )
 
@@ -330,7 +416,7 @@ class RunCoordinator:
     ):
         from ..agent.approval_service import ApprovalService
 
-        return await ApprovalService(self._components.storage.approvals, self._components.authorization).reject(
+        return await ApprovalService(self._storage.approvals, self._authorization).reject(
             approval_id,
             principal=principal,
             expected_version=expected_version,
@@ -372,7 +458,7 @@ class RunCoordinator:
         from .models import RunStatus
 
         await self._ensure_recovered()
-        storage = self._components.storage
+        storage = self._storage
         # Gate before revealing run state.
         await self._authorize_sensitive(run_id, principal, action="resume")
         # 1. Read RunRecord. 2. Require WAITING_APPROVAL.
@@ -397,7 +483,7 @@ class RunCoordinator:
             )
         spec = deserialize_agent_spec(
             snapshot.serialized_spec,
-            schema_registry=self._components.schema_registry,
+            schema_registry=self._schema_registry,
         )
         if spec_fingerprint(spec) != snapshot.spec_fingerprint:
             raise InvalidRunTransitionError(
@@ -419,7 +505,7 @@ class RunCoordinator:
                 # missing primary surfaces as "unresolvable" rather than
                 # silently resolving to a fallback and reporting "drifted".
                 try:
-                    bundle = self._components.model_resolver.resolve(
+                    bundle = self._model_resolver.resolve(
                         ModelPolicy(primary=name, fallbacks=())
                     )
                 except Exception:
@@ -458,7 +544,7 @@ class RunCoordinator:
         # compile failure or a tampered checkpoint must leave the run
         # WAITING_APPROVAL, not RUNNING.
         messages = deserialize_messages(checkpoint.payload)
-        compiled = await self._components.compiler.compile(spec)
+        compiled = await self._compiler.compile(spec)
         # 12. Construct the full context, restoring the ORIGINAL identity from
         # the snapshot (user/tenant/workspace) + lineage from the record.
         from ..runtime.assembly.lifecycle import create_run_context
@@ -475,18 +561,661 @@ class RunCoordinator:
             parent_run_id=record.parent_run_id,
         )
         # 13. CAS WAITING_APPROVAL -> RUNNING (only after every check + compile).
-        await storage.runs.transition(
+        # The returned record's version is the RUNNING version the terminal
+        # commit (complete/pause/fail) must target -- claim/heartbeat do NOT
+        # bump the version, so this is still authoritative at commit time.
+        resumed_record = await storage.runs.transition(
             run_id,
             RunStatus.RUNNING,
             expected_version=record.version,
         )
-        # 14. Resume execution. The ORIGINAL user prompt is carried through so
-        # the complete commit persists a real USER message (not an empty one).
+        # 14. Resume execution via the pure loop. The ORIGINAL user prompt is
+        # carried through so the complete commit persists a real USER message
+        # (not an empty one). ``resuming=True`` + the checkpointed
+        # ``message_history`` make execute_pure resume the graph from the
+        # paused state (the CAS above already moved the record RUNNING, so
+        # _drive_agent_stream does NOT re-start the run).
         yield {"type": "resumed", "run_id": run_id}
-        async for event in self._components.runner.run_stream(
+        async for event in self._drive_agent_stream(
             compiled,
-            RunInput(prompt=record.input.prompt or ""),
             context,
-            message_history=messages,
+            RunInput(prompt=record.input.prompt or ""),
+            resuming=True,
+            message_history=tuple(messages),
+            running_version=resumed_record.version,
         ):
             yield event
+
+    # ------------------------------------------------------------------
+    # Agent execution core (the Coordinator's run template): atomic start,
+    # execution claim
+    # + heartbeat + fencing, session-history load, AgentEngine.execute_pure,
+    # outcome -> commit command, heartbeat/register teardown.
+    # ------------------------------------------------------------------
+
+    async def _start_run(
+        self, context: Any, run_input: RunInput
+    ) -> RunRecord:
+        """Atomically create the RUNNING RunRecord + append RunStarted in one
+        commit_coordinator.start call. The single Run-start path for every
+        top-level entry point (run/run_stream)."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        record = RunRecord(
+            id=context.run_id,
+            root_run_id=context.root_run_id,
+            parent_run_id=context.parent_run_id,
+            session_id=context.session_id,
+            runnable_id=context.runnable_id,
+            runnable_type=context.runnable_type,
+            status=RunStatus.RUNNING,
+            input=run_input,
+            result=None,
+            error=None,
+            version=1,
+            created_at=now,
+            started_at=now,
+            finished_at=None,
+        )
+        commit = await self._commit_coordinator.start(
+            StartRunCommand(
+                record=record,
+                started_event=RunStartedEvent(
+                    run_id=context.run_id, runnable_id=context.runnable_id
+                ),
+                event_context=EventStreamContext.from_run_context(context),
+                commit_id=f"start:{context.run_id}",
+            )
+        )
+        return commit.record
+
+    async def open_child_run(
+        self,
+        parent_context: Any,
+        session_policy: Any,
+        metadata: "Mapping[str, Any]",
+    ) -> ChildRunHandle:
+        """Allocate a child run's id + session id + lineage (pure -- NO store
+        writes). The Coordinator is the sole id authority: a caller (swarm
+        strategy, subagent executor) must not mint child run ids, build child
+        RunContexts, create SessionRecords, or write RunDefinitions itself.
+
+        Allocating the id separately from ``dispatch_child`` lets a caller
+        record the child run id on its own domain state BEFORE execution starts
+        (the swarm strategy writes ``task.active_run_id`` so cancel/recover can
+        locate the in-flight child). A crash between this call and
+        ``dispatch_child`` leaves no orphan RunRecord/SessionRecord."""
+        child_run_id = str(uuid.uuid4())
+        if session_policy.kind == "shared":
+            session_id = parent_context.session_id
+            needs_create = False
+        elif session_policy.session_id_format:
+            session_id = session_policy.session_id_format.format(
+                child_run_id=child_run_id, **metadata
+            )
+            needs_create = True
+        else:
+            session_id = str(uuid.uuid4())
+            needs_create = True
+        root_run_id = (
+            parent_context.root_run_id
+            or parent_context.run_id
+            or child_run_id
+        )
+        return ChildRunHandle(
+            run_id=child_run_id,
+            session_id=session_id,
+            root_run_id=root_run_id,
+            parent_run_id=parent_context.run_id,
+            parent_session_id=session_policy.parent_session_id,
+            user_id=parent_context.user_id,
+            tenant_id=parent_context.tenant_id,
+            workspace=getattr(parent_context, "workspace", None),
+            session_needs_create=needs_create,
+        )
+
+    async def dispatch_child(self, request: Any) -> Any:
+        """Child-run entry for CoordinatorRunDispatcher (Swarm/Subagent). Owns
+        the full child lifecycle the strategy/subagent executor used to perform
+        itself: scratch-session create, RunContext build (from the handle's
+        lineage), resumable snapshot prepare, atomic start, claim/heartbeat/
+        fencing, execute_pure, terminal commit. Returns the RunResult; raises
+        RunPaused on a pause and propagates on failure, matching the
+        RunDispatcher contract."""
+        from .context import RunContext
+        from .models import RunnableType
+        from ..session.models import SessionRecord, SessionStatus
+        from datetime import datetime, timezone
+
+        handle = request.handle
+        compiled = request.compiled_agent
+        run_input = request.input
+        context = RunContext(
+            run_id=handle.run_id,
+            root_run_id=handle.root_run_id,
+            parent_run_id=handle.parent_run_id,
+            session_id=handle.session_id,
+            runnable_id=request.metadata.get("runnable_id") or compiled.spec.id,
+            runnable_type=RunnableType.AGENT,
+            user_id=handle.user_id,
+            tenant_id=handle.tenant_id,
+            workspace=handle.workspace,
+        )
+        if handle.session_needs_create:
+            now = datetime.now(timezone.utc)
+            await self._storage.sessions.create(
+                SessionRecord(
+                    id=handle.session_id,
+                    parent_id=handle.parent_session_id,
+                    user_id=handle.user_id,
+                    tenant_id=handle.tenant_id,
+                    status=SessionStatus.ACTIVE,
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        # A child run gets the same resumable snapshot as a top-level run: if a
+        # child tool pauses on approval, Runtime.resume(child_run_id) can
+        # restore its spec + identity.
+        await self._prepare.prepare_agent_run(spec=compiled.spec, context=context)
+        started = await self._start_run(context, run_input)
+        return await self._drive_agent(
+            compiled,
+            context,
+            run_input,
+            resuming=False,
+            message_history=(),
+            running_version=started.version,
+        )
+
+    async def _drive_agent(
+        self,
+        compiled: CompiledAgent,
+        context: Any,
+        run_input: RunInput,
+        *,
+        resuming: bool,
+        message_history: tuple,
+        running_version: "int | None",
+    ) -> Any:
+        """Non-streaming agent execution: claim + heartbeat + register, drive
+        execute_pure to a terminal outcome, commit it, tear down. Returns the
+        committed RunResult. Live events go to a NullRunLiveEventSink (no
+        consumer for a non-streaming run)."""
+        from ..run.live_events import NullRunLiveEventSink
+
+        async with self._claim_and_fence(context) as (cancellation, token, _live):
+            outcome = await self._execute_and_commit(
+                compiled,
+                context,
+                run_input,
+                resuming=resuming,
+                message_history=message_history,
+                running_version=running_version,
+                cancellation=cancellation,
+                token=token,
+                live_events=NullRunLiveEventSink(),
+            )
+        return self._result_from_outcome(outcome, context.run_id)
+
+    async def _drive_swarm(
+        self,
+        spec: Any,
+        run_input: RunInput,
+        context: Any,
+        *,
+        agents: Any,
+        running_version: int,
+    ) -> Any:
+        """Swarm lifecycle template: claim/heartbeat -> SwarmEngine.execute ->
+        outcome switch -> commit the driving Run. SwarmEngine owns only the
+        SwarmRun/strategy; the driving RunRecord is the Coordinator's. Returns
+        the aggregate RunResult on completion."""
+        async with self._claim_and_fence(context) as (cancellation, token, _live):
+            # Coordinator-owned swarm event sink: SwarmEngine emits lifecycle
+            # events through it rather than appending its own EventStore.
+            swarm_event_sink = _EventStoreEventSink(self._storage.events, context)
+            try:
+                outcome = await self._swarm_engine.execute(
+                    spec,
+                    run_input,
+                    context,
+                    agents=agents,
+                    cancellation=cancellation,
+                    swarm_event_sink=swarm_event_sink,
+                )
+            except asyncio.CancelledError:
+                # Explicit cancellation: SwarmEngine already transitioned its
+                # SwarmRun CANCELLED; converge the driving Run via the same
+                # acknowledge_cancel commit command the agent path uses (with
+                # the fencing token + a RunCancelled event), best-effort.
+                if cancellation.is_cancelled():
+                    await self._acknowledge_swarm_cancel(context, token)
+                raise
+            await self._commit_swarm_outcome(context, outcome, token, running_version)
+        return self._swarm_result_from_outcome(outcome)
+
+    async def _commit_swarm_outcome(
+        self,
+        context: Any,
+        outcome: Any,
+        token: str,
+        running_version: int,
+    ) -> None:
+        """Converge the driving Run from a SwarmExecutionOutcome. Reuses the
+        commit_coordinator (the same atomic path the agent complete/fail uses)
+        so the driving Run's transition + event append in one commit. The
+        fencing token is threaded into every command, mirroring the agent
+        path -- a stale worker that lost the claim is rejected on mismatch."""
+        run_id = context.run_id
+        event_ctx = EventStreamContext.from_run_context(context)
+        current = await self._storage.runs.get(run_id)
+        expected_version = current.version if current is not None else running_version
+        # SwarmCompleted -> complete; SwarmFailed -> fail; SwarmPaused leaves
+        # the driving Run RUNNING (the swarm is paused, not the driving Run).
+        if isinstance(outcome, SwarmCompletedType):
+            await self._commit_coordinator.complete(
+                CompleteRunCommand(
+                    run_id=run_id,
+                    session_id=context.session_id,
+                    expected_version=expected_version,
+                    execution_token=token,
+                    messages=tuple(outcome.aggregate_messages),
+                    checkpoint_payload=b"",
+                    result=outcome.result,
+                    completed_event=RunCompletedEvent(run_id=run_id),
+                    event_context=event_ctx,
+                    commit_id=f"swarm-complete:{run_id}",
+                )
+            )
+        elif isinstance(outcome, SwarmFailedType):
+            await self._commit_coordinator.fail(
+                FailRunCommand(
+                    run_id=run_id,
+                    expected_version=expected_version,
+                    execution_token=token,
+                    error=outcome.error,
+                    failed_event=RunFailedEvent(
+                        run_id=run_id,
+                        error_type=outcome.error.error_type,
+                        message=outcome.error.message,
+                    ),
+                    event_context=event_ctx,
+                    commit_id=f"swarm-fail:{run_id}",
+                )
+            )
+
+    async def _acknowledge_swarm_cancel(
+        self, context: Any, token: str
+    ) -> None:
+        """Converge the driving Run CANCELLING -> CANCELLED via the same
+        acknowledge_cancel commit command the agent path uses: fenced by the
+        execution token and persisting a RunCancelled event atomically with
+        the transition. Best-effort -- a version/transition conflict (the Run
+        already converged, or is not yet CANCELLING) is swallowed so the
+        CancelledError that brought us here still propagates."""
+        from ..errors import RunConflictError, InvalidRunTransitionError
+
+        run_id = context.run_id
+        try:
+            current = await self._storage.runs.get(run_id)
+            if current is None or current.status is RunStatus.CANCELLED:
+                return
+            await self._commit_coordinator.acknowledge_cancel(
+                AcknowledgeCancelRunCommand(
+                    run_id=run_id,
+                    expected_version=current.version,
+                    execution_token=token,
+                    cancelled_event=RunCancelledEvent(run_id=run_id),
+                    event_context=EventStreamContext.from_run_context(context),
+                    commit_id=f"swarm-ack-cancel:{run_id}",
+                )
+            )
+        except (RunConflictError, InvalidRunTransitionError):
+            return
+
+    @staticmethod
+    def _swarm_result_from_outcome(outcome: Any) -> Any:
+        """The non-streaming run() contract returns a RunResult. A completed
+        swarm returns its aggregate result; a failed swarm raises (the driving
+        Run is already FAILED); a paused swarm returns None (the driving Run
+        stays RUNNING)."""
+        if isinstance(outcome, SwarmCompletedType):
+            return outcome.result
+        if isinstance(outcome, SwarmFailedType):
+            raise RuntimeError(
+                f"swarm failed ({outcome.error.error_type}): {outcome.error.message}"
+            )
+        return None
+
+    async def _drive_agent_stream(
+        self,
+        compiled: CompiledAgent,
+        context: Any,
+        run_input: RunInput,
+        *,
+        resuming: bool,
+        message_history: tuple,
+        running_version: "int | None",
+    ) -> "AsyncIterator[dict]":
+        """Streaming agent execution: open a live-event handle, drive
+        execute_pure + commit in a background task while yielding live events
+        to the caller, then surface the terminal outcome as a final event."""
+        handle = await self._live_event_hub.open(context.run_id)
+        cancellation = CancellationToken()
+        engine_task = asyncio.create_task(
+            self._stream_drive(
+                compiled,
+                context,
+                run_input,
+                resuming=resuming,
+                message_history=message_history,
+                running_version=running_version,
+                cancellation=cancellation,
+                handle=handle,
+            )
+        )
+        try:
+            async for event in handle.events():
+                yield event
+        finally:
+            # On early consumer exit (GeneratorExit / external task cancel),
+            # stop the engine so the run converges. Force-cancel the task IN
+            # ADDITION to the cooperative flag: if the engine is currently
+            # suspended in handle.publish() on a saturated bounded queue, the
+            # flag is never re-checked there, so only task.cancel() unblocks it
+            # -- otherwise the engine task would be orphaned mid-publish.
+            if not engine_task.done():
+                cancellation.cancel()
+                engine_task.cancel()
+            # Always await INSIDE the finally so a normal-completion exception
+            # surfaces and the task is never orphaned. On the early-exit path
+            # the await re-raises the CancelledError we just injected; suppress
+            # it so the original exit exception (GeneratorExit/CancelledError)
+            # propagates cleanly.
+            try:
+                await engine_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _stream_drive(
+        self,
+        compiled: CompiledAgent,
+        context: Any,
+        run_input: RunInput,
+        *,
+        resuming: bool,
+        message_history: tuple,
+        running_version: "int | None",
+        cancellation: CancellationToken,
+        handle: Any,
+    ) -> None:
+        """Background body of _drive_agent_stream: runs the claim/heartbeat/
+        execute/commit/teardown core with the live handle as the event sink,
+        then closes the handle so the streaming consumer's ``async for`` ends,
+        and emits the terminal outcome as a final dict event."""
+        from ..run.live_events import NullRunLiveEventSink
+
+        try:
+            async with self._claim_and_fence(context, cancellation=cancellation) as (
+                _cancellation,
+                token,
+                _live,
+            ):
+                outcome = await self._execute_and_commit(
+                    compiled,
+                    context,
+                    run_input,
+                    resuming=resuming,
+                    message_history=message_history,
+                    running_version=running_version,
+                    cancellation=_cancellation,
+                    token=token,
+                    live_events=handle,
+                )
+            await handle.publish(self._terminal_event(outcome))
+        finally:
+            await handle.close()
+
+    @contextlib.asynccontextmanager
+    async def _claim_and_fence(
+        self, context: Any, *, cancellation: "CancellationToken | None" = None
+    ):
+        """Claim the execution (fencing token), register the driving task +
+        cancellation token with the RunController, and start a heartbeat task
+        that renews the claim. Lost fencing (heartbeat failure) cancels the
+        token so execute_pure's next boundary check converges to AgentCancelled
+        and the terminal commit is fenced out. Yields (cancellation, token,
+        live_events_sink_stub) -- the live sink is owned by the caller."""
+        if cancellation is None:
+            cancellation = CancellationToken()
+        run_id = context.run_id
+        token = uuid.uuid4().hex
+        worker_id = f"agent-worker:{uuid.uuid4().hex}"
+        claim = getattr(self._storage.runs, "claim_execution", None)
+        if claim is not None:
+            await claim(run_id, worker_id=worker_id, execution_token=token)
+        heartbeat = getattr(self._storage.runs, "heartbeat_execution", None)
+        heartbeat_task: "asyncio.Task | None" = None
+        if heartbeat is not None and claim is not None:
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat(run_id, worker_id, token, cancellation)
+            )
+        if self._run_controller is not None:
+            current = asyncio.current_task()
+            if current is not None:
+                await self._run_controller.register(run_id, current, cancellation)
+        try:
+            yield cancellation, token, None
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+            if self._run_controller is not None:
+                await self._run_controller.unregister(run_id)
+
+    async def _heartbeat(
+        self,
+        run_id: str,
+        worker_id: str,
+        token: str,
+        cancellation: CancellationToken,
+    ) -> None:
+        """Renew the execution claim on a fixed interval. A renewal failure
+        means fencing was lost -- cancel the engine task so a stale worker
+        cannot commit a terminal side effect."""
+        heartbeat = getattr(self._storage.runs, "heartbeat_execution", None)
+        if heartbeat is None:
+            return
+        while True:
+            await self._clock.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+            if cancellation.is_cancelled():
+                return
+            try:
+                await heartbeat(run_id, worker_id=worker_id, execution_token=token)
+            except Exception:  # noqa: BLE001 - lost fencing, stop renewing
+                cancellation.cancel()
+                return
+
+    async def _execute_and_commit(
+        self,
+        compiled: CompiledAgent,
+        context: Any,
+        run_input: RunInput,
+        *,
+        resuming: bool,
+        message_history: tuple,
+        running_version: "int | None",
+        cancellation: CancellationToken,
+        token: str,
+        live_events: Any,
+    ) -> AgentExecutionOutcome:
+        """Load session history (new-run only), build AgentInput, drive
+        execute_pure, and commit the resulting outcome via commit_coordinator
+        (complete/pause/fail/cancel). The fencing token is carried on every
+        terminal command so a stale worker's commit is rejected."""
+        security_events = _EventStoreEventSink(self._storage.events, context)
+        if not resuming:
+            message_history = await self._session_reader.load_message_history(
+                context.session_id
+            )
+            message_history = tuple(message_history)
+        agent_input = AgentInput(
+            prompt=run_input.prompt,
+            metadata=run_input.metadata,
+            message_history=message_history,
+            resuming=resuming,
+        )
+        outcome = await self._agent_engine.execute_pure(
+            compiled,
+            agent_input,
+            context,
+            cancellation=cancellation,
+            live_events=live_events,
+            security_events=security_events,
+        )
+        await self._commit_outcome(context, outcome, token, running_version)
+        return outcome
+
+    async def _commit_outcome(
+        self,
+        context: Any,
+        outcome: AgentExecutionOutcome,
+        token: str,
+        running_version: "int | None",
+    ) -> None:
+        """Converge a terminal outcome to its commit command. The expected
+        version is read LIVE from the store (not the stale ``running_version``
+        from start/resume): a concurrent cancel may have moved the record
+        RUNNING -> CANCELLING between drive-start and commit, so the version
+        captured at start would conflict. The execution-token fencing the
+        commit_coordinator enforces is the real cross-worker guard; the
+        expected_version is only the optimistic CAS against current state."""
+        run_id = context.run_id
+        event_ctx = EventStreamContext.from_run_context(context)
+        current = await self._storage.runs.get(run_id)
+        expected_version = current.version if current is not None else (running_version or 0)
+        if isinstance(outcome, AgentCompleted):
+            await self._commit_coordinator.complete(
+                CompleteRunCommand(
+                    run_id=run_id,
+                    session_id=context.session_id,
+                    expected_version=expected_version,
+                    messages=tuple(outcome.messages),
+                    checkpoint_payload=outcome.checkpoint_payload,
+                    result=outcome.result,
+                    completed_event=RunCompletedEvent(run_id=run_id),
+                    event_context=event_ctx,
+                    execution_token=token,
+                    commit_id=f"complete:{run_id}",
+                )
+            )
+        elif isinstance(outcome, AgentPaused):
+            await self._commit_coordinator.pause(
+                PauseRunCommand(
+                    run_id=run_id,
+                    expected_version=expected_version,
+                    approval_request={
+                        "tenant_id": context.tenant_id,
+                        "approval_id": outcome.request.approval_id,
+                        "tool_call_id": outcome.request.tool_call_id,
+                        "tool_name": outcome.request.tool_name or "",
+                        "reason": outcome.request.reason,
+                        "arguments": outcome.request.arguments,
+                        **outcome.request.binding,
+                    },
+                    checkpoint_payload=outcome.checkpoint_payload,
+                    paused_event=RunPausedEvent(
+                        run_id=run_id,
+                        reason=(
+                            outcome.request.reason
+                            or f"approval required: {outcome.request.approval_id}"
+                        ),
+                    ),
+                    event_context=event_ctx,
+                    execution_token=token,
+                    commit_id=f"pause:{run_id}:{outcome.request.approval_id}",
+                )
+            )
+        elif isinstance(outcome, AgentFailed):
+            await self._commit_coordinator.fail(
+                FailRunCommand(
+                    run_id=run_id,
+                    expected_version=expected_version,
+                    execution_token=token,
+                    error=outcome.error,
+                    failed_event=RunFailedEvent(
+                        run_id=run_id,
+                        error_type=outcome.error.error_type,
+                        message=outcome.error.message,
+                    ),
+                    event_context=event_ctx,
+                    commit_id=f"fail:{run_id}",
+                )
+            )
+        elif isinstance(outcome, AgentCancelled):
+            await self._commit_coordinator.acknowledge_cancel(
+                AcknowledgeCancelRunCommand(
+                    run_id=run_id,
+                    expected_version=expected_version,
+                    execution_token=token,
+                    cancelled_event=RunCancelledEvent(run_id=run_id),
+                    event_context=event_ctx,
+                    commit_id=f"ack-cancel:{run_id}",
+                )
+            )
+        else:  # pragma: no cover - discriminated union is exhaustive
+            raise SwarmError(f"unknown agent execution outcome: {type(outcome).__name__}")
+
+    @staticmethod
+    def _result_from_outcome(outcome: AgentExecutionOutcome, run_id: str) -> Any:
+        """The non-streaming run() contract: return RunResult on completion;
+        raise the control-flow signal a non-completed outcome represents so the
+        caller (Runtime.run) observes it -- RunPaused for a pause,
+        asyncio.CancelledError for a controller/external cancellation, and a
+        reconstructed exception for a failure (the run is already FAILED in the
+        store; the caller still needs to see that the run did not succeed)."""
+        import asyncio as _asyncio
+
+        from ..errors import RunPaused
+
+        if isinstance(outcome, AgentCompleted):
+            return outcome.result
+        if isinstance(outcome, AgentPaused):
+            raise RunPaused(
+                run_id=run_id,
+                approval_id=outcome.request.approval_id,
+                tool_call_id=outcome.request.tool_call_id,
+                tool_name=outcome.request.tool_name,
+                reason=outcome.request.reason,
+                arguments=dict(outcome.request.arguments),
+                binding=dict(outcome.request.binding),
+            )
+        if isinstance(outcome, AgentCancelled):
+            raise _asyncio.CancelledError(f"run {run_id} cancelled")
+        # AgentFailed: the precise exception type is not carried on the outcome,
+        # so raise a RuntimeError carrying the redacted message. The typed error
+        # is already persisted on the RunRecord.
+        raise RuntimeError(
+            f"run {run_id} failed ({outcome.error.error_type}): {outcome.error.message}"
+        )
+
+    @staticmethod
+    def _terminal_event(outcome: AgentExecutionOutcome) -> dict:
+        if isinstance(outcome, AgentCompleted):
+            return {"type": "completed"}
+        if isinstance(outcome, AgentPaused):
+            return {
+                "type": "paused",
+                "approval_id": outcome.request.approval_id,
+            }
+        if isinstance(outcome, AgentFailed):
+            return {
+                "type": "failed",
+                "error_type": outcome.error.error_type,
+                "message": outcome.error.message,
+            }
+        return {"type": "cancelled"}

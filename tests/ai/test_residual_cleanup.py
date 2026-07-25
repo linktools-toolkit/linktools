@@ -82,7 +82,7 @@ async def test_import_linktools_ai_without_sqlalchemy():
         "        if n.split('.')[0] in _B: raise ModuleNotFoundError(n,name=n)\n"
         "sys.meta_path.insert(0,_F())\n"
         "import linktools.ai, linktools.ai.storage\n"
-        "from linktools.ai.storage import Storage, FilesystemStorage\n"
+        "from linktools.ai.runtime.persistence import Storage, FilesystemStorage\n"
     )
     env = {
         "PYTHONPATH": str(_AI_SRC.parents[1])

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """SQLAlchemy adapter boundary guards.
 
-The plan (Storage/Asset/Artifact section, WP2 dialect layer) fixes hard rules
+The dialect-layer boundary fixes hard rules
 for the in-repo SqlAlchemyStorageAdapter:
 
 1. core receives NO database URL / DSN;
@@ -113,10 +113,17 @@ def test_adapter_parses_no_dsn_or_engine_url() -> None:
     }
     offenders: "list[str]" = []
     for path in _core_py_files():
-        # The SQLite reference helper is the single core site allowed to
-        # construct an engine. Skip it; everywhere else the ban
-        # holds.
-        if "storage" in path.parts and "sqlite" in path.parts:
+        # Two core sites legitimately construct an engine:
+        #   1. The SQLite reference Storage composition (the original
+        #      storage/sqlite/facade.py, now at runtime/persistence/sqlite.py
+        #      after the runtime persistence layer was introduced).
+        #   2. The storage-kernel SQLite object backend
+        #      (storage/backends/sqlite/object.py) -- it owns its own engine
+        #      for the SqliteObjectStore convenience wrapper.
+        # Everywhere else the ban holds.
+        if path.name == "sqlite.py" and "persistence" in path.parts:
+            continue
+        if "storage" in path.parts and "backends" in path.parts and "sqlite" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
         for call in forbidden_calls:
@@ -165,7 +172,7 @@ def test_sqlalchemy_storage_constructor_takes_session_factory_not_url() -> None:
     accept a url/dsn/engine argument."""
     import inspect
 
-    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
 
     sig = inspect.signature(SqlAlchemyStorage.__init__)
     params = set(sig.parameters) - {"self"}
@@ -185,7 +192,7 @@ def test_sqlalchemy_storage_adapter_has_frozen_constructor() -> None:
     blob/coordination/features, not construct them internally."""
     import inspect
 
-    from linktools.ai.storage.sqlalchemy.facade import SqlAlchemyStorageAdapter
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorageAdapter
 
     sig = inspect.signature(SqlAlchemyStorageAdapter.__init__)
     params = set(sig.parameters) - {"self"}

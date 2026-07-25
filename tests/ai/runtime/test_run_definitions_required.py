@@ -21,8 +21,8 @@ from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.models import RunInput
 from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 
 def test_runtime_build_rejects_storage_without_run_definitions(tmp_path):
@@ -51,7 +51,54 @@ class _FakeCompiler:
 
 
 class _FakeRunner:
+    """Stands in for CoordinatorRunDispatcher: implements the two-step
+    open_child + dispatch contract, creating the resumable snapshot in
+    dispatch (mirroring RunCoordinator.dispatch_child) so this test exercises
+    the real RunPreparationCoordinator primitive the production dispatcher uses."""
+
+    def __init__(self, storage):
+        from linktools.ai.run.preparation import RunPreparationCoordinator
+
+        self._preparation = RunPreparationCoordinator(storage.run_definitions)
+
+    async def open_child(self, parent_context, session_policy, metadata):
+        import uuid
+
+        from linktools.ai.run.dispatch import ChildRunHandle
+
+        child = str(uuid.uuid4())
+        return ChildRunHandle(
+            run_id=child,
+            session_id=str(uuid.uuid4()),
+            root_run_id=(
+                parent_context.root_run_id or parent_context.run_id or child
+            ),
+            parent_run_id=parent_context.run_id,
+            parent_session_id=session_policy.parent_session_id,
+            user_id=parent_context.user_id,
+            tenant_id=parent_context.tenant_id,
+            session_needs_create=True,
+        )
+
     async def dispatch(self, request):
+        from linktools.ai.run.context import RunContext
+        from linktools.ai.run.models import RunnableType
+
+        handle = request.handle
+        compiled = request.compiled_agent
+        spec = compiled[1] if isinstance(compiled, tuple) else compiled.spec
+        context = RunContext(
+            run_id=handle.run_id,
+            root_run_id=handle.root_run_id,
+            parent_run_id=handle.parent_run_id,
+            session_id=handle.session_id,
+            runnable_id=request.metadata.get("runnable_id") or spec.id,
+            runnable_type=RunnableType.AGENT,
+            user_id=handle.user_id,
+            tenant_id=handle.tenant_id,
+            workspace=None,
+        )
+        await self._preparation.prepare_agent_run(spec=spec, context=context)
         assert isinstance(request.input, RunInput)
         return _FakeResult(output="child-output")
 
@@ -59,13 +106,18 @@ class _FakeRunner:
 def test_subagent_run_persists_child_run_definition_snapshot(tmp_path):
     """a subagent (child) run persists a RunDefinitionSnapshot so a later
     Runtime.resume(child_run_id) can restore its spec + identity after an
-    approval pause. The subagent executor must call prepare_agent_run for every
-    child run -- this test fails if that call is re-gated behind an Optional."""
+    approval pause. The snapshot is created by the dispatcher's dispatch step
+    (RunCoordinator.dispatch_child -> prepare_agent_run); the executor only
+    allocates the child id via open_child and hands the handle to dispatch --
+    this test fails if that snapshot-creating step is dropped."""
+    from linktools.ai.run.context import RunContext
+    from linktools.ai.run.models import RunnableType
+
     storage = FilesystemStorage(root=tmp_path)
     executor = SubagentExecutor(
         storage=storage,
         compiler=_FakeCompiler(),
-        dispatcher=_FakeRunner(),
+        dispatcher=_FakeRunner(storage),
     )
     spec = AgentSpec(
         id="child-agent",
@@ -73,15 +125,24 @@ def test_subagent_run_persists_child_run_definition_snapshot(tmp_path):
         model=ModelPolicy(primary="any"),
         instructions=PromptSpec(instructions="do the work"),
     )
+    parent = RunContext(
+        run_id="parent-run",
+        root_run_id="parent-run",
+        parent_run_id=None,
+        session_id="parent-session",
+        runnable_id="parent-agent",
+        runnable_type=RunnableType.AGENT,
+        user_id=None,
+        tenant_id=None,
+        workspace=None,
+    )
 
     async def _run():
-        # parent=None -> the child run is its own root. The executor mints the
-        # child run id and returns it on SubagentResult.run_id.
         result = await executor.execute(
             agent_spec=spec,
             task="hi",
             context=None,
-            parent=None,
+            parent=parent,
             scope=None,
             timeout_seconds=None,
         )

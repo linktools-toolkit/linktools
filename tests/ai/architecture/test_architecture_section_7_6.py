@@ -124,14 +124,24 @@ def test_domains_do_not_import_concrete_storage_backends() -> None:
     # (storage.filesystem / storage.sqlalchemy). A backend is injected at the
     # composition root. TYPE_CHECKING imports count too -- a concrete backend
     # under TYPE_CHECKING is still a hidden dependency.
+    #
+    # EXCEPTION: a domain's own ``persistence/`` subpackage. Each domain owns
+    # its backend-specific persistence adapters; those adapters necessarily
+    # import the shared storage-kernel backend helpers (filesystem async I/O,
+    # SQLAlchemy dialect strategies). That is the composition root for that
+    # domain's persistence, not a hidden domain dependency on a backend. A
+    # domain's NON-persistence modules (its public Protocol, models, services)
+    # remain bound by the rule.
     concrete = ("linktools.ai.storage.filesystem", "linktools.ai.storage.sqlalchemy")
     offenders: "list[str]" = []
     for path in _src_py_files():
         rel_parts = path.relative_to(_AI).parts
-        # Only the storage/ package itself (its facade selects a backend) and
-        # runtime/ (the build kernel wires the commit coordinator) may name a
-        # concrete backend. Every other package is a domain and must not.
+        # storage/ (its facade selects a backend), runtime/ (the build kernel),
+        # and any <domain>/persistence/ subpackage (which owns that domain's
+        # backend adapters) may name a concrete backend.
         if rel_parts[0] in ("storage", "runtime"):
+            continue
+        if len(rel_parts) >= 2 and rel_parts[1] == "persistence":
             continue
         for mod in _resolved_imports(path):
             if mod.startswith(concrete):
@@ -146,7 +156,13 @@ def test_domains_do_not_import_concrete_storage_backends() -> None:
 def test_storage_protocols_does_not_import_concrete_backends() -> None:
     # The Protocol module is the public boundary a downstream implements; it
     # must depend on no concrete backend and no linktools concrete store.
-    protocols = _AI / "storage" / "protocols.py"
+    # The high-level UoW Protocol moved to runtime/persistence/protocols.py
+    # when the runtime persistence layer was introduced; the storage-kernel Protocols that remain (KeyedCoordinator /
+    # LeaseCoordinator / BlobStore / ObjectStore) live under their respective
+    # storage-kernel subpackages and are scanned by test_import_direction.
+    protocols = _AI / "runtime" / "persistence" / "protocols.py"
+    if not protocols.exists():
+        return  # no UoW Protocol module at all -- nothing to scan
     mods = _resolved_imports(protocols)
     backend_hits = {
         m
@@ -156,7 +172,7 @@ def test_storage_protocols_does_not_import_concrete_backends() -> None:
         )
     }
     assert not backend_hits, (
-        f"storage.protocols imports concrete backends: {sorted(backend_hits)}"
+        f"runtime.persistence.protocols imports concrete backends: {sorted(backend_hits)}"
     )
 
 

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ..capability.provider import CapabilityProvider
     from ..extension.resolver import EntrypointResolver
     from ..run.commit import RunCommitCoordinator
-    from ..storage.facade import Storage
+    from .persistence.facade import Storage
 
 T = TypeVar("T")
 
@@ -43,7 +43,7 @@ class ProviderPrefixes:
     mcp: str = "specs/mcp"
     tools: str = "specs/tools"
     extensions: "str | None" = (
-        None  # extensions need a filesystem root (see from_assets)
+        None  # extensions need a filesystem root (see from_objects)
     )
 
 
@@ -111,16 +111,16 @@ class RuntimeDependencies:
         )
 
     @classmethod
-    def from_assets(
+    def from_objects(
         cls,
-        asset_store: Any,
+        object_store: Any,
         *,
         prefixes: "ProviderPrefixes | None" = None,
         extensions_base: "Any | None" = None,
     ) -> "RuntimeDependencies":
         """Build a RuntimeDependencies of default registries from a shared
-        AssetStore. Each Spec-backed registry (agents/skills/mcp/tools) is
-        constructed via SpecLoader.from_assets under its prefix.
+        ObjectStore. Each Spec-backed registry (agents/skills/mcp/tools) is
+        constructed via SpecLoader.from_objects under its prefix.
         ``extensions_base`` (a filesystem root Path) optionally builds a
         ExtensionRegistry + DirectoryEntrypointResolver; extensions are
         filesystem trees, not single Spec files, so they take a root rather
@@ -135,19 +135,19 @@ class RuntimeDependencies:
         kwargs: "dict[str, Any]" = {}
         if prefixes.agents:
             kwargs["agents"] = AgentCatalog.from_specloader(
-                SpecLoader.from_assets(asset_store, prefix=prefixes.agents)
+                SpecLoader.from_objects(object_store, prefix=prefixes.agents)
             )
         if prefixes.skills:
             kwargs["skills"] = SkillCatalog.from_specloader(
-                SpecLoader.from_assets(asset_store, prefix=prefixes.skills)
+                SpecLoader.from_objects(object_store, prefix=prefixes.skills)
             )
         if prefixes.mcp:
             kwargs["mcp_servers"] = MCPCatalog.from_specloader(
-                SpecLoader.from_assets(asset_store, prefix=prefixes.mcp)
+                SpecLoader.from_objects(object_store, prefix=prefixes.mcp)
             )
         if prefixes.tools:
             kwargs["tool_policies"] = ToolCatalog.from_specloader(
-                SpecLoader.from_assets(asset_store, prefix=prefixes.tools)
+                SpecLoader.from_objects(object_store, prefix=prefixes.tools)
             )
         if extensions_base is not None:
             from ..extension.resolver import (

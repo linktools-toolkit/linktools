@@ -34,12 +34,15 @@ from external_adapter.conformance_adapter import (
 
 # The allowlist of public modules an EXTERNAL adapter may import. Anything
 # outside this set -- underscore-prefixed modules, ``_runtime``, the in-repo
-# reference backends under ``storage.filesystem`` / ``storage.sqlalchemy`` /
-# ``storage.coordination`` -- would defeat the point: the adapter exists to
-# prove the PUBLIC Protocols suffice.
+# reference backends under ``storage.filesystem`` / ``storage.sqlalchemy``
+# -- would defeat the point: the adapter exists to prove the PUBLIC Protocols
+# suffice. The storage-kernel Protocol modules (blob/coordination/object) ARE
+# public: an external adapter implements them.
 _PUBLIC_ADAPTER_IMPORTS = frozenset(
     {
-        "linktools.ai.storage.protocols",
+        "linktools.ai.runtime.persistence.protocols",
+        "linktools.ai.storage.blob.protocols",
+        "linktools.ai.storage.coordination.protocols",
         "linktools.ai.artifact.digest",
         "linktools.ai.artifact.models",
         "linktools.ai.errors",

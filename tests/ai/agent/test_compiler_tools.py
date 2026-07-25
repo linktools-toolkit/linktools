@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/agent/test_compiler_tools.py — verifies the contract contract: the
+"""tests/ai/agent/test_compiler_tools.py — verifies the contract: the
 AgentCompiler NO LONGER wires builtin file/terminal tools into the compiled
 pydantic-ai Agent. Those tools are constructed at EXECUTION TIME from
 ``AgentDependencies.sandbox`` (set by AgentEngine from its ``sandbox``
@@ -10,14 +10,18 @@ Three angles:
 1. A freshly-compiled Agent carries NO user-supplied FunctionToolsets (the
    builtin tools are not baked in at compile time). This replaces the old
    ``workdir=`` gate test.
-2. A run driven by a runner WITHOUT an execution backend exposes no builtin
-   tools -- a FunctionModel that tries to call read_file gets a tool-error
-   back (pydantic-ai's "unknown tool" surface), never a file payload.
-3. A run driven by a runner WITH a LocalSandbox wired sees a real
-   read_file tool call land on the backend -- the file content shows up as
-   a tool-return in the run history. This is the positive-path replacement
-   for the old "compiled agent has builtin tools" test, now driven through
-   the runner per contract's execution-time construction."""
+2. A run driven by an engine WITHOUT an execution backend exposes no builtin
+   tools -- a FunctionModel that tries to call read_file gets no successful
+   tool event (the builtin handler never runs without a backend).
+3. A run driven by an engine WITH a LocalSandbox wired sees a real read_file
+   tool call land on the backend -- the file content shows up in the run's
+   checkpoint payload (the serialized ``run.all_messages()`` execute_pure
+   returns on AgentCompleted).
+
+FS-29: the legacy ``run_stream`` is gone; cases 2-3 now drive ``execute_pure``
+directly and read tool events from the injected ``live_events`` sink + the
+checkpoint payload from the AgentCompleted outcome (the engine no longer holds
+a commit_coordinator/checkpoint store)."""
 
 import asyncio
 
@@ -27,22 +31,28 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.engine import AgentEngine
+from linktools.ai.agent.models import AgentCompleted, AgentInput
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.sandbox.local import LocalSandbox
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.resolver import ModelResolver
+from linktools.ai.run.cancellation import CancellationToken
 from linktools.ai.run.context import RunContext
-from linktools.ai.run.models import RunInput, RunnableType
-from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.run.live_events import NullSecurityEventSink
+from linktools.ai.run.models import RunnableType
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 
-from datetime import datetime, timezone
+
+class _CollectingLiveEvents:
+    """Captures every dict event execute_pure publishes via live_events."""
+
+    def __init__(self) -> None:
+        self.events: "list[dict]" = []
+
+    async def publish(self, event: dict) -> None:
+        self.events.append(event)
 
 
 def _registry(model_fn) -> ModelRegistry:
@@ -69,48 +79,18 @@ def _user_function_toolsets(compiled) -> "list[FunctionToolset]":
     ]
 
 
-def _make_runner(tmp_path, *, sandbox=None) -> AgentEngine:
+def _make_runner(*, sandbox=None) -> AgentEngine:
     from linktools.ai.capability.resolver import CapabilityResolver
     from linktools.ai.capability.builtin import BuiltinProvider
-    from linktools.ai.governance.policy.engine import PolicyEngine
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-    from linktools.ai.tool.executor import GovernedToolInvoker
 
-    run_store = FilesystemRunStore(root=tmp_path / "runs")
-    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
-    event_store = FilesystemEventStore(root=tmp_path / "events")
-    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+    # FS-29: AgentEngine takes only its pure-execution dependencies -- no
+    # run/session/event/checkpoint Store, no commit_coordinator. The
+    # execution-time builtin-tool construction under test lives in
+    # execute_pure's capability path (driven by AgentDependencies.sandbox).
     return AgentEngine(
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
         sandbox=sandbox,
         capability_resolver=CapabilityResolver({"builtin": BuiltinProvider()}),
         managed_tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
-        commit_coordinator=FilesystemRunCommitCoordinator(
-            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=checkpoint_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-        ),
-    )
-
-
-def _seed_session(store, session_id) -> None:
-    now = datetime.now(timezone.utc)
-    asyncio.run(
-        store.create(
-            SessionRecord(
-                id=session_id,
-                parent_id=None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
     )
 
 
@@ -126,6 +106,21 @@ def _run_context() -> RunContext:
         tenant_id=None,
         workspace=None,
     )
+
+
+def _execute(runner, compiled, prompt) -> "tuple[AgentCompleted, list[dict]]":
+    live = _CollectingLiveEvents()
+    outcome = asyncio.run(
+        runner.execute_pure(
+            compiled,
+            AgentInput(prompt=prompt),
+            _run_context(),
+            cancellation=CancellationToken(),
+            live_events=live,
+            security_events=NullSecurityEventSink(),
+        )
+    )
+    return outcome, live.events
 
 
 def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
@@ -147,13 +142,11 @@ def test_compiled_agent_has_no_builtin_toolsets_at_compile_time():
 
 
 def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
-    # When no Sandbox is wired, the runner-driven run exposes no
-    # builtin tools. A FunctionModel that emits a read_file ToolCallPart
-    # cannot land it on a backend. Drive the run via run_stream and collect
-    # every yielded event: without a backend, NO successful "tool" event for
-    # read_file surfaces (the model's tool call is rejected as unknown before
-    # the builtin handler runs). The model then terminates with a final
-    # response on its next turn.
+    # When no Sandbox is wired, execute_pure exposes no builtin tools. A
+    # FunctionModel that emits a read_file ToolCallPart cannot land it on a
+    # backend. Without a backend, NO successful "tool" event for read_file
+    # surfaces (the builtin handler never runs); the model then terminates
+    # with a final response on its next turn.
     def model_fn(messages, info: AgentInfo) -> ModelResponse:
         # Terminate on any non-first call. messages[0] is the user prompt;
         # the second call arrives after pydantic-ai has processed the prior
@@ -171,20 +164,9 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
         model_resolver=ModelResolver(registry=_registry(model_fn)),
     )
     compiled = asyncio.run(compiler.compile(_spec()))
-    runner = _make_runner(tmp_path)  # sandbox=None -> no builtin tools
-    _seed_session(runner._session_store, "session-1")
+    runner = _make_runner()  # sandbox=None -> no builtin tools
 
-    async def _collect():
-        events: "list[dict]" = []
-        async for ev in runner.run_stream(
-            compiled,
-            RunInput(prompt="read sample.txt"),
-            _run_context(),
-        ):
-            events.append(ev)
-        return events
-
-    events = asyncio.run(_collect())
+    _outcome, events = _execute(runner, compiled, "read sample.txt")
 
     # No successful read_file tool event -- the tool was unknown to the agent
     # (no execution backend -> no builtin tools registered on the iter() call).
@@ -202,15 +184,12 @@ def test_runner_without_execution_backend_exposes_no_builtin_tools(tmp_path):
 
 
 def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
-    # Positive path: with a LocalSandbox wired into the runner, a
-    # read_file tool call from the model lands on the backend. The runner
-    # surfaces the call as a "tool" event via run_stream -- assert read_file
-    # fires a successful "end" event AND the file content shows up in the
-    # checkpointed message history (which the runner saves from
-    # ``run.all_messages()`` -- this is where the tool-return payload lives).
-    # This is the contract replacement for the old "compiled agent has builtin
-    # tools" test, now driven through the runner per the execution-time
-    # construction.
+    # Positive path: with a LocalSandbox wired into the engine, a read_file
+    # tool call from the model lands on the backend. execute_pure surfaces the
+    # call as a "tool" event via the live_events sink AND the file content
+    # shows up in the checkpoint payload (the serialized run.all_messages()
+    # carried on the AgentCompleted outcome -- where the tool-return payload
+    # lives). This is the execution-time construction contract.
     (tmp_path / "sample.txt").write_text("hello from workdir", encoding="utf-8")
 
     def model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -234,20 +213,9 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
     )
     compiled = asyncio.run(compiler.compile(_spec()))
     backend = LocalSandbox(runtime_dir=tmp_path)
-    runner = _make_runner(tmp_path, sandbox=backend)
-    _seed_session(runner._session_store, "session-1")
+    runner = _make_runner(sandbox=backend)
 
-    async def _drive():
-        events: "list[dict]" = []
-        async for ev in runner.run_stream(
-            compiled,
-            RunInput(prompt="read sample.txt"),
-            _run_context(),
-        ):
-            events.append(ev)
-        return events
-
-    events = asyncio.run(_drive())
+    outcome, events = _execute(runner, compiled, "read sample.txt")
 
     # read_file fired and completed successfully.
     read_file_ends = [
@@ -262,10 +230,10 @@ def test_runner_with_execution_backend_routes_read_file_to_backend(tmp_path):
         f"read_file end events should be ok: {read_file_ends}"
     )
 
-    # And the file content reached the message history -- the checkpoint
-    # payload holds the serialized ``run.all_messages()`` with tool-returns.
-    checkpoint = asyncio.run(runner._commit_coordinator._checkpoints.latest("run-1"))
-    assert checkpoint is not None, "expected a checkpoint after the run"
-    assert "hello from workdir" in str(checkpoint.payload), (
+    # And the file content reached the message history -- the AgentCompleted
+    # checkpoint payload holds the serialized ``run.all_messages()`` with
+    # tool-returns.
+    assert isinstance(outcome, AgentCompleted), "expected the run to complete"
+    assert "hello from workdir" in str(outcome.checkpoint_payload), (
         "file content should appear in the checkpointed message history"
     )

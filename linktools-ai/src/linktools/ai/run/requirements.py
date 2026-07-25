@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from ..storage.features import CoordinationScope, StorageFeatures, TransactionScope
+from ..storage.features import CoordinationScope, TransactionScope
+from ..runtime.persistence.features import StorageFeatures
 
 if TYPE_CHECKING:
     # Storage is referenced only in the string annotation of
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     # All kept lazy to avoid a runtime import cycle.
     from ..runtime.builder import RuntimeSettings
     from ..runtime.dependencies import RuntimeDependencies
-    from ..storage.facade import Storage
+    from ..runtime.persistence.facade import Storage
 
 # Scope ranks: a storage scope must meet-or-exceed the required scope. The two
 # enums carry string values whose lexical order is NOT the capability order
@@ -193,6 +194,44 @@ class RuntimeRequirements:
         )
 
 
+def _max_by(rank: "dict", a, b):
+    """The stronger of two enum values by an explicit ``rank`` map -- NOT
+    ``max(enum.value)``, because these enums' string values do not sort in
+    capability order. Used by :func:`merge_runtime_requirements` so an explicit
+    requirement can only STRENGTHEN a topology-derived baseline, never weaken
+    it."""
+    return a if rank[a] >= rank[b] else b
+
+
+def merge_runtime_requirements(
+    base: "RuntimeRequirements", extra: "RuntimeRequirements"
+) -> "RuntimeRequirements":
+    """Combine a topology-derived ``base`` with a caller-declared ``extra`` so
+    the result meets-or-exceeds BOTH on every capability. Scope fields take the
+    stronger scope (by explicit rank); boolean capabilities OR together. This is
+    the single composition rule the build kernel uses: it ALWAYS derives the
+    topology baseline first, then merges any explicit requirements on top, so an
+    explicit ``RuntimeRequirements()`` (or None) can never WEAKEN what the
+    topology demands (the old behavior of letting explicit requirements REPLACE
+    the baseline let ``MULTI_WORKER + RuntimeRequirements()`` bypass the
+    distributed-coordination/leasing/fencing the topology requires)."""
+    return RuntimeRequirements(
+        coordination=_max_by(_COORDINATION_RANK, base.coordination, extra.coordination),
+        transactions=_max_by(_TRANSACTION_RANK, base.transactions, extra.transactions),
+        leasing=base.leasing or extra.leasing,
+        fencing=base.fencing or extra.fencing,
+        idempotency=base.idempotency or extra.idempotency,
+        streaming_artifacts=base.streaming_artifacts or extra.streaming_artifacts,
+        optimistic_concurrency=(
+            base.optimistic_concurrency or extra.optimistic_concurrency
+        ),
+        append_only_events=base.append_only_events or extra.append_only_events,
+        artifact_coordination=_max_by(
+            _COORDINATION_RANK, base.artifact_coordination, extra.artifact_coordination
+        ),
+    )
+
+
 def enforce_storage_capability_gate(
     features: StorageFeatures, requirements: "RuntimeRequirements | None"
 ) -> None:
@@ -269,7 +308,7 @@ def enforce_storage_feature_consistency(storage: "Storage") -> None:
     the first use."""
     from ..errors import StorageRequirementsNotMetError
     from ..storage.features import StorageComponent
-    from ..storage.transaction import NoCrossStoreTransactions
+    from ..runtime.persistence.transaction import NoCrossStoreTransactions
 
     f = storage.features
     if f.transaction_scope is not TransactionScope.NONE:
@@ -306,14 +345,17 @@ def enforce_storage_feature_consistency(storage: "Storage") -> None:
             "Storage wires an ArtifactStore (storage.artifacts) but declares "
             "streaming_artifacts=False -- the flag must agree with the wired store"
         )
-    wired_coordinator = getattr(storage.artifacts, "_coordinator", None)
-    if wired_coordinator is not None:
+    if storage.artifacts is not None:
         # The declared artifact_coordination_scope must match the ACTUAL wired
         # coordinator's own scope -- a mismatch here is a Storage that claims one
         # capability but wired a coordinator providing a different one (the
-        # topology gate above only sees the claim, not the real object).
-        wired_scope = wired_coordinator.scope
-        if wired_scope != f.artifact_coordination_scope:
+        # topology gate above only sees the claim, not the real object). Read the
+        # scope through the ArtifactStore's public ``coordination_scope``
+        # property rather than reaching into its private ``_coordinator``. The
+        # default covers a non-ArtifactStore stand-in used by narrow unit tests;
+        # a real ArtifactStore always exposes the property.
+        wired_scope = getattr(storage.artifacts, "coordination_scope", None)
+        if wired_scope is not None and wired_scope != f.artifact_coordination_scope:
             raise StorageRequirementsNotMetError(
                 f"Storage declares artifact_coordination_scope="
                 f"{f.artifact_coordination_scope.value!r} but its wired "
@@ -375,6 +417,7 @@ __all__: "list[str]" = [
     "RuntimeTopology",
     "RuntimeRequirements",
     "derive_runtime_requirements",
+    "merge_runtime_requirements",
     "enforce_storage_capability_gate",
     "enforce_storage_feature_consistency",
 ]

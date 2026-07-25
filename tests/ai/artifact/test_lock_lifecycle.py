@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""InProcessArtifactDigestCoordinator registry lifecycle: the per-digest lock
+"""InProcessKeyedCoordinator registry lifecycle: the per-digest lock
 registry is refcounted and bounded. Every exit path -- normal release, holder
 cancellation, waiter cancellation -- returns its reference, and an entry whose
 reference count reaches zero and whose lock is free is deleted. A process that
@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
 
 _VALID = "a" * 64
@@ -23,21 +23,21 @@ def _digest(n: int) -> ArtifactDigest:
 
 @pytest.mark.asyncio
 async def test_release_deletes_entry():
-    coord = InProcessArtifactDigestCoordinator()
-    async with coord.hold(ArtifactDigest.parse(_VALID)):
+    coord = InProcessKeyedCoordinator()
+    async with coord.hold(ArtifactDigest.parse(_VALID).value):
         assert coord.active_entry_count == 1
     assert coord.active_entry_count == 0
 
 
 @pytest.mark.asyncio
 async def test_multiple_waiters_then_all_release_leaves_no_entry():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     d = ArtifactDigest.parse(_VALID)
     entered = asyncio.Event()
     proceed = asyncio.Event()
 
     async def _hold_then_wait():
-        async with coord.hold(d):
+        async with coord.hold(d.value):
             entered.set()
             await proceed.wait()
 
@@ -57,19 +57,19 @@ async def test_multiple_waiters_then_all_release_leaves_no_entry():
 
 
 async def _async_noop_hold(coord, d):
-    async with coord.hold(d):
+    async with coord.hold(d.value):
         pass
 
 
 @pytest.mark.asyncio
 async def test_waiter_cancellation_decrements_reference():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     d = ArtifactDigest.parse(_VALID)
     entered = asyncio.Event()
     proceed = asyncio.Event()
 
     async def _hold():
-        async with coord.hold(d):
+        async with coord.hold(d.value):
             entered.set()
             await proceed.wait()
 
@@ -93,12 +93,12 @@ async def test_waiter_cancellation_decrements_reference():
 
 @pytest.mark.asyncio
 async def test_holder_cancellation_releases_lock_and_reaps_entry():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     d = ArtifactDigest.parse(_VALID)
     started = asyncio.Event()
 
     async def _hold_forever():
-        async with coord.hold(d):
+        async with coord.hold(d.value):
             started.set()
             await asyncio.Event().wait()  # never resolves -> cancelled mid-hold
 
@@ -111,28 +111,28 @@ async def test_holder_cancellation_releases_lock_and_reaps_entry():
         pass
     # Holder cancelled: the lock is released and the entry reaped, so a fresh
     # acquisition succeeds immediately and the registry is empty afterwards.
-    async with coord.hold(d):
+    async with coord.hold(d.value):
         pass
     assert coord.active_entry_count == 0
 
 
 @pytest.mark.asyncio
 async def test_many_unique_digests_leave_registry_empty():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     for i in range(10000):
-        async with coord.hold(_digest(i)):
+        async with coord.hold(_digest(i).value):
             pass
     assert coord.active_entry_count == 0
 
 
 @pytest.mark.asyncio
 async def test_same_digest_is_mutually_exclusive():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     d = ArtifactDigest.parse(_VALID)
     order: "list[str]" = []
 
     async def _critical(name: str):
-        async with coord.hold(d):
+        async with coord.hold(d.value):
             order.append(f"{name}-in")
             await asyncio.sleep(0)
             order.append(f"{name}-out")
@@ -144,14 +144,14 @@ async def test_same_digest_is_mutually_exclusive():
 
 @pytest.mark.asyncio
 async def test_different_digests_run_in_parallel():
-    coord = InProcessArtifactDigestCoordinator()
+    coord = InProcessKeyedCoordinator()
     inflight = 0
     max_inflight = 0
     lock = asyncio.Lock()
 
     async def _hold(d: ArtifactDigest):
         nonlocal inflight, max_inflight
-        async with coord.hold(d):
+        async with coord.hold(d.value):
             async with lock:
                 inflight += 1
                 max_inflight = max(max_inflight, inflight)

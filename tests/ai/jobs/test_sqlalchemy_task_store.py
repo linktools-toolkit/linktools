@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.job import SqlAlchemyJobStore
+from linktools.ai.jobs.persistence.sqlalchemy import SqlAlchemyJobStore
 from linktools.ai.jobs.models import (
     ActorChain,
     ActorRef,
@@ -464,7 +464,7 @@ def test_missing_dependency_does_not_crash(task_store) -> None:
 
 
 def test_commit_success_rejects_too_many_commands(task_store) -> None:
-    """Wired command-count limit (section 17.5): an outcome carrying more than
+    """Wired command-count limit: an outcome carrying more than
     MAX_COMMANDS commands is rejected before any write."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess
     from linktools.ai.jobs.validation import MAX_COMMANDS
@@ -488,7 +488,7 @@ def test_commit_success_rejects_too_many_commands(task_store) -> None:
 
 
 def test_commit_success_rejects_oversized_output_artifact(task_store) -> None:
-    """Wired output-payload limit (section 17.5): an output artifact larger than
+    """Wired output-payload limit: an output artifact larger than
     the ceiling is rejected at commit."""
     from linktools.ai.artifact.models import ArtifactRef
     from linktools.ai.jobs.protocols import TaskSuccess
@@ -516,7 +516,7 @@ def test_commit_success_rejects_oversized_output_artifact(task_store) -> None:
 
 
 def test_submit_signal_rejects_oversized_metadata(task_store) -> None:
-    """Wired signal-metadata limit (section 17.5): inline signal JSON above the
+    """Wired signal-metadata limit: inline signal JSON above the
     metadata ceiling is rejected before the signal is persisted."""
     from linktools.ai.jobs.models import TaskSignalRecord
 
@@ -783,7 +783,7 @@ def test_permanent_failure_does_not_retry(task_store) -> None:
 
 
 def test_create_task_rejects_duplicate_key_within_job(task_store) -> None:
-    """Per-task key uniqueness (section 13.3): the SQL store mirrors the file
+    """Per-task key uniqueness: the SQL store mirrors the file
     store's explicit pre-check so a duplicate key raises a clean ValueError
     rather than an IntegrityError that would strand the parent in CLAIMED."""
     from linktools.ai.jobs.protocols import CreateTask, TaskSuccess

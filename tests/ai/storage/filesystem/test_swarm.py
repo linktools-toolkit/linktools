@@ -18,7 +18,7 @@ from linktools.ai.errors import (
     SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
-from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
+from linktools.ai.swarm.persistence.filesystem import FilesystemSwarmStore
 from linktools.ai.swarm.models import (
     AttemptStatus,
     SwarmRun,

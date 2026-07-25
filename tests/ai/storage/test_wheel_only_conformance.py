@@ -33,12 +33,14 @@ _REPO = Path(__file__).resolve().parents[3]
 _CONFORMANCE = _REPO / "linktools-ai" / "conformance"
 
 # Modules an external conformance package must NEVER import: private kernel,
-# in-repo reference backends, or the in-repo tests package.
+# in-repo reference backends, or the in-repo tests package. The storage-kernel
+# public Protocols (object/cache/blob/coordination) are PUBLIC -- an external
+# adapter implements LeaseCoordinator / KeyedCoordinator / BlobStore / etc., so
+# importing them from their storage-kernel home is allowed.
 _FORBIDDEN_ROOTS = (
     "linktools.ai.runtime.builder",
     "linktools.ai.storage.filesystem",
     "linktools.ai.storage.sqlalchemy",
-    "linktools.ai.storage.coordination",
     "tests",
 )
 

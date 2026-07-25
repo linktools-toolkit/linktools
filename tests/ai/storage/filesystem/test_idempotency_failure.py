@@ -7,7 +7,7 @@ leave the FAILED transition unwritten."""
 
 import asyncio
 
-from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.persistence.filesystem import FilesystemIdempotencyStore
 from linktools.ai.tool.idempotency import IdempotencyStatus
 
 
@@ -33,7 +33,7 @@ def test_file_idempotency_fail_signature_is_single_claim_token(tmp_path):
     fast rather than silently hitting a shadow."""
     import inspect
 
-    from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+    from linktools.ai.tool.persistence.filesystem import FilesystemIdempotencyStore
 
     sig = inspect.signature(FilesystemIdempotencyStore.fail)
     assert list(sig.parameters) == ["self", "claim", "error"], sig.parameters

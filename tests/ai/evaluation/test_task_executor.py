@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """TaskEvalExecutor tests: routes a case through JobRuntime and captures
-retry_count + the sealed output (section 23.4 task mode)."""
+retry_count + the sealed output (task mode)."""
+
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 import asyncio
 
 from linktools.ai.evaluation.executors import TaskEvalExecutor
 from linktools.ai.evaluation.models import EvalCase, EvalTarget
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.ai.jobs.handlers import CallableTaskHandler
 from linktools.ai.jobs.runtime import JobRuntime, JobRuntimeOptions
 

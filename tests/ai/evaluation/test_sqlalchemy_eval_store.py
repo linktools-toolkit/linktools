@@ -18,7 +18,7 @@ from linktools.ai.evaluation.store import (
     EvalResultConflictError,
     EvalRunNotFoundError,
 )
-from linktools.ai.storage.sqlalchemy.evaluation import SqlAlchemyEvalStore
+from linktools.ai.evaluation.persistence.sqlalchemy import SqlAlchemyEvalStore
 from linktools.ai.storage.sqlalchemy.models import Base
 
 

@@ -6,10 +6,11 @@ strategy implements, plus the integrity-violation taxonomy.
 A dialect strategy owns the dialect-specific pieces of the insert/conflict
 algorithm: it classifies a caught :class:`~sqlalchemy.exc.IntegrityError`, and
 it executes a unique-key-conflict-detecting INSERT in the way that dialect
-supports. It does NOT replicate Asset CRUD -- the generic concurrency algorithm
-lives in the backend and calls :meth:`SqlAlchemyDialectStrategy.execute_conflict_insert`
-plus :meth:`SqlAlchemyDialectStrategy.classify_integrity_error`, so the
-algorithm itself stays dialect-neutral.
+supports. It does NOT replicate the object kernel's CRUD -- the generic
+concurrency algorithm lives in the backend and calls
+:meth:`SqlAlchemyDialectStrategy.execute_conflict_insert` plus
+:meth:`SqlAlchemyDialectStrategy.classify_integrity_error`, so the algorithm
+itself stays dialect-neutral.
 
 The split exists because SQLite cannot use a SAVEPOINT to absorb a conflicting
 INSERT (aiosqlite commits the savepoint immediately, breaking UoW rollback), so
@@ -24,7 +25,7 @@ from ....errors import StorageError
 
 
 class IntegrityViolationKind(str, Enum):
-    ASSET_KEY = "asset_key"
+    OBJECT_KEY = "object_key"
     IDEMPOTENCY_KEY = "idempotency_key"
     OTHER = "other"
 
@@ -40,11 +41,11 @@ class SqlAlchemyDialectStrategy(Protocol):
     name: str
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
-        """Map a caught ``IntegrityError`` to the asset domain's violation kind.
+        """Map a caught ``IntegrityError`` to the object kernel's violation kind.
 
         Implementations must return :attr:`IntegrityViolationKind.OTHER` for any
-        violation that is not one of the two known asset unique-key conflicts
-        so the caller can re-raise the original error unchanged."""
+        violation that is not one of the two known object-kernel unique-key
+        conflicts so the caller can re-raise the original error unchanged."""
         ...
 
     async def execute_conflict_insert(

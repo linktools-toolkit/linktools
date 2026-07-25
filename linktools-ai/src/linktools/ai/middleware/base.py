@@ -3,12 +3,15 @@
 """Middleware: a base class with no-op defaults for every lifecycle hook --
 a concrete Middleware overrides only what it needs.
 
-before_run/after_run/on_error are called directly by AgentEngine around its
-agent.run(...) call (pydantic-ai has no equivalent native hook). before_model/
-after_model/before_tool/after_tool get adapted into a real pydantic-ai
-AbstractCapability by build_middleware_capability() (tool/executor.py
-and AgentCompiler wire this up) -- this file only defines the
-Protocol-like base class, it does not touch pydantic-ai at all."""
+before_run/after_run are called directly by AgentEngine around its
+execute_pure(...) loop (on a new, non-resuming run): before_run before the
+model/tool loop, after_run after a successful result is built (FS-29:
+execute_pure is Store-free, so after_run always precedes the RunCoordinator
+commit). before_model/after_model/before_tool/after_tool (plus on_error on
+the tool path) get adapted into a real pydantic-ai AbstractCapability by
+build_middleware_capability() (tool/executor.py and AgentCompiler wire this
+up) -- this file only defines the Protocol-like base class, it does not touch
+pydantic-ai at all."""
 
 from typing import Any
 

@@ -20,7 +20,7 @@ from linktools.ai.errors import (
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
 from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+from linktools.ai.swarm.persistence.sqlalchemy import SqlAlchemySwarmStore
 from linktools.ai.swarm.models import (
     AttemptStatus,
     SwarmRun,

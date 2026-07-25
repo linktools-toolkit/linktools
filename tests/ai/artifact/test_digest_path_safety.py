@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
 from linktools.ai.artifact.digest import ArtifactDigest
 from linktools.ai.artifact.models import ArtifactProvenance
 from linktools.ai.artifact.store import ArtifactStore
@@ -42,7 +42,7 @@ class _RecordingCoordinator:
         async def __aexit__(self, *exc):
             return False
 
-    def hold(self, digest: ArtifactDigest):
+    def hold(self, digest: str):
         self.hold_count += 1
         return self._inner.hold(digest)
 
@@ -54,18 +54,18 @@ class _RecordingBlob:
         self.put_count = 0
 
     async def put_if_absent(
-        self, *, digest: ArtifactDigest, source: AsyncIterator[bytes], size
+        self, *, digest: str, source: AsyncIterator[bytes], size
     ):
         self.put_count += 1
         raise AssertionError("blob store must not be called for a bad digest")
 
-    async def open(self, *, digest: ArtifactDigest):
+    async def open(self, *, digest: str):
         raise AssertionError
 
-    async def stat(self, *, digest: ArtifactDigest):
+    async def stat(self, *, digest: str):
         raise AssertionError
 
-    async def delete(self, *, digest: ArtifactDigest):
+    async def delete(self, *, digest: str):
         raise AssertionError
 
 
@@ -91,7 +91,7 @@ async def _source():
 
 @pytest.mark.asyncio
 async def test_bad_expected_digest_raises_before_any_side_effect():
-    inner = InProcessArtifactDigestCoordinator()
+    inner = InProcessKeyedCoordinator()
     coord = _RecordingCoordinator(inner)
     blob = _RecordingBlob()
     store = ArtifactStore(blob, _NullRecords(), coord)
@@ -113,7 +113,7 @@ async def test_bad_expected_digest_raises_before_any_side_effect():
 async def test_bad_expected_digest_creates_no_lock_file(tmp_path):
     # Use the real in-process coordinator and inspect its registry: a bad digest
     # must not register a lock entry (the value object rejects before hold).
-    inner = InProcessArtifactDigestCoordinator()
+    inner = InProcessKeyedCoordinator()
     coord = _RecordingCoordinator(inner)
     blob = _RecordingBlob()
     store = ArtifactStore(blob, _NullRecords(), coord)
@@ -134,17 +134,22 @@ async def test_bad_expected_digest_creates_no_lock_file(tmp_path):
 async def test_filesystem_coordinator_lock_path_stays_in_locks_dir(tmp_path):
     # A valid digest produces a lock path whose parent is exactly the locks dir;
     # the parent-check defense rejects anything that would escape it.
-    from linktools.ai.storage.filesystem.artifact_coordination import (
-        FilesystemArtifactDigestCoordinator,
+    from linktools.ai.storage.coordination.file import (
+        FilesystemKeyedCoordinator,
     )
 
-    coord = FilesystemArtifactDigestCoordinator(root=tmp_path / "artifacts")
+    coord = FilesystemKeyedCoordinator(root=tmp_path / "artifacts")
     digest = ArtifactDigest.from_bytes(b"x")
-    async with coord.hold(digest):
-        # The lock file lives directly under .locks, named by the digest value.
+    import urllib.parse
+
+    encoded = urllib.parse.quote(digest.value, safe="")
+    async with coord.hold(digest.value):
+        # The lock file lives directly under .locks, named by the percent-encoded
+        # digest value (encoding keeps an arbitrary caller key a single path
+        # component under the locks dir).
         locks_dir = tmp_path / "artifacts" / ".locks"
-        assert (locks_dir / digest.value).exists()
-        assert (locks_dir / digest.value).parent == locks_dir
+        assert (locks_dir / encoded).exists()
+        assert (locks_dir / encoded).parent == locks_dir
     # Permissions on the locks dir are owner-only.
     import os
 

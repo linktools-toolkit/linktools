@@ -10,14 +10,14 @@ ToolContext reaches them via pydantic-ai dependency injection
 CompiledAgent is safe to share across concurrent Runs."""
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
 
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage
 
 from ..model.resolver import ResolvedModel
 from ..run.models import RunErrorInfo, RunResult
+from ..session.models import NewSessionMessage
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
 
@@ -36,13 +36,22 @@ class CompiledAgent:
 
 @dataclass(frozen=True, slots=True)
 class AgentInput:
-    """The AgentEngine-facing execution request (spec 12.4's ``input:
+    """The AgentEngine-facing execution request (the ``input:
     AgentInput``) -- a dedicated type rather than reusing ``run.models.RunInput``
     directly, so AgentEngine's public surface does not couple to the Run
     domain's own input shape as that shape evolves independently."""
 
     prompt: str
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+    # Session history RunCoordinator already loaded (via SessionReader) and
+    # converted to pydantic-ai's message shape -- AgentEngine folds it into
+    # the model prompt but never reads SessionStore itself. Empty (default)
+    # means a new run with no prior turns.
+    message_history: "tuple[ModelMessage, ...]" = ()
+    # True when this execution resumes a paused run from a checkpoint: the
+    # prompt is already baked into ``message_history`` and must not be
+    # re-fed alongside it.
+    resuming: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,36 +85,62 @@ class PauseRequest:
     binding: "Mapping[str, Any]" = field(default_factory=dict)
 
 
-class AgentExecutionStatus(str, Enum):
-    COMPLETED = "completed"
-    PAUSED = "paused"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
+@dataclass(frozen=True, slots=True)
+class AgentCompleted:
+    """AgentEngine ran to a successful final output. ``checkpoint_payload`` is
+    the serialized full message history at completion -- RunCoordinator
+    persists it alongside the SUCCEEDED transition so a later resume/replay
+    has the same message state a paused run would have checkpointed."""
+
+    result: RunResult
+    messages: "tuple[NewSessionMessage, ...]"
+    checkpoint_payload: bytes
+    usage: RunUsage
 
 
 @dataclass(frozen=True, slots=True)
-class AgentExecutionOutcome:
-    """The sole return shape of ``AgentEngine.execute()`` under the section
-    12 API (spec 12.3/12.4): a single awaited value replacing today's
-    async-generator-of-dict-events shape, so RunCoordinator can converge run
-    lifecycle (transition/checkpoint/session/event writes) from ONE outcome
-    object instead of iterating a stream and inferring state from event
-    shapes. Field combinations are constrained by ``status``:
+class AgentPaused:
+    """AgentEngine suspended on a tool call awaiting approval. Carries
+    everything RunCoordinator needs to persist the ApprovalRequest and
+    checkpoint without AgentEngine touching ApprovalStore/CheckpointStore
+    itself."""
 
-    - COMPLETED: ``result`` is set, ``pause_request``/``error`` are None.
-    - PAUSED: ``pause_request`` is set, ``result``/``error`` are None.
-    - FAILED: ``error`` is set, ``result``/``pause_request`` are None.
-    - CANCELLED: ``result``/``pause_request``/``error`` are all typically
-      None (a cancellation has no output to report).
+    request: PauseRequest
+    messages: "tuple[NewSessionMessage, ...]"
+    checkpoint_payload: bytes
+    usage: RunUsage
 
-    This dataclass does not itself enforce that constraint (no validating
-    ``__post_init__`` yet) -- RunCoordinator's convergence step is what
-    switches on ``status``; a future increment may add the check once that
-    consumer exists."""
 
-    status: AgentExecutionStatus
-    result: "RunResult | None" = None
-    pause_request: "PauseRequest | None" = None
-    error: "RunErrorInfo | None" = None
-    messages: "tuple[ModelMessage, ...]" = ()
-    usage: "RunUsage | None" = None
+@dataclass(frozen=True, slots=True)
+class AgentFailed:
+    """AgentEngine caught an expected provider/model/tool failure. ``error``
+    is already redacted -- callers never need to sanitize it further.
+    Configuration/invariant/protocol violations and unknown programming
+    errors are NOT reported this way; they propagate as raised exceptions
+    instead of becoming an ``AgentFailed``."""
+
+    error: RunErrorInfo
+    retryable: bool
+    usage: RunUsage
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCancelled:
+    """An explicit Run cancellation converged cleanly (as opposed to an
+    external ``asyncio.CancelledError``, which the engine re-raises after
+    cleanup rather than reporting as an outcome)."""
+
+    reason: "str | None"
+    usage: RunUsage
+
+
+AgentExecutionOutcome: TypeAlias = (
+    AgentCompleted | AgentPaused | AgentFailed | AgentCancelled
+)
+"""The sole return shape of ``AgentEngine.execute_pure()``: a single awaited
+discriminated union, so RunCoordinator can converge run lifecycle
+(transition/checkpoint/session/event writes) from ONE outcome object instead
+of iterating a stream and inferring state from event shapes. Unlike a flat
+dataclass with nullable fields per status, invalid combinations (e.g. a
+completed run carrying a pause request) are not constructible -- callers
+dispatch with ``isinstance()``."""

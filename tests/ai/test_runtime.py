@@ -10,8 +10,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 
 def _model_fn(messages, info: AgentInfo) -> ModelResponse:
@@ -161,6 +161,87 @@ def test_runtime_run_with_explicit_session_reuses_it(tmp_path):
     run, messages = asyncio.run(_verify())
     assert run is not None
     assert any("hello from runtime" in str(m.content) for m in messages)
+
+
+def test_runtime_run_new_turn_persists_only_the_new_prompt_as_user_message(tmp_path):
+    """FS-29 behavioral guard: a new run's persisted USER message is
+    exactly the run's prompt -- prior-turn history (loaded as native
+    message_history for the MODEL prompt) must NOT bleed into the new USER
+    message persisted to the session. Replaces the deleted agent-level
+    test_v5_user_prompt_persistence with a runtime-level test that drives the
+    full RunCoordinator -> commit path."""
+    from linktools.ai.model.resolver import ModelResolver
+    from linktools.ai.session.models import (
+        MessageRole,
+        NewSessionMessage,
+        SessionRecord,
+        SessionStatus,
+    )
+
+    storage = FilesystemStorage(root=tmp_path)
+    runtime = build_runtime(
+        storage=storage,
+        model_resolver=ModelResolver(registry=_registry()),
+        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
+    )
+    session_id = "session-history"
+    now = datetime.now(timezone.utc)
+
+    async def _setup():
+        await storage.sessions.create(
+            SessionRecord(
+                id=session_id,
+                parent_id=None,
+                status=SessionStatus.ACTIVE,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        # Seed a prior USER + ASSISTANT turn -- this is the history a new run
+        # loads as message_history. It must NOT contaminate the new USER msg.
+        await storage.sessions.append_messages(
+            session_id,
+            (
+                NewSessionMessage(
+                    role=MessageRole.USER, content="old question", run_id="run-old"
+                ),
+                NewSessionMessage(
+                    role=MessageRole.ASSISTANT, content="old answer", run_id="run-old"
+                ),
+            ),
+        )
+
+    asyncio.run(_setup())
+    spec = AgentSpec(
+        id="agent-hist",
+        name="rt-agent-hist",
+        model=ModelPolicy(primary="test-model"),
+        instructions=PromptSpec(instructions="hi"),
+    )
+
+    async def _run():
+        return await runtime.run(
+            spec, "fresh-question", session_id=session_id, run_id="run-new"
+        )
+
+    asyncio.run(_run())
+
+    async def _verify():
+        return await storage.sessions.list_messages(session_id)
+
+    messages = asyncio.run(_verify())
+    # The new run appends exactly one USER ("fresh-question") + one ASSISTANT.
+    new_user = [
+        m for m in messages if m.run_id == "run-new" and m.role == MessageRole.USER
+    ]
+    assert len(new_user) == 1, f"expected one new USER message, got {new_user}"
+    assert new_user[0].content == "fresh-question", (
+        f"new USER message must be the run prompt verbatim, "
+        f"not history-contaminated: {new_user[0].content!r}"
+    )
+    # And the seeded history is untouched (still present, not rewritten).
+    assert any(m.content == "old question" for m in messages)
 
 
 def test_runtime_run_dispatches_swarm_spec_and_marks_driving_run_succeeded(tmp_path):
@@ -323,7 +404,7 @@ def _echo_registry():
 
 def test_runtime_build_threads_storage_memories_into_runner(tmp_path):
     from linktools.ai.model.resolver import ModelResolver
-    from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
+    from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
 
     storage = FilesystemStorage(root=tmp_path)
     runtime = build_runtime(

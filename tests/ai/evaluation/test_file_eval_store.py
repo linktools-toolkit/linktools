@@ -17,7 +17,7 @@ from linktools.ai.evaluation.store import (
     EvalResultConflictError,
     EvalRunNotFoundError,
 )
-from linktools.ai.storage.filesystem.evaluation import FilesystemEvaluationStore
+from linktools.ai.evaluation.persistence.filesystem import FilesystemEvaluationStore
 
 
 def test_file_eval_store_round_trip(tmp_path) -> None:

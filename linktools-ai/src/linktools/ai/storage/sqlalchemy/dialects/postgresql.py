@@ -4,9 +4,12 @@
 the constraint name the driver attaches. psycopg exposes it as
 ``error.orig.diag.constraint_name``; asyncpg's wording puts the constraint name
 in the message text, so the named constraint is matched either way. Only the
-two asset-domain named constraints are recognized."""
+two object-kernel named constraints are recognized."""
 
-from ..models import ASSET_IDEMPOTENCY_CONSTRAINT, ASSET_PATH_CONSTRAINT
+from ...backends.sqlalchemy.models import (
+    STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT,
+    STORAGE_OBJECT_KEY_CONSTRAINT,
+)
 from .base import IntegrityViolationKind
 
 
@@ -18,11 +21,11 @@ class PostgreSqlDialectStrategy:
         diag = getattr(orig, "diag", None)
         constraint = getattr(diag, "constraint_name", None) if diag else None
         message = str(orig or error)
-        if constraint == ASSET_PATH_CONSTRAINT or ASSET_PATH_CONSTRAINT in message:
-            return IntegrityViolationKind.ASSET_KEY
+        if constraint == STORAGE_OBJECT_KEY_CONSTRAINT or STORAGE_OBJECT_KEY_CONSTRAINT in message:
+            return IntegrityViolationKind.OBJECT_KEY
         if (
-            constraint == ASSET_IDEMPOTENCY_CONSTRAINT
-            or ASSET_IDEMPOTENCY_CONSTRAINT in message
+            constraint == STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT
+            or STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT in message
         ):
             return IntegrityViolationKind.IDEMPOTENCY_KEY
         return IntegrityViolationKind.OTHER

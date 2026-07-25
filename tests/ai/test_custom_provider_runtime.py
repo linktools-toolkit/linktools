@@ -9,8 +9,8 @@ import pytest
 from linktools.ai.capability import CapabilityRuntimeOptions
 from linktools.ai.runtime import RuntimeDependencies
 from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.storage.facade import FilesystemStorage
-from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
 
 def _runtime(tmp_path, **kw):
@@ -311,9 +311,9 @@ async def test_runtime_async_context_manager_closes_mcp(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_dependencies_from_assets_builds_registries(tmp_path):
-    # contract: RuntimeDependencies.from_assets constructs the default
-    # Spec-backed registries from a asset store + prefixes.
+async def test_runtime_dependencies_from_objects_builds_registries(tmp_path):
+    # contract: RuntimeDependencies.from_objects constructs the default
+    # Spec-backed registries from an object store + prefixes.
     from linktools.ai.runtime import RuntimeDependencies
     from linktools.ai.runtime.dependencies import ProviderPrefixes
 
@@ -337,7 +337,7 @@ async def test_runtime_dependencies_from_assets_builds_registries(tmp_path):
             "specs/skills/sql.md": "---\nname: sql\n---\nx\n",
         }
     )
-    bundle = RuntimeDependencies.from_assets(store, prefixes=ProviderPrefixes())
+    bundle = RuntimeDependencies.from_objects(store, prefixes=ProviderPrefixes())
     assert bundle.agents is not None
     assert bundle.skills is not None
     assert bundle.mcp_servers is not None

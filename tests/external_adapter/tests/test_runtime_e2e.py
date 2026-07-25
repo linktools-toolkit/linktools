@@ -116,8 +116,8 @@ from linktools.ai.run.store import RunStore
 from linktools.ai.runtime import Runtime, build_runtime, RuntimeDependencies
 from linktools.ai.session.models import MessageRole
 from linktools.ai.session.store import SessionStore
-from linktools.ai.storage.transaction import NoCrossStoreTransactions
-from linktools.ai.storage.features import FILE_STORAGE_FEATURES
+from linktools.ai.runtime.persistence.transaction import NoCrossStoreTransactions
+from linktools.ai.runtime.persistence.features import FILE_STORAGE_FEATURES
 from linktools.ai.swarm.store import SwarmStore
 from linktools.ai.tool.executor import GovernedToolInvoker
 from linktools.ai.tool.idempotency import IdempotencyStore
@@ -148,8 +148,10 @@ from external_adapter.storage import (
 # The allowlist of public modules the adapter may import. Anything outside
 # this set -- underscore-prefixed modules, the private runtime kernel
 # (``_runtime``), the in-repo reference backends under ``storage.filesystem``
-# / ``storage.sqlalchemy`` / ``storage.coordination`` -- would defeat the
-# point: the adapter exists to prove the PUBLIC Protocols suffice.
+# / ``storage.sqlalchemy`` -- would defeat the point: the adapter exists to
+# prove the PUBLIC Protocols suffice. The storage-kernel Protocol modules
+# (blob / coordination / object Protocols) ARE public: an external adapter
+# implements them.
 #
 # Pattern follows test_external_adapter_conformance.py:48. Extended beyond the
 # starter list with the three ``*.models`` / ``*.scope`` modules the data
@@ -183,32 +185,37 @@ _PUBLIC_ADAPTER_IMPORTS = frozenset(
         "linktools.ai.memory.store",
         "linktools.ai.memory.models",
         "linktools.ai.memory.scope",
-        "linktools.ai.asset.store",
-        "linktools.ai.asset.memory",
+        "linktools.ai.storage.object.store",
+        "linktools.ai.storage.backends.memory.object",
+        "linktools.ai.storage.blob.protocols",
+        "linktools.ai.storage.coordination.protocols",
+        "linktools.ai.storage.coordination.process_local",
         "linktools.ai.artifact.store",
-        "linktools.ai.artifact.coordination",
         "linktools.ai.artifact.digest",
         "linktools.ai.artifact.models",
         "linktools.ai.jobs.store",
         "linktools.ai.jobs.models",
         "linktools.ai.jobs.protocols",
-        "linktools.ai.storage.protocols",
-        "linktools.ai.storage.facade",
+        "linktools.ai.runtime.persistence.protocols",
+        "linktools.ai.runtime.persistence.facade",
+        "linktools.ai.runtime.persistence.features",
         "linktools.ai.storage.features",
-        "linktools.ai.storage.transaction",
+        "linktools.ai.runtime.persistence.transaction",
     }
 )
 
 # Anything that starts with one of these prefixes is a private reference
 # backend or internal kernel and MUST NOT be imported by an external
 # adapter. The allowlist check above is the positive set; this is the
-# belt-and-braces negative guarantee called out in the spec.
+# belt-and-braces negative guarantee called out in the spec. The
+# storage-kernel coordination Protocols + process-local reference impl ARE
+# public (an external adapter implements the Protocols or reuses the
+# process-local reference), so ``storage.coordination`` is NOT forbidden.
 _FORBIDDEN_PREFIXES = (
     "linktools.ai.runtime.builder",
     "linktools.ai.storage.filesystem",
     "linktools.ai.storage.sqlite",
     "linktools.ai.storage.sqlalchemy",
-    "linktools.ai.storage.coordination",
 )
 
 # Marker substrings that must not appear in comments / docstrings: this

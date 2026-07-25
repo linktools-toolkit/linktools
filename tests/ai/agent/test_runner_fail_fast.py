@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentEngine missing-dependency fail-fast.
+"""AgentEngine missing-dependency fail-fast (via the Store-free execute_pure).
 
 A spec that needs tools must fail eagerly when the resolver or the managed
 executor is missing -- before any capability resolution work. ``tools=()`` is
-a model-only run and never raises."""
+a model-only run and never raises.
+
+FS-29: the engine's legacy ``run()`` (full Run-lifecycle) is gone; these
+checks now drive ``execute_pure`` directly. The fail-fast ``RuntimeInitializationError``
+is raised inside ``execute_pure`` BEFORE any model work, so the assertion is
+unchanged -- and because execute_pure touches no Store, the test no longer
+wires one up."""
 
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -15,19 +20,17 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.compiler import AgentCompiler
 from linktools.ai.agent.engine import AgentEngine
+from linktools.ai.agent.models import AgentCompleted, AgentInput
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
 from linktools.ai.capability.resolver import CapabilityResolver
 from linktools.ai.errors import RuntimeInitializationError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.resolver import ModelResolver
+from linktools.ai.run.cancellation import CancellationToken
 from linktools.ai.run.context import RunContext
-from linktools.ai.run.models import RunInput, RunnableType
-from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.storage.filesystem.checkpoint import FilesystemCheckpointStore
-from linktools.ai.storage.filesystem.event import FilesystemEventStore
-from linktools.ai.storage.filesystem.run import FilesystemRunStore
-from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+from linktools.ai.run.live_events import NullRunLiveEventSink, NullSecurityEventSink
+from linktools.ai.run.models import RunnableType
 from linktools.ai.governance.policy.engine import PolicyEngine
 from linktools.ai.tool.executor import GovernedToolInvoker
 
@@ -56,18 +59,16 @@ def _context() -> RunContext:
     )
 
 
-def _seed(store, session_id) -> None:
-    now = datetime.now(timezone.utc)
-    asyncio.run(
-        store.create(
-            SessionRecord(
-                id=session_id,
-                parent_id=None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
+def _execute_pure(engine: AgentEngine, compiled, prompt: str = "hi"):
+    """Drive execute_pure with the Store-free sinks execute_pure requires."""
+    return asyncio.run(
+        engine.execute_pure(
+            compiled,
+            AgentInput(prompt=prompt),
+            _context(),
+            cancellation=CancellationToken(),
+            live_events=NullRunLiveEventSink(),
+            security_events=NullSecurityEventSink(),
         )
     )
 
@@ -87,29 +88,14 @@ def _compiled_spec_with_tools():
     return asyncio.run(compiler.compile(spec))
 
 
-def _make_runner(
-    tmp_path, *, capability_resolver, managed_tool_executor
-) -> AgentEngine:
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
-    from linktools.ai.storage.filesystem.commit import FilesystemRunCommitCoordinator
-
-    run_store = FilesystemRunStore(root=tmp_path / "runs")
-    session_store = FilesystemSessionStore(root=tmp_path / "sessions")
-    event_store = FilesystemEventStore(root=tmp_path / "events")
-    checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
+def _make_runner(*, capability_resolver, managed_tool_executor) -> AgentEngine:
+    # FS-29: the engine accepts only the pure-execution dependencies it
+    # actually uses -- no run/session/event/checkpoint Store, no
+    # commit_coordinator. The fail-fast wiring under test lives entirely in
+    # execute_pure's capability-resolution prelude.
     return AgentEngine(
-        run_store=run_store,
-        session_store=session_store,
-        event_store=event_store,
         capability_resolver=capability_resolver,
         managed_tool_executor=managed_tool_executor,
-        commit_coordinator=FilesystemRunCommitCoordinator(
-            approval_store=FilesystemApprovalStore(root=tmp_path / "approvals"),
-            checkpoint_store=checkpoint_store,
-            run_store=run_store,
-            session_store=session_store,
-            event_store=event_store,
-        ),
     )
 
 
@@ -125,25 +111,21 @@ def test_eager_fail_fast_when_tools_declared(tmp_path, resolver, executor, match
     """Declaring tools with a missing resolver or executor must fail eagerly
     (before any capability resolution work)."""
     runner = _make_runner(
-        tmp_path,
         capability_resolver=resolver,
         managed_tool_executor=executor,
     )
-    _seed(runner._session_store, "session-1")
     compiled = _compiled_spec_with_tools()
 
     with pytest.raises(RuntimeInitializationError, match=match):
-        asyncio.run(runner.run(compiled, RunInput(prompt="hi"), _context()))
+        _execute_pure(runner, compiled)
 
 
 def test_empty_tools_never_raises_even_without_assembler_or_executor(tmp_path):
     """tools=() is a model-only run and does not require tool wiring."""
     runner = _make_runner(
-        tmp_path,
         capability_resolver=None,
         managed_tool_executor=None,
     )
-    _seed(runner._session_store, "session-1")
     compiler = AgentCompiler(
         tool_executor=GovernedToolInvoker(policy=PolicyEngine(rules=())),
         model_resolver=ModelResolver(registry=_registry()),
@@ -156,5 +138,5 @@ def test_empty_tools_never_raises_even_without_assembler_or_executor(tmp_path):
         tools=(),
     )
     compiled = asyncio.run(compiler.compile(spec))
-    result = asyncio.run(runner.run(compiled, RunInput(prompt="hi"), _context()))
-    assert result is not None
+    outcome = _execute_pure(runner, compiled)
+    assert isinstance(outcome, AgentCompleted)

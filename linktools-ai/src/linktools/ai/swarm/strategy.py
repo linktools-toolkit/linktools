@@ -9,19 +9,21 @@ or ``task_factory`` (ParallelFanOut). Tests inject deterministic functions and
 use FunctionModel workers -- no real model calls.
 
 Workers run against per-task SCRATCH sessions (spec invariant: only the final
-aggregate is written to the shared/parent session). ``_run_task`` builds a CHILD
-RunContext whose session_id is ``f"swarm:{swarm_run.id}:{task.id}:{child_run_id}"``
-and creates that SessionRecord before invoking AgentEngine.run. The
-``child_run_id`` suffix keeps each retry attempt's scratch session distinct
-(see the retry identity note below) so a failed attempt's partial conversation
+aggregate is written to the shared/parent session). The dispatcher allocates
+each child run's id + scratch session via ``open_child`` (pure -- no store
+writes) and ``dispatch`` creates the SessionRecord + child RunContext + snapshot
+and drives the full lifecycle. The strategy passes a ``session_id_format`` of
+``"swarm:{swarm_run_id}:{task_id}:{child_run_id}"`` so the scratch session keeps
+its debuggable per-task naming; the ``child_run_id`` suffix keeps each retry
+attempt's scratch session distinct so a failed attempt's partial conversation
 can never leak into the next attempt's prompt.
 
-The child RunRecord's id is NOT the task's id. ``_run_task``
-mints a fresh ``str(uuid.uuid4())`` run_id per execution and stores it on the
-task via ``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the
-handle SwarmEngine.cancel uses to find the in-flight child Run. On retry the
-same task gets a NEW run_id (active_run_id is overwritten), which is the
-decoupling mandated for correctness.
+The child RunRecord's id is NOT the task's id. ``open_child`` mints a fresh
+child run id per execution and ``_run_task`` stores it on the task via
+``SwarmStore.set_active_run`` -- so ``task.active_run_id`` is the handle
+SwarmEngine.cancel uses to find the in-flight child Run. On retry the same task
+gets a NEW run_id (active_run_id is overwritten), which is the decoupling
+mandated for correctness.
 
 claim_task is a WORK-QUEUE api: ``claim_task(swarm_run_id, agent_id)`` returns
 the oldest PENDING task for that (run, agent) pair -- it does NOT take a task_id.
@@ -56,14 +58,16 @@ from typing import (
     runtime_checkable,
 )
 
-from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
 from ..errors import SwarmConflictError, SwarmError, SwarmLimitExceededError
 from ..run.context import RunContext
-from ..run.dispatch import RunDispatcher, RunDispatchRequest
-from ..run.models import RunErrorInfo, RunInput, RunResult, RunnableType
+from ..run.dispatch import (
+    ChildSessionPolicy,
+    RunDispatcher,
+    RunDispatchRequest,
+)
+from ..run.models import RunErrorInfo, RunInput, RunResult
 from ..governance.security.redact import redact_exception
-from ..session.models import SessionRecord, SessionStatus
 from .aggregation import aggregate
 from .limits import SwarmLimits
 from .models import (
@@ -77,9 +81,6 @@ from .models import (
 )
 from .spec import SwarmSpec, SwarmStrategySpec
 from .store import SwarmStore
-
-if TYPE_CHECKING:
-    from ..run.definition import RunDefinitionStore
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,8 +104,12 @@ TaskFactory = Callable[[RunInput], "Tuple[TaskInput, ...]"]
 class SwarmExecutionContext:
     """The bundle a strategy consumes: the spec, the driving swarm run, the
     request that initiated it, the parent RunContext (shared session lives
-    here), the dispatcher/compiler, the pre-compiled worker agents keyed by
-    AgentRef.agent_id, and the four stores.
+    here), the dispatcher, and the pre-compiled worker agents keyed by
+    AgentRef.agent_id. The strategy drives ONLY swarm-domain state
+    (SwarmRun/SwarmStep via ``swarm_store``); it holds no RunStore /
+    SessionStore / EventStore / RunDefinitionStore -- the dispatcher owns the
+    child run's session + RunRecord + snapshot + lifecycle, so the strategy
+    has no business with those stores.
 
     ContextPolicy: ``spec.context_policy`` is accessible to strategies. The
     current ``coordinator_delegation`` strategy reads the parent session for
@@ -118,13 +123,8 @@ class SwarmExecutionContext:
     request: RunInput
     parent_context: RunContext
     dispatcher: RunDispatcher
-    compiler: AgentCompiler
     agents: "Mapping[str, CompiledAgent]"
     swarm_store: SwarmStore
-    run_store: Any  # RunStore Protocol (typed loosely to avoid a cycle with run.store)
-    session_store: Any  # SessionStore Protocol
-    event_store: Any  # EventStore Protocol
-    run_definitions: "RunDefinitionStore"
 
 
 # --- SwarmStrategy Protocol + registry --------------------------------------
@@ -292,16 +292,17 @@ async def _run_task(
          api -- in the serial path this is ``task``; in the parallel path it may
          be a sibling task created by the same fan-out. We process whatever the
          store hands us so the PENDING->CLAIMED flip is consistent.
-      3. mint a FRESH child run_id (task.id != run_id) and
-         record it on the task via ``set_active_run`` so cancel() can find the
-         child RunRecord later. On retry this same method is re-invoked, so a
-         new run_id is minted and active_run_id is overwritten.
-      4. build a per-task SCRATCH session and create it (workers must not touch
-         the shared/parent session).
-      5. build a CHILD RunContext parented to the swarm's driving run.
-      6. retry loop: on exception retry up to ``max_task_retries`` extra times;
-         on final failure mark the task FAILED and return None (catch-and-
-         continue so a coordinator round completes even if a worker errors).
+      3. allocate a FRESH child run id + scratch session via the dispatcher's
+         ``open_child`` (task.id != run_id; pure -- no store writes), then
+         record the id on the task via ``set_active_run`` so cancel() can find
+         the child RunRecord later. On retry this same method is re-invoked,
+         so a new id is allocated and active_run_id is overwritten.
+      4. retry loop: ``dispatch`` creates the child session + RunContext +
+         snapshot and drives start/fence/execute/commit (the strategy creates
+         none of those). On exception retry up to ``max_task_retries`` extra
+         times; on final failure mark the task FAILED and return None
+         (catch-and-continue so a coordinator round completes even if a worker
+         errors).
 
     Returns the worker's RunResult on success, or None if there was nothing to
     claim or every attempt failed.
@@ -338,19 +339,28 @@ async def _run_task(
     # too-low count.
     base_attempt = len(await ctx.swarm_store.list_attempts(claimed.id)) + 1
     for _attempt in range(max_task_retries + 1):
-        # Each attempt mints a FRESH child RunRecord id + scratch
-        # session, not just the first one. Reusing one child_run_id across
-        # attempts made AgentEngine.execute()'s run_store.create() collide on
-        # the same primary key from attempt #2 onward -- a real
-        # UNIQUE-constraint failure under SqlAlchemy storage that silently
-        # turned every retry into a failure (masked under FileStore, which
-        # overwrites on create() instead of rejecting the duplicate id).
-        # Reusing one scratch session would also leak a failed attempt's
-        # partial conversation into the retry's prompt, since AgentEngine
-        # always prepends list_messages(session_id) for a fresh, non-resume
-        # run. set_active_run records the fresh id on the task (bumping its
+        # Each attempt allocates a FRESH child run id + scratch session via the
+        # dispatcher (the sole id authority), not just the first one. open_child
+        # is pure -- no store writes -- so the session + RunRecord are only
+        # created if dispatch runs; a crash between open_child and dispatch
+        # leaves no orphan, and recovery already tolerates "active_run_id set
+        # but Run missing". The dispatcher derives the scratch session id from
+        # this attempt's child_run_id, so each attempt gets its own (reusing one
+        # would leak a failed attempt's partial conversation into the retry's
+        # prompt). set_active_run records the fresh id on the task (bumping its
         # version) so SwarmEngine.cancel can locate the in-flight child Run.
-        child_run_id = str(uuid.uuid4())
+        handle = await ctx.dispatcher.open_child(
+            ctx.parent_context,
+            ChildSessionPolicy(
+                kind="scratch",
+                session_id_format="swarm:{swarm_run_id}:{task_id}:{child_run_id}",
+            ),
+            # Only the fields the session_id_format substitutes; the runnable
+            # identity for the child RunRecord travels on the dispatch request
+            # (see RunDispatchRequest.metadata below).
+            {"swarm_run_id": ctx.swarm_run.id, "task_id": claimed.id},
+        )
+        child_run_id = handle.run_id
         # Unlike complete_task/fail_task below, a set_active_run conflict is
         # NOT retried with the fresh version -- it is discarded outright.
         # complete_task/fail_task can safely retry-once because
@@ -383,34 +393,6 @@ async def _run_task(
             )
             return None
 
-        scratch_session_id = f"swarm:{ctx.swarm_run.id}:{claimed.id}:{child_run_id}"
-        now = _now()
-        await ctx.session_store.create(
-            SessionRecord(
-                id=scratch_session_id,
-                parent_id=None,
-                # A worker scratch session inherits the driving run's principal.
-                user_id=ctx.parent_context.user_id,
-                tenant_id=ctx.parent_context.tenant_id,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-        child_context = RunContext(
-            run_id=child_run_id,
-            root_run_id=ctx.parent_context.root_run_id,
-            parent_run_id=ctx.swarm_run.run_id,
-            session_id=scratch_session_id,
-            runnable_id=claimed.assigned_agent_id,
-            runnable_type=RunnableType.AGENT,
-            user_id=ctx.parent_context.user_id,
-            tenant_id=ctx.parent_context.tenant_id,
-            workspace=None,
-        )
-
         # Record the RUNNING attempt BEFORE invoking the worker so the audit
         # trail captures the start even if the worker never returns (crash
         # mid-run). record_attempt is an upsert on attempt.id, so the trailing
@@ -436,19 +418,20 @@ async def _run_task(
         # caught here and mistaken for a worker failure that warrants a
         # retry or an eventual fail_task() call.
         try:
-            # A worker Run gets the same resumable snapshot as a top-level run:
-            # if a worker tool pauses on approval, Runtime.resume(child_run_id)
-            # can restore its spec + identity.
-            from ..run.preparation import RunPreparationCoordinator as _Prep
-
-            await _Prep(ctx.run_definitions).prepare_agent_run(
-                spec=compiled.spec, context=child_context
-            )
+            # The dispatcher owns the child session create + RunContext build
+            # + snapshot prepare + start/fence/execute/commit lifecycle -- the
+            # strategy creates none of those (it only drives swarm-domain
+            # state: claim/active_run/attempt/complete/fail).
             result = await ctx.dispatcher.dispatch(
                 RunDispatchRequest(
-                    agent=compiled,
+                    compiled_agent=compiled,
                     input=RunInput(prompt=claimed.input.prompt),
-                    context=child_context,
+                    handle=handle,
+                    # assigned_agent_id (the AgentRef key) is the runnable
+                    # identity recorded on the child RunRecord + snapshot -- not
+                    # compiled.spec.id, which is only equal to it when agents are
+                    # keyed by their spec id.
+                    metadata={"runnable_id": claimed.assigned_agent_id},
                 )
             )
         except asyncio.CancelledError:

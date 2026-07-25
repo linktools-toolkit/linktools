@@ -15,7 +15,7 @@ from ...run.models import RunnableType
 from ...session.models import SessionRecord, SessionStatus
 
 if TYPE_CHECKING:
-    from ...storage.facade import Storage
+    from ..persistence.facade import Storage
 
 
 async def resolve_session(

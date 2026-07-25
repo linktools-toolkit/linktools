@@ -135,7 +135,6 @@ class ManagedToolsetWrapper(WrapperToolset):
         policy_provider: "ToolPolicyProvider | None" = None,
         baseline_policy: "ResolvedToolPolicy | None" = None,
         run_context: "_RunContext | None" = None,
-        event_store: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
         security_event_emitter: Any = None,
     ) -> None:
@@ -148,7 +147,6 @@ class ManagedToolsetWrapper(WrapperToolset):
         self._policy_provider = policy_provider
         self._baseline = baseline_policy
         self._run_context = run_context
-        self._event_store = event_store
         self._security_audit_failure_mode = security_audit_failure_mode
         self._security_event_emitter = security_event_emitter
 
@@ -173,7 +171,6 @@ class ManagedToolsetWrapper(WrapperToolset):
             security_pipeline=self._pipeline,
             baseline_policy=self._baseline,
             run_context=self._run_context,
-            event_store=self._event_store,
             security_audit_failure_mode=self._security_audit_failure_mode,
             security_event_emitter=self._security_event_emitter,
         )

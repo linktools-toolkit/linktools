@@ -32,7 +32,7 @@ from linktools.ai.mcp.catalog import MCPCatalog
 from linktools.ai.skill.catalog import SkillCatalog
 from linktools.ai.runtime import Runtime, build_runtime
 from linktools.ai.skill.private import ActiveSkillContext, get_active_skill
-from linktools.ai.storage.facade import FilesystemStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.ai.subagent.config import SkillPrivateSubagentConfig
 from linktools.ai.subagent.skill_resolver import (
     SkillSubagentProvider,
@@ -199,7 +199,7 @@ def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundl
     # RunCommitCoordinator construction (Filesystem -> journaled sequential
     # commit under {state_root}/transactions). The build kernel accepts the
     # coordinator as an injected dependency and never branches on Storage type.
-    from linktools.ai.storage.filesystem.commit import (
+    from linktools.ai.run.persistence.commit import (
         FilesystemRunCommitCoordinator,
     )
 

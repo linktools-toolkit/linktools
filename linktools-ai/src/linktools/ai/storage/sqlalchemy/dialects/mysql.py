@@ -5,7 +5,10 @@ error 1062) by parsing the named constraint out of the message. Every other
 driver error is OTHER -- INSERT IGNORE is never used because it would swallow
 non-unique-constraint failures."""
 
-from ..models import ASSET_IDEMPOTENCY_CONSTRAINT, ASSET_PATH_CONSTRAINT
+from ...backends.sqlalchemy.models import (
+    STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT,
+    STORAGE_OBJECT_KEY_CONSTRAINT,
+)
 from .base import IntegrityViolationKind
 
 # MySQL ER_DUP_ENTRY: a unique/primary key collision.
@@ -27,9 +30,9 @@ class MySqlDialectStrategy:
         if _driver_error_code(orig) != _MYSQL_DUPLICATE_KEY_CODE:
             return IntegrityViolationKind.OTHER
         message = str(orig or error)
-        if ASSET_PATH_CONSTRAINT in message:
-            return IntegrityViolationKind.ASSET_KEY
-        if ASSET_IDEMPOTENCY_CONSTRAINT in message:
+        if STORAGE_OBJECT_KEY_CONSTRAINT in message:
+            return IntegrityViolationKind.OBJECT_KEY
+        if STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT in message:
             return IntegrityViolationKind.IDEMPOTENCY_KEY
         return IntegrityViolationKind.OTHER
 

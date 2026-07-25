@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLAlchemy table models for Asset and reliable-task storage. deleted_at/whiteout_version on
-AssetRow encode the whiteout tombstone in the same row/table as live assets,
-rather than a separate whiteouts table, so the unique path constraint naturally
-covers both live and deleted state."""
+"""SQLAlchemy table models for reliable-task storage and the other legacy
+domain stores. Assets live on their own DeclarativeBase now
+(storage/backends/sqlalchemy/models.py); this module no longer defines any
+asset-related table."""
 
 from datetime import datetime
 
@@ -24,69 +24,11 @@ class Base(DeclarativeBase):
     pass
 
 
-# Stable, named unique-constraint identifiers so per-dialect integrity-error
-# classifiers (storage/sqlalchemy/dialects/) can map a violation back to the
-# asset path key vs. the idempotency key without parsing free-form messages.
-ASSET_PATH_CONSTRAINT = "uq_ai_assets_tenant_path"
-ASSET_IDEMPOTENCY_CONSTRAINT = "uq_ai_asset_idempotency_tenant_key"
-
-
-class AssetRow(Base):
-    """``path_hash`` (sha256 of the normalized path, see
-    :func:`storage.sqlalchemy.asset.asset_path_hash`) -- not ``path`` itself --
-    carries the uniqueness constraint: MySQL's index key-length limit is
-    exceeded by a ``VARCHAR(1024)`` column under a multi-byte charset, so the
-    full path cannot be the unique-index key on that dialect. The plain
-    (non-unique) ``path`` index below is capped to a MySQL-safe prefix length
-    via ``mysql_length`` for prefix/LIKE listing queries; SQLite/PostgreSQL
-    ignore that hint and index the whole column."""
-
-    __tablename__ = "ai_assets"
-    __table_args__ = (
-        UniqueConstraint("path_hash", name=ASSET_PATH_CONSTRAINT),
-        Index("ix_ai_assets_path_prefix", "path", mysql_length={"path": 191}),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    path: Mapped[str] = mapped_column(String(1024))
-    path_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
-    kind: Mapped[str] = mapped_column(String(32))
-    etag: Mapped[str] = mapped_column(String(64))
-    version: Mapped[int]
-    content_type: Mapped["str | None"] = mapped_column(String(255), nullable=True)
-    size: Mapped[int]
-    content: Mapped[bytes] = mapped_column(LargeBinary)
-    modified_at: Mapped[datetime]
-    metadata_json: Mapped[str] = mapped_column(Text)
-    deleted_at: Mapped["datetime | None"] = mapped_column(nullable=True)
-    whiteout_version: Mapped["int | None"] = mapped_column(nullable=True)
-
-
-class AssetIdempotencyRow(Base):
-    """``key_hash`` carries the uniqueness constraint for the same reason as
-    ``AssetRow.path_hash`` -- a long idempotency key under a multi-byte
-    charset can exceed MySQL's index key-length limit."""
-
-    __tablename__ = "ai_asset_idempotency"
-    __table_args__ = (
-        UniqueConstraint("key_hash", name=ASSET_IDEMPOTENCY_CONSTRAINT),
-        Index("ix_ai_asset_idempotency_key_prefix", "key", mysql_length={"key": 191}),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    key_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
-    key: Mapped[str] = mapped_column(String(1024))
-    request_hash: Mapped[str] = mapped_column(String(64))
-    result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
-
-
 class ToolIdempotencyRow(Base):
     """Persistent tool-call idempotency records. The unique
     constraint on (scope, key) is the natural primary key for the
     IdempotencyStore Protocol -- it backs ``reserve``'s "find-or-create"
-    semantics (IntegrityError on the race -> SELECT the winner -> hash-check).
-    Named ``ToolIdempotencyRow`` (not ``AssetIdempotencyRow``) because that class
-    name is already taken by asset-side idempotency above."""
+    semantics (IntegrityError on the race -> SELECT the winner -> hash-check)."""
 
     __tablename__ = "ai_idempotency"
     __table_args__ = (
@@ -111,13 +53,6 @@ class ToolIdempotencyRow(Base):
     receipt_artifact_id: Mapped["str | None"] = mapped_column(String(256), nullable=True)
     binding_fingerprint: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     result_processor_revision: Mapped["str | None"] = mapped_column(String(128), nullable=True)
-
-
-class AssetRevisionRow(Base):
-    __tablename__ = "ai_asset_revision"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    value: Mapped[int]
 
 
 class RunRow(Base):

@@ -10,15 +10,17 @@ from linktools.ai.errors import StorageCapabilityError
 from linktools.ai.run.models import RunInput, RunnableType, RunRecord, RunStatus
 from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.features import (
-    FILE_STORAGE_FEATURES,
-    SQLALCHEMY_STORAGE_FEATURES,
     TransactionScope,
 )
-from linktools.ai.storage import SqlAlchemyStorage
-from linktools.ai.storage.facade import FilesystemStorage, Storage
-from linktools.ai.asset.models import WriteOptions
-from linktools.ai.asset.path import AssetPath
+from linktools.ai.runtime.persistence.features import (
+    FILE_STORAGE_FEATURES,
+    SQLALCHEMY_STORAGE_FEATURES,
+)
+from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.runtime.persistence.facade import FilesystemStorage, Storage
+from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
+from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
 
 
 def _session_record(session_id="session-1") -> SessionRecord:
@@ -93,7 +95,7 @@ def test_file_storage_runs_end_to_end(tmp_path):
         await storage.runs.create(_run_record())
         fetched = await storage.sessions.get("session-1")
         run = await storage.runs.get("run-1")
-        path = AssetPath("/artifacts/tenant-1/run-1/draft.txt")
+        path = StorageKey("/artifacts/tenant-1/run-1/draft.txt")
         await storage.assets.put(
             path, b"hello", options=WriteOptions(content_type="text/plain", metadata={})
         )
@@ -143,6 +145,7 @@ def _sqlalchemy_storage(tmp_path):
     async def _create():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(ObjectBase.metadata.create_all)
         await engine.dispose()
 
     asyncio.run(_create())
@@ -211,7 +214,7 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
             return {
                 "session": tx.session,
                 "assets": tx.assets,
-                "assets_session": tx.assets._primary._session,
+                "assets_session": tx.assets._primary._tx_session,
                 "artifact_records": tx.artifact_records,
                 "artifact_records_session": tx.artifact_records._session,
                 "runs": tx.runs._session,
@@ -225,17 +228,17 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
 
     bound = asyncio.run(_run())
     # assets IS session-bound now; its backend must share the UoW session.
-    from linktools.ai.asset.store import AssetStore
-    from linktools.ai.storage.sqlalchemy.asset import SqlAlchemyAssetBackend
+    from linktools.ai.storage.object.store import ObjectStore
+    from linktools.ai.storage.backends.sqlalchemy.object import SqlAlchemyObjectBackend
 
-    assert isinstance(bound["assets"], AssetStore)
-    assert isinstance(bound["assets"]._primary, SqlAlchemyAssetBackend)
+    assert isinstance(bound["assets"], ObjectStore)
+    assert isinstance(bound["assets"]._primary, SqlAlchemyObjectBackend)
     shared = bound["session"]
     assert bound["assets_session"] is shared, (
         "tx.assets backend must bind to the UoW's shared session"
     )
     # artifact_records IS session-bound now; it must share the UoW session.
-    from linktools.ai.storage.sqlalchemy.artifact_record import (
+    from linktools.ai.artifact.persistence.sqlalchemy import (
         SqlAlchemyArtifactRecordStore,
     )
 
@@ -282,7 +285,7 @@ def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
 
     async def _seed():
         await storage.artifacts._blob.put_if_absent(
-            digest=ArtifactDigest.parse(digest), source=_src(), size=len(payload)
+            digest=ArtifactDigest.parse(digest).value, source=_src(), size=len(payload)
         )
 
     asyncio.run(_seed())
@@ -310,7 +313,7 @@ def test_sqlalchemy_uow_rolls_back_run_and_artifact_record_together(tmp_path):
         assert await storage.runs.get("run-1") is None
         assert await storage.artifacts.stat(artifact_id="art-1", tenant_id="t1") is None
         # The blob survives (written outside the UoW) -> orphan candidate.
-        info = await storage.artifacts._blob.stat(digest=ArtifactDigest.parse(digest))
+        info = await storage.artifacts._blob.stat(digest=ArtifactDigest.parse(digest).value)
         assert info is not None and info.size == len(payload)
 
     asyncio.run(_check())
@@ -472,14 +475,14 @@ def test_sqlalchemy_uow_idempotency_conflict_aborts_the_whole_transaction(tmp_pa
 
 
 def test_file_storage_exposes_file_swarm_store(tmp_path):
-    from linktools.ai.storage.filesystem.swarm import FilesystemSwarmStore
+    from linktools.ai.swarm.persistence.filesystem import FilesystemSwarmStore
 
     storage = FilesystemStorage(root=tmp_path)
     assert isinstance(storage.swarms, FilesystemSwarmStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_swarm_store(tmp_path):
-    from linktools.ai.storage.sqlalchemy.swarm import SqlAlchemySwarmStore
+    from linktools.ai.swarm.persistence.sqlalchemy import SqlAlchemySwarmStore
 
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.swarms, SqlAlchemySwarmStore)
@@ -516,14 +519,14 @@ def test_file_storage_swarms_round_trips_a_swarm_run(tmp_path):
 
 
 def test_file_storage_exposes_file_memory_store(tmp_path):
-    from linktools.ai.storage.filesystem.memory import FilesystemMemoryStore
+    from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
 
     storage = FilesystemStorage(root=tmp_path)
     assert isinstance(storage.memories, FilesystemMemoryStore)
 
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_memory_store(tmp_path):
-    from linktools.ai.storage.sqlalchemy.memory import SqlAlchemyMemoryStore
+    from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
 
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.memories, SqlAlchemyMemoryStore)
@@ -560,7 +563,7 @@ def test_file_storage_memories_round_trips_a_record(tmp_path):
 
 def test_file_storage_exposes_file_approval_store(tmp_path):
     from linktools.ai.agent.approval import ApprovalStore
-    from linktools.ai.storage.filesystem.approval import FilesystemApprovalStore
+    from linktools.ai.agent.persistence.filesystem import FilesystemApprovalStore
 
     storage = FilesystemStorage(root=tmp_path)
     assert isinstance(storage.approvals, FilesystemApprovalStore)
@@ -569,7 +572,7 @@ def test_file_storage_exposes_file_approval_store(tmp_path):
 
 def test_sqlalchemy_storage_exposes_sqlalchemy_approval_store(tmp_path):
     from linktools.ai.agent.approval import ApprovalStore
-    from linktools.ai.storage.sqlalchemy.approval import SqlAlchemyApprovalStore
+    from linktools.ai.agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
 
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage.approvals, SqlAlchemyApprovalStore)

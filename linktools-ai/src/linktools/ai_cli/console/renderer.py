@@ -43,7 +43,7 @@ def print_event(
 
 def announce_failed(event: "Mapping[str, Any]", logger: "logging.Logger") -> None:
     """Render a ``failed`` stream event -- the Outcome-model replacement for a
-    raised exception (spec section 12.3): the run ended FAILED without ever
+    raised exception: the run ended FAILED without ever
     raising out of ``run_stream()``, so the console reports it explicitly
     instead of relying on an uncaught exception reaching a top-level handler."""
     logger.error(f"run failed: {event.get('error_type')}: {event.get('message')}")

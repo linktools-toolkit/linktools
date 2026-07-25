@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset snapshot utility tests: pinning a live asset into an immutable
+"""Asset snapshot utility tests: pinning a live object into an immutable
 Artifact so retries/replay read the exact pinned bytes."""
 
 import asyncio
@@ -9,24 +9,21 @@ import hashlib
 import pytest
 
 from linktools.ai.artifact import ArtifactStore
-from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
-from linktools.ai.asset.memory import MemoryAssetBackend
-from linktools.ai.asset.models import WriteOptions
-from linktools.ai.asset.path import AssetPath
-from linktools.ai.asset.store import AssetStore
+from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
+from linktools.ai.storage.backends.memory.object import MemoryObjectBackend
+from linktools.ai.storage.object.models import StorageKey, WriteOptions
+from linktools.ai.storage.object.store import ObjectStore
 from linktools.ai.jobs.snapshot import AssetSnapshotError, snapshot_asset
-from linktools.ai.storage.filesystem.artifact import (
-    FilesystemArtifactBlobStore,
-    FilesystemArtifactRecordStore,
-)
+from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
 
 
-def _stores(tmp_path) -> "tuple[AssetStore, ArtifactStore]":
-    assets = AssetStore(primary=MemoryAssetBackend())
+def _stores(tmp_path) -> "tuple[ObjectStore, ArtifactStore]":
+    assets = ObjectStore(primary=MemoryObjectBackend())
     artifacts = ArtifactStore(
         FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs"),
         FilesystemArtifactRecordStore(records_root=tmp_path / "records"),
-        InProcessArtifactDigestCoordinator(),
+        InProcessKeyedCoordinator(),
     )
     return assets, artifacts
 
@@ -36,7 +33,7 @@ def test_snapshot_asset_pins_content_and_metadata(tmp_path) -> None:
 
     async def run() -> None:
         await assets.put(
-            AssetPath("/data/file.txt"),
+            StorageKey("/data/file.txt"),
             b"snapshot-me",
             options=WriteOptions(content_type="text/plain"),
         )

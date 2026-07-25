@@ -76,7 +76,7 @@ def test_corrupt_session_record_raises_not_treated_as_missing(tmp_path) -> None:
         SessionStatus,
     )
     from datetime import datetime, timezone
-    from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+    from linktools.ai.session.persistence.filesystem import FilesystemSessionStore
 
     store = FilesystemSessionStore(root=tmp_path)
 
@@ -112,7 +112,7 @@ def test_corrupt_session_message_raises(tmp_path) -> None:
         SessionStatus,
     )
     from datetime import datetime, timezone
-    from linktools.ai.storage.filesystem.session import FilesystemSessionStore
+    from linktools.ai.session.persistence.filesystem import FilesystemSessionStore
 
     store = FilesystemSessionStore(root=tmp_path)
 

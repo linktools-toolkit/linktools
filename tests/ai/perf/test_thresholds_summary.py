@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 """op 7: benchmark summary. Runs every threshold in a single
 process, captures each row's measured value + pass/fail state, and writes a
 JSON + Markdown summary to ``PERF_RESULTS_DIR`` (default ``.docs/review-fix``)
@@ -24,6 +23,7 @@ evidence). This summary's OWN inline re-measurement of it is still
 opt-in via ``RUN_PERF_RSS=1`` (set ``skipped: true`` otherwise) purely to
 avoid duplicating the ~8s I/O cost in a report generator that is not itself
 an acceptance gate; the load-bearing assertion lives in the dedicated test."""
+from linktools.ai.artifact import ANONYMOUS_PROVENANCE
 
 import asyncio
 import json
@@ -171,8 +171,8 @@ def _measure_coordination_p95() -> "dict[str, Any]":
 
 def _measure_runtime_build_p95(tmp_path: Path) -> "dict[str, Any]":
     from linktools.ai.runtime import Runtime, build_runtime
-    from linktools.ai.storage.facade import FilesystemStorage
-    from linktools.ai.storage.filesystem.commit import (
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.persistence.commit import (
         FilesystemRunCommitCoordinator,
     )
 
@@ -195,7 +195,7 @@ def _measure_runtime_build_p95(tmp_path: Path) -> "dict[str, Any]":
 
 
 def _measure_event_append_p95(tmp_path: Path) -> "dict[str, Any]":
-    from linktools.ai.storage.filesystem.event import FilesystemEventStore
+    from linktools.ai.events.persistence.filesystem import FilesystemEventStore
 
     async def _run() -> "dict[str, Any]":
         store = FilesystemEventStore(root=tmp_path)
@@ -214,7 +214,7 @@ def _measure_event_append_p95(tmp_path: Path) -> "dict[str, Any]":
 
 
 def _measure_artifact_integrity_10k() -> "dict[str, Any]":
-    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
     from linktools.ai.artifact.store import ArtifactStore
 
     from external_adapter import (
@@ -226,7 +226,7 @@ def _measure_artifact_integrity_10k() -> "dict[str, Any]":
         store = ArtifactStore(
             InMemoryArtifactBlobStore(),
             InMemoryArtifactRecordStore(),
-            InProcessArtifactDigestCoordinator(),
+            InProcessKeyedCoordinator(),
         )
         mismatches = 0
         for i in range(10000):
@@ -294,7 +294,7 @@ def _measure_job_recovery_threshold(tmp_path: Path) -> "dict[str, Any]":
         TaskRecord,
         TaskStatus,
     )
-    from linktools.ai.storage.filesystem.job import FilesystemJobStore
+    from linktools.ai.jobs.persistence.filesystem import FilesystemJobStore
 
     class _Clock:
         def __init__(self) -> None:
@@ -396,18 +396,16 @@ def _measure_streaming_rss_if_enabled(tmp_path: Path) -> "dict[str, Any]":
         _CHUNK_KIB,
         _read_vm_rss_kib,
     )
-    from linktools.ai.artifact.coordination import InProcessArtifactDigestCoordinator
+    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
     from linktools.ai.artifact.store import ArtifactStore
-    from linktools.ai.storage.filesystem.artifact import (
-        FilesystemArtifactBlobStore,
-        FilesystemArtifactRecordStore,
-    )
+    from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
+    from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
     import gc
     import hashlib
 
     blob = FilesystemArtifactBlobStore(blobs_root=tmp_path / "blobs")
     records = FilesystemArtifactRecordStore(records_root=tmp_path / "records")
-    store = ArtifactStore(blob, records, InProcessArtifactDigestCoordinator())
+    store = ArtifactStore(blob, records, InProcessKeyedCoordinator())
     pre_baseline = _read_vm_rss_kib()
     if pre_baseline is None:
         return {"skipped": True, "reason": "/proc unavailable", "passed": None}

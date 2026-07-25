@@ -19,7 +19,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.storage.filesystem.idempotency import FilesystemIdempotencyStore
+from linktools.ai.tool.persistence.filesystem import FilesystemIdempotencyStore
 from linktools.ai.tool.idempotency import ClaimDisposition, IdempotencyStatus
 
 
@@ -36,7 +36,7 @@ def store_factory(request, tmp_path):
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     from linktools.ai.storage.sqlalchemy.models import Base
-    from linktools.ai.storage.sqlalchemy.idempotency import SqlAlchemyIdempotencyStore
+    from linktools.ai.tool.persistence.sqlalchemy import SqlAlchemyIdempotencyStore
 
     counter = {"n": 0}
     engines = []
