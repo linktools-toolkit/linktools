@@ -1,0 +1,124 @@
+# Common tools
+
+schema: 1
+
+tools:
+
+  ##########################################################################################
+  # smali: https://github.com/JesusFreke/smali
+  ##########################################################################################
+  baksmali:
+    version: "2.5.2"
+    install:
+      url: "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-{version}.jar"
+      entrypoint: "baksmali-{version}.jar"
+    run: {runner: java, args: [-jar, "{artifact_path}"]}
+  smali:
+    version: "2.5.2"
+    install:
+      url: "https://bitbucket.org/JesusFreke/smali/downloads/smali-{version}.jar"
+      entrypoint: "smali-{version}.jar"
+    run: {runner: java, args: [-jar, "{artifact_path}"]}
+
+  ##########################################################################################
+  # apktool: https://github.com/iBotPeaches/Apktool
+  ##########################################################################################
+  apktool:
+    version: "2.12.0"
+    install:
+      url: "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_{version}.jar"
+      entrypoint: "apktool_{version}.jar"
+    run: {runner: java, args: [-jar, "{artifact_path}"]}
+
+  ##########################################################################################
+  # dex2jar: https://github.com/pxb1988/dex2jar
+  ##########################################################################################
+  dex2jar:
+    version: "2.4"
+    install:
+      url: "https://github.com/pxb1988/dex2jar/releases/download/v{version}/dex-tools-v{version}.zip"
+      extract_dir: "dex2jar-{version}"
+      entrypoint: "dex-tools-v{version}/d2j-dex2jar.sh"
+    variants:
+      - match: {platform: windows, architecture: amd64}
+        install:
+          entrypoint: "dex-tools-v{version}/d2j-dex2jar.bat"
+  jar2dex:
+    version: "2.4"
+    install:
+      url: "https://github.com/pxb1988/dex2jar/releases/download/v{version}/dex-tools-v{version}.zip"
+      extract_dir: "dex2jar-{version}"
+      entrypoint: "dex-tools-v{version}/d2j-jar2dex.sh"
+    variants:
+      - match: {platform: windows, architecture: amd64}
+        install:
+          entrypoint: "dex-tools-v{version}/d2j-jar2dex.bat"
+
+  ##########################################################################################
+  # jadx: https://github.com/skylot/jadx
+  ##########################################################################################
+  jadx:
+    version: "1.5.3"
+    install:
+      url: "https://github.com/skylot/jadx/releases/download/v{version}/jadx-{version}.zip"
+      extract_dir: "jadx-{version}"
+      entrypoint: "bin/jadx"
+    dependencies: [java]
+    variables: {java_opts: "-Xmx8g"}
+    run:
+      environment: {JAVA_OPTS: "{variables[java_opts]}"}
+    variants:
+      - match: {platform: windows, architecture: amd64}
+        install: {entrypoint: "bin/jadx.bat"}
+  jadx-gui:
+    version: "1.5.3"
+    install:
+      url: "https://github.com/skylot/jadx/releases/download/v{version}/jadx-{version}.zip"
+      extract_dir: "jadx-{version}"
+      entrypoint: "bin/jadx-gui"
+    variables: {java_opts: "-Xmx8g"}
+    dependencies: [java]
+    run:
+      environment: {JAVA_OPTS: "{variables[java_opts]}"}
+    variants:
+      - match: {platform: windows, architecture: amd64}
+        install: {entrypoint: "bin/jadx-gui.bat"}
+
+  ##########################################################################################
+  # burpsuite: https://portswigger.net/burp
+  ##########################################################################################
+  burpsuite:
+    version: "2024.10"
+    dependencies: [burpsuite-keygen]
+    install:
+      url: "https://portswigger-cdn.net/burp/releases/download?product=pro&type=Jar&version={version}"
+      entrypoint: "burpsuite_pro_v{version}.jar"
+    run:
+      runner: java
+      args:
+        - -Dfile.encoding=utf-8
+        - --add-opens=java.desktop/javax.swing=ALL-UNNAMED
+        - --add-opens=java.base/java.lang=ALL-UNNAMED
+        - --add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED
+        - --add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED
+        - "-javaagent:{tools[burpsuite-keygen].artifact_path}=loader"
+        - -jar
+        - "{artifact_path}"
+    variants:
+      - match: {platform: windows, architecture: amd64}
+        run:
+          runner: java
+          args:
+            - --add-opens=java.desktop/javax.swing=ALL-UNNAMED
+            - --add-opens=java.base/java.lang=ALL-UNNAMED
+            - --add-opens=java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED
+            - --add-opens=java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED
+            - "-javaagent:{tools[burpsuite-keygen].artifact_path}=loader"
+            - -jar
+            - "{artifact_path}"
+  burpsuite-keygen:
+    version: "20251028"
+    install:
+      url: "https://github.com/linktools-toolkit/archives/releases/download/burp-loader-keygen-{version}/burp-loader-keygen-{version}.jar"
+      entrypoint: "burp-loader-keygen-{version}.jar"
+    run: {runner: java, args: [-jar, "{artifact_path}"]}

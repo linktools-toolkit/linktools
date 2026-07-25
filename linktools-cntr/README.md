@@ -19,7 +19,7 @@ Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一�
   - `ct-cntr compose validate` → `ct-cntr compose --check`
 - Compose 中用户自己写的相对路径（`build`/`build.context`/`env_file`/`volumes` 短语法）不再被自动改写为绝对路径；仓库作者需要绝对路径时应在模板中显式使用 `{{ SOURCE_PATH }}`/`{{ APP_DATA_PATH }}` 等变量。
 - `ct-cntr status` 改为基于 `docker compose ... ps --quiet` + `docker inspect` 获取真实状态，不再依赖 `docker compose ps --format json` 的输出。
-- `.linktools.json` 中声明的 `runtime:docker-engine`/`runtime:docker-compose` 版本要求会实际阻断 `up`/`restart`/`compose`/`plan up`/`plan restart`（`down`/`status`/`doctor`/`plan down` 不受影响）。
+- `.linktools.json` 中声明的 `runtime:docker-engine`/`runtime:docker-compose` 版本要求会实际阻断 `up`/`restart`/`compose`（`down`/`status`/`doctor` 不受影响）。
 
 ## 开始使用
 
@@ -177,7 +177,7 @@ ct-cntr status --json
 # 执行计划（只展示会发生什么，不实际执行）
 #######################
 
-ct-cntr plan up
+ct-cntr up --dry-run
 ct-cntr up --dry-run
 
 #######################
@@ -206,7 +206,7 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 
 cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如未来的 `linktools-ai`）cntr 完全忽略。
 
-不再有 Docker/Compose 运行时版本门禁：`up`/`restart`/`compose`/`plan` 不再因为仓库声明的运行时版本要求被阻断；`doctor --runtime`/`ct-cntr up` 等仍然会对实际 docker/compose 运行时做只读校验，但那与 `.linktools.json` 的 `requires` 无关。
+迁移表：`ct-cntr plan up|restart|down` 分别改为 `ct-cntr up|restart|down --dry-run`；旧 JSON 输出分别改为追加 `--json`。`--json` 必须与 `--dry-run` 同时使用。
 
 ```bash
 ct-cntr repo status

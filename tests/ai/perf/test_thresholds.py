@@ -499,20 +499,10 @@ async def test_object_list_1000_filesystem_p95_under_2000ms(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_artifact_integrity_10000_rw_zero_mismatch():
-    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
-    from linktools.ai.artifact.store import ArtifactStore
+async def test_artifact_integrity_10000_rw_zero_mismatch(tmp_path):
+    from linktools.ai.storage.facade import FilesystemStorage
 
-    from external_adapter import (
-        InMemoryArtifactBlobStore,
-        InMemoryArtifactRecordStore,
-    )
-
-    store = ArtifactStore(
-        InMemoryArtifactBlobStore(),
-        InMemoryArtifactRecordStore(),
-        InProcessKeyedCoordinator(),
-    )
+    store = FilesystemStorage(root=tmp_path).artifacts
     for i in range(10000):
         content = f"payload-{i}".encode()
         record = await store.put(content=content, media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)

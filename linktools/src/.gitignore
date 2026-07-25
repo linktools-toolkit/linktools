@@ -1,2 +1,3 @@
 linktools/metadata.py
 linktools/assets/tools.json
+linktools/assets/tools/*.json

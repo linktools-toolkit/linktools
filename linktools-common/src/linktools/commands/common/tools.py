@@ -78,15 +78,21 @@ class Command(BaseCommand):
     def run(self, args: "Namespace") -> "int | None":
 
         tool_name, tool_args = args.tool_name, args.tool_args
-        tool = self.environ.get_tool(tool_name, **(args.configs or {}))
+        if args.configs:
+            raise TypeError("tool configuration overrides must be stored in tools.json")
+        tool = self.environ.get_tool(tool_name)
 
         if args.config:
-            self.logger.info(json.dumps(tool.config, indent=2, ensure_ascii=False))
+            self.logger.info(json.dumps({
+                "name": tool.name, "version": tool.version,
+                "dependencies": tool.dependencies, "variables": tool.variables,
+                "argv": tool.argv, "environment": tool.environment,
+            }, indent=2, ensure_ascii=False))
             return 0
 
         elif args.download:
             tool.prepare()
-            self.logger.info(f"Download tool files success: {tool.absolute_path}")
+            self.logger.info(f"Download tool files success: {tool.artifact_path}")
             return 0
 
         elif args.clear:

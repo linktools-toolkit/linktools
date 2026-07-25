@@ -147,6 +147,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
             from ..cli.argparse import ArgParseComplete
             from ..cli.command import iter_entry_point_commands
+            from ..core._tools import get_tool_stub_path
 
             stub_path = get_stub_path()
             stub_path.mkdir(parents=True, exist_ok=True)
@@ -155,7 +156,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             executables = []
             command_infos = {
                 command_info.id: command_info
-                for command_info in iter_entry_point_commands(metadata.__scripts_group__, onerror="warn")
+                for command_info in iter_entry_point_commands(metadata.__scripts_group__, onerror="ignore")
             }
             for command_info in command_infos.values():
                 if command_info.command:
@@ -172,7 +173,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                     executables.append(executable)
 
             script = ShellScript(shell)
-            script.append_path([str(stub_path), str(environ.tools.stub_path)])
+            script.append_path([str(stub_path), str(get_tool_stub_path(environ))])
 
             completion = ArgParseComplete.shellcode(executables, shell=shell)
             if completion:
@@ -200,7 +201,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 java = java.copy(version=args.version)
 
             shell = args.shell or get_default_shell(environ)
-            home_path = java.get("home_path")
+            home_path = java.get_variable("home_path")
 
             # Structured intent only -- ShellScript owns quoting/$PATH syntax.
             # PATH gets the real bin path, never a "$JAVA_HOME/bin" expression.
@@ -353,7 +354,7 @@ if __name__ == '__main__':
             return args.func(args)
 
         def on_tool(self, args: "argparse.Namespace"):
-            return self.environ.get_tool(args.name, cmdline=None) \
+            return self.environ.get_tool(args.name) \
                 .popen(*args.args) \
                 .call()
 

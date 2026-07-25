@@ -1,0 +1,204 @@
+# Mobile tools
+
+schema: 1
+
+tools:
+
+  ##########################################################################################
+  # adb: https://developer.android.com/tools/releases/platform-tools?hl=zh-cn#downloads
+  ##########################################################################################
+  adb:
+    version: "latest"
+    install:
+      extract_dir: "platform-tools-{version}"
+      entrypoint: "platform-tools/adb"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-darwin.zip"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-linux.zip"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-windows.zip"
+          entrypoint: "platform-tools/{name}.exe"
+  fastboot:
+    version: "latest"
+    install:
+      extract_dir: "platform-tools-{version}"
+      entrypoint: "platform-tools/fastboot"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-darwin.zip"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-linux.zip"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/platform-tools-{version}-windows.zip"
+          entrypoint: "platform-tools/{name}.exe"
+
+  ##########################################################################################
+  # Android build tools: https://androidsdkoffline.blogspot.com/p/android-sdk-build-tools.html
+  ##########################################################################################
+  aapt:
+    version: "r34"
+    install:
+      extract_dir: "build-tools-{version}"
+      entrypoint: "android-14/aapt"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-macosx.zip"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-linux.zip"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-windows.zip"
+          entrypoint: "android-14/{name}.exe"
+  aapt2:
+    version: "r34"
+    install:
+      extract_dir: "build-tools-{version}"
+      entrypoint: "android-14/aapt2"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-macosx.zip"}
+      - match: {platform: linux, architecture: x86_64}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-linux.zip"}
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-windows.zip"
+          entrypoint: "android-14/{name}.exe"
+  zipalign:
+    version: "r34"
+    install:
+      extract_dir: "build-tools-{version}"
+      entrypoint: "android-14/zipalign"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-macosx.zip"}
+      - match: {platform: linux, architecture: x86_64}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-linux.zip"}
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-windows.zip"
+          entrypoint: "android-14/{name}.exe"
+  apksigner:
+    version: "r34"
+    install:
+      extract_dir: "build-tools-{version}"
+      entrypoint: "android-14/apksigner"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-macosx.zip"}
+      - match: {platform: linux, architecture: x86_64}
+        install: {url: "https://dl.google.com/android/repository/build-tools_{version}-linux.zip"}
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://dl.google.com/android/repository/build-tools_{version}-windows.zip"
+          entrypoint: "android-14/{name}.bat"
+
+  ##########################################################################################
+  # vdexExtractor: https://github.com/anestisb/vdexExtractor
+  ##########################################################################################
+  vdexExtractor:
+    version: "20240430"
+    install:
+      entrypoint: "vdexExtractor"
+    variants:
+      - match: {platform: darwin, architecture: arm64}
+        install: {url: "https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-arm64"}
+      - match: {platform: darwin, architecture: x86_64}
+        install: {url: "https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-macos-amd64"}
+      - match: {platform: linux, architecture: x86_64}
+        install: {url: "https://github.com/linktools-toolkit/archives/releases/download/vdexExtractor-{version}/vdexExtractor-linux-amd64"}
+
+  ##########################################################################################
+  # compact_dex_converter: https://github.com/linktools-toolkit/archives
+  ##########################################################################################
+  compact_dex_converter:
+    version: "20240430"
+    install:
+      extract_dir: "compact_dex_converter-{version}"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/compact_dex_converter-{version}/compact_dex_converter.zip"
+          entrypoint: "compact_dex_converter_mac"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/compact_dex_converter-{version}/compact_dex_converter.zip"
+          entrypoint: "compact_dex_converter_linux64"
+
+  ##########################################################################################
+  # Go-iOS: https://github.com/danielpaulus/go-ios
+  ##########################################################################################
+  ios:
+    version: "1.0.182"
+    install:
+      extract_dir: "ios-{version}"
+    variants:
+      - match: {platform: darwin, architecture: [arm64, x86_64]}
+        install:
+          url: "https://github.com/danielpaulus/go-ios/releases/download/v{version}/go-ios-mac.zip"
+          entrypoint: "ios"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://github.com/danielpaulus/go-ios/releases/download/v{version}/go-ios-linux.zip"
+          entrypoint: "ios-amd64"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://github.com/danielpaulus/go-ios/releases/download/v{version}/go-ios-win.zip"
+          entrypoint: "ios.exe"
+
+  ##########################################################################################
+  # ipatool: https://github.com/majd/ipatool
+  ##########################################################################################
+  ipatool:
+    version: "2.2.0"
+    install:
+      extract_dir: "ipatool-{version}"
+    variants:
+      - match: {platform: darwin, architecture: arm64}
+        install:
+          url: "https://github.com/majd/ipatool/releases/download/v{version}/ipatool-{version}-macos-arm64.tar.gz"
+          entrypoint: "bin/ipatool-{version}-macos-arm64"
+      - match: {platform: darwin, architecture: x86_64}
+        install:
+          url: "https://github.com/majd/ipatool/releases/download/v{version}/ipatool-{version}-macos-amd64.tar.gz"
+          entrypoint: "bin/ipatool-{version}-macos-amd64"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://github.com/majd/ipatool/releases/download/v{version}/ipatool-{version}-linux-amd64.tar.gz"
+          entrypoint: "bin/ipatool-{version}-linux-amd64"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://github.com/majd/ipatool/releases/download/v{version}/ipatool-{version}-windows-amd64.tar.gz"
+          entrypoint: "bin/ipatool-{version}-windows-amd64.exe"
+
+  ##########################################################################################
+  # hdc: https://developer.huawei.com/consumer/cn/download/
+  ##########################################################################################
+  hdc:
+    version: "20250324"
+    install:
+      extract_dir: "harmony-toolchains-{version}"
+      entrypoint: "hdc"
+    variants:
+      - match: {platform: darwin, architecture: arm64}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-arm64.zip"
+      - match: {platform: darwin, architecture: x86_64}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-macos-x64.zip"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-linux-x64.zip"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://github.com/linktools-toolkit/archives/releases/download/harmonyos-toolchains-{version}/toolchains-windows-x64.zip"
+          entrypoint: "hdc.exe"

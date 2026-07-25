@@ -8,8 +8,7 @@ servers via specs, wire a `Storage` backend + a `ModelResolver`, and call
 
 ## Quick start
 
-A tested minimal example lives at [`examples/minimal_runtime.py`](../examples/minimal_runtime.py)
-(run by `tests/ai/docs/test_readme_examples.py`). It registers a model, builds a
+A minimal example registers a model, builds a
 `Runtime` over a `FilesystemStorage`, runs one no-tool agent, and closes it:
 
 ```python
@@ -82,8 +81,7 @@ There is no raw-tool bypass and no non-managed path.
 A `Sandbox` supplies a capability (file / terminal access); the
 `CapabilityResolver` exposes it as a tool; every call flows through the
 `GovernedToolInvoker`. A run never reaches the sandbox backend directly — only
-through a governed builtin tool resolved from the sandbox. See
-[`examples/sandbox_runtime.py`](../examples/sandbox_runtime.py):
+through a governed builtin tool resolved from the sandbox:
 
 ```python
 from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef

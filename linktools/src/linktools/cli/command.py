@@ -126,15 +126,9 @@ class _CommandInfo:
 
 
 def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
-    try:
-        from importlib.metadata import entry_points
-    except ImportError:
-        from importlib_metadata import entry_points
+    from ..core._entrypoint import select_entry_points
 
-    eps = entry_points()
-    eps = eps.get(group, []) \
-        if isinstance(eps, dict) \
-        else eps.select(group=group)
+    eps = select_entry_points(group)
     for ep in eps:
         try:
             yield ep, ep.load()

@@ -207,8 +207,9 @@ def test_dry_run_and_plan_command_share_one_model(fresh_manager, monkeypatch):
     monkeypatch.setattr(fresh_manager.planner, "plan", spy_plan)
 
     cntr_main.command.on_command_up(names=["portainer"], build=False, pull=False, dry_run=True)
-    from linktools.cntr.commands.plan import PlanCommand
-    PlanCommand().on_command_up(names=["portainer"], build=False, pull=False, as_json=False)
+    from linktools.cntr.commands.plan import maybe_dry_run
+    maybe_dry_run(fresh_manager, cntr_main.command.logger, "up", names=["portainer"],
+                  build=False, pull=False, dry_run=True)
 
     assert len(recorded) == 2
     assert recorded[0] == recorded[1]

@@ -3,20 +3,11 @@
 """SECONDARY import guard, NOT the proof (: '仅扫描内部 E2E 是否
 import 私有模块' is explicitly listed as non-evidence).
 
-The strong form -- a from-scratch EXTERNAL adapter driving the FULL
-connected run -> approval -> resume -> artifact -> job chain through the public
-Protocol surface alone -- lives in
-``tests/ai/storage/test_external_adapter_full_chain.py::
-test_external_adapter_full_connected_chain_run_approval_resume_artifact_job``.
-That test is the evidence; it runs the connected chain through the
-adapter's public stores with real persistence assertions.
-
-This test is retained only as a defense-in-depth IMPORT GUARD: it AST-scans the
+This test is a defense-in-depth IMPORT GUARD: it AST-scans the
 in-repo chain-driving modules (run/complete, pause/approve/resume, MCP) and
 fails if any reaches into ``linktools.ai.runtime.builder`` or an underscore-private
 module -- catching a regression where an in-repo test quietly uses a private
-surface. It is deliberately NOT counted as evidence; the connected
-external-adapter chain is."""
+surface."""
 
 from __future__ import annotations
 

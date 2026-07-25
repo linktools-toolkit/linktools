@@ -156,11 +156,10 @@ def test_derive_uses_settings_topology_via_frozen_signature(tmp_path):
     assert single == RuntimeRequirements()
 
     # MULTI_WORKER needs a populated dependencies bundle (real Storage +
-    # RunCommitCoordinator). The external-adapter in-memory storage satisfies
-    # both, so derive returns the multi-worker minimums without raising.
-    from external_adapter import build_in_memory_external_storage
+    # RunCommitCoordinator). The filesystem reference storage satisfies both.
+    from linktools.ai.storage.facade import FilesystemStorage
 
-    storage = build_in_memory_external_storage(root=tmp_path / "derive_multi")
+    storage = FilesystemStorage(root=tmp_path / "derive_multi")
     multi = derive_runtime_requirements(
         settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
         dependencies=RuntimeDependencies(
@@ -203,9 +202,9 @@ def test_derive_multi_worker_refuses_dependencies_missing_coordinator(tmp_path):
         derive_runtime_requirements,
     )
 
-    from external_adapter import build_in_memory_external_storage
+    from linktools.ai.storage.facade import FilesystemStorage
 
-    storage = build_in_memory_external_storage(root=tmp_path / "derive_no_coord")
+    storage = FilesystemStorage(root=tmp_path / "derive_no_coord")
     with pytest.raises(StorageRequirementsNotMetError, match="RunCommitCoordinator"):
         derive_runtime_requirements(
             settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),

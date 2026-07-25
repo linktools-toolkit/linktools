@@ -13,7 +13,6 @@ from linktools.cntr.commands._order import CONFIG_COMMAND_ORDER, REPO_COMMAND_OR
 from linktools.cntr.commands.compose import ComposeCommand
 from linktools.cntr.commands.config import ConfigCommand
 from linktools.cntr.commands.exec_ import ExecCommand
-from linktools.cntr.commands.plan import PlanCommand
 from linktools.cntr.commands.repo import RepoCommand
 
 
@@ -86,17 +85,15 @@ def test_status_mixin_position_does_not_affect_order():
 
 
 def test_wrapper_registration_order_does_not_affect_final_order():
-    """init_subcommands() lists wrappers as [exec, compose, plan, config,
-    repo], but the final help order (exec, compose, plan, config, repo) is
+    """init_subcommands() lists wrappers independently of their final order,
+    which is driven by explicit order values.
     driven by ROOT_COMMAND_ORDER, not by that list's position."""
     subcommands = cntr_main.Command().init_subcommands()
     wrapped_names = [type(sub.command).__name__ for sub in subcommands[1:]]
-    assert set(wrapped_names) == {
-        "ExecCommand", "ComposeCommand", "PlanCommand", "ConfigCommand", "RepoCommand",
-    }
+    assert set(wrapped_names) == {"ExecCommand", "ComposeCommand", "ConfigCommand", "RepoCommand"}
 
     text = _help_text()
-    _assert_in_order(text, ["exec", "compose", "plan", "config", "repo"])
+    _assert_in_order(text, ["exec", "compose", "config", "repo"])
 
 
 def test_registration_list_order_is_genuinely_ignored_when_reversed(monkeypatch):
@@ -112,7 +109,6 @@ def test_registration_list_order_is_genuinely_ignored_when_reversed(monkeypatch)
             command,
             SubCommandWrapper(RepoCommand(), order=ROOT_COMMAND_ORDER["repo"]),
             SubCommandWrapper(ConfigCommand(), order=ROOT_COMMAND_ORDER["config"]),
-            SubCommandWrapper(PlanCommand(), order=ROOT_COMMAND_ORDER["plan"]),
             SubCommandWrapper(ComposeCommand(), order=ROOT_COMMAND_ORDER["compose"]),
             SubCommandWrapper(ExecCommand(), order=ROOT_COMMAND_ORDER["exec"]),
         ]

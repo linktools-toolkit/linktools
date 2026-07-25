@@ -497,22 +497,7 @@ class BaseEnviron(abc.ABC):
 
     def _create_tools(self) -> "Tools":
         from ._tools import Tools
-
-        config = ConfigDict()
-
-        develop_path = self.get_path("assets", "develop", "tools.yml")
-        data_path = self.get_data_path("tools", "tools.json")
-        asset_path = self.get_path("assets", "tools.json")
-
-        if os.path.exists(data_path):
-            config.update_from_file(data_path, json.load)
-        elif not metadata.__develop__ or not os.path.exists(develop_path):
-            config.update_from_file(asset_path, json.load)
-        else:
-            import yaml
-            config.update_from_file(develop_path, yaml.safe_load)
-
-        return Tools(self, config)
+        return Tools(self)
 
     @cached_property(lock=True)
     def tools(self) -> "Tools":
@@ -533,6 +518,8 @@ class BaseEnviron(abc.ABC):
         Returns:
             Tool: The operation result.
         """
+        if set(kwargs) - {"version"}:
+            raise TypeError("only version may be overridden")
         tool = self.tools[name]
         if len(kwargs) != 0:
             tool = tool.copy(**kwargs)
@@ -618,6 +605,58 @@ class Environ(BaseEnviron):
         )
 
         return config
+
+    def _create_tools(self):
+        """Load capability-owned definitions only when Tools is requested."""
+        import json
+        from ._entrypoint import select_entry_points
+        from ._tools import Tools, _deep_merge
+
+        definitions = {}
+        sources = {}
+        capabilities = []
+        for ep in select_entry_points(metadata.__capability_group__):
+            capability = ep.load()
+            if isinstance(capability, type):
+                capability = capability()
+            capabilities.append(capability)
+        capabilities.sort(key=lambda item: item.name)
+        seen_capabilities = set()
+        for capability in capabilities:
+            if capability.name in seen_capabilities:
+                raise ValueError("duplicate capability %s" % capability.name)
+            seen_capabilities.add(capability.name)
+            develop = capability.get_asset_path("develop", "tools", "%s.yml" % capability.name)
+            release = capability.get_asset_path("tools", "%s.json" % capability.name)
+            path = develop if capability.develop and develop.exists() else release
+            if not path.exists():
+                continue
+            if path.suffix == ".yml":
+                import yaml
+                payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            if (set(payload) - {"schema", "templates", "tools"} or
+                    payload.get("schema") != 1 or not isinstance(payload.get("tools"), dict)):
+                raise ValueError("invalid tools schema for %s: %s" % (capability.name, path))
+            for name, value in payload["tools"].items():
+                if name in definitions:
+                    raise ValueError("duplicate tool %s from %s (%s)" % (name, capability.name, path))
+                definitions[name] = value
+                sources[name] = "%s: %s" % (capability.name, path)
+        user_path = self.get_data_path("tools", "tools.json")
+        if user_path.exists():
+            user = json.loads(user_path.read_text(encoding="utf-8"))
+            if (set(user) - {"schema", "templates", "tools"} or
+                    user.get("schema") != 1 or not isinstance(user.get("tools"), dict)):
+                raise ValueError("invalid user tools schema: %s" % user_path)
+            user_tools = user["tools"]
+            for name, value in user_tools.items():
+                if name not in definitions and isinstance(value, dict) and not ({"install", "run"} & set(value)):
+                    raise ValueError("user tool %s in %s is not a complete definition" % (name, user_path))
+            definitions = _deep_merge(definitions, user_tools)
+            sources.update({name: "user: %s" % user_path for name in user_tools})
+        return Tools(self, definitions, sources=sources)
 
 
 environ = Environ()

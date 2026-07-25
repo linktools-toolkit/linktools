@@ -34,7 +34,7 @@ version = {file = ".version"}
 dependencies = {file = "requirements.yml"}
 convert = [
   {type = "jinja2", source = "metadata.jinja2", dest = "src/linktools/metadata.py"},
-  {type = "yml2json", source = "src/linktools/assets/develop/tools.yml", dest = "src/linktools/assets/tools.json"},
+  {type = "yml2json", source = "src/linktools/assets/develop/tools/linktools.yml", dest = "src/linktools/assets/tools/linktools.json"},
 ]
 
 [tool.linktools.scripts]

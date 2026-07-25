@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""the one-click dev-storage rebuild. Verifies BOTH the
+"""The dev-storage rebuild helpers. Verifies BOTH the
 Filesystem data dir and the SQLite dev DB can be wiped and reconstructed from
 scratch (a RunStore round-trip succeeds on the fresh stores). The SQLite
-engine is constructed by the CALLER (this test / the one-click script), never
+engine is constructed by the CALLER, never
 by the core rebuild module -- honoring the adapter-boundary invariant."""
 
 import asyncio
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -148,33 +146,3 @@ def test_rebuild_dev_storage_summary_reports_both_backends(tmp_path):
         assert summary["sqlite_smoke"] == "ok"
     finally:
         asyncio.run(engine.dispose())
-
-
-def test_one_click_script_runs_wheel_installable_cli(tmp_path):
-    # The one-click CLI (linktools-ai/scripts/rebuild_dev_storage.py) is a dev
-    # tool that constructs the engine + calls the core helpers. Run it as a
-    # subprocess and assert it exits 0 with a filesystem-smoke=ok summary.
-    script = (
-        Path(__file__).resolve().parents[3]
-        / "linktools-ai"
-        / "scripts"
-        / "rebuild_dev_storage.py"
-    )
-    if not script.exists():
-        pytest.skip(f"one-click script not present at {script}")
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            "--data-root",
-            str(tmp_path / "data"),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, (
-        f"one-click script failed: rc={result.returncode}\n"
-        f"stdout={result.stdout}\nstderr={result.stderr}"
-    )
-    assert "filesystem_smoke" in result.stdout

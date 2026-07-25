@@ -16,7 +16,7 @@ from ._order import ROOT_COMMAND_ORDER
 from .compose import ComposeCommand
 from .config import ConfigCommand
 from .exec_ import ExecCommand
-from .plan import PlanCommand, maybe_dry_run
+from .plan import maybe_dry_run
 from .repo import RepoCommand
 from .status import StatusCommands
 
@@ -55,7 +55,6 @@ class Command(StatusCommands, BaseCommandGroup):
             self,
             SubCommandWrapper(ExecCommand(), order=ROOT_COMMAND_ORDER["exec"]),
             SubCommandWrapper(ComposeCommand(), order=ROOT_COMMAND_ORDER["compose"]),
-            SubCommandWrapper(PlanCommand(), order=ROOT_COMMAND_ORDER["plan"]),
             SubCommandWrapper(ConfigCommand(), order=ROOT_COMMAND_ORDER["config"]),
             SubCommandWrapper(RepoCommand(), order=ROOT_COMMAND_ORDER["repo"]),
         ]
@@ -136,13 +135,15 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False,
+                         help="output JSON; requires --dry-run")
     @subcommand_argument("--report", action="store_true", default=False,
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False,
-                      dry_run: bool = False, report: bool = False):
-        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, build=build, pull=pull, dry_run=dry_run):
+                      dry_run: bool = False, report: bool = False, as_json: bool = False):
+        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, build=build, pull=pull, dry_run=dry_run, as_json=as_json):
             return
         # Root `up` and `compose` (final-model rendering) share one
         # implementation (ComposeOperations) so they cannot drift from each other.
@@ -154,26 +155,30 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False,
+                         help="output JSON; requires --dry-run")
     @subcommand_argument("--report", action="store_true", default=False,
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False,
-                           dry_run: bool = False, report: bool = False):
+                           dry_run: bool = False, report: bool = False, as_json: bool = False):
         if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, build=build, pull=pull,
-                         dry_run=dry_run):
+                         dry_run=dry_run, as_json=as_json):
             return
         _shared.manager.compose_operations.restart(names=names, build=build, pull=pull, report=report)
 
     @subcommand("down", order=ROOT_COMMAND_ORDER["down"], help="stop installed containers")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
                          help="show what would happen, without doing it")
+    @subcommand_argument("--json", dest="as_json", action="store_true", default=False,
+                         help="output JSON; requires --dry-run")
     @subcommand_argument("--report", action="store_true", default=False,
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False):
-        if maybe_dry_run(_shared.manager, self.logger, "down", names=names, dry_run=dry_run):
+    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False, as_json: bool = False):
+        if maybe_dry_run(_shared.manager, self.logger, "down", names=names, dry_run=dry_run, as_json=as_json):
             return
         _shared.manager.compose_operations.down(names=names, report=report)
 

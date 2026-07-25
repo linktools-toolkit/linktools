@@ -1,0 +1,54 @@
+# Core tools
+
+schema: 1
+
+templates:
+  # Shared JDK installation definition. YAML anchors are expanded at build time;
+  # templates are not registered as tools by the runtime loader.
+  jdk: &jdk
+    version: "17.0.8"
+    install:
+      extract_dir: "java-{version}"
+    variants:
+      - match: {platform: darwin, architecture: arm64}
+        install:
+          url: "https://github.com/SAP/SapMachine/releases/download/sapmachine-{version}/sapmachine-jdk-{version}_macos-aarch64_bin.tar.gz"
+          extract_dir: "java-{version}"
+          entrypoint: "sapmachine-jdk-{version}.jdk/Contents/Home/bin/{name}"
+        variables:
+          home_path: "{content_dir}/sapmachine-jdk-{version}.jdk/Contents/Home"
+      - match: {platform: darwin, architecture: x86_64}
+        install:
+          url: "https://github.com/SAP/SapMachine/releases/download/sapmachine-{version}/sapmachine-jdk-{version}_macos-x64_bin.tar.gz"
+          extract_dir: "java-{version}"
+          entrypoint: "sapmachine-jdk-{version}.jdk/Contents/Home/bin/{name}"
+        variables:
+          home_path: "{content_dir}/sapmachine-jdk-{version}.jdk/Contents/Home"
+      - match: {platform: linux, architecture: x86_64}
+        install:
+          url: "https://github.com/SAP/SapMachine/releases/download/sapmachine-{version}/sapmachine-jdk-{version}_linux-x64_bin.tar.gz"
+          extract_dir: "java-{version}"
+          entrypoint: "sapmachine-jdk-{version}/bin/{name}"
+        variables:
+          home_path: "{content_dir}/sapmachine-jdk-{version}"
+      - match: {platform: windows, architecture: amd64}
+        install:
+          url: "https://github.com/SAP/SapMachine/releases/download/sapmachine-{version}/sapmachine-jdk-{version}_windows-x64_bin.zip"
+          extract_dir: "java-{version}"
+          entrypoint: "sapmachine-jdk-{version}/bin/{name}.exe"
+        variables:
+          home_path: "{content_dir}/sapmachine-jdk-{version}"
+
+tools:
+
+  ##########################################################################################
+  # java: https://github.com/SAP/SapMachine
+  ##########################################################################################
+  java:
+    <<: *jdk
+    run: {lookup: java}
+  ##########################################################################################
+  # jarsigner: https://docs.oracle.com/en/java/javase/17/docs/specs/man/jarsigner.html
+  ##########################################################################################
+  jarsigner:
+    <<: *jdk

@@ -16,7 +16,6 @@ ROOT_COMMAND_ORDER = {
     "down": "070-down",
     "exec": "080-exec",
     "compose": "090-compose",
-    "plan": "100-plan",
     "config": "110-config",
     "repo": "120-repo",
     "doctor": "130-doctor",

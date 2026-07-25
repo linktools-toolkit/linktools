@@ -25,10 +25,7 @@ from ._config import (
     ResolvedConfig,
     redact_config_value,
 )
-from ._tools import Tools, Tool
-from ._tools_installer import ToolInstaller
-from ._tools_registry import ToolRegistry, ToolDefinition
-from ._tools_runner import ToolRunner
+from ._tools import InstallSpec, RunSpec, ToolDefinition, Tool, Tools, ToolInstaller
 from ._download import (
     DownloadRequest,
     DownloadResult,
@@ -65,8 +62,7 @@ __all__ = [
     "SizeValidator", "HashValidator", "CompositeValidator", "FileTransport",
     "HttpTransport", "UrlFile",
     # tools
-    "Tools", "Tool", "ToolInstaller", "ToolRegistry",
-    "ToolDefinition", "ToolRunner",
+    "Tools", "Tool", "ToolInstaller", "ToolDefinition", "InstallSpec", "RunSpec",
     # capability
     "BaseCapability", "Capability", "Updater", "DevelopUpdater", "GitUpdater",
     "PypiUpdater",
