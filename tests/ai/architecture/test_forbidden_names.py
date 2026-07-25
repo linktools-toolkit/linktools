@@ -46,7 +46,6 @@ def _is_allowlisted(path: Path) -> bool:
         "__pycache__" in parts
         or "migrations" in parts
         or "architecture" in parts
-        or path.name == "test_wheel_only_conformance.py"
     )
 
 

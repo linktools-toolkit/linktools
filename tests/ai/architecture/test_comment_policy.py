@@ -36,9 +36,6 @@ _SCAN_TREES = (
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "ai_cli",
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "capabilities",
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "commands",
-    _REPO_ROOT / "linktools-ai" / "scripts",
-    _REPO_ROOT / "linktools-ai-testing" / "src",
-    _REPO_ROOT / "linktools-ai" / "conformance",
     _REPO_ROOT / "tests",
 )
 
