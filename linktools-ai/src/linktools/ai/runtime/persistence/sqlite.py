@@ -113,6 +113,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         )
         self._artifact_root = resolved_root
         from ...storage.sqlalchemy.dialects import SqliteObjectDialect
+        from .sqlalchemy import _SqlAlchemyTransactionManager
 
         coordination = ProcessLocalLeaseCoordinator()
         self._initialize(
@@ -120,7 +121,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
             coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_manager=None,
+                transaction_manager=_SqlAlchemyTransactionManager(session_factory, dialect=SqliteObjectDialect()),
                 coordination=coordination,
                 artifacts=None,
                 components={},

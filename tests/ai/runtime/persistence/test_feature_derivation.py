@@ -17,6 +17,7 @@ from linktools.ai.runtime.persistence.facade import (
     storage_component_map,
 )
 from linktools.ai.runtime.persistence.features import StorageFeatures
+from linktools.ai.runtime.persistence.transaction import NoCrossStoreTransactions
 from linktools.ai.storage.features import (
     CoordinationScope,
     StorageComponent,
@@ -51,7 +52,7 @@ def test_coordination_none_derives_none_and_false(tmp_path):
     """coordination=None derives coordination_scope=NONE, leasing=False,
     fencing=False. Built from a minimal features object (no coordinator)."""
     f = StorageFeatures.from_components(
-        transaction_manager=None,
+        transaction_manager=NoCrossStoreTransactions(),
         coordination=None,
         artifacts=None,
         components={},
@@ -75,7 +76,7 @@ def test_coordinator_without_fencing_derives_fencing_false():
         async def release(self, **kwargs): ...
 
     f = StorageFeatures.from_components(
-        transaction_manager=None,
+        transaction_manager=NoCrossStoreTransactions(),
         coordination=_NoFencingCoord(),
         artifacts=None,
         components={},

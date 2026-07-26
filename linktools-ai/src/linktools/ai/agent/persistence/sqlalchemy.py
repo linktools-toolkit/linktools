@@ -117,6 +117,11 @@ class SqlAlchemyApprovalStore:
         # no-op.
         self._metrics = metrics
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the
         shared session (UoW mode). See SqlAlchemyRunStore._execute_in_session."""

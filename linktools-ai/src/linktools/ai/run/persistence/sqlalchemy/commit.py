@@ -127,10 +127,6 @@ class SqlAlchemyRunCommitCoordinator:
         approval_id = command.approval_request.approval_id
         commit_id = command.commit_id.value
         async with self._storage.transaction() as tx:
-            self._check_execution_token(
-                await tx.runs.get(command.run_id),
-                command.execution_fence.token if command.execution_fence else "",
-            )
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
@@ -139,6 +135,10 @@ class SqlAlchemyRunCommitCoordinator:
             )
             if replay is not None:
                 return replay
+            self._check_execution_token(
+                await tx.runs.get(command.run_id),
+                command.execution_fence.token if command.execution_fence else "",
+            )
 
             if command.approval_request.tool_call_id is not None:
                 approval = await tx.approvals.create_or_get_pending(
@@ -216,10 +216,6 @@ class SqlAlchemyRunCommitCoordinator:
             payload=command.checkpoint_payload,
         )
         async with self._storage.transaction() as tx:
-            self._check_execution_token(
-                await tx.runs.get(command.run_id),
-                command.execution_fence.token if command.execution_fence else "",
-            )
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
@@ -228,6 +224,10 @@ class SqlAlchemyRunCommitCoordinator:
             )
             if replay is not None:
                 return replay
+            self._check_execution_token(
+                await tx.runs.get(command.run_id),
+                command.execution_fence.token if command.execution_fence else "",
+            )
 
             await tx.sessions.append_messages(command.session_id, command.messages)
             await tx.checkpoints.append(checkpoint)

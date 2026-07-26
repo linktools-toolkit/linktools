@@ -118,6 +118,11 @@ class FilesystemJobStore:
         self._lock = asyncio.Lock()
         self._clock = clock or SystemClock()
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     # ----------------------------------------------------------- paths --
 
     def _job_dir(self, job_id: str) -> Path:

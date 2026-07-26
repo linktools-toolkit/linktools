@@ -13,6 +13,7 @@ The ``asyncio.Lock`` is held in the async wrapper and spans the
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -36,6 +37,50 @@ from ..models import (
     TokenUsage,
 )
 from linktools.ai.storage.filesystem._util import _atomic_write, _validate_id_segment
+
+
+class SwarmCommitScopeClosedError(RuntimeError):
+    pass
+
+
+class FilesystemSwarmCommitView:
+    def __init__(self, store: "FilesystemSwarmStore", swarm_run_id: str) -> None:
+        self._store = store
+        self._swarm_run_id = swarm_run_id
+        self._open = True
+
+    def _require_open(self) -> None:
+        if not self._open:
+            raise SwarmCommitScopeClosedError("swarm commit scope is closed")
+
+    async def get_run(self):
+        self._require_open()
+        return await asyncio.to_thread(self._store._get_run_sync, self._swarm_run_id)
+
+    async def assert_execution_fence(self, expected_token: str):
+        self._require_open()
+        current = await self.get_run()
+        from ..commit import SwarmFenceLostError, SwarmFenceStateError
+        if current is None:
+            raise SwarmRunNotFoundError(self._swarm_run_id)
+        if not current.execution_token:
+            raise SwarmFenceStateError("persisted execution token is missing")
+        if current.execution_token != expected_token:
+            raise SwarmFenceLostError("swarm execution fence mismatch")
+        return current
+
+    async def create_run(self, run):
+        self._require_open(); return await asyncio.to_thread(self._store._create_run_sync, run)
+    async def create_task(self, task):
+        self._require_open(); return await asyncio.to_thread(self._store._create_task_sync, task)
+    async def complete_task(self, task_id, result, *, expected_version, active_run_id=None):
+        self._require_open(); return await asyncio.to_thread(self._store._complete_task_sync, task_id, result, expected_version=expected_version, active_run_id=active_run_id)
+    async def fail_task(self, task_id, error, *, expected_version, active_run_id=None):
+        self._require_open(); return await asyncio.to_thread(self._store._fail_task_sync, task_id, error, expected_version=expected_version, active_run_id=active_run_id)
+    async def update_run(self, *, expected_version, status=None, round=None, token_usage=None, cost=None, metadata=None):
+        self._require_open(); return await asyncio.to_thread(self._store._update_run_sync, self._swarm_run_id, expected_version=expected_version, status=status, round=round, token_usage=token_usage, cost=cost, metadata=metadata)
+    def close(self) -> None:
+        self._open = False
 
 
 def _run_to_json(run: SwarmRun) -> dict:
@@ -241,6 +286,15 @@ class FilesystemSwarmStore:
         self._attempts_dir = self._root / "attempts"
         self._attempts_dir.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def commit_scope(self, swarm_run_id: str):
+        async with self._lock:
+            view = FilesystemSwarmCommitView(self, swarm_run_id)
+            try:
+                yield view
+            finally:
+                view.close()
 
     # -- paths ---------------------------------------------------------
 

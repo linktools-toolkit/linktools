@@ -33,6 +33,11 @@ class FilesystemCheckpointStore:
         self._root.mkdir(parents=True, exist_ok=True)
         self._locks: "dict[str, asyncio.Lock]" = {}
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     def _lock_for(self, run_id: str) -> asyncio.Lock:
         lock = self._locks.get(run_id)
         if lock is None:

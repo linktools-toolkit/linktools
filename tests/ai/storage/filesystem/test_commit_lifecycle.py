@@ -366,23 +366,20 @@ def test_recovery_reappends_started_event_when_start_reached_commit_point(tmp_pa
         await storage.runs.create(_record("run-s3", "sess-s3", RunStatus.RUNNING, 1))
         journal = TransactionJournal(tmp_path / "transactions")
         ctx = EventStreamContext.from_run_context(_context("run-s3", "sess-s3"))
+        recovery_command = StartRunCommand(
+            record=_record("run-s3", "sess-s3", RunStatus.RUNNING, 1),
+            started_event=RunStartedEvent(run_id="run-s3", runnable_id="agent-1"),
+            event_context=ctx,
+            commit_id=RunCommitId("recovery:tx:run-s3"),
+        )
         journal.begin(
             kind=TransactionKind.START,
             run_id="run-s3",
             target_run_status="running",
-            command={
-                "event_context": {
-                    "stream_id": ctx.stream_id,
-                    "run_id": ctx.run_id,
-                    "root_run_id": ctx.root_run_id,
-                    "parent_run_id": ctx.parent_run_id,
-                    "session_id": ctx.session_id,
-                    "runnable_id": ctx.runnable_id,
-                }
-            },
+            command={},
             commit_id="recovery:tx:run-s3",
             request_hash="",
-            command_payload=b"{}",
+            command_payload=RunCommitCodec().encode_request("start", recovery_command),
         )
 
         await coordinator.recover_incomplete_commits()

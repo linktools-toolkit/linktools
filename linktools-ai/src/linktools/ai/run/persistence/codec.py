@@ -16,7 +16,7 @@ engine canonicalises dict key order and set iteration order before hashing."""
 from __future__ import annotations
 
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING
 
 from .wire import (
     SCHEMA_VERSION,
@@ -26,12 +26,27 @@ from .wire import (
     decode_envelope,
     encode_envelope,
 )
+from ..commit import (
+    AcknowledgeCancelRunCommand, CompleteRunCommand, FailRunCommand,
+    PauseRunCommand, RequestCancelRunCommand, ResumeRunCommand, StartRunCommand,
+    CancellingRunCommit, CancelledRunCommit, CompletedRunCommit, FailedRunCommit,
+    PausedRunCommit, ResumedRunCommit, StartedRunCommit,
+)
+
+RunCommitCommand = (StartRunCommand | PauseRunCommand | ResumeRunCommand |
+                    CompleteRunCommand | FailRunCommand | RequestCancelRunCommand |
+                    AcknowledgeCancelRunCommand)
+RunCommitResult = (StartedRunCommit | PausedRunCommit | ResumedRunCommit |
+                   CompletedRunCommit | FailedRunCommit | CancellingRunCommit |
+                   CancelledRunCommit)
 
 __all__ = [
     "RunCommitCodec",
     "RunCommitCodecError",
     "RunCommitIntegrityError",
     "RunCommitOperation",
+    "RunCommitCommand",
+    "RunCommitResult",
 ]
 
 
@@ -44,41 +59,41 @@ class RunCommitCodec:
     def encode_request(
         self,
         operation: "RunCommitOperation | str",
-        command: Any,
+        command: "RunCommitCommand",
     ) -> bytes:
-        return encode_envelope(operation, command)
+        return encode_envelope(operation, command, kind="request")
 
     def decode_request(
         self,
         operation: "RunCommitOperation | str",
         payload: bytes,
-    ) -> Any:
-        return decode_envelope(payload, expected_operation=operation)
+    ) -> "RunCommitCommand":
+        return decode_envelope(payload, expected_operation=operation, expected_kind="request")
 
     def encode_result(
         self,
         operation: "RunCommitOperation | str",
-        result: Any,
+        result: "RunCommitResult",
     ) -> bytes:
-        return encode_envelope(operation, result)
+        return encode_envelope(operation, result, kind="result")
 
     def decode_result(
         self,
         operation: "RunCommitOperation | str",
         payload: bytes,
-    ) -> Any:
-        return decode_envelope(payload, expected_operation=operation)
+    ) -> "RunCommitResult":
+        return decode_envelope(payload, expected_operation=operation, expected_kind="result")
 
     def request_hash(
         self,
         operation: "RunCommitOperation | str",
-        command: Any,
+        command: "RunCommitCommand",
     ) -> bytes:
         return sha256(self.encode_request(operation, command)).digest()
 
     def result_hash(
         self,
         operation: "RunCommitOperation | str",
-        result: Any,
+        result: "RunCommitResult",
     ) -> bytes:
         return sha256(self.encode_result(operation, result)).digest()

@@ -126,6 +126,11 @@ class FilesystemRunStore:
         # Mirrors FilesystemSwarmStore's single-lock pattern (see storage/filesystem/swarm.py).
         self._lock = asyncio.Lock()
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     def _path(self, run_id: str) -> Path:
         return self._root / f"{_validate_id_segment(run_id, kind='run_id')}.json"
 

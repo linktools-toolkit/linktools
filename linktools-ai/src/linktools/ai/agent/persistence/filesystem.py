@@ -153,6 +153,11 @@ class FilesystemApprovalStore:
         # no-op.
         self._metrics = metrics
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     # -- paths ---------------------------------------------------------
 
     def _path(self, approval_id: str) -> Path:

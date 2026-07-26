@@ -15,8 +15,8 @@ import asyncio
 from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
-from linktools.ai.events.payloads import RunCompleted
-from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, RunCommitId, RunCommitPolicy
+from linktools.ai.events.payloads import RunCompleted, RunPaused
+from linktools.ai.run.commit import ApprovalRequestData, CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId, RunCommitPolicy
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -190,28 +190,28 @@ def test_post_commit_crash_recovery_republishes_messages(tmp_path):
     coordinator = _coordinator(storage, tmp_path)
 
     journal = TransactionJournal(tmp_path / "transactions")
+    recovery_command = CompleteRunCommand(
+        run_id="run-c",
+        session_id="sess-c",
+        expected_version=1,
+        messages=(
+            NewSessionMessage(role=MessageRole.USER, content="hi", run_id="run-c"),
+            NewSessionMessage(role=MessageRole.ASSISTANT, content="answer", run_id="run-c"),
+        ),
+        checkpoint_payload=b"recovery",
+        result=RunResult(output="ok"),
+        completed_event=RunCompleted(run_id="run-c"),
+        event_context=_ctx("run-c", "sess-c"),
+        commit_id=RunCommitId("complete:run-c:1"),
+    )
     journal.begin(
         kind=TransactionKind.COMPLETE,
         run_id="run-c",
         target_run_status="succeeded",
         commit_id="complete:run-c:1",
-        command={
-            "session_id": "sess-c",
-            "messages": [
-                _msg(MessageRole.USER, "hi", "run-c"),
-                _msg(MessageRole.ASSISTANT, "answer", "run-c"),
-            ],
-            "event_context": {
-                "stream_id": "run-c",
-                "run_id": "run-c",
-                "root_run_id": "run-c",
-                "parent_run_id": None,
-                "session_id": "sess-c",
-                "runnable_id": "agent-1",
-            },
-        },
+        command={},
         request_hash="",
-        command_payload=b"{}",
+        command_payload=RunCommitCodec().encode_request("complete", recovery_command),
     )
 
     asyncio.run(coordinator.recover_incomplete_commits())
@@ -316,25 +316,25 @@ def test_recovery_event_failure_retains_journal_for_retry(tmp_path):
     coordinator = _coordinator(storage, tmp_path)
 
     journal = TransactionJournal(tmp_path / "transactions")
+    recovery_command = CompleteRunCommand(
+        run_id="run-r",
+        session_id="sess-r",
+        expected_version=1,
+        messages=(NewSessionMessage(role=MessageRole.ASSISTANT, content="answer", run_id="run-r"),),
+        checkpoint_payload=b"recovery",
+        result=RunResult(output="ok"),
+        completed_event=RunCompleted(run_id="run-r"),
+        event_context=_ctx("run-r", "sess-r"),
+        commit_id=RunCommitId("complete:run-r:1"),
+    )
     journal.begin(
         kind=TransactionKind.COMPLETE,
         run_id="run-r",
         target_run_status="succeeded",
         commit_id="complete:run-r:1",
-        command={
-            "session_id": "sess-r",
-            "messages": [_msg(MessageRole.ASSISTANT, "answer", "run-r")],
-            "event_context": {
-                "stream_id": "run-r",
-                "run_id": "run-r",
-                "root_run_id": "run-r",
-                "parent_run_id": None,
-                "session_id": "sess-r",
-                "runnable_id": "agent-1",
-            },
-        },
+        command={},
         request_hash="",
-        command_payload=b"{}",
+        command_payload=RunCommitCodec().encode_request("complete", recovery_command),
     )
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)
@@ -358,29 +358,26 @@ def test_recovery_pause_event_failure_retains_journal(tmp_path):
     coordinator = _coordinator(storage, tmp_path)
 
     journal = TransactionJournal(tmp_path / "transactions")
+    recovery_command = PauseRunCommand(
+        run_id="run-pa",
+        expected_version=1,
+        approval_request=ApprovalRequestData(
+            approval_id="appr-1", tool_name="shell", reason="review",
+            arguments={}, tenant_id="tenant-1", tool_call_id="c1", binding={}
+        ),
+        checkpoint_payload=b"recovery",
+        paused_event=RunPaused(run_id="run-pa", reason="review"),
+        event_context=_ctx("run-pa", "sess-pa"),
+        commit_id=RunCommitId("pause:run-pa:appr-1"),
+    )
     journal.begin(
         kind=TransactionKind.PAUSE,
         run_id="run-pa",
         target_run_status="waiting_approval",
         commit_id="pause:run-pa:appr-1",
-        command={
-            "approval_id": "appr-1",
-            "tool_call_id": "c1",
-            "tool_name": "shell",
-            "reason": "review",
-            "arguments": {},
-            "checkpoint_payload_b64": "",
-            "event_context": {
-                "stream_id": "run-pa",
-                "run_id": "run-pa",
-                "root_run_id": "run-pa",
-                "parent_run_id": None,
-                "session_id": "sess-pa",
-                "runnable_id": "agent-1",
-            },
-        },
+        command={},
         request_hash="",
-        command_payload=b"{}",
+        command_payload=RunCommitCodec().encode_request("pause", recovery_command),
     )
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)

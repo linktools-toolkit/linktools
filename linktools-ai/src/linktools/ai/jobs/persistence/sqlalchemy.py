@@ -347,6 +347,11 @@ class SqlAlchemyJobStore:
         self._clock = clock or SystemClock()
         self._session = session
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     async def _in_session(self, action):
         if self._session is not None:
             result = await action(self._session)

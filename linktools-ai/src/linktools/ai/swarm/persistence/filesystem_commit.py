@@ -345,58 +345,35 @@ class FilesystemSwarmCommitCoordinator:
         replay = self._read_completion(commit_id, request_hash)
         if replay is not None:
             return replay
-        if not establish_run_owner:
-            current = await self._state_store.assert_execution_fence(
-                swarm_run_id, expected_token=command.fence.token
-            )
-            self._policy.validate(
-                supplied=command.fence, stored_token=current.execution_token
-            )
-        # Journal the intent BEFORE the business write so a crash mid-write
-        # is reconcilable (recovery marks the swarm_run FAILED).
-        self._write_inflight(
-            commit_id,
-            operation,
-            swarm_run_id,
-            request_hash,
-            self._codec.encode_request(operation, command),
-        )
-        result = await run_business()
-        payload = getattr(command, "payload", None)
-        event_context = getattr(payload, "event_context", None)
-        lifecycle_event = next(
-            (
-                getattr(payload, name, None)
-                for name in (
-                    "started_event", "step_event", "completed_event",
-                    "failed_event", "cancelled_event",
+        async with self._state_store.commit_scope(swarm_run_id) as state:
+            if not establish_run_owner:
+                current = await state.assert_execution_fence(
+                    command.fence.token
                 )
-                if getattr(payload, name, None) is not None
-            ),
-            None,
-        )
-        if event_context is not None and lifecycle_event is not None:
-            from ...events.context import append_event_once
-            await append_event_once(
-                self._events,
-                event_context,
-                lifecycle_event,
-                commit_id=commit_id,
-                metadata={"commit_id": commit_id},
+                self._policy.validate(
+                    supplied=command.fence, stored_token=current.execution_token
+                )
+            self._write_inflight(
+                commit_id,
+                operation,
+                swarm_run_id,
+                request_hash,
+                self._codec.encode_request(operation, command),
             )
-        result_payload = self._record_inflight_result(commit_id, operation, result)
-        self._write_completion(
-            commit_id,
-            operation,
-            request_hash,
-            result,
-            result_payload,
-        )
-        self._clear_inflight(commit_id)
+            result = await run_business(state)
+            payload = getattr(command, "payload", None)
+            event_context = getattr(payload, "event_context", None)
+            lifecycle_event = next((getattr(payload, name, None) for name in ("started_event", "step_event", "completed_event", "failed_event", "cancelled_event") if getattr(payload, name, None) is not None), None)
+            if event_context is not None and lifecycle_event is not None:
+                from ...events.context import append_event_once
+                await append_event_once(self._events, event_context, lifecycle_event, commit_id=commit_id, metadata={"commit_id": commit_id})
+            result_payload = self._record_inflight_result(commit_id, operation, result)
+            self._write_completion(commit_id, operation, request_hash, result, result_payload)
+            self._clear_inflight(commit_id)
         return result
 
     async def start(self, command: "StartSwarmCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from dataclasses import replace as _replace
             from ..models import SwarmRun
 
@@ -405,7 +382,7 @@ class FilesystemSwarmCommitCoordinator:
             run_to_create = _replace(
                 command.payload.run, execution_token=command.fence.token
             )
-            created = await self._state_store.create_run(run_to_create)
+            created = await state.create_run(run_to_create)
             return {"swarm_run_id": created.id, "version": created.version}
 
         return await self._run_commit(
@@ -413,10 +390,10 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def start_step(self, command: "StartSwarmStepCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ..models import SwarmStep
 
-            created = await self._state_store.create_task(command.payload.step)
+            created = await state.create_task(command.payload.step)
             return {"task_id": created.id, "version": created.version}
 
         return await self._run_commit(
@@ -424,12 +401,12 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def complete_step(self, command: "CompleteSwarmStepCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ...run.models import RunResult
 
             task_id = command.payload.task_id
             result = command.payload.result
-            updated = await self._state_store.complete_task(
+            updated = await state.complete_task(
                 task_id,
                 result,
                 expected_version=command.expected_version,
@@ -442,12 +419,12 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def fail_step(self, command: "FailSwarmStepCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ...run.models import RunErrorInfo
 
             task_id = command.payload.task_id
             error = command.payload.error
-            updated = await self._state_store.fail_task(
+            updated = await state.fail_task(
                 task_id,
                 error,
                 expected_version=command.expected_version,
@@ -460,11 +437,10 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def complete(self, command: "CompleteSwarmCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ..models import SwarmStatus
 
-            updated = await self._state_store.update_run(
-                command.swarm_run_id,
+            updated = await state.update_run(
                 expected_version=command.expected_version,
                 status=SwarmStatus.SUCCEEDED,
             )
@@ -475,11 +451,10 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def fail(self, command: "FailSwarmCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ..models import SwarmStatus
 
-            updated = await self._state_store.update_run(
-                command.swarm_run_id,
+            updated = await state.update_run(
                 expected_version=command.expected_version,
                 status=SwarmStatus.FAILED,
             )
@@ -490,11 +465,10 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def cancel(self, command: "CancelSwarmCommand") -> "SwarmCommitResult":
-        async def _business():
+        async def _business(state):
             from ..models import SwarmStatus
 
-            updated = await self._state_store.update_run(
-                command.swarm_run_id,
+            updated = await state.update_run(
                 expected_version=command.expected_version,
                 status=SwarmStatus.CANCELLED,
             )

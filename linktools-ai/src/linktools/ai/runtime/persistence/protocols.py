@@ -26,6 +26,40 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, AsyncContextManager, Protocol, runtime_checkable
 
+from ...storage.features import ComponentCapabilities, CoordinationScope, TransactionScope
+
+
+@runtime_checkable
+class TransactionManagerCapabilities(Protocol):
+    @property
+    def scope(self) -> TransactionScope: ...
+
+
+@runtime_checkable
+class LeaseCoordinatorCapabilities(Protocol):
+    @property
+    def scope(self) -> CoordinationScope: ...
+    @property
+    def supports_leasing(self) -> bool: ...
+    @property
+    def supports_fencing(self) -> bool: ...
+
+
+@runtime_checkable
+class ComponentCapabilityProvider(Protocol):
+    @property
+    def capabilities(self) -> ComponentCapabilities: ...
+
+
+@runtime_checkable
+class ArtifactStoreCapabilities(Protocol):
+    @property
+    def coordination_scope(self) -> CoordinationScope: ...
+    @property
+    def supports_streaming(self) -> bool: ...
+    @property
+    def record_store(self) -> object: ...
+
 if TYPE_CHECKING:
     # Protocol-level imports kept TYPE_CHECKING-only so the
     # ``runtime.persistence.protocols`` module has no runtime dependency on
@@ -94,6 +128,10 @@ class StorageUnitOfWork(Protocol):
 
 
 __all__: "list[str]" = [
+    "TransactionManagerCapabilities",
+    "LeaseCoordinatorCapabilities",
+    "ComponentCapabilityProvider",
+    "ArtifactStoreCapabilities",
     "StorageTransactionManager",
     "StorageUnitOfWork",
 ]

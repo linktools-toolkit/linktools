@@ -35,16 +35,26 @@ from ...storage.features import (
     StorageComponent,
     TransactionScope,
 )
+from ...errors import StorageCapabilityDeclarationError
+from .protocols import (
+    ArtifactStoreCapabilities,
+    ComponentCapabilityProvider,
+    LeaseCoordinatorCapabilities,
+    TransactionManagerCapabilities,
+)
 
 def _capabilities_of(store: object) -> ComponentCapabilities:
-    """Read a store's declared capabilities, defaulting to the empty
-    ComponentCapabilities if the store does not expose the property (so an
-    exotic adapter that predates the property is treated as offering nothing
-    rather than everything)."""
-    caps = getattr(store, "capabilities", None)
-    if isinstance(caps, ComponentCapabilities):
-        return caps
-    return ComponentCapabilities()
+    """Read a wired component's declared capabilities fail-closed."""
+    if not isinstance(store, ComponentCapabilityProvider):
+        raise StorageCapabilityDeclarationError(
+            "every wired component store must expose ComponentCapabilities"
+        )
+    caps = store.capabilities
+    if not isinstance(caps, ComponentCapabilities):
+        raise StorageCapabilityDeclarationError(
+            "wired component store capabilities has the wrong type"
+        )
+    return caps
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,30 +100,34 @@ class StorageFeatures:
           append_only_events are derived from each component store's
           ``capabilities`` (a component appears in a set iff its wired store
           declares the corresponding capability)."""
-        transaction_scope = (
-            transaction_manager.scope
-            if transaction_manager is not None and hasattr(transaction_manager, "scope")
-            else TransactionScope.NONE
-        )
-        coordination_scope = (
-            coordination.scope
-            if coordination is not None and hasattr(coordination, "scope")
-            else CoordinationScope.NONE
-        )
-        artifact_coordination_scope = (
-            artifacts.coordination_scope
-            if artifacts is not None and hasattr(artifacts, "coordination_scope")
-            else CoordinationScope.NONE
-        )
-        leasing = coordination is not None and bool(
-            getattr(coordination, "supports_leasing", False)
-        )
-        fencing = coordination is not None and bool(
-            getattr(coordination, "supports_fencing", False)
-        )
-        streaming_artifacts = artifacts is not None and bool(
-            getattr(artifacts, "supports_streaming", False)
-        )
+        if transaction_manager is None:
+            raise StorageCapabilityDeclarationError("transaction_manager is required")
+        if not isinstance(transaction_manager, TransactionManagerCapabilities):
+            raise StorageCapabilityDeclarationError("transaction_manager must expose scope")
+        transaction_scope = transaction_manager.scope
+        if not isinstance(transaction_scope, TransactionScope):
+            raise StorageCapabilityDeclarationError("transaction_manager.scope has invalid type")
+        if coordination is None:
+            coordination_scope = CoordinationScope.NONE
+            leasing = fencing = False
+        else:
+            if not isinstance(coordination, LeaseCoordinatorCapabilities):
+                raise StorageCapabilityDeclarationError("coordination must expose complete capabilities")
+            coordination_scope = coordination.scope
+            leasing = coordination.supports_leasing
+            fencing = coordination.supports_fencing
+            if not isinstance(coordination_scope, CoordinationScope) or not isinstance(leasing, bool) or not isinstance(fencing, bool):
+                raise StorageCapabilityDeclarationError("invalid coordination capability declaration")
+        if artifacts is None:
+            artifact_coordination_scope = CoordinationScope.NONE
+            streaming_artifacts = False
+        else:
+            if not isinstance(artifacts, ArtifactStoreCapabilities):
+                raise StorageCapabilityDeclarationError("artifacts must expose complete capabilities")
+            artifact_coordination_scope = artifacts.coordination_scope
+            streaming_artifacts = artifacts.supports_streaming
+            if not isinstance(artifact_coordination_scope, CoordinationScope) or not isinstance(streaming_artifacts, bool):
+                raise StorageCapabilityDeclarationError("invalid artifact capability declaration")
         transactional: "set[StorageComponent]" = set()
         optimistic: "set[StorageComponent]" = set()
         idempotency_seen = False

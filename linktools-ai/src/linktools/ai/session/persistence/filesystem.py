@@ -118,6 +118,11 @@ class FilesystemSessionStore:
         self._locks_guard = asyncio.Lock()
         self.recover_incomplete_batches()
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     async def _session_lock(self, session_id: str) -> asyncio.Lock:
         async with self._locks_guard:
             lock = self._locks.get(session_id)

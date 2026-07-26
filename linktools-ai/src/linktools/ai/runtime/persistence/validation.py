@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from ...errors import StorageCapabilityDeclarationError, StorageRequirementsNotMetError
 from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
+from .protocols import ArtifactStoreCapabilities, TransactionManagerCapabilities
 
 if TYPE_CHECKING:
     from .facade import Storage
@@ -33,6 +34,10 @@ def validate_storage_feature_consistency(storage: "Storage") -> None:
     function so the build-time gate cannot diverge."""
     f = storage.features
 
+    from .features import StorageFeatures
+    from .facade import storage_component_map
+    from .protocols import ArtifactStoreCapabilities, TransactionManagerCapabilities
+
     # transaction_scope vs the wired transaction manager.
     if f.transaction_scope is not TransactionScope.NONE:
         manager = storage.transaction_manager
@@ -41,11 +46,11 @@ def validate_storage_feature_consistency(storage: "Storage") -> None:
                 f"Storage declares transaction_scope={f.transaction_scope.value!r} "
                 "but its transaction manager is None"
             )
-        if (
-            f.transaction_scope is TransactionScope.DATABASE
-            and getattr(manager, "scope", TransactionScope.NONE)
-            is not TransactionScope.DATABASE
-        ):
+        if not isinstance(manager, TransactionManagerCapabilities):
+            raise StorageCapabilityDeclarationError(
+                "wired transaction manager must expose scope"
+            )
+        if f.transaction_scope is TransactionScope.DATABASE and manager.scope is not TransactionScope.DATABASE:
             raise StorageRequirementsNotMetError(
                 "Storage declares transaction_scope=DATABASE but its transaction "
                 "manager is NoCrossStoreTransactions (cannot group stores)"
@@ -82,15 +87,10 @@ def validate_storage_feature_consistency(storage: "Storage") -> None:
                 "Storage wires an ArtifactStore but declares "
                 "streaming_artifacts=False -- the flag must agree with the wired store"
             )
-        # Public capability Protocol: coordination_scope / supports_streaming /
-        # record_store. A missing property is a misconfigured stand-in.
-        for prop in ("coordination_scope", "supports_streaming", "record_store"):
-            if not hasattr(artifacts, prop):
-                raise StorageCapabilityDeclarationError(
-                    f"wired ArtifactStore is missing the public capability "
-                    f"property {prop!r}; a Storage cannot declare artifact "
-                    f"capabilities without it"
-                )
+        if not isinstance(artifacts, ArtifactStoreCapabilities):
+            raise StorageCapabilityDeclarationError(
+                "wired ArtifactStore must expose complete capabilities"
+            )
         wired_scope = artifacts.coordination_scope
         if wired_scope != f.artifact_coordination_scope:
             raise StorageRequirementsNotMetError(
@@ -99,11 +99,43 @@ def validate_storage_feature_consistency(storage: "Storage") -> None:
                 f"ArtifactStore coordinator scope is {wired_scope.value!r}"
             )
 
+    if not isinstance(storage.transaction_manager, TransactionManagerCapabilities):
+        raise StorageCapabilityDeclarationError(
+            "wired transaction manager must expose scope"
+        )
+    if storage.artifacts is not None and not isinstance(
+        storage.artifacts, ArtifactStoreCapabilities
+    ):
+        raise StorageCapabilityDeclarationError(
+            "wired ArtifactStore must expose complete capabilities"
+        )
+
+    wired = frozenset(
+        component
+        for component, store in storage_component_map(storage).items()
+        if store is not None
+    )
+    missing = f.transactional_components - wired
+    if missing:
+        names = ", ".join(sorted(c.value for c in missing))
+        raise StorageRequirementsNotMetError(
+            f"Storage declares transactional_components that are not wired: {names}"
+        )
+
+    expected = StorageFeatures.from_components(
+        transaction_manager=storage.transaction_manager,
+        coordination=storage.coordination,
+        artifacts=storage.artifacts,
+        components=storage_component_map(storage),
+    )
+    if f != expected:
+        raise StorageCapabilityDeclarationError(
+            "Storage.features does not match capabilities derived from wired objects"
+        )
+
     # Each declared transactional component must be backed by a real wired
     # store. Use the same component map __post_init__ derived features from,
     # so the declared set and the wired set come from one source of truth.
-    from .facade import storage_component_map
-
     wired = frozenset(
         component
         for component, store in storage_component_map(storage).items()

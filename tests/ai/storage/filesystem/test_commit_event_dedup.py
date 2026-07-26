@@ -170,23 +170,26 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
         )
 
         journal = TransactionJournal(tmp_path / "transactions")
+        ctx = _event_ctx("run-c", "sess-c")
+        recovery_command = CompleteRunCommand(
+            run_id="run-c",
+            session_id="sess-c",
+            expected_version=1,
+            messages=(NewSessionMessage(role=MessageRole.USER, content="hi", run_id="run-c"),),
+            checkpoint_payload=b"recovery",
+            result=RunResult(output="ok"),
+            completed_event=RunCompleted(run_id="run-c"),
+            event_context=ctx,
+            commit_id=RunCommitId("complete:run-c:1"),
+        )
         journal.begin(
             kind=TransactionKind.COMPLETE,
             run_id="run-c",
             target_run_status="succeeded",
             commit_id="complete:run-c:1",
-            command={
-                "event_context": {
-                    "stream_id": "run-c",
-                    "run_id": "run-c",
-                    "root_run_id": "run-c",
-                    "parent_run_id": None,
-                    "session_id": "sess-c",
-                    "runnable_id": "agent-1",
-                }
-            },
+            command={},
             request_hash="",
-            command_payload=b"{}",
+            command_payload=RunCommitCodec().encode_request("complete", recovery_command),
         )
         await coordinator.recover_incomplete_commits()
 

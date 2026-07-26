@@ -256,6 +256,24 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
         # (which reads via the real store's list()) does not short-circuit
         # before the failing append.
         journal = TransactionJournal(tmp_path / "transactions")
+        recovery_command = CompleteRunCommand(
+            run_id="run-x",
+            session_id="sess-x",
+            expected_version=1,
+            messages=(),
+            checkpoint_payload=b"recovery",
+            result=RunResult(output="ok"),
+            completed_event=RunCompleted(run_id="run-x"),
+            event_context=EventStreamContext.from_run_context(
+                RunContext(
+                    run_id="run-x", root_run_id="run-x", parent_run_id=None,
+                    session_id="sess-x", runnable_id="agent-1",
+                    runnable_type=RunnableType.AGENT, user_id=None,
+                    tenant_id=None, workspace=None,
+                )
+            ),
+            commit_id=RunCommitId("complete:run-x:forced-recovery-failure"),
+        )
         journal.begin(
             kind=TransactionKind.COMPLETE,
             run_id="run-x",
@@ -274,7 +292,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                 },
             },
             request_hash="",
-            command_payload=b"{}",)
+            command_payload=RunCommitCodec().encode_request("complete", recovery_command),)
         await coordinator.recover_incomplete_commits()
         assert metrics.counters.get("critical_event_persist_failure_total") == 1
 

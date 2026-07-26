@@ -60,6 +60,11 @@ class SqlAlchemyCheckpointStore:
         # on (run_id, sequence) is the cross-process backstop.
         self._append_locks: "dict[str, asyncio.Lock]" = {}
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ....storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     def _append_lock_for(self, run_id: str) -> asyncio.Lock:
         lock = self._append_locks.get(run_id)
         if lock is None:

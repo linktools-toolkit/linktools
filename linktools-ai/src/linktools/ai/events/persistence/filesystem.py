@@ -45,6 +45,11 @@ class FilesystemEventStore:
         # the payload class name. File and SQL stores share one codec.
         self._codec: EventCodec = codec or default_codec
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     async def _stream_lock(self, stream_id: str) -> asyncio.Lock:
         async with self._streams_guard:
             lock = self._stream_locks.get(stream_id)

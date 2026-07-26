@@ -103,6 +103,11 @@ class SqlAlchemySessionStore:
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
 
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        from ...storage.features import ComponentCapabilities
+        return ComponentCapabilities()
+
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the
         shared session (UoW mode). See SqlAlchemyRunStore._execute_in_session."""

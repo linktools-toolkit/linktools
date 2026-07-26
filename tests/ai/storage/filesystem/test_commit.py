@@ -334,12 +334,31 @@ def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
             _record("run-p", "sess-p", RunStatus.WAITING_APPROVAL, 1)
         )
         journal = TransactionJournal(tmp_path / "transactions")
+        ctx = EventStreamContext.from_run_context(_context("run-p", "sess-p"))
+        recovery_command = PauseRunCommand(
+            run_id="run-p",
+            expected_version=1,
+            approval_request=ApprovalRequestData(
+                approval_id="recovery-approval",
+                tool_name="recovery-tool",
+                reason="recovery",
+                arguments={},
+                tenant_id="tenant-1",
+                tool_call_id=None,
+                binding={},
+            ),
+            checkpoint_payload=b"recovery",
+            paused_event=RunPaused(run_id="run-p", reason="recovery"),
+            event_context=ctx,
+            commit_id=RunCommitId("recovery:pause:run-p"),
+        )
         journal.begin(
             kind=TransactionKind.PAUSE,
             run_id="run-p",
             target_run_status="waiting_approval",
-            command={"event_context": {}},
-            command_payload=b"{}",
+            commit_id="recovery:pause:run-p",
+            command={},
+            command_payload=RunCommitCodec().encode_request("pause", recovery_command),
         )
 
         await coordinator.recover_incomplete_commits()
@@ -350,4 +369,3 @@ def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
         assert not journal.list_incomplete()
 
     asyncio.run(_run())
-

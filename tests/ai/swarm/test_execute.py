@@ -151,16 +151,16 @@ def test_execute_propagates_swarm_conflict_error_instead_of_swarm_failed(tmp_pat
 
     # Sabotage ONLY the SUCCEEDED transition: the strategy completes, then the
     # swarm_store rejects the SUCCEEDED update as a version conflict.
-    original_update_run = stores.swarm_store.update_run
+    original_update_run_sync = stores.swarm_store._update_run_sync
 
-    async def _conflict_on_succeeded(swarm_run_id, **kwargs):
+    def _conflict_on_succeeded(swarm_run_id, **kwargs):
         if kwargs.get("status") is SwarmStatus.SUCCEEDED:
             raise SwarmConflictError(
                 f"simulated version conflict on SUCCEEDED for {swarm_run_id}"
             )
-        return await original_update_run(swarm_run_id, **kwargs)
+        return original_update_run_sync(swarm_run_id, **kwargs)
 
-    stores.swarm_store.update_run = _conflict_on_succeeded  # type: ignore[assignment]
+    stores.swarm_store._update_run_sync = _conflict_on_succeeded  # type: ignore[assignment]
 
     async def _run():
         return await runner.execute(

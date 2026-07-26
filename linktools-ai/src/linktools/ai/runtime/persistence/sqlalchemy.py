@@ -205,7 +205,7 @@ class SqlAlchemyStorageAdapter(Storage):
                 # Placeholder: Storage.__post_init__ re-derives from the REAL
                 # wired objects (transaction manager / coordination / artifacts)
                 # once they are set on the instance.
-                transaction_manager=None,
+                transaction_manager=_SqlAlchemyTransactionManager(session_factory, dialect=dialect),
                 coordination=coordination,
                 artifacts=None,
                 components={},
@@ -252,7 +252,7 @@ class _ReferenceSqlAlchemyComposition(SqlAlchemyStorageAdapter):
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
             coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_manager=None,
+                transaction_manager=_SqlAlchemyTransactionManager(session_factory, dialect=SqliteObjectDialect()),
                 coordination=coordination,
                 artifacts=None,
                 components={},
