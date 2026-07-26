@@ -5,8 +5,11 @@ every operation is idempotent by commit_id, same-id-different-payload
 raises SwarmCommitConflictError, terminal complete is idempotent."""
 
 import asyncio
+import json
+import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
+from dataclasses import replace
 
 import pytest
 
@@ -239,3 +242,101 @@ def test_fs_recovery_marks_inflight_commit_failed(tmp_path):
     assert run.status is SwarmStatus.RUNNING
     # The journal is retained for forensics on the invalid identity path.
     assert inflight_path.exists()
+
+
+def _prepare_start_journal(coordinator, command):
+    payload = coordinator._codec.encode_request("start", command)
+    coordinator._write_inflight(
+        str(command.commit_id),
+        "start",
+        command.swarm_run_id,
+        coordinator._codec.request_hash("start", command),
+        payload,
+    )
+    return coordinator._inflight_dir / (
+        f"{hashlib.sha256(str(command.commit_id).encode()).hexdigest()}.json"
+    )
+
+
+def test_prepared_start_creates_missing_run_and_completes(tmp_path):
+    coordinator, swarm_store = _make(tmp_path)
+    command = _start_command("swarm-recover-missing", "driving-recover")
+    journal = _prepare_start_journal(coordinator, command)
+
+    _run(coordinator.recover_incomplete_commits())
+
+    run = _run(swarm_store.get_run(command.swarm_run_id))
+    assert run is not None
+    assert run.execution_token == _FENCE_TOKEN
+    assert not journal.exists()
+    assert list(coordinator._completed_dir.glob("*.json"))
+
+
+def test_prepared_start_existing_matching_run_completes(tmp_path):
+    coordinator, swarm_store = _make(tmp_path)
+    command = _start_command("swarm-recover-existing", "driving-recover")
+    expected = replace(command.payload.run, execution_token=_FENCE_TOKEN)
+    _run(swarm_store.create_run(expected))
+    journal = _prepare_start_journal(coordinator, command)
+
+    _run(coordinator.recover_incomplete_commits())
+
+    assert _run(swarm_store.get_run(command.swarm_run_id)) == expected
+    assert not journal.exists()
+
+
+def test_prepared_start_mismatched_run_fails_closed(tmp_path):
+    from linktools.ai.swarm.persistence.filesystem_commit import SwarmRecoveryError
+
+    coordinator, swarm_store = _make(tmp_path)
+    command = _start_command("swarm-recover-mismatch", "driving-recover")
+    mismatched = replace(
+        command.payload.run,
+        execution_token=_FENCE_TOKEN,
+        version=99,
+    )
+    _run(swarm_store.create_run(mismatched))
+    journal = _prepare_start_journal(coordinator, command)
+
+    with pytest.raises(SwarmRecoveryError):
+        _run(coordinator.recover_incomplete_commits())
+    assert journal.exists()
+    assert not list(coordinator._completed_dir.glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("commit_id", "other-commit"), ("swarm_run_id", "other-run"), ("request_hash", "00" * 32)],
+)
+def test_journal_identity_mismatch_is_rejected(tmp_path, field, value):
+    from linktools.ai.swarm.persistence.filesystem_commit import SwarmRecoveryError
+
+    coordinator, _ = _make(tmp_path)
+    command = _start_command("swarm-identity", "driving-identity")
+    journal = _prepare_start_journal(coordinator, command)
+    raw = json.loads(journal.read_text())
+    raw[field] = value
+    journal.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(SwarmRecoveryError):
+        _run(coordinator.recover_incomplete_commits())
+    assert journal.exists()
+
+
+def test_result_ready_validates_command_before_completion(tmp_path):
+    from linktools.ai.swarm.persistence.filesystem_commit import SwarmRecoveryError
+
+    coordinator, _ = _make(tmp_path)
+    command = _start_command("swarm-result-ready", "driving-result")
+    journal = _prepare_start_journal(coordinator, command)
+    coordinator._record_inflight_result(
+        str(command.commit_id), "start", {"swarm_run_id": command.swarm_run_id}
+    )
+    raw = json.loads(journal.read_text())
+    raw["commit_id"] = "wrong-result-ready-id"
+    journal.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(SwarmRecoveryError):
+        _run(coordinator.recover_incomplete_commits())
+    assert journal.exists()
+    assert not list(coordinator._completed_dir.glob("*.json"))

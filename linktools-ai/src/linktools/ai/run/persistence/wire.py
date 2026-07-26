@@ -59,12 +59,15 @@ class RunCommitIntegrityError(Exception):
 
 JsonScalar = str | int | float | bool | None
 JsonValue = TypeAliasType("JsonValue", JsonScalar | list["JsonValue"] | dict[str, "JsonValue"])
-DecodedRunCommand = (StartRunCommand | PauseRunCommand | ResumeRunCommand |
-                     CompleteRunCommand | FailRunCommand | RequestCancelRunCommand |
-                     AcknowledgeCancelRunCommand)
-DecodedRunResult = (StartedRunCommit | PausedRunCommit | ResumedRunCommit |
-                    CompletedRunCommit | FailedRunCommit | CancellingRunCommit |
-                    CancelledRunCommit)
+RunCommitCommand = (StartRunCommand | PauseRunCommand | ResumeRunCommand |
+                    CompleteRunCommand | FailRunCommand | RequestCancelRunCommand |
+                    AcknowledgeCancelRunCommand)
+RunCommitResult = (StartedRunCommit | PausedRunCommit | ResumedRunCommit |
+                   CompletedRunCommit | FailedRunCommit | CancellingRunCommit |
+                   CancelledRunCommit)
+RunLifecycleEvent = (
+    RunStarted | RunPaused | RunResumed | RunCompleted | RunFailed | RunCancelled
+)
 
 
 class _WireModel(BaseModel):
@@ -408,7 +411,7 @@ def _event(value: Any) -> dict[str, Any]:
     raise RunCommitCodecError(f"event: unsupported lifecycle event {type(value).__name__}")
 
 
-def _event_from(value: EventWire) -> Any:
+def _event_from(value: EventWire) -> RunLifecycleEvent:
     if value.schema_version != 1:
         raise RunCommitCodecError("event: unknown schema")
     payload_model = _EVENT_PAYLOAD_MODELS.get(value.event_type)
@@ -511,7 +514,7 @@ def _approval_from(value: ApprovalRequestWire) -> ApprovalRequestData:
     return ApprovalRequestData(**value.model_dump())
 
 
-def _request_wire(value: DecodedRunCommand, operation: RunCommitOperation) -> _WireModel:
+def _request_wire(value: RunCommitCommand, operation: RunCommitOperation) -> _WireModel:
     _require_domain_type(value, operation, result=False)
     common = {"commit_id": value.commit_id.value}
     if operation is RunCommitOperation.START:
@@ -585,7 +588,7 @@ def _require_event_type(value: EventWire, expected: str, path: str) -> None:
         raise RunCommitCodecError(f"{path}.event_type must be {expected!r}")
 
 
-def _request_from_wire(value: _WireModel, operation: RunCommitOperation) -> DecodedRunCommand:
+def _request_from_wire(value: _WireModel, operation: RunCommitOperation) -> RunCommitCommand:
     if operation is RunCommitOperation.START:
         wire = value
         assert isinstance(wire, StartRunRequestWire)
@@ -621,7 +624,7 @@ def _request_from_wire(value: _WireModel, operation: RunCommitOperation) -> Deco
     return AcknowledgeCancelRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, cancelled_event=_event_from(wire.cancelled_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id), execution_fence=_fence_from(wire.execution_fence))
 
 
-def _decode_result_model(value: _WireModel, operation: RunCommitOperation) -> DecodedRunResult:
+def _decode_result_model(value: _WireModel, operation: RunCommitOperation) -> RunCommitResult:
     if operation is RunCommitOperation.START:
         assert isinstance(value, StartedRunResultWire)
         return StartedRunCommit(run_record_from_wire(value.record))
@@ -644,7 +647,7 @@ def _decode_result_model(value: _WireModel, operation: RunCommitOperation) -> De
     return CancelledRunCommit(run_id=value.run_id)
 
 
-def _result_wire(value: DecodedRunResult, operation: RunCommitOperation) -> _WireModel:
+def _result_wire(value: RunCommitResult, operation: RunCommitOperation) -> _WireModel:
     _require_domain_type(value, operation, result=True)
     if operation is RunCommitOperation.START:
         return StartedRunResultWire(record=RunRecordWire.model_validate(run_record_to_wire(value.record)))
@@ -697,4 +700,4 @@ def decode_envelope(payload: bytes, *, expected_operation: RunCommitOperation | 
         ) from exc
 
 
-__all__ = ["JsonValue", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "RunStartedEventPayloadWire", "RunPausedEventPayloadWire", "RunResumedEventPayloadWire", "RunCompletedEventPayloadWire", "RunFailedEventPayloadWire", "RunCancelledEventPayloadWire", "RunRecordWire", "ApprovalRequestWire", "StartRunRequestWire", "PauseRunRequestWire", "ResumeRunRequestWire", "CompleteRunRequestWire", "FailRunRequestWire", "RequestCancelRunRequestWire", "AcknowledgeCancelRunRequestWire", "StartedRunResultWire", "PausedRunResultWire", "ResumedRunResultWire", "CompletedRunResultWire", "FailedRunResultWire", "CancellingRunResultWire", "CancelledRunResultWire", "REQUEST_WIRE_MODELS", "RESULT_WIRE_MODELS", "require_json_value", "run_record_to_wire", "run_record_from_wire", "run_result_from_wire", "run_error_from_wire", "encode_envelope", "decode_envelope"]
+__all__ = ["JsonValue", "RunCommitCommand", "RunCommitResult", "RunLifecycleEvent", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "RunStartedEventPayloadWire", "RunPausedEventPayloadWire", "RunResumedEventPayloadWire", "RunCompletedEventPayloadWire", "RunFailedEventPayloadWire", "RunCancelledEventPayloadWire", "RunRecordWire", "ApprovalRequestWire", "StartRunRequestWire", "PauseRunRequestWire", "ResumeRunRequestWire", "CompleteRunRequestWire", "FailRunRequestWire", "RequestCancelRunRequestWire", "AcknowledgeCancelRunRequestWire", "StartedRunResultWire", "PausedRunResultWire", "ResumedRunResultWire", "CompletedRunResultWire", "FailedRunResultWire", "CancellingRunResultWire", "CancelledRunResultWire", "REQUEST_WIRE_MODELS", "RESULT_WIRE_MODELS", "require_json_value", "run_record_to_wire", "run_record_from_wire", "run_result_from_wire", "run_error_from_wire", "encode_envelope", "decode_envelope"]

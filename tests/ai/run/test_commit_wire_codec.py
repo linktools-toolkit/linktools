@@ -288,6 +288,47 @@ def test_event_round_trip():
     assert decoded.completed_event == command.completed_event
 
 
+def test_event_run_id_integer_is_rejected():
+    codec = RunCommitCodec()
+    import json
+
+    envelope = json.loads(
+        codec.encode_request(RunCommitOperation.COMPLETE, _complete_command())
+    )
+    envelope["payload"]["completed_event"]["payload"]["run_id"] = 123
+    with pytest.raises(RunCommitCodecError):
+        codec.decode_request(
+            RunCommitOperation.COMPLETE,
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(),
+        )
+
+
+def test_event_result_summary_non_json_is_rejected():
+    command = _complete_command()
+    command.completed_event.result_summary["bad"] = object()
+    with pytest.raises(RunCommitCodecError):
+        RunCommitCodec().encode_request(RunCommitOperation.COMPLETE, command)
+
+
+def test_wrong_command_type_for_operation_is_codec_error():
+    with pytest.raises(RunCommitCodecError):
+        RunCommitCodec().encode_request(
+            RunCommitOperation.COMPLETE, REQUESTS[RunCommitOperation.START]
+        )
+
+
+def test_wrong_result_type_for_operation_is_codec_error():
+    with pytest.raises(RunCommitCodecError):
+        RunCommitCodec().encode_result(
+            RunCommitOperation.COMPLETE, RESULTS[RunCommitOperation.START]
+        )
+
+
+def test_encode_does_not_leak_attribute_error():
+    with pytest.raises(RunCommitCodecError):
+        RunCommitCodec().encode_request(RunCommitOperation.COMPLETE, object())
+
+
 def test_unknown_schema_version_rejected():
     codec = RunCommitCodec()
     payload = codec.encode_result(RunCommitOperation.FAIL, RESULTS[RunCommitOperation.FAIL])
